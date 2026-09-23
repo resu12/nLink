@@ -22192,6 +22192,7 @@ public sealed partial class NknSignalingTransport
                 RuntimeUnlockRetryDispatchScopeInvalidationCommand command)
     {
         RuntimeUnlockRetryDispatchScopeInvalidationReceipt receipt;
+        RuntimeUnlockRetryPhysicalSendScope? retiredPhysicalSend = null;
         lock (accelerationGate)
         {
             var shadow = runtimeUnlockRetryDispatchInstallShadow;
@@ -22256,6 +22257,12 @@ public sealed partial class NknSignalingTransport
                             command.Reason);
                         runtimeUnlockRetryDispatchPendingInstallFollowUp = null;
                         runtimeUnlockRetryDispatchLastConfirmedInstallReceipt = null;
+                        if (command.Reason == FileTransferCoordinator.PostFallbackProbeRollbackRetryRetirementReason &&
+                            runtimeUnlockRetryPhysicalSendScope is { IsCompleted: false } physicalSend &&
+                            physicalSend.InstallReceipt == command.InstalledAttempt?.InstallReceipt)
+                        {
+                            retiredPhysicalSend = physicalSend;
+                        }
                     }
                     receipt =
                         new RuntimeUnlockRetryDispatchScopeInvalidationReceipt(
@@ -22287,6 +22294,11 @@ public sealed partial class NknSignalingTransport
                                 command.InvalidationGeneration);
                 }
             }
+        }
+
+        if (retiredPhysicalSend?.RequestCancellation() == true)
+        {
+            LogRuntimeUnlockRetryPhysicalSendScopeCancellation(retiredPhysicalSend, command.Reason);
         }
 
         LocalOperationalLog.Info(
@@ -22368,7 +22380,8 @@ public sealed partial class NknSignalingTransport
                 "retry_dispatch_outbound_transfer_terminal" or
                 "retry_dispatch_inbound_transfer_terminal" or
                 "retry_dispatch_stage_expired" or
-                "retry_dispatch_runtime_scope_replaced"))
+                "retry_dispatch_runtime_scope_replaced" or
+                FileTransferCoordinator.PostFallbackProbeRollbackRetryRetirementReason))
         {
             rejectionReason =
                 command.IsDefault ||
@@ -22377,6 +22390,20 @@ public sealed partial class NknSignalingTransport
                         command)
                     ? "retry_dispatch_scope_invalidation_identity_invalid"
                     : "retry_dispatch_scope_invalidation_reason_invalid";
+            return false;
+        }
+
+        if (command.Reason == FileTransferCoordinator.PostFallbackProbeRollbackRetryRetirementReason &&
+            (command.Kind != RuntimeUnlockRetryDispatchScopeInvalidationKind.FullScope ||
+             command.PendingAttempt is not null || command.RetainedPredecessor is not null ||
+             command.BoundedClosure is not null || command.InstalledAttempt is not
+             {
+                 State: RuntimeUnlockRetryLifecycleAttemptState.Settled,
+                 Settlement.Outcome: RuntimeUnlockRetryDispatchSettlementOutcome.DispatchObserved,
+                 DispatchObserved: true,
+             }))
+        {
+            rejectionReason = "retry_dispatch_probe_rollback_retirement_attempt_mismatch";
             return false;
         }
 

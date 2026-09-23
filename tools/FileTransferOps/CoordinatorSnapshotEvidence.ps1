@@ -3268,7 +3268,7 @@ function Get-FileTransferCoordinatorRetryConfirmationCompensationShape {
         $Envelope.decisionReason -cne 'retry_dispatch_install_confirmation_rejected' -or
         [long]$aggregate.afterStateGeneration -ne ([long]$aggregate.beforeStateGeneration + 1L) -or
         $aggregate.afterStateFingerprint -ceq $aggregate.beforeStateFingerprint -or
-        $operations.Count -notin @(2, 4) -or @($operations | Where-Object {
+        $operations.Count -notin @(2, 3, 4) -or @($operations | Where-Object {
             -not [bool]$_.stateApplied -or $_.operationKind -cne 'RetryAttempt' -or
             $_.runtimeUnlockRetry.role -cne $_.operationRole -or
             [long]$_.operationGeneration -ne [long]$_.runtimeUnlockRetry.authorityGeneration
@@ -3316,6 +3316,22 @@ function Get-FileTransferCoordinatorRetryConfirmationCompensationShape {
             $restored[0].authorityId -ceq $failed[0].authorityId -or
             $restored[0].authorityId -cne $displaced[0].authorityId -or
             [long]$restored[0].operationGeneration -ne [long]$displaced[0].operationGeneration))) { return $null }
+    if ($operations.Count -eq 3) {
+        # An independent install can replace the old DispatchObserved terminal
+        # without restoring a predecessor. Its exact slot history is required below.
+        if ($restored.Count -ne 0 -or $displaced.Count -ne 1 -or
+            $displaced[0].operationRole -cne 'attempt_terminal' -or
+            $displaced[0].authorityId -ceq $failed[0].authorityId -or
+            [long]$displaced[0].operationGeneration -ge [long]$failed[0].operationGeneration -or
+            $failed[0].predecessorAuthorityId -cne '(none)' -or
+            $failed[0].runtimeUnlockRetry.requestActivePredecessorSupersession -isnot [bool] -or
+            $failed[0].runtimeUnlockRetry.requestActivePredecessorSupersession -or
+            $displaced[0].runtimeUnlockRetry.dispatchObserved -isnot [bool] -or
+            -not $displaced[0].runtimeUnlockRetry.dispatchObserved -or
+            @($displaced[0].runtimeUnlockRetry.receipts | Where-Object {
+                $_.stage -ceq 'settlement' -and $_.receiptStatus -ceq 'DispatchObserved' -and [bool]$_.receiptValidated
+            }).Count -ne 1) { return $null }
+    }
     return [pscustomobject]@{ Applied = $true; Failed = $failed[0]; Terminal = $terminal[0];
         Restored = $restored; Displaced = $displaced; Operations = $operations }
 }
@@ -3361,24 +3377,31 @@ function Test-FileTransferCoordinatorRetryConfirmationCompensationHistory {
                 -Envelope $commitEnvelope -Operation $retainedAtCommit[0])) { return $false }
     }
     if ($shape.Displaced.Count -eq 1 -and $shape.Displaced[0].operationRole -ceq 'attempt_terminal') {
-        # MissingDispatch already owns the terminal slot before the successor
-        # commit. That unchanged descriptor is not re-emitted by the commit.
+        # The unchanged terminal descriptor is not re-emitted by the commit.
         $displaced = $shape.Displaced[0]
+        $independent = $shape.Operations.Count -eq 3
+        $historyEnd = if ($independent) { $commit.afterStateGeneration } else { $commit.beforeStateGeneration }
         $terminalHistory = @($PriorEntries | Where-Object {
             $_.Boundary.coordinatorInstanceId -ceq $Boundary.coordinatorInstanceId -and
             $_.Boundary.writer -ceq $Boundary.writer -and $_.SessionId -ceq $Boundary.sessionId -and
             $_.TransferId -ceq $Boundary.transferId -and $_.Direction -ceq $Boundary.direction -and
-            [long]$_.Boundary.afterStateGeneration -le [long]$commit.beforeStateGeneration
+            [long]$_.Boundary.afterStateGeneration -le [long]$historyEnd
         } | ForEach-Object {
             $priorBoundary = $_.Boundary
             foreach ($operation in @($priorBoundary.operations | Where-Object {
-                $_.operationKey -ceq $displaced.operationKey -and [bool]$_.stateApplied
+                [bool]$_.stateApplied -and ($_.operationKey -ceq $displaced.operationKey -or
+                    ($independent -and $_.family -ceq 'runtime_unlock_retry_lifecycle' -and $_.operationRole -ceq 'attempt_terminal'))
             })) { [pscustomobject]@{ Boundary=$priorBoundary; Operation=$operation } }
         })
         # Exactly one None -> Settled establishes this operation key. Any later
         # applied mutation/removal/restore before B commits poisons the carry.
-        if ($terminalHistory.Count -ne 1) { return $false }
-        $origin = $terminalHistory[0]
+        $origins = @($terminalHistory | Where-Object { $_.Operation.operationKey -ceq $displaced.operationKey })
+        if ($origins.Count -ne 1) { return $false }
+        $origin = $origins[0]
+        if ($independent -and @($terminalHistory | Where-Object {
+            [long]$_.Boundary.afterStateGeneration -ge [long]$origin.Boundary.afterStateGeneration
+        }).Count -ne 1) { return $false }
+        $settlementStatus = if ($independent) { 'DispatchObserved' } else { 'MissingDispatch' }
         if ($origin.Operation.beforeState -cne 'None' -or $origin.Operation.afterState -cne 'Settled' -or
             $origin.Boundary.decisionKind -notin @('EvaluateRuntimeUnlockRetryDispatchDeadline', 'ObserveRuntimeUnlockRetryDispatchSettlement') -or
             $origin.Boundary.decisionStatus -cne 'Accepted' -or
@@ -3386,8 +3409,11 @@ function Test-FileTransferCoordinatorRetryConfirmationCompensationHistory {
             ($origin.Operation.runtimeUnlockRetry | ConvertTo-Json -Depth 32 -Compress) -cne
                 ($displaced.runtimeUnlockRetry | ConvertTo-Json -Depth 32 -Compress) -or
             @($displaced.runtimeUnlockRetry.receipts | Where-Object {
-                $_.stage -ceq 'settlement' -and $_.receiptStatus -ceq 'MissingDispatch' -and [bool]$_.receiptValidated
+                $_.stage -ceq 'settlement' -and $_.receiptStatus -ceq $settlementStatus -and [bool]$_.receiptValidated
             }).Count -ne 1) { return $false }
+        if ($independent) {
+            return $origin.Boundary.decisionKind -ceq 'ObserveRuntimeUnlockRetryDispatchSettlement'
+        }
         $restoredPayload = $shape.Restored[0].runtimeUnlockRetry | ConvertTo-Json -Depth 32 -Compress | ConvertFrom-Json
         $restoredPayload.role = 'attempt_terminal'
         if (($restoredPayload | ConvertTo-Json -Depth 32 -Compress) -cne

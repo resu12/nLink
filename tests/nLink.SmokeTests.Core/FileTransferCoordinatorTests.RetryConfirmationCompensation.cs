@@ -764,10 +764,12 @@ public sealed partial class FileTransferCoordinatorTests
     }
 
     private static RetryConfirmationFixture CreateRetryConfirmationFixture(bool predecessor,
-        FileTransferDirection direction = FileTransferDirection.Outbound, bool snapshots = true)
+        FileTransferDirection direction = FileTransferDirection.Outbound, bool snapshots = true,
+        bool clearInitialCheckpoint = false)
     {
         var envelopes = new List<FileTransferCoordinatorTransitionEnvelope>();
         var initial = ActiveFallbackStateWithoutCheckpoint(direction);
+        if (clearInitialCheckpoint) { initial = initial with { CurrentFallbackCheckpointLease = null }; }
         initial = initial with
         {
             CurrentDataSessionIdentity = "retry-confirmation-data", CurrentDataSessionGeneration = 1,

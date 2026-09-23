@@ -13,6 +13,10 @@ public sealed class FileTransferRetryConfirmationCompensationEvidenceTests : Fil
         => await RunSharedEvidenceAsync(withPredecessor, activePredecessor: false);
 
     [Fact]
+    public async Task RejectedRetryConfirmation_IndependentTerminalEvictionRequiresExactSlotHistory()
+        => await RunSharedEvidenceAsync(false, false, independentTerminalEviction: true);
+
+    [Fact]
     public async Task RejectedRetryConfirmation_CancelledSupersessionPreservesRestoredOpenAuthority()
         => await RunSharedEvidenceAsync(withPredecessor: true, activePredecessor: true);
 
@@ -36,7 +40,7 @@ public sealed class FileTransferRetryConfirmationCompensationEvidenceTests : Fil
 
     private async Task RunSharedEvidenceAsync(bool withPredecessor, bool activePredecessor,
         bool settleRestoredPredecessor = false, bool successfulConfirmation = false, bool includeLateAttempts = false,
-        bool settleSuccessor = false)
+        bool settleSuccessor = false, bool independentTerminalEviction = false)
     {
         if (!OperatingSystem.IsWindows()) { return; }
         var root = FindRepoRoot();
@@ -44,7 +48,9 @@ public sealed class FileTransferRetryConfirmationCompensationEvidenceTests : Fil
         Directory.CreateDirectory(directory);
         try
         {
-            var source = successfulConfirmation
+            var source = independentTerminalEviction
+                ? FileTransferCoordinatorTests.CreateRejectedIndependentRetryConfirmationSnapshotFixture()
+                : successfulConfirmation
                 ? FileTransferCoordinatorTests.CreateSuccessfulActiveRetryConfirmationSnapshotFixture(includeLateAttempts, settleSuccessor)
                 : activePredecessor
                 ? FileTransferCoordinatorTests.CreateRejectedActiveRetryConfirmationSnapshotFixture(settleRestoredPredecessor)
@@ -55,7 +61,8 @@ public sealed class FileTransferRetryConfirmationCompensationEvidenceTests : Fil
             await File.WriteAllTextAsync(path,
                 "[" + string.Join(",", envelopes.Select(envelope => envelope.ToCanonicalJson())) + "]");
             var script = await File.ReadAllTextAsync(Path.Combine(root, "tests", "nLink.SmokeTests.Core",
-                "Support", successfulConfirmation ? "SuccessfulRetryConfirmationSnapshotEvidence.ps1" : "RetryConfirmationCompensationSnapshotEvidence.ps1"));
+                "Support", independentTerminalEviction ? "IndependentRetryConfirmationSnapshotEvidence.ps1" :
+                successfulConfirmation ? "SuccessfulRetryConfirmationSnapshotEvidence.ps1" : "RetryConfirmationCompensationSnapshotEvidence.ps1"));
             string? firstHostOutput = null;
             foreach (var host in new[] { "powershell", "pwsh" })
             {

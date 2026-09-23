@@ -31,6 +31,20 @@ public sealed partial class NknAccelerationTransportTests
         => RunJoinedFallbackRetryAsync(withStalledRepair: false, sidecarFailureReason: reason);
 
     [Theory]
+    [InlineData("sidecar_tuna_stream_eof")]
+    [InlineData("listener_terminal_tuna_stream_eof")]
+    [Trait("FileTransferInfraSuite", "PostFallbackRetryInstallRetirement")]
+    public Task JoinedFallbackRetry_EofAllowsNextIndependentInstall(string reason)
+        => RunJoinedFallbackRetryAsync(false, reason, continueAfterEof: true);
+
+    [Theory]
+    [InlineData("sidecar_tuna_stream_eof")]
+    [InlineData("listener_terminal_tuna_stream_eof")]
+    [Trait("FileTransferInfraSuite", "PostFallbackRetryInstallRetirement")]
+    public Task JoinedFallbackRetry_RejectedRetirementKeepsOldPairConsumed(string reason)
+        => RunJoinedFallbackRetryAsync(false, reason, "retirement_stage_generation_conflict");
+
+    [Theory]
     [InlineData("data_session_disposed")]
     [InlineData("data_session_replaced")]
     [InlineData("service_disposed")]
@@ -42,7 +56,8 @@ public sealed partial class NknAccelerationTransportTests
     public Task JoinedFallbackRetry_ListenerEofRejectsStaleProbeBinding(string control)
         => RunJoinedFallbackRetryAsync(false, "listener_terminal_tuna_stream_eof", control);
 
-    private async Task RunJoinedFallbackRetryAsync(bool withStalledRepair, string? sidecarFailureReason = null, string? failureControl = null)
+    private async Task RunJoinedFallbackRetryAsync(bool withStalledRepair, string? sidecarFailureReason = null,
+        string? failureControl = null, bool continueAfterEof = false)
     {
         // Initial fallback contexts are an explicit fixture baseline. There is
         // no file-I/O/live acceptance claim. After the baseline, all authority,
@@ -59,6 +74,7 @@ public sealed partial class NknAccelerationTransportTests
         var answerSent = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var answerAckSent = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var probeHeld = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseFailedProbe = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var previousPriority = NknSignalingTransport.HelperPaidOfferHelpeePriorityDelayOverrideForTests;
         var previousSendBarrier = SessionFileTransferService.OutboundRegularV4PhysicalSendPreReservationBarrierForTests;
         NknSignalingTransport.HelperPaidOfferHelpeePriorityDelayOverrideForTests = TimeSpan.Zero;
@@ -256,8 +272,15 @@ public sealed partial class NknAccelerationTransportTests
                     senderProbePumpLifetime.Cancel();
                     try { await pumps[0]; } catch (OperationCanceledException) { }
                 }
-                await AssertJoinedFallbackEofHandoffAsync(sender, outbound, host, hostLane, senderData,
+                var eof = await AssertJoinedFallbackEofHandoffAsync(sender, outbound, host, hostLane, senderData,
                     installed.InstallReceipt!, sidecarFailureReason, failureControl, timeout.Token);
+                if (continueAfterEof)
+                {
+                    await helperLane.StopAsync(sidecarFailureReason, timeout.Token);
+                    releaseFailedProbe.TrySetResult();
+                    await AssertJoinedIndependentInstallAfterEofAsync(sender, outbound, host,
+                        installed.InstallReceipt!.Value, offers, logStart, eof!);
+                }
                 Assert.Empty(acks);
                 return;
             }
@@ -457,6 +480,12 @@ public sealed partial class NknAccelerationTransportTests
                 while (!token.IsCancellationRequested)
                 {
                     var received = await data.ReceiveWithMetadataAsync(token);
+                    if (continueAfterEof && received.Frame is FileTransferFallbackTailYieldFrameV6 nextYield)
+                    {
+                        SessionFileTransferV4SenderTests.ApplyJoinedNknYieldForTest(service,
+                            direction == FileTransferDirection.Outbound ? outbound! : inbound!, direction, nextYield);
+                        continue;
+                    }
                     if (received.Frame is not FileTransferRuntimeUnlockPreCommitProbeFrame)
                     {
                         // Post-proof state/commit traffic is outside this bounded
@@ -476,7 +505,11 @@ public sealed partial class NknAccelerationTransportTests
                         senderProbeScopes.Enqueue(scope);
                         if (sidecarFailureReason is not null)
                         {
-                            probeHeld.TrySetResult();
+                            if (probeHeld.TrySetResult() && continueAfterEof)
+                            {
+                                await releaseFailedProbe.Task.WaitAsync(token);
+                                continue; // The old physical probe never becomes a proof after EOF.
+                            }
                             await Task.Delay(Timeout.Infinite, token);
                         }
                     }

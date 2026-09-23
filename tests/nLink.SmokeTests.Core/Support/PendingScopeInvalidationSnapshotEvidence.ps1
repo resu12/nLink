@@ -205,7 +205,27 @@ function Assert-Parity([string[]]$inputLines, [bool]$valid, [string]$reason = ''
     }
     $path = Join-Path $OutputRoot 'compact.log'; [IO.File]::WriteAllLines($path, $compactLines)
     $gui = Get-TunaGuiFileTransferSetupFailureClassification -Bookmark 0 -ErrorMessage 'fixture' -RouteMode 'regular-v4-live-activation-off-on-off-256mb' -ImmutableEvidencePaths @($path)
-    if ($valid) { if ($null -ne $gui) { throw 'GUI rejected valid preparation.' } }
+    if ($valid) {
+        # Valid here means artifact/retirement-contract validity. These isolated
+        # authoritative slices omit route publication history, so the GUI must
+        # still reject their route-authority claim with the exact shared boundary.
+        $route = Get-FileTransferCoordinatorSnapshotRouteConsistency -Evaluation $full
+        $compactRoute = Get-FileTransferCoordinatorSnapshotRouteConsistency -Evaluation $compact
+        if ($route.Verdict -cne 'fail' -or $route.Findings.Count -ne 1 -or
+            $route.Findings[0] -cne 'snapshot authoritative route stream contains no route publications' -or
+            $route.NormalizedBoundaryJson -cne $compactRoute.NormalizedBoundaryJson) {
+            throw 'Isolated invalidation fixture route rejection changed.'
+        }
+        $boundary = $route.FirstUnresolvedBoundary
+        if ($gui.FailureClass -cne $boundary.taxonomyClass -or
+            $gui.FailureVariant -cne $boundary.variant -or
+            $gui.CoordinatorBoundaryHash -cne $boundary.boundaryHash -or
+            $gui.CoordinatorBoundaryId -cne $boundary.boundaryId -or
+            $gui.CoordinatorWriter -cne $boundary.writer -or
+            $gui.CoordinatorWriterSequence -ne $boundary.writerSequence) {
+            throw 'GUI lost the exact missing-route-publication rejection.'
+        }
+    }
     else {
         $boundary = $full.FirstUnresolvedBoundary
         if ($gui.CoordinatorBoundaryHash -cne $boundary.boundaryHash -or $gui.CoordinatorBoundaryId -cne $boundary.boundaryId -or

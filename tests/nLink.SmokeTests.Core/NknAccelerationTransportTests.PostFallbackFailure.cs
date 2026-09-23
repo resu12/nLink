@@ -12,7 +12,7 @@ public sealed partial class NknAccelerationTransportTests
         => SessionFileTransferV4SenderTests.CaptureJoinedNknStateForTest(service, context)
             .PersistentState.FallbackTailYield.CurrentOperation?.PairedRelease is not null;
 
-    private static async Task AssertJoinedFallbackEofHandoffAsync(SessionFileTransferService sender, object outbound,
+    private static async Task<RuntimeUnlockPostFallbackPreCommitProbeFailureObservedEventArgs?> AssertJoinedFallbackEofHandoffAsync(SessionFileTransferService sender, object outbound,
         NknSignalingTransport host, RetryableTunaAccelerationSession lane, IFileTransferDataSession data,
         object installedReceipt, string reason, string? control, CancellationToken token)
     {
@@ -21,6 +21,20 @@ public sealed partial class NknAccelerationTransportTests
         var failures = new List<RuntimeUnlockPostFallbackPreCommitProbeFailureObservedEventArgs>();
         ((IRuntimeUnlockRetryDispatchAuthorityBridge)host).RuntimeUnlockPostFallbackPreCommitProbeFailureObserved +=
             (_, args) => failures.Add(args);
+        if (control == "retirement_stage_generation_conflict")
+        {
+            var shadow = GetPrivateField(host, "runtimeUnlockRetryDispatchInstallShadow")!;
+            var copy = typeof(object).GetMethod("MemberwiseClone", BindingFlags.Instance | BindingFlags.NonPublic)!.Invoke(shadow, null)!;
+            var generation = copy.GetType().GetProperty("LastScopeInvalidationGeneration")!;
+            generation.SetValue(copy, (long)generation.GetValue(copy)! + 1);
+            SetPrivateField(host, "runtimeUnlockRetryDispatchInstallShadow", copy);
+            await lane.StopAsync(reason, token);
+            var rejected = Assert.Single(failures).Decision;
+            Assert.Equal(RuntimeUnlockPostFallbackPreCommitProbeFailureStatus.Rejected, rejected.Status);
+            Assert.Equal("post_fallback_precommit_probe_failure_rollback_rejected", rejected.Reason);
+            AssertNoRetirement();
+            return null;
+        }
         if (control is not null)
         {
             IFileTransferDataSession? replacement = null;
@@ -42,7 +56,7 @@ public sealed partial class NknAccelerationTransportTests
                 AssertNoSuccessor();
             }
             finally { replacement?.Dispose(); }
-            return;
+            return null;
         }
         await lane.StopAsync(reason, token);
         var failure = Assert.Single(failures);
@@ -55,6 +69,7 @@ public sealed partial class NknAccelerationTransportTests
             BindingFlags.Instance | BindingFlags.NonPublic)!.Invoke(sender, [host, replay]);
         Assert.NotEqual(RuntimeUnlockPostFallbackPreCommitProbeFailureStatus.Accepted, replay.Decision.Status);
         AssertUnchanged();
+        return failure;
 
         [MethodImpl(MethodImplOptions.NoInlining)]
         FileTransferCoordinatorState CaptureStarted()
@@ -65,6 +80,10 @@ public sealed partial class NknAccelerationTransportTests
             Assert.Equal(installedReceipt, (object?)state.PersistentState.FallbackTailYield.LastConsumingInstallReceipt);
             Assert.Equal(FileTransferRouteTransitionState.Draining,
                 state.PersistentState.FileTransferRouteTransition.CurrentOperation!.Value.State);
+            var premature = FileTransferCoordinator.PrepareRuntimeUnlockRetryLifecycleScopeInvalidation(state,
+                FileTransferCoordinator.PostFallbackProbeRollbackRetryRetirementReason);
+            Assert.False(premature.Accepted);
+            Assert.Same(state, premature.State);
             return state;
         }
 
@@ -91,6 +110,15 @@ public sealed partial class NknAccelerationTransportTests
             Assert.Equal(predecessor, state.PersistentState.FallbackTailYield.LastTerminalOperation!.Value.Decision);
             Assert.Equal(FileTransferFallbackTailYieldPairingState.Invalidated,
                 state.PersistentState.FallbackTailYield.LastTerminalOperation!.Value.PairingState);
+            var lifecycle = state.PersistentState.RuntimeUnlockRetryLifecycle;
+            var retirement = lifecycle.LastScopeInvalidationReceipt!.Value;
+            Assert.True(retirement.Accepted);
+            Assert.Equal(FileTransferCoordinator.PostFallbackProbeRollbackRetryRetirementReason, retirement.Command.Reason);
+            Assert.Equal(RuntimeUnlockRetryDispatchScopeInvalidationKind.FullScope, retirement.Command.Kind);
+            Assert.Equal(before.PersistentState.RuntimeUnlockRetryLifecycle.LastTerminalAttempt, retirement.Command.InstalledAttempt);
+            Assert.Equal(installedReceipt, (object?)retirement.Command.InstalledAttempt!.Value.InstallReceipt);
+            Assert.Null(lifecycle.PendingScopeInvalidationCommand);
+            Assert.Null(GetLastCommittedRuntimeUnlockRetryDispatchInstallReceipt(host));
             return state;
         }
 
@@ -101,6 +129,24 @@ public sealed partial class NknAccelerationTransportTests
             Assert.Equal(after.PersistentState.FallbackTailYield.CurrentOperation!.Value.Decision,
                 state.PersistentState.FallbackTailYield.CurrentOperation!.Value.Decision);
             Assert.Equal(after.CurrentRoutePublicationToken, state.CurrentRoutePublicationToken);
+            Assert.Equal(after.PersistentState.RuntimeUnlockRetryLifecycle.LastScopeInvalidationReceipt,
+                state.PersistentState.RuntimeUnlockRetryLifecycle.LastScopeInvalidationReceipt);
+        }
+
+        [MethodImpl(MethodImplOptions.NoInlining)]
+        void AssertNoRetirement()
+        {
+            var state = SessionFileTransferV4SenderTests.CaptureJoinedNknStateForTest(sender, outbound);
+            Assert.Null(state.PersistentState.FileTransferRouteTransition.CurrentOperation);
+            Assert.Equal(FileTransferRouteTransitionState.Invalidated,
+                state.PersistentState.FileTransferRouteTransition.LastTerminalOperation!.Value.State);
+            Assert.Equal(before.PersistentState.FallbackTailYield.CurrentOperation, state.PersistentState.FallbackTailYield.CurrentOperation);
+            Assert.Equal(FileTransferFallbackTailYieldPairingState.ReleaseConsumed,
+                state.PersistentState.FallbackTailYield.CurrentOperation!.Value.PairingState);
+            Assert.Null(state.PersistentState.RuntimeUnlockRetryLifecycle.PendingScopeInvalidationCommand);
+            Assert.Null(state.PersistentState.RuntimeUnlockRetryLifecycle.LastScopeInvalidationReceipt);
+            Assert.Equal(installedReceipt, (object?)GetLastCommittedRuntimeUnlockRetryDispatchInstallReceipt(host));
+            Assert.Equal(before.CurrentRoutePublicationToken, state.CurrentRoutePublicationToken);
         }
 
         [MethodImpl(MethodImplOptions.NoInlining)]

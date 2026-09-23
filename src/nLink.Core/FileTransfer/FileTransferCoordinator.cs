@@ -4894,6 +4894,13 @@ internal static partial class FileTransferCoordinator
                 "retry_dispatch_scope_invalidation_reason_missing");
         }
 
+        if (normalizedReason == PostFallbackProbeRollbackRetryRetirementReason &&
+            !IsPostFallbackProbeRollbackRetryRetirementCurrent(state))
+        {
+            return Decision(RuntimeUnlockRetryLifecycleTransitionStatus.Rejected,
+                "retry_dispatch_probe_rollback_retirement_not_current");
+        }
+
         var lifecycle = GetRuntimeUnlockRetryLifecycle(state);
         var installedForScopeInvalidation =
             GetRuntimeUnlockRetryLifecycleAttemptForScopeInvalidation(
@@ -4996,6 +5003,13 @@ internal static partial class FileTransferCoordinator
             return Decision(
                 RuntimeUnlockRetryLifecycleTransitionStatus.Rejected,
                 "retry_dispatch_scope_invalidation_receipt_missing");
+        }
+
+        if (receipt.Command.Reason == PostFallbackProbeRollbackRetryRetirementReason &&
+            !IsPostFallbackProbeRollbackRetryRetirementCurrent(state))
+        {
+            return Decision(RuntimeUnlockRetryLifecycleTransitionStatus.Rejected,
+                "retry_dispatch_probe_rollback_retirement_not_current");
         }
 
         if (lifecycle.PendingScopeInvalidationCommand is null &&

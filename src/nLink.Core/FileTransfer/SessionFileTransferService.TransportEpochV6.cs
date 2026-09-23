@@ -4830,6 +4830,17 @@ public sealed partial class SessionFileTransferService
                 tailState.PersistentState.FallbackTailYield
                     .LastConsumingInstallReceipt is { } installReceipt)
             {
+                // Retire the exact settled install before releasing the consumed
+                // pair. A rejected retirement leaves that pair unavailable for retry.
+                if (supersessionReason == "sidecar_failed_precommit_probe_rollback")
+                {
+                    if (!TryInvalidateRuntimeUnlockRetryLifecycleForScopeReplacementLocked(outbound,
+                            FileTransferCoordinator.PostFallbackProbeRollbackRetryRetirementReason))
+                    {
+                        return;
+                    }
+                    tailState = CreateCoordinatorStateLocked(outbound);
+                }
                 var superseded = FileTransferCoordinator
                     .SupersedeFallbackTailPairedYieldAfterRejectedProbe(
                         tailState,
