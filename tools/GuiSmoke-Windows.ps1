@@ -33426,9 +33426,11 @@ function Get-TunaGuiPeerVisibleFileTunaV4PayloadBytes {
 function Get-TunaGuiCompletedTerminalFromLogLine {
     param([string]$Line)
 
+    # Source/target terminal-generation fields occur on nonterminal send-lease records.
     if ([string]::IsNullOrWhiteSpace($Line) -or
-        ($Line.IndexOf('_terminal', [System.StringComparison]::OrdinalIgnoreCase) -lt 0 -and
-         $Line.IndexOf('event=transfer_terminal', [System.StringComparison]::OrdinalIgnoreCase) -lt 0)) {
+        ($Line.IndexOf('file_transfer_inbound_terminal', [System.StringComparison]::OrdinalIgnoreCase) -lt 0 -and
+         $Line.IndexOf('file_transfer_outbound_terminal', [System.StringComparison]::OrdinalIgnoreCase) -lt 0 -and
+         $Line.IndexOf('transfer_terminal', [System.StringComparison]::OrdinalIgnoreCase) -lt 0)) {
         return $null
     }
 

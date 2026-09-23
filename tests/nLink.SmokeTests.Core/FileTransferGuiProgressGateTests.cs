@@ -11,6 +11,69 @@ public sealed class FileTransferGuiProgressGateTests : FileTransferOpsScriptsTes
     [InlineData("powershell", true)]
     [InlineData("pwsh", false)]
     [InlineData("pwsh", true)]
+    public async Task ProgressGate_TerminalGenerationFieldsDoNotTriggerTerminalParsing(string host, bool earlyFallback)
+    {
+        var script = Fixture() + $$"""
+            $lines = [Collections.Generic.List[string]]::new()
+            foreach ($eventName in @('filetransfer_route_transition_physical_send_lease_retired',
+                'filetransfer_outbound_physical_send_lease_registered',
+                'filetransfer_outbound_physical_send_lease_retired',
+                'filetransfer_route_transition_physical_send_lease_registered')) {
+                for ($i = 0; $i -lt 1041; $i++) {
+                    $lines.Add("event=$eventName; source_terminal_generation=0; target_terminal_generation=0; state=Completed; error_code=(none)")
+                }
+            }
+            $lines.Add($peer)
+            $gate = '{{(earlyFallback ? "Wait-TunaGuiLiveSwitchOffTransferProgressOrEarlyFallbackBeforeFault" : "Wait-TunaGuiLiveSwitchOffTransferProgressBeforeFault")}}'
+            $r = Invoke-Gate -Gate $gate -Snapshots @([pscustomobject]@{ Lines = $lines.ToArray() })
+            if ($r.Error) { throw $r.Error }
+            if ($r.Result.Kind -ne 'peer_visible_payload' -or $r.Visits -ne 4165 -or
+                $r.Polls -ne 1 -or $r.Result.AcceleratedPayloadBytes -ne 524288) { throw 'gate accounting changed' }
+            if ($r.Parses -ne 2) { throw "unrelated terminal-generation fields still parsed: $($r.Parses)" }
+            'terminal-generation-fast-rejection-ok'
+            """;
+        await AssertScriptAsync(script, "terminal-generation-fast-rejection-ok", host);
+    }
+
+    [Theory]
+    [InlineData("powershell")]
+    [InlineData("pwsh")]
+    public async Task TerminalPredicate_PreservesSupportedEventsAndParserSemantics(string host)
+    {
+        var script = Fixture() + """
+            $script:Visits = 0
+            foreach ($eventName in @('file_transfer_inbound_terminal', 'file_transfer_outbound_terminal', 'transfer_terminal')) {
+                $direction = if ($eventName -eq 'file_transfer_inbound_terminal') { 'inbound' } else { 'outbound' }
+                $line = "event=$eventName; direction=$direction; transfer_id=t1; reason=Transfer complete.; error_code=(none)"
+                foreach ($positive in @($line, $line.ToUpperInvariant().Replace('EVENT=', 'EVENT = '), ('event=noise; ' + $line))) {
+                    $script:Parses = 0
+                    $r = Get-TunaGuiCompletedTerminalFromLogLine -Line $positive
+                    if ($null -eq $r -or $r.Direction -ne $direction -or $r.TransferId -ine 't1' -or $script:Parses -ne 1) {
+                        throw 'supported terminal event changed'
+                    }
+                }
+                foreach ($negative in @(($line + '; event=noise'), ($line.Replace($eventName, ($eventName + '_suffix'))),
+                    "event=noise; detail=$eventName; direction=$direction; transfer_id=t1; state=Completed",
+                    ($line + '; state=Failed'), ($line + '; error_code=io_error'))) {
+                    if ($null -ne (Get-TunaGuiCompletedTerminalFromLogLine -Line $negative)) { throw 'nonterminal admitted' }
+                }
+            }
+            foreach ($negative in @($null, '', ' ', 'event=noise; source_terminal_generation=0')) {
+                $script:Parses = 0
+                if ($null -ne (Get-TunaGuiCompletedTerminalFromLogLine -Line $negative) -or $script:Parses -ne 0) {
+                    throw 'irrelevant line parsed'
+                }
+            }
+            'terminal-parser-semantics-ok'
+            """;
+        await AssertScriptAsync(script, "terminal-parser-semantics-ok", host);
+    }
+
+    [Theory]
+    [InlineData("powershell", false)]
+    [InlineData("powershell", true)]
+    [InlineData("pwsh", false)]
+    [InlineData("pwsh", true)]
     public async Task ProgressGate_NoiseAvoidsParsingWithoutSkippingRecords(string host, bool earlyFallback)
     {
         var script = Fixture() + $$"""
