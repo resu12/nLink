@@ -22,6 +22,8 @@ internal sealed class NknTunaSidecarProcessOwner : IDisposable
         runId = Guid.NewGuid().ToString("N");
         StartedUtc = DateTimeOffset.UtcNow;
         Pid = SafeGetPid(process);
+        SetupDiagnostics = new NknTunaSetupDiagnostics(this.role, Pid, Guid.ParseExact(runId, "N"),
+            message => LocalOperationalLog.Info("NKN.Tuna", message));
     }
 
     public int Pid { get; }
@@ -29,6 +31,8 @@ internal sealed class NknTunaSidecarProcessOwner : IDisposable
     public DateTimeOffset StartedUtc { get; }
 
     public string RunId => runId;
+
+    internal NknTunaSetupDiagnostics SetupDiagnostics { get; }
 
     public bool IsRunning
     {
@@ -116,6 +120,7 @@ internal sealed class NknTunaSidecarProcessOwner : IDisposable
             var exited = processToStop is null || SafeHasExited(processToStop);
             var exitCode = SafeGetExitCode(processToStop);
             try { processToStop?.Dispose(); } catch { }
+            SetupDiagnostics.ObserveStop();
             LocalOperationalLog.Info(
                 "NKN.Tuna",
                 $"event=tuna_sidecar_stop_completed; role={role}; pid={Pid}; run_id={runId}; reason={safeReason}; exited={FormatBool(exited)}; exit_code={exitCode}");

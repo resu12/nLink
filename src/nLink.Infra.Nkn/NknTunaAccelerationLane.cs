@@ -457,7 +457,7 @@ internal sealed partial class NknTunaAccelerationLane : INknTunaAccelerationSess
         {
             if (!string.IsNullOrWhiteSpace(e.Data))
             {
-                LocalOperationalLog.Info("NKN.Tuna", $"event=tuna_dialer_sidecar_stderr; line_len={e.Data.Length}");
+                HandleOwnedDialerStderr(owner, e.Data);
             }
         };
         process.Exited += (_, _) =>
@@ -957,6 +957,12 @@ internal sealed partial class NknTunaAccelerationLane : INknTunaAccelerationSess
 
     private static bool TryPreserveOwnedDialerTrace(NknTunaSidecarProcessOwner? owner, string line)
         => NknTunaDeliveryTrace.PreserveChildLine(line, owner?.RunId, "dialer");
+
+    private static void HandleOwnedDialerStderr(NknTunaSidecarProcessOwner? owner, string line)
+    {
+        owner?.SetupDiagnostics.DialErrorLine(line);
+        LocalOperationalLog.Info("NKN.Tuna", $"event=tuna_dialer_sidecar_stderr; line_len={line.Length}");
+    }
 
     private static void LogBridgeTerminal(string line)
     {
