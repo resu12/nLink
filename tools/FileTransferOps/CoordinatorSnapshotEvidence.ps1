@@ -16479,6 +16479,12 @@ function Get-FileTransferCoordinatorSnapshotCorrelationResult {
                 Event = $event
                 Class = [string]$boundary.taxonomyClass
                 Reason = [string]$boundary.decisionReason
+                Variant = if ($null -ne $boundary.PSObject.Properties['variant']) {
+                    [string]$boundary.variant
+                }
+                else {
+                    '(none)'
+                }
                 Boundary = $boundary
                 Recovered = [int]$boundary.recoveredCount -gt 0 -and
                     [int]$boundary.unresolvedCount -eq 0
