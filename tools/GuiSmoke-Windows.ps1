@@ -31789,19 +31789,18 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
         $TestMetrics.classificationSource = $classificationSource
     }
 
-    return [pscustomobject]@{
-        Phase = $phase
-        Reason = $reason
-        RouteMode = $RouteMode
-        ClassificationSource = $classificationSource
-        ClassificationComplete = $true
-        EvidenceLineVisitCount = [long]$evidenceLines.Count
-        EvidenceParsedRecordCount =
-            [long]$guiFailureEvidenceIndexMetrics.parsedRecordCount
-        EvidenceLookupCount =
-            [long]$guiFailureEvidenceIndexMetrics.settlementLookupCount
-        ClassificationElapsedMilliseconds =
-            [long]$classificationStopwatch.ElapsedMilliseconds
+    # Generic evidence must satisfy the same complete response contract as the
+    # explicit and indexed paths before enrichment can adopt it.
+    $result = New-TunaGuiFileTransferFailureClassificationResult `
+        -Phase $phase `
+        -Reason $reason `
+        -RouteMode $RouteMode `
+        -ClassificationSource $classificationSource `
+        -EvidenceLineVisitCount ([long]$evidenceLines.Count) `
+        -EvidenceParsedRecordCount ([long]$guiFailureEvidenceIndexMetrics.parsedRecordCount) `
+        -EvidenceLookupCount ([long]$guiFailureEvidenceIndexMetrics.settlementLookupCount) `
+        -ClassificationElapsedMilliseconds ([long]$classificationStopwatch.ElapsedMilliseconds)
+    Add-Member -InputObject $result -Force -NotePropertyMembers @{
         ListenerUnavailable = [bool]$listenerUnavailable
         ListenerSidecarUnavailable = [bool]$listenerSidecarUnavailable
         ListenerReady = [bool]$listenerReady
@@ -31839,6 +31838,7 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
         OfferReceived = [bool]$offerReceived
         TerminalObserved = [bool]$terminalObserved
     }
+    return $result
 }
 
 function Get-TunaGuiFailureClassificationBudgetMilliseconds {
