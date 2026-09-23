@@ -7367,12 +7367,14 @@ function Get-FileTransferCoordinatorSnapshotInitialPublications {
             $generation = [long]$boundary.afterStateGeneration
             $hash = [string]$boundary.afterStateHash; $scope = $after; $identity = $boundaryIdentity
             if ($poisoned) { continue }
-            # A prepared initial Tuna route has the same epoch-zero Core owner
+            # Initial Tuna and fallback routes share the epoch-zero Core owner
             # lineage. Only Regular permits same-owner republication here;
-            # later Tuna publications still require their route-transition proof.
-            $initialRoute = ($after.route -ceq 'regular_nkn_v4_fast' -or
-                    ($after.route -ceq 'file_tuna_v4' -and $null -eq $publication)) -and
-                [long]$after.protocolVersion -eq 4L -and [long]$after.liveRouteEpoch -eq 0L -and
+            # later publications retain their independent transition/owner proof.
+            $initialRoute = (($after.route -ceq 'regular_nkn_v4_fast' -and [long]$after.protocolVersion -eq 4L) -or
+                    ($null -eq $publication -and
+                        (($after.route -ceq 'file_tuna_v4' -and [long]$after.protocolVersion -eq 4L) -or
+                         ($after.route -ceq 'post_tuna_fallback_v6' -and [long]$after.protocolVersion -eq 6L)))) -and
+                [long]$after.liveRouteEpoch -eq 0L -and
                 [long]$after.routeCommitGeneration -eq 0L -and [long]$after.terminalGeneration -eq 0L
             $runtime = @($boundary.operations | Where-Object { $_.family -ceq 'route_runtime' -and $_.stateApplied })
             if (-not $started) {
