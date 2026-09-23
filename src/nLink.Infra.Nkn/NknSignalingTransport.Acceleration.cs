@@ -15142,41 +15142,20 @@ public sealed partial class NknSignalingTransport
         out RuntimeUnlockPostFallbackPreCommitProbeFailureObservation? observation)
     {
         observation = null;
-        if (!IsRuntimeUnlockListenerRearmSidecarDropReason(sidecarReason))
+        if (!IsRuntimeUnlockListenerRearmSidecarDropReason(sidecarReason) &&
+            !string.Equals(sidecarReason, "listener_terminal_tuna_stream_eof", StringComparison.Ordinal))
         {
             return false;
         }
 
         FileTransferRoutePublicationAuthority? sourcePublication = null;
+        FileTransferRouteTransitionPauseBindingShadow? initiatorBinding;
         lock (accelerationGate)
         {
-            var transaction = runtimeUnlockTransactionState;
-            var lease = runtimeUnlockTunaPathLeaseState;
-            var currentInstalledBoundary = outboundRuntimeUnlockOfferAuthorityBoundary is
-                {
-                    Mode: RuntimeUnlockOfferAuthorityMode.InstalledRetry,
-                    InstallReceipt: not null,
-                } currentBoundary &&
-                currentBoundary.TransactionGeneration ==
-                    transaction.TransactionGeneration &&
-                currentBoundary.OfferGeneration == transaction.OfferGeneration &&
-                currentBoundary.TunaPathLeaseGeneration == lease.LeaseGeneration
-                ? currentBoundary
-                : null;
-            var retiredInstalledBoundary = retiredRuntimeUnlockOfferAuthorityBoundary is
-                {
-                    Mode: RuntimeUnlockOfferAuthorityMode.InstalledRetry,
-                    InstallReceipt: not null,
-                } retiredBoundary &&
-                retiredBoundary.TransactionGeneration ==
-                    transaction.TransactionGeneration &&
-                retiredBoundary.OfferGeneration == transaction.OfferGeneration &&
-                retiredBoundary.TunaPathLeaseGeneration == lease.LeaseGeneration
-                ? retiredBoundary
-                : null;
-            sourcePublication = (currentInstalledBoundary ??
-                retiredInstalledBoundary)?.InstallReceipt?
-                .Request.SourcePublicationAuthority ??
+            initiatorBinding = GetRuntimeUnlockPostFallbackProbeFailureBindingUnsafe();
+            sourcePublication = (initiatorBinding?.Command.Authority.ProofBoundary as
+                    FileTransferTunaActivationTransitionProofBoundary)?
+                .EffectiveRetryInstallReceipt?.Request.SourcePublicationAuthority ??
                 runtimeUnlockResponderAnswerProbeConvergence?
                     .PairedRetryBindingReceipt?
                     .Request.PublicationAuthority ??
@@ -15187,7 +15166,8 @@ public sealed partial class NknSignalingTransport
         if (sourcePublication is null ||
             !TryCaptureRuntimeUnlockRetryNegotiationSourceScope(
                 sourcePublication,
-                out var currentSourceScope))
+                out var currentSourceScope,
+                out var sourceDataSession))
         {
             return false;
         }
@@ -15207,32 +15187,7 @@ public sealed partial class NknSignalingTransport
         {
             var transaction = runtimeUnlockTransactionState;
             var lease = runtimeUnlockTunaPathLeaseState;
-            var installedBoundary = outboundRuntimeUnlockOfferAuthorityBoundary is
-                {
-                    Mode: RuntimeUnlockOfferAuthorityMode.InstalledRetry,
-                    InstallReceipt: not null,
-                } currentInstalledBoundary &&
-                currentInstalledBoundary.TransactionGeneration ==
-                    transaction.TransactionGeneration &&
-                currentInstalledBoundary.OfferGeneration ==
-                    transaction.OfferGeneration &&
-                currentInstalledBoundary.TunaPathLeaseGeneration ==
-                    lease.LeaseGeneration
-                    ? currentInstalledBoundary
-                    : retiredRuntimeUnlockOfferAuthorityBoundary is
-                        {
-                            Mode: RuntimeUnlockOfferAuthorityMode.InstalledRetry,
-                            InstallReceipt: not null,
-                        } retiredInstalledBoundary &&
-                        retiredInstalledBoundary.TransactionGeneration ==
-                            transaction.TransactionGeneration &&
-                        retiredInstalledBoundary.OfferGeneration ==
-                            transaction.OfferGeneration &&
-                        retiredInstalledBoundary.TunaPathLeaseGeneration ==
-                            lease.LeaseGeneration
-                        ? retiredInstalledBoundary
-                        : null;
-            if (transaction.IsTerminal ||
+            if (disposed || sourceDataSession is null || sourceDataSession.IsDisposed || transaction.IsTerminal ||
                 transaction.TransactionGeneration <= 0 ||
                 transaction.OfferGeneration <= 0 ||
                 lease.LeaseGeneration <= 0 ||
@@ -15256,14 +15211,15 @@ public sealed partial class NknSignalingTransport
                     started.PathProbeId,
                     transaction.PathProbeId,
                     StringComparison.Ordinal) &&
-                installedBoundary is
+                initiatorBinding is
                     {
-                        Mode: RuntimeUnlockOfferAuthorityMode.InstalledRetry,
-                        InstallReceipt: { } installed,
-                    } boundary &&
-                boundary.TransactionGeneration == transaction.TransactionGeneration &&
-                boundary.OfferGeneration == transaction.OfferGeneration &&
-                boundary.TunaPathLeaseGeneration == lease.LeaseGeneration &&
+                        Command.Authority.ProofBoundary: FileTransferTunaActivationTransitionProofBoundary
+                        { EffectiveRetryInstallReceipt: { } installed },
+                    } pauseBinding &&
+                ReferenceEquals(pauseBinding, GetRuntimeUnlockPostFallbackProbeFailureBindingUnsafe()) &&
+                pauseBinding.Command.Authority.SourceTransportEpoch == failureSourceScope.TransportEpoch &&
+                pauseBinding.Command.Authority.SourceBridgeRecoveryGeneration == failureSourceScope.BridgeRecoveryGeneration &&
+                pauseBinding.Command.Authority.DataSessionGeneration == failureSourceScope.DataSessionGeneration &&
                 runtimeUnlockRetryDispatchInstallShadow.LastCommittedReceipt ==
                     installed &&
                 installed.Authority.Direction == FileTransferDirection.Outbound &&

@@ -266,8 +266,27 @@ function Assert-Parity(
         -Bookmark 0 -ErrorMessage 'fixture' `
         -RouteMode 'regular-v4-live-activation-off-on-off-256mb' `
         -ImmutableEvidencePaths @($path)
-    if ($valid) {
-        if ($null -ne $gui) { throw 'GUI rejected valid peer-first Failed evidence.' }
+    if ($full.ArtifactEvidenceVerdict -ceq 'pass') {
+        # These family fixtures intentionally omit earlier route publications.
+        # GUI route checks precede semantic findings, which remain pinned above.
+        $route = Get-FileTransferCoordinatorSnapshotRouteConsistency -Evaluation $full
+        $compactRoute = Get-FileTransferCoordinatorSnapshotRouteConsistency -Evaluation $compact
+        $boundary = $route.FirstUnresolvedBoundary
+        if ($route.Verdict -cne 'fail' -or @($route.Findings).Count -ne 1 -or
+            $route.Findings[0] -cne 'snapshot authoritative route stream contains no route publications' -or
+            (Compare-FileTransferCoordinatorSnapshotRouteConsistency $route $compactRoute).Verdict -cne 'pass' -or
+            $route.BoundaryHash -cne $compactRoute.BoundaryHash -or
+            $boundary.boundaryId -cne $full.Boundaries[0].boundaryId -or
+            $boundary.boundaryHash -cne $full.Boundaries[0].boundaryHash -or
+            $gui.ClassificationSource -cne 'coordinator_snapshot_authority_v1_route_consistency' -or
+            $gui.FailureClass -cne 'filetransfer_route_consistency_analysis_parity_invalid' -or
+            $gui.FailureVariant -cne 'snapshot_authoritative_route_boundary_invalid' -or
+            $gui.CoordinatorBoundaryId -cne $boundary.boundaryId -or $gui.CoordinatorBoundaryHash -cne $boundary.boundaryHash -or
+            $gui.CoordinatorWriter -cne $boundary.writer -or $gui.CoordinatorWriterSequence -ne $boundary.writerSequence -or
+            $gui.CoordinatorRawCount -ne 1 -or $gui.CoordinatorDistinctCount -ne 1 -or
+            $gui.CoordinatorRecoveredCount -ne 0 -or $gui.CoordinatorUnresolvedCount -ne 1) {
+            throw 'Peer-first Failed partial-route rejection or exact GUI boundary changed.'
+        }
     }
     else {
         $boundary = $full.FirstUnresolvedBoundary

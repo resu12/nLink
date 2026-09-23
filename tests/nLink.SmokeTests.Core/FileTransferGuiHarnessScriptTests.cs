@@ -4210,6 +4210,8 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
     [Fact]
     public async Task GuiSmokeFailureClassification_PostFallbackProbeSidecarFailureUsesIndexedProofBeforeDeadline()
     {
+        var snapshotHelperPath = Path.Combine(FindRepoRoot(), "tools", "FileTransferOps", "CoordinatorSnapshotEvidence.ps1");
+        var frontierHelperPath = Path.Combine(FindRepoRoot(), "tools", "FileTransferFrontierGraceHandoff.ps1");
         var guiText = File.ReadAllText(Path.Combine(FindRepoRoot(), "tools", "GuiSmoke-Windows.ps1"));
         var resultBody = ExtractPowerShellFunctionBody(
             guiText,
@@ -4230,6 +4232,8 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
             function Get-TunaGuiFileTransferSetupFailureClassification { {{classifierBody}} }
             function Get-AppLogLinesAfterBookmark { throw 'live ledger was read' }
             function Read-GuiSmokeProcessOutputLinesSnapshot { throw 'process output was read' }
+            . '{{snapshotHelperPath.Replace("'", "''", StringComparison.Ordinal)}}'
+            . '{{frontierHelperPath.Replace("'", "''", StringComparison.Ordinal)}}'
             $tempRoot = Join-Path ([IO.Path]::GetTempPath()) ('nlink-gui-probe-sidecar-' + [guid]::NewGuid().ToString('N'))
             [void][IO.Directory]::CreateDirectory($tempRoot)
             try {

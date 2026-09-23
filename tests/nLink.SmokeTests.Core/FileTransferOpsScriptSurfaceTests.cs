@@ -6523,6 +6523,28 @@ public sealed class FileTransferOpsScriptSurfaceTests : FileTransferOpsScriptsTe
     }
 
     [Theory]
+    [InlineData("sidecar_failed_precommit_probe_rollback")]
+    [InlineData("pressure_rejected_precommit_probe_rollback")]
+    public async Task FileTransferOps_RejectedProbeRetryCycleRequiresExactRollbackHistory(string reason)
+    {
+        if (!OperatingSystem.IsWindows()) { return; }
+        var repoRoot = FindRepoRoot();
+        var tempRoot = Path.Combine(Path.GetTempPath(), "nlink-retry-cycle", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(tempRoot);
+        try
+        {
+            var envelopes = FileTransferCoordinatorTests.CreateRejectedProbeRetryCycleSnapshotFixture(reason)
+                .Select(NLink.Core.FileTransfer.SessionFileTransferService.CreateCoordinatorSnapshotEvidenceForTesting);
+            var fixturePath = Path.Combine(tempRoot, "envelopes.json");
+            await File.WriteAllTextAsync(fixturePath, "[" + string.Join(",", envelopes.Select(e => e.ToCanonicalJson())) + "]");
+            var script = File.ReadAllText(Path.Combine(repoRoot, "tests", "nLink.SmokeTests.Core", "Support", "RejectedProbeRetryCycleSnapshotEvidence.ps1"));
+            var result = await RunPowerShellScriptTextAsync(script, [repoRoot, fixturePath, tempRoot]);
+            Assert.True(result.ExitCode == 0, $"STDOUT:{result.Stdout}{Environment.NewLine}STDERR:{result.Stderr}");
+        }
+        finally { TryDeleteDirectory(tempRoot); }
+    }
+
+    [Theory]
     [InlineData(1)]
     [InlineData(2)]
     [InlineData(7)]

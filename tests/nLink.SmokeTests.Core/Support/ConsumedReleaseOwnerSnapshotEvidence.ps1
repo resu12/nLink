@@ -30,7 +30,28 @@ function Assert-Parity($value, [bool]$valid) {
         ($valid -and $null -ne $full.FirstUnresolvedBoundary)) { throw "Failed issuance parity: $($full.ArtifactEvidenceFailureReason)" }
     $path = Join-Path $OutputRoot 'compact.log'; [IO.File]::WriteAllLines($path,$compactLines)
     $gui = Get-TunaGuiFileTransferSetupFailureClassification -Bookmark 0 -ErrorMessage 'fixture' -RouteMode 'regular-v4-live-activation-off-on-off-256mb' -ImmutableEvidencePaths @($path)
-    if ($valid) { if ($null -ne $gui) { throw 'GUI invented a Failed-yield incident.' } }
+    if ($valid) {
+        # This isolated issuance omits its earlier route publications. Valid
+        # family evidence must not excuse the GUI's independent route stop.
+        $route = Get-FileTransferCoordinatorSnapshotRouteConsistency -Evaluation $full
+        $compactRoute = Get-FileTransferCoordinatorSnapshotRouteConsistency -Evaluation $compact
+        $boundary = $route.FirstUnresolvedBoundary
+        if ($route.Verdict -cne 'fail' -or @($route.Findings).Count -ne 1 -or
+            $route.Findings[0] -cne 'snapshot authoritative route stream contains no route publications' -or
+            (Compare-FileTransferCoordinatorSnapshotRouteConsistency $route $compactRoute).Verdict -cne 'pass' -or
+            $route.BoundaryHash -cne $compactRoute.BoundaryHash -or
+            $boundary.boundaryId -cne $value.transitionId -or
+            $boundary.boundaryHash -cne $full.Boundaries[0].boundaryHash -or
+            $gui.ClassificationSource -cne 'coordinator_snapshot_authority_v1_route_consistency' -or
+            $gui.FailureClass -cne 'filetransfer_route_consistency_analysis_parity_invalid' -or
+            $gui.FailureVariant -cne 'snapshot_authoritative_route_boundary_invalid' -or
+            $gui.CoordinatorBoundaryId -cne $boundary.boundaryId -or $gui.CoordinatorBoundaryHash -cne $boundary.boundaryHash -or
+            $gui.CoordinatorWriter -cne $boundary.writer -or $gui.CoordinatorWriterSequence -ne $boundary.writerSequence -or
+            $gui.CoordinatorRawCount -ne 1 -or $gui.CoordinatorDistinctCount -ne 1 -or
+            $gui.CoordinatorRecoveredCount -ne 0 -or $gui.CoordinatorUnresolvedCount -ne 1) {
+            throw 'Failed-yield partial-route rejection or exact GUI boundary changed.'
+        }
+    }
     elseif ($gui.CoordinatorBoundaryHash -cne $full.FirstUnresolvedBoundary.boundaryHash -or
         $gui.CoordinatorBoundaryId -cne $full.FirstUnresolvedBoundary.boundaryId -or
         $gui.CoordinatorWriterSequence -ne $full.FirstUnresolvedBoundary.writerSequence) { throw 'GUI failure boundary differs.' }
