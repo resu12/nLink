@@ -2638,10 +2638,8 @@ public sealed partial class NknAccelerationTransportTests : CoreSmokeTestsBase, 
             Assert.True(accelerationStatus.ShouldUseFileTransferV6ForAcceleration);
 
             var logTail = ReadOperationalLogTail(logStart);
-            var positiveTail = logTail + Environment.NewLine + LocalOperationalLog.GetRecentLogText();
-            Assert.Contains("event=filetransfer_runtime_unlock_waiting_for_fallback_owner;", positiveTail, StringComparison.Ordinal);
-            Assert.Contains("event=runtime_unlock_fallback_unavailable_suppressed;", positiveTail, StringComparison.Ordinal);
-            Assert.Contains("event=filetransfer_runtime_unlock_handoff_held_by_fallback_owner;", positiveTail, StringComparison.Ordinal);
+            Assert.Contains("event=filetransfer_runtime_unlock_handoff_held_for_retry_authority;", logTail, StringComparison.Ordinal);
+            Assert.Contains("decision_reason=fallback_paired_tail_yield_install_receipt_missing", logTail, StringComparison.Ordinal);
             Assert.DoesNotContain(
                 $"event=tuna_activation_filetransfer_handoff_requested; session_id={sessionId}; reason=test_accept",
                 logTail,
@@ -32666,9 +32664,11 @@ public sealed partial class NknAccelerationTransportTests : CoreSmokeTestsBase, 
         }
     }
 
-    [Fact]
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
     [Trait("Category", "Smoke")]
-    public async Task FileTransferFallbackRecovered_UserStopStartsFreshFallbackAfterReactivation()
+    public async Task FileTransferFallbackRecovered_UserStopStartsFreshFallbackAfterReactivation(bool hasCommittedFallback)
     {
         FakeNknClient.ResetNetwork();
         try
@@ -32697,20 +32697,35 @@ public sealed partial class NknAccelerationTransportTests : CoreSmokeTestsBase, 
             dataSession.AvailabilityChanged += (_, e) => availabilityEvents.Enqueue(e);
             helper.SetAccelerationAcceptedForTests(NknAccelerationLaneKind.File, sessionId);
 
+            var command = CreateFallbackPrerequisiteDisposition(dataSession, FileTransferDirection.Inbound);
+            var boundary = Assert.IsType<FileTransferFallbackTransitionProofBoundary>(command.Authority.ProofBoundary);
+            if (hasCommittedFallback)
+            {
+                await ApplyFallbackPrerequisiteDispositionAsync(helper, command);
+            }
             var logStart = GetOperationalLogLength();
             var observer = Assert.IsAssignableFrom<IFileTransferV6TransportEpochObserver>(helper);
-            observer.ObserveFileTransferV6TransportEpoch(
-                new FileTransferV6TransportEpochSnapshot(
+            var recovered = new FileTransferV6TransportEpochSnapshot(
                     sessionId,
                     transferId,
                     FileTransferDirection.Inbound,
-                    17,
+                    boundary.TargetTransportEpoch,
                     FileTransferTransportHandoffKind.TunaToNormalFallback,
                     FileTransferTransportKind.Tuna,
                     FileTransferTransportKind.RegularNkn,
                     V6TransportEpochState.Recovered,
                     "frontier_chunk_proof",
-                    IsUnresolved: false));
+                    IsUnresolved: false);
+            observer.ObserveFileTransferV6TransportEpoch(recovered);
+            if (!hasCommittedFallback)
+            {
+                Assert.False(helper.IsPostTunaFileFallbackActiveForRouteSelection);
+                Assert.DoesNotContain("event=filetransfer_v6_fallback_recovered_state_synthesized;",
+                    ReadOperationalLogTail(logStart), StringComparison.Ordinal);
+                Assert.Contains("decision_reason=coordinator_route_transition_commit_required",
+                    ReadOperationalLogTail(logStart), StringComparison.Ordinal);
+                return;
+            }
 
             await WaitUntilAsync(
                 () => ReadOperationalLogTail(logStart).Contains("event=filetransfer_v6_fallback_recovered_state_synthesized;", StringComparison.Ordinal),
@@ -32972,16 +32987,20 @@ public sealed partial class NknAccelerationTransportTests : CoreSmokeTestsBase, 
                 true,
                 FileTransferTransportHandoffKind.TunaToNormalFallback,
                 FileTransferTransportKind.RegularNkn);
-            await WaitUntilAsync(
-                () => availabilityEvents.Any(e =>
-                    !e.IsAvailable &&
-                    e.RequiresResumeRequest &&
-                    e.Reason == "sidecar_remote_closed"),
-                TimeSpan.FromSeconds(2));
-            TrackPostTunaFallbackRuntimeUnlockAdmissionDenied(
-                host,
-                transferId,
-                "test_post_tuna_fallback_admission_denied");
+            Assert.True(dataSession.IsAvailable);
+            Assert.Empty(availabilityEvents);
+            Assert.Contains("decision_reason=peer_fallback_proof_required",
+                ReadOperationalLogTail(logStart), StringComparison.Ordinal);
+
+            var command = CreateFallbackPrerequisiteDisposition(dataSession, FileTransferDirection.Outbound);
+            await ApplyFallbackPrerequisiteDispositionAsync(host, command);
+            var publication = command.RoutePublicationToken!.Value;
+            ((IFileTransferRouteHintObserver)host).ObserveFileTransferRouteHint(new(
+                sessionId, transferId, publication.RouteToken, publication.ProtocolVersion,
+                "test_committed_fallback", PublicationAuthority:
+                    FileTransferCoordinator.CreateRoutePublicationAuthority(publication)));
+            Assert.True(dataSession.IsAvailable);
+            while (availabilityEvents.TryDequeue(out _)) { }
 
             InvokePrivateMethod(
                 host,
@@ -32992,7 +33011,8 @@ public sealed partial class NknAccelerationTransportTests : CoreSmokeTestsBase, 
 
             await Task.Delay(200, cts.Token);
 
-            Assert.False(dataSession.IsAvailable);
+            Assert.True(dataSession.IsAvailable);
+            Assert.Empty(availabilityEvents);
             Assert.DoesNotContain(
                 availabilityEvents,
                 e => !e.IsAvailable &&
@@ -33005,8 +33025,8 @@ public sealed partial class NknAccelerationTransportTests : CoreSmokeTestsBase, 
                 logTail,
                 StringComparison.Ordinal);
             Assert.True(
-                logTail.Contains("suppress_reason=recovery_active", StringComparison.Ordinal),
-                "Expected activation pause suppression to be tied to a coordinator admission denial.");
+                logTail.Contains("suppress_reason=fallback_paired_tail_yield_install_receipt_missing", StringComparison.Ordinal),
+                "Expected activation pause suppression until the coordinator retry install receipt is current.");
             Assert.Contains("trigger=runtime_unlock", logTail, StringComparison.Ordinal);
             Assert.DoesNotContain("event=filetransfer_tuna_activation_negotiation_regular_nkn_paused;", logTail, StringComparison.Ordinal);
             Assert.DoesNotContain("event=filetransfer_tuna_activation_negotiation_transport_recovered_suppressed;", logTail, StringComparison.Ordinal);

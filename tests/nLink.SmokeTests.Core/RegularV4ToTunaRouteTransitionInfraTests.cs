@@ -10,7 +10,7 @@ using NLink.Infra.Nkn;
 namespace NLink.SmokeTests;
 
 [Collection(FakeNknNetworkCollection.Name)]
-public sealed class FileTransferRouteTransitionInfraTests : IDisposable
+public sealed partial class FileTransferRouteTransitionInfraTests : IDisposable
 {
     public FileTransferRouteTransitionInfraTests()
         => FakeNknClient.ResetNetwork();
@@ -635,68 +635,78 @@ public sealed class FileTransferRouteTransitionInfraTests : IDisposable
     private static FileTransferRouteTransitionAuthority CreateAuthority(
         string reason,
         long dataSessionGeneration)
+        => CreateAuthorityForRoute(reason, dataSessionGeneration);
+
+    private static FileTransferRouteTransitionAuthority CreateAuthorityForRoute(
+        string reason,
+        long dataSessionGeneration,
+        FileTransferRoute sourceRoute = FileTransferRoute.RegularNknV4Fast,
+        FileTransferDirection direction = FileTransferDirection.Outbound)
     {
         const string sessionId = "route-transition-session";
         const string transferId = "route-transition-transfer";
+        var sourceSelection = FileTransferRouteResolver.Resolve(sourceRoute);
+        var sourceGeneration = sourceRoute == FileTransferRoute.PostTunaFallbackV6 ? 3 : 1;
+        var sourceTransportEpoch = sourceRoute == FileTransferRoute.PostTunaFallbackV6 ? 7 : 1;
         var sourceOwner = new RuntimeOwnerToken(
             sessionId,
             transferId,
-            FileTransferDirection.Outbound,
-            FileTransferRoute.RegularNknV4Fast,
-            "regular_nkn_v4_fast",
-            FileTransferProtocol.ProtocolVersionV4,
-            LiveRouteEpoch: 1,
-            RuntimeGeneration: 1,
+            direction,
+            sourceRoute,
+            sourceSelection.TelemetryToken,
+            sourceSelection.ProtocolVersion,
+            LiveRouteEpoch: sourceGeneration,
+            RuntimeGeneration: sourceGeneration,
             TerminalGeneration: 0,
             RuntimeFamily: "regular_nkn_v4",
             CreatedReason: reason);
         var sourcePublication = new RoutePublicationToken(
             sessionId,
             transferId,
-            FileTransferDirection.Outbound,
+            direction,
             sourceOwner,
-            FileTransferRoute.RegularNknV4Fast,
-            "regular_nkn_v4_fast",
-            FileTransferProtocol.ProtocolVersionV4,
-            LiveRouteEpoch: 1,
-            RuntimeGeneration: 1,
+            sourceRoute,
+            sourceSelection.TelemetryToken,
+            sourceSelection.ProtocolVersion,
+            LiveRouteEpoch: sourceGeneration,
+            RuntimeGeneration: sourceGeneration,
             TerminalGeneration: 0,
-            LegGeneration: 1,
+            LegGeneration: sourceGeneration,
             RouteCommitGeneration: null,
-            TargetRoute: FileTransferRoute.RegularNknV4Fast,
-            TargetProtocolVersion: FileTransferProtocol.ProtocolVersionV4,
+            TargetRoute: sourceRoute,
+            TargetProtocolVersion: sourceSelection.ProtocolVersion,
             TargetTransport: FileTransferTransportKind.RegularNkn,
-            PublicationGeneration: 1,
+            PublicationGeneration: sourceGeneration,
             ActionKind: FileTransferCoordinatorActionKind.RoutePublication,
             Reason: reason);
         var admission = new RuntimeUnlockAdmissionToken(
             sessionId,
             transferId,
-            FileTransferDirection.Outbound,
+            direction,
             sourceOwner,
-            FileTransferRoute.RegularNknV4Fast,
-            "regular_nkn_v4_fast",
-            FileTransferProtocol.ProtocolVersionV4,
-            LiveRouteEpoch: 1,
-            RuntimeGeneration: 1,
+            sourceRoute,
+            sourceSelection.TelemetryToken,
+            sourceSelection.ProtocolVersion,
+            LiveRouteEpoch: sourceGeneration,
+            RuntimeGeneration: sourceGeneration,
             TerminalGeneration: 0,
-            LegGeneration: 1,
+            LegGeneration: sourceGeneration,
             AdmissionGeneration: 1,
             Reason: reason,
             RuntimeUnlockFallbackSurvivalState.Empty);
         var pending = new RuntimeUnlockPendingPreCommitProbeRequest(
             sessionId,
             transferId,
-            FileTransferDirection.Outbound,
+            direction,
             sourceOwner,
             admission,
-            FileTransferRoute.RegularNknV4Fast,
-            "regular_nkn_v4_fast",
-            FileTransferProtocol.ProtocolVersionV4,
-            LiveRouteEpoch: 1,
-            RuntimeGeneration: 1,
+            sourceRoute,
+            sourceSelection.TelemetryToken,
+            sourceSelection.ProtocolVersion,
+            LiveRouteEpoch: sourceGeneration,
+            RuntimeGeneration: sourceGeneration,
             TerminalGeneration: 0,
-            LegGeneration: 1,
+            LegGeneration: sourceGeneration,
             TransactionGeneration: 1,
             OfferGeneration: 1,
             TunaPathLeaseGeneration: 1,
@@ -736,8 +746,8 @@ public sealed class FileTransferRouteTransitionInfraTests : IDisposable
             sourceOwner,
             sourcePublication,
             SourceTerminalGeneration: 0,
-            SourceLegGeneration: 1,
-            SourceTransportEpoch: 1,
+            SourceLegGeneration: sourceGeneration,
+            SourceTransportEpoch: sourceTransportEpoch,
             SourceBridgeRecoveryGeneration: 0,
             DataSessionGeneration: dataSessionGeneration,
             StateEpoch: 1,
@@ -752,20 +762,22 @@ public sealed class FileTransferRouteTransitionInfraTests : IDisposable
                 proof,
                 LaunchGeneration: 1);
         return new FileTransferRouteTransitionAuthority(
-            FileTransferRouteTransitionKind.RegularV4ToTunaV4,
+            sourceRoute == FileTransferRoute.PostTunaFallbackV6
+                ? FileTransferRouteTransitionKind.PostTunaFallbackV6ToTunaV4
+                : FileTransferRouteTransitionKind.RegularV4ToTunaV4,
             SessionId: sessionId,
             TransferId: transferId,
-            Direction: FileTransferDirection.Outbound,
+            Direction: direction,
             SourceRuntimeOwner: sourceOwner,
             SourceRoutePublication: sourcePublication,
             SourceRouteCommit: null,
-            SourceRoute: FileTransferRoute.RegularNknV4Fast,
-            SourceProtocolVersion: FileTransferProtocol.ProtocolVersionV4,
+            SourceRoute: sourceRoute,
+            SourceProtocolVersion: sourceSelection.ProtocolVersion,
             SourceTransport: FileTransferTransportKind.RegularNkn,
             SourceTerminalGeneration: 0,
-            SourceLiveRouteEpoch: 1,
-            SourceLegGeneration: 1,
-            SourceTransportEpoch: 1,
+            SourceLiveRouteEpoch: sourceGeneration,
+            SourceLegGeneration: sourceGeneration,
+            SourceTransportEpoch: sourceTransportEpoch,
             SourceBridgeRecoveryGeneration: 0,
             DataSessionGeneration: dataSessionGeneration,
             ProofBoundary: proofBoundary,
@@ -802,8 +814,8 @@ public sealed class FileTransferRouteTransitionInfraTests : IDisposable
             FileTransferRoute.FileTunaV4,
             "file_tuna_v4",
             FileTransferProtocol.ProtocolVersionV4,
-            LiveRouteEpoch: 2,
-            RuntimeGeneration: 2,
+            LiveRouteEpoch: authority.SourceLiveRouteEpoch + 1,
+            RuntimeGeneration: authority.SourceRuntimeOwner.RuntimeGeneration + 1,
             TerminalGeneration: authority.SourceTerminalGeneration,
             RuntimeFamily: "file_tuna_v4",
             CreatedReason: "test_commit");
@@ -816,10 +828,10 @@ public sealed class FileTransferRouteTransitionInfraTests : IDisposable
             FileTransferRoute.FileTunaV4,
             "file_tuna_v4",
             FileTransferProtocol.ProtocolVersionV4,
-            LiveRouteEpoch: 2,
-            RuntimeGeneration: 2,
+            LiveRouteEpoch: authority.SourceLiveRouteEpoch + 1,
+            RuntimeGeneration: authority.SourceRuntimeOwner.RuntimeGeneration + 1,
             TerminalGeneration: authority.SourceTerminalGeneration,
-            LegGeneration: 2,
+            LegGeneration: authority.SourceLegGeneration + 1,
             TransactionGeneration:
                 activation.AcceptedLaunchBoundary.TransactionGeneration,
             OfferGeneration:
@@ -844,15 +856,15 @@ public sealed class FileTransferRouteTransitionInfraTests : IDisposable
             FileTransferRoute.FileTunaV4,
             "file_tuna_v4",
             FileTransferProtocol.ProtocolVersionV4,
-            LiveRouteEpoch: 2,
-            RuntimeGeneration: 2,
+            LiveRouteEpoch: authority.SourceLiveRouteEpoch + 1,
+            RuntimeGeneration: authority.SourceRuntimeOwner.RuntimeGeneration + 1,
             TerminalGeneration: authority.SourceTerminalGeneration,
-            LegGeneration: 2,
+            LegGeneration: authority.SourceLegGeneration + 1,
             RouteCommitGeneration: commit.CommitGeneration,
             TargetRoute: FileTransferRoute.FileTunaV4,
             TargetProtocolVersion: FileTransferProtocol.ProtocolVersionV4,
             TargetTransport: FileTransferTransportKind.Tuna,
-            PublicationGeneration: 2,
+            PublicationGeneration: authority.SourceRoutePublication.PublicationGeneration + 1,
             ActionKind: FileTransferCoordinatorActionKind.RouteCommitPublication,
             Reason: "test_commit");
         return new FileTransferRouteTransitionDispositionCommand(

@@ -25143,153 +25143,153 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
             context,
             "test_probe_failure_drain");
 
-        var stageMethod = serviceType.GetMethod(
-            "TryPrepareOutboundRegularV4ToTunaRouteTransitionLocked",
-            BindingFlags.Instance | BindingFlags.NonPublic)!;
-        var failureMethod = serviceType.GetMethod(
-            "LogRuntimeUnlockPreCommitProbeFailed",
-            BindingFlags.Instance | BindingFlags.NonPublic)!;
-        var firstStageArguments = new object?[]
+        VerifyDrainFailures(service, transport, context, sessionId, logStart);
+
+        [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+        static void VerifyDrainFailures(SessionFileTransferService service,
+            LoopbackFileTransferTransport transport, object context, string sessionId, int logStart)
         {
-            context,
-            transport.RuntimeUnlockRouteCommitSnapshot,
-            "test_first_probe",
-            null,
-        };
-        Assert.True(
-            Assert.IsType<bool>(stageMethod.Invoke(service, firstStageArguments)),
-            ReadOperationalLogTail(logStart));
-        var firstOperation = Assert.IsType<FileTransferRouteTransitionOperation>(
-            GetPrivateProperty<FileTransferCoordinatorPersistentState>(
-                    context,
-                    "CoordinatorPersistentState")
-                .FileTransferRouteTransition
-                .CurrentOperation);
-        var firstDrain = Assert.IsType<FileTransferRouteTransitionPhysicalDrainCommand>(
-            firstOperation.DrainCommand);
+            var serviceType = typeof(SessionFileTransferService);
+            var stageMethod = serviceType.GetMethod(
+                "TryPrepareOutboundRegularV4ToTunaRouteTransitionLocked",
+                BindingFlags.Instance | BindingFlags.NonPublic)!;
+            var failureMethod = serviceType.GetMethod(
+                "LogRuntimeUnlockPreCommitProbeFailed",
+                BindingFlags.Instance | BindingFlags.NonPublic)!;
+            var firstStageArguments = new object?[]
+            {
+                context,
+                transport.RuntimeUnlockRouteCommitSnapshot,
+                "test_first_probe",
+                null,
+            };
+            Assert.True(
+                Assert.IsType<bool>(stageMethod.Invoke(service, firstStageArguments)),
+                ReadOperationalLogTail(logStart));
+            var firstOperation = CaptureOperation(context);
 
-        failureMethod.Invoke(
-            service,
-            [
-                FileTransferDirection.Outbound,
-                transferId,
+            failureMethod.Invoke(
+                service,
+                [
+                    FileTransferDirection.Outbound,
+                    transferId,
+                    sessionId,
+                    7L,
+                    11L,
+                    13L,
+                    firstProbeId,
+                    "timeout",
+                ]);
+            AssertInvalidated(context, firstOperation);
+
+            transport.RuntimeUnlockRouteCommitSnapshot = CreateSnapshot(
                 sessionId,
-                7L,
-                11L,
-                13L,
-                firstProbeId,
-                "timeout",
-            ]);
-        var firstTerminal = GetPrivateProperty<FileTransferCoordinatorPersistentState>(
-            context,
-            "CoordinatorPersistentState").FileTransferRouteTransition;
-        Assert.Null(firstTerminal.CurrentOperation);
-        Assert.True(firstTerminal.LastTerminalOperation.HasValue);
-        Assert.Equal(
-            FileTransferRouteTransitionState.Invalidated,
-            firstTerminal.LastTerminalOperation.Value.State);
-        Assert.Equal(
-            firstOperation.Authority.TransitionGeneration,
-            firstTerminal.LastTerminalOperation.Value.Authority.TransitionGeneration);
+                transferId,
+                transactionGeneration: 8,
+                offerGeneration: 12,
+                leaseGeneration: 14,
+                successorProbeId);
+            EnsureRuntimeUnlockPreCommitAuthoritiesForDrainForTest(
+                service,
+                context,
+                "test_successor_probe");
+            var successorStageArguments = new object?[]
+            {
+                context,
+                transport.RuntimeUnlockRouteCommitSnapshot,
+                "test_successor_probe",
+                null,
+            };
+            Assert.True(Assert.IsType<bool>(stageMethod.Invoke(service, successorStageArguments)));
+            var successorOperation = CaptureOperation(context);
+            AssertSuccessorDrain(firstOperation, successorOperation);
 
-        transport.RuntimeUnlockRouteCommitSnapshot = CreateSnapshot(
-            sessionId,
-            transferId,
-            transactionGeneration: 8,
-            offerGeneration: 12,
-            leaseGeneration: 14,
-            successorProbeId);
-        EnsureRuntimeUnlockPreCommitAuthoritiesForDrainForTest(
-            service,
-            context,
-            "test_successor_probe");
-        var successorStageArguments = new object?[]
+            failureMethod.Invoke(
+                service,
+                [
+                    FileTransferDirection.Outbound,
+                    transferId,
+                    sessionId,
+                    7L,
+                    11L,
+                    13L,
+                    firstProbeId,
+                    "late_timeout",
+                ]);
+            Assert.Equal(
+                successorOperation,
+                CaptureOperation(context));
+
+            failureMethod.Invoke(
+                service,
+                [
+                    FileTransferDirection.Outbound,
+                    transferId,
+                    sessionId,
+                    8L,
+                    12L,
+                    14L,
+                    "runtime-unlock-precommit:8:12:mismatched",
+                    "late_timeout",
+                ]);
+            Assert.Equal(
+                successorOperation,
+                CaptureOperation(context));
+
+            failureMethod.Invoke(
+                service,
+                [
+                    FileTransferDirection.Outbound,
+                    transferId,
+                    sessionId,
+                    8L,
+                    12L,
+                    14L,
+                    successorProbeId,
+                    "timeout",
+                ]);
+            AssertInvalidated(context, successorOperation);
+        }
+
+        // Box snapshots only between assertions so production calls do not retain their large value copies.
+        [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+        static object CaptureOperation(object currentContext)
         {
-            context,
-            transport.RuntimeUnlockRouteCommitSnapshot,
-            "test_successor_probe",
-            null,
-        };
-        Assert.True(Assert.IsType<bool>(stageMethod.Invoke(service, successorStageArguments)));
-        var successorTransition = GetPrivateProperty<FileTransferCoordinatorPersistentState>(
-            context,
-            "CoordinatorPersistentState").FileTransferRouteTransition;
-        var successorOperation = Assert.IsType<FileTransferRouteTransitionOperation>(
-            successorTransition.CurrentOperation);
-        var successorDrain =
-            Assert.IsType<FileTransferRouteTransitionPhysicalDrainCommand>(
-                successorOperation.DrainCommand);
-        Assert.NotEqual(firstDrain, successorDrain);
-        Assert.Equal(
-            FileTransferRouteTransitionState.Draining,
-            successorOperation.State);
-        Assert.Equal(
-            successorOperation.Authority.TransitionGeneration,
-            successorDrain.Authority.TransitionGeneration);
+            var operation = Assert.IsType<FileTransferRouteTransitionOperation>(
+                ReadTransition(currentContext).CurrentOperation);
+            Assert.IsType<FileTransferRouteTransitionPhysicalDrainCommand>(operation.DrainCommand);
+            return operation;
+        }
 
-        failureMethod.Invoke(
-            service,
-            [
-                FileTransferDirection.Outbound,
-                transferId,
-                sessionId,
-                7L,
-                11L,
-                13L,
-                firstProbeId,
-                "late_timeout",
-            ]);
-        Assert.Equal(
-            successorOperation,
-            GetPrivateProperty<FileTransferCoordinatorPersistentState>(
-                    context,
-                    "CoordinatorPersistentState")
-                .FileTransferRouteTransition
-                .CurrentOperation);
+        [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+        static void AssertInvalidated(object currentContext, object expected)
+        {
+            var operation = Assert.IsType<FileTransferRouteTransitionOperation>(expected);
+            var terminal = ReadTransition(currentContext);
+            Assert.Null(terminal.CurrentOperation);
+            Assert.True(terminal.LastTerminalOperation.HasValue);
+            Assert.Equal(FileTransferRouteTransitionState.Invalidated, terminal.LastTerminalOperation.Value.State);
+            Assert.Equal(operation.Authority.TransitionGeneration,
+                terminal.LastTerminalOperation.Value.Authority.TransitionGeneration);
+        }
 
-        failureMethod.Invoke(
-            service,
-            [
-                FileTransferDirection.Outbound,
-                transferId,
-                sessionId,
-                8L,
-                12L,
-                14L,
-                "runtime-unlock-precommit:8:12:mismatched",
-                "late_timeout",
-            ]);
-        Assert.Equal(
-            successorOperation,
-            GetPrivateProperty<FileTransferCoordinatorPersistentState>(
-                    context,
-                    "CoordinatorPersistentState")
-                .FileTransferRouteTransition
-                .CurrentOperation);
+        [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+        static void AssertSuccessorDrain(object first, object successor)
+        {
+            var firstOperation = Assert.IsType<FileTransferRouteTransitionOperation>(first);
+            var successorOperation = Assert.IsType<FileTransferRouteTransitionOperation>(successor);
+            var firstDrain = Assert.IsType<FileTransferRouteTransitionPhysicalDrainCommand>(firstOperation.DrainCommand);
+            var successorDrain = Assert.IsType<FileTransferRouteTransitionPhysicalDrainCommand>(successorOperation.DrainCommand);
+            Assert.NotEqual(firstDrain, successorDrain);
+            Assert.Equal(FileTransferRouteTransitionState.Draining, successorOperation.State);
+            Assert.Equal(successorOperation.Authority.TransitionGeneration, successorDrain.Authority.TransitionGeneration);
+        }
 
-        failureMethod.Invoke(
-            service,
-            [
-                FileTransferDirection.Outbound,
-                transferId,
-                sessionId,
-                8L,
-                12L,
-                14L,
-                successorProbeId,
-                "timeout",
-            ]);
-        var successorTerminal = GetPrivateProperty<FileTransferCoordinatorPersistentState>(
-            context,
-            "CoordinatorPersistentState").FileTransferRouteTransition;
-        Assert.Null(successorTerminal.CurrentOperation);
-        Assert.True(successorTerminal.LastTerminalOperation.HasValue);
-        Assert.Equal(
-            FileTransferRouteTransitionState.Invalidated,
-            successorTerminal.LastTerminalOperation.Value.State);
-        Assert.Equal(
-            successorOperation.Authority.TransitionGeneration,
-            successorTerminal.LastTerminalOperation.Value.Authority.TransitionGeneration);
+        // Keep large persistent-state copies out of the frame that invokes production setup.
+        [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+        static FileTransferRouteTransitionSubstate ReadTransition(object currentContext)
+            => GetPrivateProperty<FileTransferCoordinatorPersistentState>(
+                currentContext, "CoordinatorPersistentState").FileTransferRouteTransition;
 
         static RuntimeUnlockRouteCommitSnapshot CreateSnapshot(
             string sessionId,

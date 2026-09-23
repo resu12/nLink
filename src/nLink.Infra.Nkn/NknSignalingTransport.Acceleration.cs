@@ -779,6 +779,10 @@ public sealed partial class NknSignalingTransport
 
         public long FileV6TransportEpoch { get; set; }
 
+        public RoutePublicationToken? FileProjectionPublication { get; set; }
+
+        public FileTransferRouteTransitionDispositionCommand? FileProjectionRetirement { get; set; }
+
         public long ScreenFramesApplied { get; set; }
 
         public bool AccelerationUsedAfterFallback { get; set; }
@@ -2392,7 +2396,7 @@ public sealed partial class NknSignalingTransport
                     {
                         Current = new FileTransferRouteTransitionPauseBindingShadow(
                             command,
-                            receipt),
+                            receipt) { FallbackProjection = CaptureFileFallbackProjectionUnsafe(authority) },
                         RetainedPredecessor = predecessor,
                     };
                 }
@@ -2420,7 +2424,7 @@ public sealed partial class NknSignalingTransport
                             Current =
                                 new FileTransferRouteTransitionPauseBindingShadow(
                                     command,
-                                    receipt),
+                                    receipt) { FallbackProjection = CaptureFileFallbackProjectionUnsafe(authority) },
                         };
                     }
                     else
@@ -2473,7 +2477,7 @@ public sealed partial class NknSignalingTransport
                     {
                         Current = new FileTransferRouteTransitionPauseBindingShadow(
                             command,
-                            receipt),
+                            receipt) { FallbackProjection = CaptureFileFallbackProjectionUnsafe(authority) },
                     };
                 }
             }
@@ -2635,6 +2639,7 @@ public sealed partial class NknSignalingTransport
     {
         FileTransferRouteTransitionDispositionReceipt receipt;
         var scheduleAvailability = false;
+        var fallbackProjectionRetired = false;
         RuntimeUnlockRetiredAnswerBarrier? completedAnswerBarrier = null;
         var wakeRetryAfterAnswerBarrier = false;
         lock (accelerationGate)
@@ -2682,6 +2687,11 @@ public sealed partial class NknSignalingTransport
             }
             else
             {
+                if (currentMatches && shadow.RetainedPredecessor is null)
+                {
+                    fallbackProjectionRetired = ApplyFileFallbackProjectionDispositionUnsafe(
+                        command, shadow.Current!.FallbackProjection);
+                }
                 receipt = new FileTransferRouteTransitionDispositionReceipt(
                     command,
                     FileTransferRouteTransitionDispositionApplyStatus.Applied,
@@ -2780,6 +2790,10 @@ public sealed partial class NknSignalingTransport
         }
 
         LogFileTransferRouteTransitionDispositionReceipt(receipt);
+        if (fallbackProjectionRetired)
+        {
+            NotifyTransportAccelerationStateChanged("coordinator_committed_reactivation");
+        }
         if (completedAnswerBarrier is not null)
         {
             LogRuntimeUnlockRetiredAnswerBarrier(
@@ -3087,7 +3101,10 @@ public sealed partial class NknSignalingTransport
 
     private sealed record FileTransferRouteTransitionPauseBindingShadow(
         FileTransferRouteTransitionPauseBindCommand Command,
-        FileTransferRouteTransitionPauseBindReceipt Receipt);
+        FileTransferRouteTransitionPauseBindReceipt Receipt)
+    {
+        public TunaFallbackProofState? FallbackProjection { get; init; }
+    }
 
     private sealed record FileTransferRouteTransitionExecutionShadow(
         FileTransferRouteTransitionPauseBindingShadow? Current,
@@ -12783,6 +12800,7 @@ public sealed partial class NknSignalingTransport
             }
 
             if ((lane & NknAccelerationLaneKind.File) == NknAccelerationLaneKind.File &&
+                current.FileProjectionRetirement is null &&
                 current.FileState != state)
             {
                 current.FileState = state;
@@ -12811,7 +12829,8 @@ public sealed partial class NknSignalingTransport
         var changed = false;
         lock (accelerationGate)
         {
-            if (!TryGetCurrentTunaFallbackProofStateUnsafe(sessionId, out var current))
+            if (!TryGetCurrentTunaFallbackProofStateUnsafe(sessionId, out var current) ||
+                current.FileProjectionRetirement is not null)
             {
                 return;
             }
@@ -40516,6 +40535,7 @@ public sealed partial class NknSignalingTransport
         {
             if (!TryGetCurrentTunaFallbackProofStateUnsafe(currentSessionSecurityState.SessionId?.Value, out var state) ||
                 (state.Lanes & NknAccelerationLaneKind.File) != NknAccelerationLaneKind.File ||
+                state.FileProjectionRetirement is not null ||
                 state.FileState == TunaFallbackLaneState.None)
             {
                 return false;
@@ -41307,6 +41327,7 @@ public sealed partial class NknSignalingTransport
             return tunaFallbackProofState is { } state &&
                    string.Equals(state.SessionId, fallbackSessionId, StringComparison.Ordinal) &&
                    (state.Lanes & NknAccelerationLaneKind.File) == NknAccelerationLaneKind.File &&
+                   state.FileProjectionRetirement is null &&
                    state.FileState != TunaFallbackLaneState.None;
         }
     }
