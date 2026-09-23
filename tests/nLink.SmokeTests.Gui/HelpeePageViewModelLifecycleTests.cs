@@ -550,6 +550,77 @@ public sealed class HelpeePageViewModelLifecycleTests : CoreSmokeTestsBase
         Assert.Equal("The other side ended the session.", helpee.HeaderStatusText);
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    [Trait("Category", "Smoke")]
+    public async Task HelpeePageViewModel_PostTerminalRestart_IsBlockedOnlyForWindowClose(bool closing)
+    {
+        var createdTransports = 0;
+        using var runtime = new SessionRuntime(() =>
+        {
+            Interlocked.Increment(ref createdTransports);
+            return new ScriptedSignalingTransport(onHostByAddressAsync: _ => Task.CompletedTask);
+        });
+        using var helpee = new HelpeePageViewModel(static () => { }, CreateNknTestConfig(), runtime);
+        await WaitUntilAsync(() => runtime.State == SessionRuntimeState.Waiting, TimeSpan.FromSeconds(3));
+
+        if (closing)
+        {
+            await helpee.PrepareForWindowCloseAsync();
+        }
+
+        var generation = Assert.IsType<long>(GetPrivateField(helpee, "inviteBootstrapGeneration"));
+        var flow = runtime.FlowSnapshot with
+        {
+            TerminalKind = SessionTerminalKind.PeerEnded,
+            PostTerminalAction = SessionFlowPostTerminalAction.ReturnToWaiting,
+            TerminalStatusText = "The other side ended the session."
+        };
+        InvokePrivateMethod(helpee, "TryApplyPostTerminalAction", flow);
+
+        Assert.Equal(generation + (closing ? 0 : 1),
+            Assert.IsType<long>(GetPrivateField(helpee, "inviteBootstrapGeneration")));
+        if (!closing)
+        {
+            await WaitUntilAsync(() => Volatile.Read(ref createdTransports) == 2, TimeSpan.FromSeconds(3));
+        }
+        Assert.Equal(closing ? 1 : 2, Volatile.Read(ref createdTransports));
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public async Task HelpeePageViewModel_QueuedHosting_DoesNotStartAfterWindowClose()
+    {
+        var createdTransports = 0;
+        using var runtime = new SessionRuntime(() =>
+        {
+            Interlocked.Increment(ref createdTransports);
+            return new ScriptedSignalingTransport(onHostByAddressAsync: _ => Task.CompletedTask);
+        });
+        using var helpee = new HelpeePageViewModel(static () => { }, CreateNknTestConfig(), runtime);
+        await WaitUntilAsync(() => runtime.State == SessionRuntimeState.Waiting, TimeSpan.FromSeconds(3));
+
+        var gate = Assert.IsType<SemaphoreSlim>(GetPrivateField(runtime, "lifecycleGate"));
+        await gate.WaitAsync();
+        Task hosting;
+        Task closing;
+        try
+        {
+            hosting = Assert.IsAssignableFrom<Task>(InvokePrivateMethod(helpee, "StartHostingAsync"));
+            Assert.False(hosting.IsCompleted);
+            closing = helpee.PrepareForWindowCloseAsync();
+        }
+        finally
+        {
+            gate.Release();
+        }
+
+        await Task.WhenAll(hosting, closing).WaitAsync(TimeSpan.FromSeconds(3));
+        Assert.Equal(1, Volatile.Read(ref createdTransports));
+        Assert.Equal(SessionRuntimeState.Idle, runtime.State);
+    }
+
     [Trait("Category", "Smoke")]
     [Fact]
     public void HelpeePageViewModel_FailedBootstrap_ReplacesStaleInvitePreparationStatus()

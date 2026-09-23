@@ -2297,6 +2297,11 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
 
     private void StartHosting(bool allowAfterVisibleTerminalFailure = false)
     {
+        if (disposed || Volatile.Read(ref windowCloseDisconnectStarted) != 0)
+        {
+            return;
+        }
+
         if (!allowAfterVisibleTerminalFailure &&
             ShouldKeepVisibleTerminalFailureBeforeAutoRestart())
         {
@@ -2377,6 +2382,12 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
         try
         {
             await sessionRuntime.ResetAsync();
+            // Reset may have yielded while the window began closing.
+            if (disposed || Volatile.Read(ref windowCloseDisconnectStarted) != 0)
+            {
+                return;
+            }
+
             await sessionRuntime.StartHelpeeAsync(bootstrapCts.Token);
             await UiThreadDispatch.RunAsync(() =>
             {

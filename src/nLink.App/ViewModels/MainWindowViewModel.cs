@@ -233,8 +233,9 @@ public class MainWindowViewModel : ViewModelBase, IDisposable
     {
         ArgumentNullException.ThrowIfNull(getOrStartEndSessionTask);
 
-        var endSession = getOrStartEndSessionTask();
+        // Let the page latch its close intent before disconnect emits terminal events.
         var preparePage = PreparePageForWindowCloseAsync(closeAwarePage);
+        var endSession = getOrStartEndSessionTask();
         try
         {
             await Task.WhenAll(endSession, preparePage)

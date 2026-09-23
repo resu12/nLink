@@ -41,6 +41,7 @@ public sealed class MainWindowViewModelTests
             page,
             () =>
             {
+                Assert.Equal(1, page.CallCount);
                 endSessionStarted++;
                 return Task.CompletedTask;
             },
@@ -48,6 +49,29 @@ public sealed class MainWindowViewModelTests
 
         Assert.Equal(1, endSessionStarted);
         Assert.Equal(1, page.CallCount);
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public async Task PrepareWindowCloseAsync_DoesNotWaitForPageBeforeStartingEndSession()
+    {
+        var preparation = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var page = new StubWindowCloseAware(() => preparation.Task);
+        var endSessionStarted = false;
+
+        await MainWindowViewModel.PrepareWindowCloseAsync(
+            page,
+            () =>
+            {
+                Assert.Equal(1, page.CallCount);
+                Assert.False(preparation.Task.IsCompleted);
+                endSessionStarted = true;
+                preparation.SetResult();
+                return Task.CompletedTask;
+            },
+            TimeSpan.FromSeconds(1));
+
+        Assert.True(endSessionStarted);
     }
 
     [Fact]
