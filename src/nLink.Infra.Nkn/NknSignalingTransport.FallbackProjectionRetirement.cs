@@ -61,6 +61,15 @@ public sealed partial class NknSignalingTransport
                 captured.FileV6TransportEpoch = fallback.TargetTransportEpoch;
                 captured.FileV6EpochState = V6TransportEpochState.Recovered;
             }
+            else if (captured.FileProjectionPublication is null && captured.FileV6TransportEpoch == 0 &&
+                command.Authority.TargetProtocolVersion == FileTransferProtocol.ProtocolVersionV6 &&
+                command.Authority.TargetTransport == FileTransferTransportKind.RegularNkn &&
+                command.Authority.ProofBoundary is FileTransferFallbackTransitionProofBoundary { TargetTransportEpoch: > 0 } initialFallback)
+            {
+                // Bind the first fallback's epoch from its committed command;
+                // retirement must not depend on a later epoch observation.
+                captured.FileV6TransportEpoch = initialFallback.TargetTransportEpoch;
+            }
             captured.FileProjectionPublication = publication;
             return false;
         }

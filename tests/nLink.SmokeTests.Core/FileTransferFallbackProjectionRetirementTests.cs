@@ -227,7 +227,8 @@ public sealed partial class FileTransferRouteTransitionInfraTests
         public void Dispose() { DataSession.Dispose(); Transport.Dispose(); }
     }
 
-    private static async Task<FallbackProjectionFixture> CreateFallbackProjectionFixtureAsync(FileTransferDirection direction)
+    private static async Task<FallbackProjectionFixture> CreateFallbackProjectionFixtureAsync(
+        FileTransferDirection direction, bool commitFallback = true)
     {
         var client = new FakeNknClient("fallback-projection.invalid");
         var transport = new NknSignalingTransport(client, NknTransportOptions.Load(),
@@ -265,19 +266,22 @@ public sealed partial class FileTransferRouteTransitionInfraTests
         var bridge = (IFileTransferRouteTransitionBridge)transport;
         Assert.True((bool)InvokePrivate(transport, "StartTunaFallbackProofIfNeeded", "header_switch_off",
             reactivation.SessionId, NknAccelerationLaneKind.File | NknAccelerationLaneKind.Screen)!);
-        var entryBind = bridge.BindFileTransferRouteTransitionPause(new(entry));
-        Assert.True(entryBind.Status == FileTransferRouteTransitionPauseBindStatus.Installed, entryBind.Reason);
         var fallbackEntry = new FileTransferRouteTransitionDispositionCommand(entry,
             FileTransferRouteTransitionDispositionKind.Committed, null,
             reactivation.SourceRoutePublication, "test_fallback_commit");
-        Assert.Equal(FileTransferRouteTransitionDispositionApplyStatus.Applied,
-            bridge.ApplyFileTransferRouteTransitionDisposition(fallbackEntry).Status);
-        await WaitUntilAsync(() => GetPendingRouteTransitionAvailabilityDisposition(transport) is null);
         var recovered = new FileTransferV6TransportEpochSnapshot(reactivation.SessionId, reactivation.TransferId,
             direction, 7, FileTransferTransportHandoffKind.TunaToNormalFallback,
             FileTransferTransportKind.Tuna, FileTransferTransportKind.RegularNkn,
             V6TransportEpochState.Recovered, "test_fallback_recovered", false);
+        var fixture = new FallbackProjectionFixture(transport, data,
+            reactivation with { TransitionGeneration = entry.TransitionGeneration + 1 }, fallbackEntry, recovered);
+        if (!commitFallback) return fixture;
+        var entryBind = bridge.BindFileTransferRouteTransitionPause(new(entry));
+        Assert.True(entryBind.Status == FileTransferRouteTransitionPauseBindStatus.Installed, entryBind.Reason);
+        Assert.Equal(FileTransferRouteTransitionDispositionApplyStatus.Applied,
+            bridge.ApplyFileTransferRouteTransitionDisposition(fallbackEntry).Status);
+        await WaitUntilAsync(() => GetPendingRouteTransitionAvailabilityDisposition(transport) is null);
         transport.ObserveFileTransferV6TransportEpoch(recovered);
-        return new(transport, data, reactivation with { TransitionGeneration = entry.TransitionGeneration + 1 }, fallbackEntry, recovered);
+        return fixture;
     }
 }
