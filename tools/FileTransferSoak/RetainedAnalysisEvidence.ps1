@@ -1,4 +1,5 @@
 Set-StrictMode -Version Latest
+. (Join-Path (Split-Path -Parent $PSScriptRoot) 'FileTransferOps/SecondTransferReport.ps1')
 
 if ($null -eq ('NLink.FileTransferEvidenceNative' -as [type])) {
     Add-Type -TypeDefinition @'
@@ -273,6 +274,7 @@ function Write-FileTransferRetainedAnalysisAttemptReceipt {
         [Parameter(Mandatory = $true)][bool]$ExitCodeAvailable,
         [Parameter(Mandatory = $true)][int]$ExitCode,
         [Parameter(Mandatory = $true)][bool]$CompletedProofArtifacts,
+        [bool]$SecondTransferReportRequired = $false,
         [AllowNull()]$LocalPublicationCustody = $null,
         [AllowNull()]$FrontierTerminalCustody = $null,
         [AllowNull()]$FrontierSourceRequest = $null
@@ -410,6 +412,14 @@ function Write-FileTransferRetainedAnalysisAttemptReceipt {
         operatorVerdict = & $artifact 'filetransfer-operator-verdict.txt'
         stabilitySummary = & $artifact 'stability-gates-summary.txt'
     }
+    if ($SecondTransferReportRequired) {
+        $receipt.secondTransferReportRequired = $true
+        $receipt.secondTransferReportSha256 = Get-FileTransferEvidenceSha256 -Path (Join-Path $ArtifactDir 'second-transfer-analysis/primary-derived-report.json')
+        if (-not (Test-FileTransferSecondTransferReport -ArtifactDir $ArtifactDir -Receipt ([pscustomobject]$receipt))) {
+            $receipt.completedProofArtifacts = $false
+            if ($receipt.status -ceq 'completed') { $receipt.status = 'proof_incomplete' }
+        }
+    }
     $private:localReceiptPrepared = $false
     $private:localReceiptRecorded = $false
     $private:localReceiptReturn = $null
@@ -456,10 +466,15 @@ function Test-FileTransferRetainedAnalysisAttemptReceipt {
         [AllowEmptyString()][string]$ScenarioRunId = '',
         [Parameter(Mandatory = $true)][string]$LogPath,
         [Parameter(Mandatory = $true)][string]$LiveRouteProofMode,
-        [bool]$CompactRequired = $false
+        [bool]$CompactRequired = $false,
+        [bool]$SecondTransferReportRequired = $false
     )
 
     try {
+        if ($SecondTransferReportRequired -or $null -ne $Receipt.PSObject.Properties['secondTransferReportRequired']) {
+            if ($null -eq $Receipt.PSObject.Properties['secondTransferReportRequired'] -or -not $Receipt.secondTransferReportRequired -or
+                -not (Test-FileTransferSecondTransferReport -ArtifactDir $ArtifactDir -Receipt $Receipt)) { return $false }
+        }
         $startedUtc = [DateTimeOffset]::MinValue
         $endedUtc = [DateTimeOffset]::MinValue
         $timestampsValid = [DateTimeOffset]::TryParse([string]$Receipt.startedUtc, [ref]$startedUtc) -and
@@ -694,7 +709,8 @@ function Update-FileTransferTunaDirectEvidenceManifestFromReceipt {
         -ScenarioRunId $ScenarioRunId `
         -LogPath $inputPath `
         -LiveRouteProofMode $LiveRouteProofMode `
-        -CompactRequired ($ExpectedOwner -eq 'RouteAcceptance')
+        -CompactRequired ($ExpectedOwner -eq 'RouteAcceptance') `
+        -SecondTransferReportRequired ($ExpectedOwner -eq 'RouteAcceptance' -and $RouteMode -ceq 'live-reactivation-second-transfer')
     $sourceCommit = [string](& git -C $RepoRoot rev-parse HEAD 2>$null)
     $sourceDirty = @(& git -C $RepoRoot status --porcelain 2>$null).Count -gt 0
     $binaryMatches = [string]::Equals((Get-FileTransferEvidenceSha256 -Path $ExePath), [string]$manifest.executableSha256, [System.StringComparison]::OrdinalIgnoreCase) -and

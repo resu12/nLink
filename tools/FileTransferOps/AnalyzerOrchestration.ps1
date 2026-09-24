@@ -9168,6 +9168,16 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
     $fullSnapshotEvaluation | Select-Object * -ExcludeProperty __HeldPublicationProofClosures, __FallbackTailPeerProofBindings, __RoutePublicationEffects, __CheckpointRepairContinuityEvidence | ConvertTo-Json -Depth 64 | Set-Content -LiteralPath (Join-Path $ArtifactDir 'filetransfer-coordinator-snapshot-full-summary.json') -Encoding UTF8
     $snapshotParity | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $ArtifactDir 'filetransfer-coordinator-snapshot-parity-summary.json') -Encoding UTF8
 
+    if (-not [string]::IsNullOrWhiteSpace([string]$env:NLINK_FILETRANSFER_SECOND_REPORT_REQUEST)) {
+        . (Join-Path $PSScriptRoot 'SecondTransferReport.ps1')
+        Write-FileTransferSecondTransferReport -ArtifactDir $ArtifactDir `
+            -Request ($env:NLINK_FILETRANSFER_SECOND_REPORT_REQUEST | ConvertFrom-Json) `
+            -Index $Index -Full $fullSnapshotEvaluation -Compact $compactSnapshotEvaluation `
+            -Parity $snapshotParity -RouteState $routeConsistencyState -Gui $gui `
+            -ParentVerdict $verdict -ParentGateStatus $gateStatus -ParentHardFailures $hardFailureCount `
+            -ParentProofFailures $compactProofChainCandidates.Count -ParentWarningCapExceeded $warningCapExceededKinds
+    }
+
     # Separate native diagnostic only, after the original reports. Use exactly
     # the selected failure and original proof/views; never recover a failure or
     # evaluate authority again. Rejection must preserve the primary outcome.

@@ -2992,7 +2992,21 @@ function Set-Phase4MeasurementContamination {
         }
     }
 
-    $measuredRecoveryCount = Get-RouteAcceptanceMeasuredWindowBridgeRecoveryCount -ArtifactDir $analysisDir
+    if ([string]$Scenario.Name -ceq 'second-transfer-after-reactivation' -and $script:RouteAcceptanceExecutionMode -ceq 'live') {
+        try {
+            $receipt = Get-Content -LiteralPath (Join-Path $Result.artifactDir 'filetransfer-retained-analysis-attempt-receipt.json') -Raw -ErrorAction Stop | ConvertFrom-Json
+            if (-not (Test-FileTransferSecondTransferReport -ArtifactDir $Result.artifactDir -Receipt $receipt)) { throw 'derived_measurement_invalid' }
+            $measurement = Read-RouteAcceptanceKeyValueArtifact -Path (Join-Path $analysisDir 'measurement-summary.txt')
+            $measuredRecoveryCount = Get-RouteAcceptanceReportInt -Report $measurement -Name 'measured_window_bridge_recovery_count'
+        }
+        catch {
+            Add-RouteAcceptanceFailure -Result $Result -Message 'second-transfer measurement receipt invalid'
+            return
+        }
+    }
+    else {
+        $measuredRecoveryCount = Get-RouteAcceptanceMeasuredWindowBridgeRecoveryCount -ArtifactDir $analysisDir
+    }
     if ($measuredRecoveryCount -gt 0) {
         Add-RouteAcceptanceMeasurementContamination -Result $Result -Reason ("active_tuna_v4_bridge_receive_recovery_window: event_count={0}" -f $measuredRecoveryCount)
     }
@@ -4211,6 +4225,17 @@ function Try-ApplySecondTransferSplitProofAcceptance {
 
     $secondRoutePath = Join-Path $Result.artifactDir 'second-transfer-analysis\filetransfer-route-consistency-summary.txt'
     $secondOperatorPath = Join-Path $Result.artifactDir 'second-transfer-analysis\filetransfer-operator-verdict.txt'
+    if ($script:RouteAcceptanceExecutionMode -ceq 'live') {
+        try {
+            $manifest = Get-Content -LiteralPath (Join-Path $Result.artifactDir 'filetransfer-tuna-gui-evidence-manifest.json') -Raw -ErrorAction Stop | ConvertFrom-Json
+            $receipt = Get-Content -LiteralPath (Join-Path $Result.artifactDir 'filetransfer-retained-analysis-attempt-receipt.json') -Raw -ErrorAction Stop | ConvertFrom-Json
+            if (-not (Test-FileTransferRetainedAnalysisAttemptReceipt -Receipt $receipt -ArtifactDir $Result.artifactDir `
+                    -ExpectedOwner 'RouteAcceptance' -AcceptanceRunId $manifest.acceptanceRunId -ScenarioRunId $manifest.scenarioRunId `
+                    -LogPath (Join-Path $Result.artifactDir 'filetransfer-retained-log-slice.log') -LiveRouteProofMode 'None' `
+                    -CompactRequired $true -SecondTransferReportRequired $true)) { return $false }
+        }
+        catch { return $false }
+    }
     if (-not (Test-Path -LiteralPath $secondRoutePath -PathType Leaf) -or
         -not (Test-Path -LiteralPath $secondOperatorPath -PathType Leaf)) {
         return $false
@@ -6959,6 +6984,7 @@ function Invoke-RouteAcceptanceRetainedAnalysis {
         [string]$LiveRouteProofMode = "None",
         [switch]$CaptureLocalSourceOwnership,
         [switch]$CaptureFrontierReports,
+        [switch]$SecondTransferReport,
         [AllowNull()]$LocalWriterContext = $null,
         [AllowNull()]$LocalPublication = $null,
         [AllowNull()]$FrontierParentCustody = $null,
@@ -7076,6 +7102,21 @@ function Invoke-RouteAcceptanceRetainedAnalysis {
         $startInfo.UseShellExecute = $false
         $compactRequested = $true
         $startInfo.Environment['NLINK_FILETRANSFER_RETAINED_ANALYSIS_COMPACT'] = '1'
+        [void]$startInfo.Environment.Remove('NLINK_FILETRANSFER_SECOND_REPORT_REQUEST')
+        if ($SecondTransferReport) {
+            if ($null -ne $FailedGuiCapture) { throw 'second_transfer_failed_gui_not_eligible' }
+            $secondSlicePath = Join-Path $ArtifactDir 'filetransfer-second-transfer-retained-log-slice.log'
+            $startInfo.Environment['NLINK_FILETRANSFER_SECOND_REPORT_REQUEST'] = ([ordered]@{
+                schemaVersion = 1
+                attemptId = $attemptId
+                acceptanceRunId = [string]$env:NLINK_FILETRANSFER_ACCEPTANCE_RUN_ID
+                scenarioRunId = [string]$env:NLINK_FILETRANSFER_SCENARIO_RUN_ID
+                artifactDir = [IO.Path]::GetFullPath($ArtifactDir)
+                inputSha256 = $inputSha256Before
+                sliceSha256 = Get-FileTransferSecondReportSha256 -Path $secondSlicePath
+                guiSha256 = Get-FileTransferSecondReportSha256 -Path (Join-Path $ArtifactDir 'filetransfer-tuna-gui-summary.json')
+            } | ConvertTo-Json -Compress)
+        }
         $startInfo.RedirectStandardOutput = $true
         $startInfo.RedirectStandardError = $true
         $startInfo.CreateNoWindow = $true
@@ -7231,6 +7272,7 @@ function Invoke-RouteAcceptanceRetainedAnalysis {
             -ExitCodeAvailable $true `
             -ExitCode $process.ExitCode `
             -CompletedProofArtifacts $completedProofArtifacts `
+            -SecondTransferReportRequired ([bool]$SecondTransferReport) `
             -LocalPublicationCustody $private:localAdoption `
             -FrontierTerminalCustody $private:frontierTerminal `
             -FrontierSourceRequest $private:frontierSource
@@ -9374,6 +9416,9 @@ function Invoke-TunaRouteAcceptanceRun {
                 $private:localAnalysisArguments.CaptureFrontierReports = $true
                 $private:localAnalysisArguments.FrontierRelayCustody = $private:localFrontierRelayCustody
             }
+        }
+        if ($RouteMode -ceq 'live-reactivation-second-transfer') {
+            $private:localAnalysisArguments.SecondTransferReport = $true
         }
         Invoke-RouteAcceptanceRetainedAnalysis -ArtifactDir $ArtifactDir -LiveRouteProofMode $LiveProofMode @localAnalysisArguments
         $reconciliation = Update-FileTransferTunaDirectEvidenceManifestFromReceipt `

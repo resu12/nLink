@@ -6092,7 +6092,7 @@ public sealed class FileTransferOpsScriptSurfaceTests : FileTransferOpsScriptsTe
 
         var repoRoot = FindRepoRoot();
         var ledgerScript = File.ReadAllText(
-            Path.Combine(repoRoot, "tools", "GuiSmokeLogLedger.ps1"));
+            Path.Combine(repoRoot, "tools", "GuiSmokeEvidenceCatalog.ps1"));
         Assert.Contains(
             "LegacyV0EvidenceCatalog.json",
             ledgerScript,

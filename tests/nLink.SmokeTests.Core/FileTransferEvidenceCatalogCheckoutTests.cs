@@ -36,7 +36,7 @@ public sealed class FileTransferEvidenceCatalogCheckoutTests : FileTransferOpsSc
         try {
             Copy-Item -LiteralPath (Join-Path $RepoRoot '.gitattributes') -Destination $work
             Copy-Item -LiteralPath (Join-Path $RepoRoot 'tools/FileTransferOps') -Destination (Join-Path $work 'tools') -Recurse
-            foreach ($name in @('GuiSmokeLogLedger.ps1', 'GuiSmokeStructuredFields.ps1', 'GuiSmokeContentHash.ps1', 'GuiSmokeLogLedgerStreamingProcessor.cs', 'Test-FileTransferEvidenceCatalog.ps1')) {
+            foreach ($name in @('GuiSmokeLogLedger.ps1', 'GuiSmokeEvidenceCatalog.ps1', 'GuiSmokeStructuredFields.ps1', 'GuiSmokeContentHash.ps1', 'GuiSmokeLogLedgerStreamingProcessor.cs', 'Test-FileTransferEvidenceCatalog.ps1')) {
                 Copy-Item -LiteralPath (Join-Path $RepoRoot ('tools/' + $name)) -Destination (Join-Path $work 'tools')
             }
             Invoke-Git init --quiet
