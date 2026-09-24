@@ -68,10 +68,15 @@ internal static partial class FileTransferCoordinator
         => scope is { Publication: { }, Source: { } } &&
             CaptureFallbackBootstrapSourceScope(state, scope.Publication.CoordinatorDecisionReason) is { } current && current == scope;
 
-    private static bool IsFallbackBootstrapInitiationCurrent(
+    internal static bool IsFallbackBootstrapInitiationCurrent(
         FileTransferCoordinatorState state, FileTransferFallbackV6ProofBootstrapObservation observation)
         => observation.InitiationKind == FileTransferBootstrapInitiationKind.PeerEvidence
-            ? observation.LocalStop is null && observation.ProofKind != "local_runtime_disabled"
+            ? !observation.IsDefault && observation.LocalStop is null &&
+              observation.Source == "correlated_bootstrap_peer_frame" &&
+              observation.ProofKind == (state.Direction == FileTransferDirection.Outbound
+                  ? "file_transfer_v6_state_frame_received" : "file_transfer_v6_frontier_request_frame_received") &&
+              observation.SessionId == state.SessionId && observation.TransferId == state.TransferId && observation.Direction == state.Direction &&
+              IsBootstrapHoldCheckpointSourceCurrent(state, observation.DurableCheckpoint)
             : observation.InitiationKind == FileTransferBootstrapInitiationKind.LocalRuntimeDisable &&
               !observation.IsDefault && observation.Source == "runtime_disabled" && observation.ProofKind == "local_runtime_disabled" &&
               observation.SessionId == state.SessionId && observation.TransferId == state.TransferId && observation.Direction == state.Direction &&

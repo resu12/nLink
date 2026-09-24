@@ -66,6 +66,15 @@ public sealed partial class FileTransferCoordinatorTests
             InitiationKind = peerEvidence ? FileTransferBootstrapInitiationKind.PeerEvidence : FileTransferBootstrapInitiationKind.LocalRuntimeDisable,
             LocalStop = peerEvidence ? null : new(BootstrapStopScopeForTests(state), state.CurrentDataSessionIdentity!, state.CurrentDataSessionGeneration),
         };
+        if (peerEvidence)
+        {
+            var rejectedOrigin = FileTransferCoordinator.PrepareFallbackBootstrapSourceHold(state,
+                observation with { Source = "tuna_unavailable_before_send", ProofKind = "file_transfer_v4_state_frame_sent" }, peerWake);
+            Assert.False(rejectedOrigin.Accepted);
+            Assert.Same(state, rejectedOrigin.State);
+            Assert.All(rejectedOrigin.SnapshotEnvelope!.Aggregate.Operations, operation => Assert.False(operation.StateApplied));
+            Capture(rejectedOrigin.SnapshotEnvelope);
+        }
         state = includeCallback ? ApplyCallbackBootstrapSourceHoldForTests(state, observation, peerWake, Capture)
             : ApplyEmptyBootstrapSourceHoldForTests(state, observation, peerWake, Capture);
         var issued = FileTransferCoordinator.StartFallbackBootstrapExchange(state, observation,

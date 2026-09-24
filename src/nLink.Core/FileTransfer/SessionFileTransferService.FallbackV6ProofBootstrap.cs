@@ -132,6 +132,13 @@ public sealed partial class SessionFileTransferService
                 return;
             }
 
+            if (!IsBootstrapCorrelationInitiationCurrentLocked(bridge, evaluation))
+            {
+                LogBootstrapCorrelationRejection(evaluation.Direction, evaluation.SessionId,
+                    evaluation.TriggerTransferId ?? "(none)", "bootstrap_initiation_source_not_current");
+                return;
+            }
+
             if (!TryIssueFallbackV6ProofBootstrapLockedCore(
                     evaluation,
                     out command,
@@ -533,13 +540,6 @@ public sealed partial class SessionFileTransferService
                 return false;
             }
             inboundCorrelationState = CreateCoordinatorStateLocked(inbound);
-            if (staged is not null &&
-                (inbound.PendingFallbackV6ProofBootstrapPeerFrameBinding is not { } stagedBinding ||
-                 !TryCreateFallbackV6ProofBootstrapPeerFrameBinding(inbound, staged, FileTransferDirection.Inbound, out var currentBinding) ||
-                 !MatchesFallbackV6ProofBootstrapPeerFrameBinding(stagedBinding, currentBinding)))
-            {
-                return false;
-            }
             var phase = IssueBootstrapCorrelationPhaseLocked(inboundCorrelationState, inboundObservation,
                 new FileTransferFallbackBootstrapStateFrameV6
                 {
