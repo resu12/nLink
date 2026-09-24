@@ -8,20 +8,30 @@ namespace NLink.SmokeTests;
 public sealed class FileTransferInitialFallbackStartupEvidenceTests : FileTransferOpsScriptsTestBase
 {
     private static readonly Lazy<Task<string[]>> Evidence = new(InitialFallbackStartupFixture.CreateAsync);
+    private static readonly Lazy<Task<string[]>> CorrelatedEvidence = new(() => InitialFallbackStartupFixture.CreateCorrelatedAsync());
 
     [Theory]
     [InlineData("powershell")]
     [InlineData("pwsh")]
     public async Task InitialFallbackStartup_ExactBindingAndOwnerSuccessorPassWithFailClosedControls(string host)
+        => await RunServiceAsync(host, correlated: false);
+
+    [Theory]
+    [InlineData("powershell")]
+    [InlineData("pwsh")]
+    public async Task InitialFallbackStartup_CorrelatedServiceAgreementPreservesExactSuccessor(string host)
+        => await RunServiceAsync(host, correlated: true);
+
+    private static async Task RunServiceAsync(string host, bool correlated)
     {
         if (!OperatingSystem.IsWindows()) { return; }
-        var root = Path.Combine(FindRepoRoot(), "artifacts", "initial-fallback-successor-20260923", host + "-" + Guid.NewGuid().ToString("N"));
+        var root = Path.Combine(FindRepoRoot(), "artifacts", correlated ? "initial-fallback-agreement-implementation-20260924" : "initial-fallback-successor-20260923", host + "-" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(root);
         var path = Path.Combine(root, "service-evidence.log");
-        await File.WriteAllLinesAsync(path, await Evidence.Value);
+        await File.WriteAllLinesAsync(path, await (correlated ? CorrelatedEvidence : Evidence).Value);
         var script = File.ReadAllText(Path.Combine(FindRepoRoot(), "tests", "nLink.SmokeTests.Core",
             "Support", "InitialFallbackStartupEvidence.ps1"));
-        var result = await RunPowerShellScriptTextAsync(script, [FindRepoRoot(), path], host);
+        var result = await RunPowerShellScriptTextAsync(script, [FindRepoRoot(), path, "False", correlated.ToString()], host);
         await File.WriteAllTextAsync(Path.Combine(root, "result.txt"), result.Stdout + Environment.NewLine + result.Stderr);
         Assert.True(result.ExitCode == 0, $"{host}: {result.Stdout}{Environment.NewLine}{result.Stderr}");
         Assert.Contains("initial-fallback-startup-evidence-ok", result.Stdout, StringComparison.Ordinal);
@@ -31,16 +41,25 @@ public sealed class FileTransferInitialFallbackStartupEvidenceTests : FileTransf
     [InlineData("powershell")]
     [InlineData("pwsh")]
     public async Task InitialFallbackStartup_IndependentOwnerLegAndPublicationGenerationsRemainExact(string host)
+        => await RunCoreAsync(host, correlated: false);
+
+    [Theory]
+    [InlineData("powershell")]
+    [InlineData("pwsh")]
+    public async Task InitialFallbackStartup_CorrelatedCoreAgreementPreservesIndependentGenerations(string host)
+        => await RunCoreAsync(host, correlated: true);
+
+    private static async Task RunCoreAsync(string host, bool correlated)
     {
         if (!OperatingSystem.IsWindows()) { return; }
-        var root = Path.Combine(FindRepoRoot(), "artifacts", "initial-fallback-successor-20260923",
+        var root = Path.Combine(FindRepoRoot(), "artifacts", correlated ? "initial-fallback-agreement-implementation-20260924" : "initial-fallback-successor-20260923",
             "independent-" + host + "-" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(root);
         var lines = new List<string>();
         foreach (var direction in new[] { FileTransferDirection.Inbound, FileTransferDirection.Outbound })
         {
             var envelopes = FileTransferCoordinatorTests.CreateInitialFallbackPublicationSnapshotFixture(
-                direction, independentGenerations: true, publicationCount: 1, startup: true);
+                direction, independentGenerations: true, publicationCount: 1, startup: true, correlated: correlated);
             // Actual Core snapshots and production emitter; the forwarding call
             // here is modeled, separate from the real-service fixture above.
             lines.AddRange(FileTransferInitialRegularRouteEvidenceTests.Emit(envelopes, (type, emitter, envelope) =>
@@ -60,7 +79,7 @@ public sealed class FileTransferInitialFallbackStartupEvidenceTests : FileTransf
         await File.WriteAllLinesAsync(path, lines);
         var script = File.ReadAllText(Path.Combine(FindRepoRoot(), "tests", "nLink.SmokeTests.Core",
             "Support", "InitialFallbackStartupEvidence.ps1"));
-        var result = await RunPowerShellScriptTextAsync(script, [FindRepoRoot(), path, "True"], host);
+        var result = await RunPowerShellScriptTextAsync(script, [FindRepoRoot(), path, "True", correlated.ToString()], host);
         await File.WriteAllTextAsync(Path.Combine(root, "result.txt"), result.Stdout + Environment.NewLine + result.Stderr);
         Assert.True(result.ExitCode == 0, $"{host}: {result.Stdout}{Environment.NewLine}{result.Stderr}");
         Assert.Contains("initial-fallback-startup-evidence-ok", result.Stdout, StringComparison.Ordinal);
@@ -69,17 +88,26 @@ public sealed class FileTransferInitialFallbackStartupEvidenceTests : FileTransf
 
 internal sealed class InitialFallbackStartupFixture : SessionFileTransferServiceTestBase
 {
-    internal static async Task<string[]> CreateAsync()
+    internal static Task<string[]> CreateAsync() => CreateAsync(correlated: false);
+    internal static Task<string[]> CreateCorrelatedAsync() => CreateAsync(correlated: true);
+
+    private sealed class CorrelatedLoopbackTransport(string sessionId, bool correlated)
+        : LoopbackFileTransferTransport(sessionId), IFileTransferRouteTransitionBridge
+    {
+        bool IFileTransferRouteTransitionBridge.SupportsFallbackBootstrapCorrelation => correlated;
+    }
+
+    private static async Task<string[]> CreateAsync(bool correlated)
     {
         const string transferId = "initial_fallback_startup";
         const string sessionId = "session_initial_fallback_startup";
         var payload = Enumerable.Range(0, 128_000).Select(index => (byte)(index % 251)).ToArray();
-        using var senderTransport = new LoopbackFileTransferTransport(sessionId)
+        using var senderTransport = new CorrelatedLoopbackTransport(sessionId, correlated)
         {
             IsFileTunaActiveForRouteSelection = false,
             IsPostTunaFileFallbackActiveForRouteSelection = true,
         };
-        using var receiverTransport = new LoopbackFileTransferTransport(sessionId)
+        using var receiverTransport = new CorrelatedLoopbackTransport(sessionId, correlated)
         {
             IsFileTunaActiveForRouteSelection = false,
             IsPostTunaFileFallbackActiveForRouteSelection = true,

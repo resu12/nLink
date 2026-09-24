@@ -89,6 +89,62 @@ function Test-FileTransferCoordinatorInitialDataSessionOperation {
     catch { return $false }
 }
 
+function Test-FileTransferCoordinatorInitialFallbackStartupAgreement {
+    param([object[]]$Steps, [object[]]$StreamBoundaries, $Previous, $Catalog)
+
+    # Negotiation does not replace the owner/publication proof. Its immutable
+    # offer-time scope is validated at its own birth, not at publication time.
+    $offers = @($StreamBoundaries | Where-Object {
+        $_.decisionKind -ceq 'PinFallbackBootstrapOffer' -and
+        [long]$_.afterStateGeneration -le [long]$Previous.Boundary.beforeStateGeneration
+    })
+    if ($offers.Count -ne 1 -or $Steps.Count -ne 2) { return $false }
+    $offer = $offers[0]; $accept = $Steps[0]; $open = $Steps[1]
+    if ($offer.decisionStatus -cne 'Accepted' -or $offer.decisionReason -cne 'bootstrap_offer_pinned' -or
+        @($offer.operations).Count -ne 1 -or $offer.operations[0].beforeState -cne 'None' -or
+        $offer.operations[0].afterState -cne 'Offered' -or
+        $accept.decisionKind -cne 'ApplyFallbackBootstrapAccept' -or
+        $accept.decisionStatus -cne 'Accepted' -or $accept.decisionReason -cne 'bootstrap_accept_pinned' -or
+        @($accept.operations).Count -ne 1 -or $accept.operations[0].beforeState -cne 'Offered' -or
+        $open.decisionKind -cne 'ApplyFallbackBootstrapSessionOpen') { return $false }
+    if ($Previous.Boundary.direction -ceq 'outbound') {
+        if ($accept.operations[0].afterState -cne 'Enabled' -or $open.decisionStatus -cne 'Idempotent' -or
+            $open.decisionReason -cne 'bootstrap_session_open_validated' -or @($open.operations).Count -ne 0 -or
+            $open.beforeStateGeneration -ne $open.afterStateGeneration -or
+            $open.beforeStateHash -cne $open.afterStateHash) { return $false }
+    }
+    elseif ($Previous.Boundary.direction -ceq 'inbound') {
+        if ($accept.operations[0].afterState -cne 'Selected' -or $open.decisionStatus -cne 'Accepted' -or
+            $open.decisionReason -cne 'bootstrap_receiver_session_open_applied' -or @($open.operations).Count -ne 1 -or
+            $open.operations[0].beforeState -cne 'Selected' -or $open.operations[0].afterState -cne 'Enabled') { return $false }
+    }
+    else { return $false }
+    foreach ($step in @($offer) + $Steps) {
+        foreach ($field in @('coordinatorInstanceId','writer','sessionId','transferId','direction')) {
+            if ([string]$step.$field -cne [string]$Previous.Boundary.$field) { return $false }
+        }
+        if (-not (Test-FileTransferCoordinatorSnapshotBoundaryTupleEqual $step.beforeBoundary $step.afterBoundary) -or
+            ($step -ne $offer -and -not (Test-FileTransferCoordinatorSnapshotBoundaryTupleEqual $step.beforeBoundary $Previous.RouteBoundary))) {
+            return $false
+        }
+        foreach ($operation in @($step.operations)) {
+            if ($operation.operationRole -cne 'fallback_bootstrap_agreement' -or
+                -not (Test-FileTransferCoordinatorBootstrapCorrelationOperation $step $operation $Catalog) -or
+                $operation.predecessorAuthorityId -cne '(none)' -or $operation.receiptValidated -or
+                $operation.receiptIdentity -cne '(none)' -or $operation.receiptGeneration -ne 0 -or
+                $operation.receiptStatus -cne '(none)' -or $operation.receiptFingerprint -cne '(none)' -or
+                $step.afterStateGeneration -ne ($step.beforeStateGeneration + 1) -or
+                $step.beforeStateHash -ceq $step.afterStateHash -or
+                ($step -ne $offer -and $operation.routeTransition.bootstrapCorrelation.version -ne 1) -or
+                -not (Test-FileTransferCoordinatorSnapshotBoundaryTupleEqual $operation.routeTransition.sourceBoundary $offer.beforeBoundary) -or
+                -not (Test-FileTransferCoordinatorSnapshotBoundaryTupleEqual $operation.routeTransition.targetBoundary $offer.beforeBoundary)) {
+                return $false
+            }
+        }
+    }
+    return @(Get-FileTransferBootstrapCorrelationHistoryErrors -Boundaries (@($offer) + $Steps)).Count -eq 0
+}
+
 function Test-FileTransferCoordinatorInitialFallbackStartupInterval {
     param($Boundary, $Previous, $AggregateIndex, $InitialPublications, [string]$CatalogVersion)
 
@@ -118,6 +174,13 @@ function Test-FileTransferCoordinatorInitialFallbackStartupInterval {
         [long]$_.beforeStateGeneration -ge $generation -and
         [long]$_.beforeStateGeneration -le [long]$Boundary.beforeStateGeneration
     } | Sort-Object { [long]$_.beforeStateGeneration }, { [long]$_.afterStateGeneration }, { [long]$_.writerSequence })
+    $negotiations = @($steps | Where-Object {
+        $_.decisionKind -cin @('ApplyFallbackBootstrapAccept','ApplyFallbackBootstrapSessionOpen') -or
+        @($_.operations | Where-Object { Test-FileTransferCoordinatorBootstrapCorrelationMarker $_ }).Count -gt 0
+    })
+    if ($negotiations.Count -gt 0 -and -not (Test-FileTransferCoordinatorInitialFallbackStartupAgreement `
+            -Steps $negotiations -StreamBoundaries @($AggregateIndex[$streamKey].Boundaries.Values | ForEach-Object Boundary) `
+            -Previous $Previous -Catalog $catalog)) { return $false }
     foreach ($step in $steps) {
         foreach ($field in @('coordinatorInstanceId','writer','sessionId','transferId','direction')) {
             if ([string]$step.$field -cne [string]$Boundary.$field -or
@@ -146,6 +209,7 @@ function Test-FileTransferCoordinatorInitialFallbackStartupInterval {
         else {
             if (-not (Test-FileTransferCoordinatorSnapshotBoundaryTupleEqual $step.beforeBoundary $step.afterBoundary)) { return $false }
             foreach ($operation in @($step.operations)) {
+                if ($operation.operationRole -ceq 'fallback_bootstrap_agreement') { continue }
                 $prior = if ($operation.operationKey -ceq $Previous.Operation.operationKey) { $Previous.Operation }
                     elseif ($operation.operationKey -ceq $Previous.RuntimeOwner.operationKey) { $Previous.RuntimeOwner } else { $null }
                 if ($null -eq $prior -or -not $operation.stateApplied -or

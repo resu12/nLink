@@ -45,7 +45,7 @@ public sealed class FileTransferInitialFallbackRouteEvidenceTests : FileTransfer
 public sealed partial class FileTransferCoordinatorTests
 {
     internal static FileTransferCoordinatorTransitionEnvelope[] CreateInitialFallbackPublicationSnapshotFixture(
-        FileTransferDirection direction, bool independentGenerations, int publicationCount, bool startup = false)
+        FileTransferDirection direction, bool independentGenerations, int publicationCount, bool startup = false, bool correlated = false)
     {
         var fallback = FileTransferRouteResolver.Resolve(FileTransferRoute.PostTunaFallbackV6);
         var empty = EmptyState(fallback, direction) with
@@ -94,6 +94,31 @@ public sealed partial class FileTransferCoordinatorTests
         if (startup)
         {
             Assert.Equal(1, publicationCount);
+            if (correlated)
+            {
+                var receiverIssuer = direction == FileTransferDirection.Inbound
+                    ? FileTransferCoordinator.CreateLocalFallbackBootstrapIssuer(state)
+                    : FileTransferBootstrapCorrelation.CreateIssuer("initial-fallback-Inbound", state.SessionId,
+                        state.TransferId, FileTransferDirection.Inbound);
+                var accepted = FileTransferCoordinator.ApplyFallbackBootstrapAccept(state, new()
+                {
+                    SessionId = state.SessionId, TransferId = state.TransferId, AcceptedDataProtocolVersion = 6,
+                    FileTransferRoute = fallback.TelemetryToken, FallbackBootstrapCorrelationVersion = 1,
+                    FallbackBootstrapIssuerId = receiverIssuer,
+                });
+                Assert.True(accepted.Accepted, accepted.Reason);
+                envelopes.Add(accepted.SnapshotEnvelope!);
+                var opened = FileTransferCoordinator.ApplyFallbackBootstrapSessionOpen(accepted.State, new()
+                {
+                    SessionId = state.SessionId, TransferId = state.TransferId, ProtocolVersion = 6,
+                    FileTransferRoute = fallback.TelemetryToken, SessionRole = FileTransferProtocol.SessionRoleSender,
+                    ChunkSizeBytes = 21 * 1024, InitialPipelineDepth = 8,
+                    FallbackBootstrapCorrelationVersion = 1, FallbackBootstrapIssuerId = issuer,
+                });
+                Assert.True(opened.Accepted, opened.Reason);
+                envelopes.Add(opened.SnapshotEnvelope!);
+                state = opened.State;
+            }
             var binding = FileTransferCoordinator.BindInitialFallbackDataSession(state,
                 InitialFallbackDataSessionRequestForTest(state));
             Assert.NotNull(binding.Binding);

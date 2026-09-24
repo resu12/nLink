@@ -1,4 +1,4 @@
-param([string]$RepoRoot, [string]$FixturePath, [string]$IndependentGenerations = 'False')
+param([string]$RepoRoot, [string]$FixturePath, [string]$IndependentGenerations = 'False', [string]$Correlated = 'False')
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 . (Join-Path $RepoRoot 'tools/FileTransferOps/CoordinatorSnapshotEvidence.ps1')
@@ -47,6 +47,36 @@ foreach ($startup in $startups) {
     })
     if ($bindings.Count -ne 1) { throw 'Initial attachment witness is not unique.' }
     $binding = $bindings[0]
+    $interval = @($full.Boundaries | Where-Object {
+        $_.coordinatorInstanceId -ceq $startup.coordinatorInstanceId -and
+        $_.beforeStateGeneration -ge $publication.afterStateGeneration -and
+        $_.beforeStateGeneration -lt $binding.beforeStateGeneration
+    } | Sort-Object { [long]$_.writerSequence })
+    if ($Correlated -ceq 'True') {
+        $accepts = @($interval | Where-Object decisionKind -CEQ 'ApplyFallbackBootstrapAccept')
+        $opens = @($full.Boundaries | Where-Object {
+            $_.coordinatorInstanceId -ceq $startup.coordinatorInstanceId -and
+            $_.decisionKind -ceq 'ApplyFallbackBootstrapSessionOpen' -and
+            $_.beforeStateGeneration -ge $publication.afterStateGeneration -and
+            $_.beforeStateGeneration -le $binding.beforeStateGeneration
+        })
+        if ($accepts.Count -ne 1 -or $opens.Count -ne 1 -or
+            $accepts[0].decisionStatus -cne 'Accepted' -or
+            $accepts[0].operations[0].operationKind -cne 'FallbackBootstrapAgreement' -or
+            $accepts[0].operations[0].routeTransition.bootstrapCorrelation.version -ne 1) {
+            throw 'Correlated fixture did not exercise actual accepted negotiation before binding.'
+        }
+    }
+    elseif ($interval.Count -ne 0) { throw 'Uncorrelated fixture unexpectedly contains an intervening mutation.' }
+    $generation=$publication.afterStateGeneration; $hash=$publication.afterStateHash
+    foreach ($step in $interval) {
+        if ($step.beforeStateGeneration -ne $generation -or $step.beforeStateHash -cne $hash -or
+            -not (Test-FileTransferCoordinatorSnapshotBoundaryTupleEqual $publication.afterBoundary $step.beforeBoundary) -or
+            -not (Test-FileTransferCoordinatorSnapshotBoundaryTupleEqual $step.beforeBoundary $step.afterBoundary)) {
+            throw 'Negotiation lost aggregate continuity or changed route/runtime scope.'
+        }
+        $generation=$step.afterStateGeneration; $hash=$step.afterStateHash
+    }
     $before = $startup.beforeBoundary; $after = $startup.afterBoundary
     if ($IndependentGenerations -ceq 'True' -and
         ($before.runtimeGeneration -ne 7 -or $after.runtimeGeneration -ne 8 -or
@@ -54,8 +84,8 @@ foreach ($startup in $startups) {
         throw 'Independent runtime and leg generation domains were not exercised.'
     }
     if ($startup.decisionStatus -cne 'Accepted' -or
-        $publication.afterStateGeneration -ne $binding.beforeStateGeneration -or
-        $publication.afterStateHash -cne $binding.beforeStateHash -or
+        $generation -ne $binding.beforeStateGeneration -or
+        $hash -cne $binding.beforeStateHash -or
         -not (Test-FileTransferCoordinatorSnapshotBoundaryTupleEqual $publication.afterBoundary $binding.beforeBoundary) -or
         $binding.afterStateGeneration -ne $startup.beforeStateGeneration -or
         $binding.afterStateHash -cne $startup.beforeStateHash -or
@@ -137,6 +167,11 @@ foreach ($original in $bindingEnvelopes) {
     }
 }
 $successorControls = & (Join-Path $RepoRoot 'tests/nLink.SmokeTests.Core/Support/InitialFallbackStartupSuccessorControls.ps1') -RepoRoot $RepoRoot -Full $full -Compact $compact
+$agreementControls = 0
+if ($Correlated -ceq 'True') {
+    $agreement = & (Join-Path $RepoRoot 'tests/nLink.SmokeTests.Core/Support/InitialFallbackStartupAgreementControls.ps1') -RepoRoot $RepoRoot -Full $full -Compact $compact
+    $agreementControls = $agreement.CasesPerDirection * $agreement.Directions * $agreement.Consumers
+}
 [ordered]@{
     artifactEvidenceVerdict=$full.ArtifactEvidenceVerdict; streamComplete=$full.StreamComplete
     snapshotParity='pass'; routeParity='pass'; routeVerdict=$route.Verdict
@@ -144,6 +179,7 @@ $successorControls = & (Join-Path $RepoRoot 'tests/nLink.SmokeTests.Core/Support
     witnessedInitialAttachments=$startups.Count; ownerSuccessors=$startups.Count
     bindingNegativeControls=($controls.Count * $bindingEnvelopes.Count)
     successorNegativeControls=($successorControls.CasesPerDirection * $successorControls.Directions * $successorControls.Consumers)
+    agreementNegativeControls=$agreementControls
     findings=@($route.Findings)
 } | ConvertTo-Json -Depth 4 -Compress
 Write-Output 'initial-fallback-startup-evidence-ok'
