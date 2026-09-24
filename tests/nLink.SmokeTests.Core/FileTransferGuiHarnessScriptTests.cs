@@ -11055,8 +11055,8 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
         Assert.Contains("terminal_before_same_transfer_reactivation", guiText, StringComparison.Ordinal);
         Assert.Contains("secondTransferRequiresFreshDiagnosticReadiness", guiText, StringComparison.Ordinal);
         Assert.Contains("filetransfer_tuna_gui_second_transfer_fresh_readiness_required", guiText, StringComparison.Ordinal);
-        Assert.Contains("filetransfer_tuna_gui_second_transfer_fresh_unlock_not_completed", guiText, StringComparison.Ordinal);
-        Assert.Contains("unlockError = $secondFreshUnlockError", guiText, StringComparison.Ordinal);
+        Assert.DoesNotContain("filetransfer_tuna_gui_second_transfer_fresh_unlock_not_completed", guiText, StringComparison.Ordinal);
+        Assert.DoesNotContain("$secondFreshUnlockError", guiText, StringComparison.Ordinal);
         Assert.Contains("first_transfer_terminal_before_same_transfer_reactivation", guiText, StringComparison.Ordinal);
         Assert.DoesNotContain("Tuna GUI second-transfer preactivation readiness missing", guiText, StringComparison.Ordinal);
         Assert.Contains("Tuna GUI live reactivation second-transfer proof did not prove clean fallback terminal followed by second-transfer Tuna V4", guiText, StringComparison.Ordinal);

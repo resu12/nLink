@@ -37890,21 +37890,14 @@ function Invoke-FileTransferTunaHandoffFallbackCycle {
         $secondSw = [System.Diagnostics.Stopwatch]::StartNew()
         $secondTransferPhase = $null
         $secondRouteLine = ''
-        $secondFreshUnlockError = ''
         Write-Host "[GUI Smoke][filetransfer_tuna] Starting second transfer after live reactivation; expecting file_tuna_v4 protocol 4." -ForegroundColor DarkGray
 
         try {
             if ($secondTransferRequiresFreshDiagnosticReadiness) {
                 $observedEvidenceLines.Add(("[{0}] [INFO] [GuiSmoke] event=filetransfer_tuna_gui_second_transfer_fresh_readiness_required; route_mode={1}; first_transfer_id={2}; reason=first_transfer_terminal_before_same_transfer_reactivation" -f ([datetime]::UtcNow.ToString('yyyy-MM-dd HH:mm:ssZ')), $RouteMode, $firstTransferTerminalBeforeLiveReactivationTransferId)) | Out-Null
                 Write-Host "[GUI Smoke][filetransfer_tuna] First transfer completed before same-transfer reactivation; requiring fresh diagnostic Tuna readiness before second send." -ForegroundColor Yellow
-                try {
-                    Unlock-TunaPayers -Context $Context -PayerMode $PayerMode -Password $WalletPassword
-                }
-                catch {
-                    $secondFreshUnlockError = $_.Exception.Message
-                    $observedEvidenceLines.Add(("[{0}] [WARN] [GuiSmoke] event=filetransfer_tuna_gui_second_transfer_fresh_unlock_not_completed; route_mode={1}; first_transfer_id={2}; reason=unlock_prompt_or_runtime_evidence_missing; error={3}" -f ([datetime]::UtcNow.ToString('yyyy-MM-dd HH:mm:ssZ')), $RouteMode, $firstTransferTerminalBeforeLiveReactivationTransferId, ($secondFreshUnlockError -replace ';', ','))) | Out-Null
-                    Write-Host ("[GUI Smoke][filetransfer_tuna] Fresh second-transfer Tuna unlock did not complete before readiness wait: {0}" -f $secondFreshUnlockError) -ForegroundColor Yellow
-                }
+                # The live on step already issued the unlock. Repeating that
+                # toggle here would switch an already-on payer off.
             }
 
             try {
@@ -37926,7 +37919,6 @@ function Invoke-FileTransferTunaHandoffFallbackCycle {
                     nextRequiredProof = 'second_transfer_file_tuna_v4_route_publication'
                     required = $secondTransferRequiresFreshDiagnosticReadiness
                     requiredReason = if ($secondTransferRequiresFreshDiagnosticReadiness) { 'first_transfer_terminal_before_same_transfer_reactivation' } else { '(none)' }
-                    unlockError = $secondFreshUnlockError
                 }
                 $summary | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $ArtifactDir 'filetransfer-tuna-gui-summary.json') -Encoding UTF8
                 Write-Host "[GUI Smoke][filetransfer_tuna] Second-transfer diagnostic Tuna readiness was not refreshed before send; continuing to require coordinator-authorized file_tuna_v4 publication for the new transfer." -ForegroundColor Yellow
