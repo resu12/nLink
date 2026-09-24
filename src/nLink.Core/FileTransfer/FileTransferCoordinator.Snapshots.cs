@@ -888,12 +888,17 @@ internal static partial class FileTransferCoordinator
                     descriptor.PredecessorAuthorityId,
                     requiredPredecessorAuthorityId,
                     StringComparison.Ordinal) &&
-                descriptor.OperationGeneration ==
+                descriptor.CommandGeneration ==
                     requiredInstallGeneration &&
+                descriptor.ReceiptGeneration ==
+                    requiredInstallGeneration &&
+                descriptor.ReceiptValidated &&
                 descriptor.RegularV4FrontierRepairPressure is
                     {
                         PressureInstallGeneration: var installGeneration,
                     } pressureSnapshot &&
+                descriptor.OperationGeneration ==
+                    pressureSnapshot.DecisionGeneration &&
                 installGeneration == requiredInstallGeneration &&
                 pressureSnapshot.SourceBoundary == requiredSourceBoundary &&
                 pressureSnapshot.EffectiveBoundary ==

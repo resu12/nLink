@@ -4313,13 +4313,36 @@ public sealed partial class FileTransferCoordinatorTests
     [InlineData(FileTransferDirection.Outbound, false)]
     [InlineData(FileTransferDirection.Outbound, true)]
     [InlineData(FileTransferDirection.Inbound, true)]
+    [InlineData(FileTransferDirection.Inbound, false)]
+    [InlineData(FileTransferDirection.Outbound, false, true)]
+    [InlineData(FileTransferDirection.Outbound, true, true)]
+    [InlineData(FileTransferDirection.Inbound, false, true)]
+    [InlineData(FileTransferDirection.Inbound, true, true)]
     [Trait("FileTransferCoordinatorSuite", "RegularV4FrontierRepairPressure")]
     public void RegularV4FrontierRepairPressure_SuccessorRetiresOnlyExactPredecessor(
         FileTransferDirection direction,
-        bool fileTuna)
+        bool fileTuna,
+        bool independentGenerations = false)
+        => CreatePressureSettlementGenerationDomainsFixture(direction, fileTuna, independentGenerations);
+
+    internal static FileTransferCoordinatorTransitionEnvelope CreatePressureSettlementGenerationDomainsFixture(
+        FileTransferDirection direction, bool fileTuna, bool independentGenerations)
     {
-        var (initialState, initialDecision) = AuthorizeRegularV4FrontierRepair(
-            fileTuna ? CreateFileTunaPressureSource(direction) : null);
+        var source = fileTuna
+            ? CreateFileTunaPressureSource(direction)
+            : StartRegular(FileTransferRouteResolver.Resolve(FileTransferRoute.RegularNknV4Fast), direction).State;
+        source = source with
+        {
+            LastRepairReplayGeneration = independentGenerations ? 16 : 0,
+            PersistentState = source.PersistentState with
+            {
+                RegularV4FrontierRepairPressure = PressureState(source) with
+                {
+                    LastInstallGeneration = independentGenerations ? 6 : 0,
+                },
+            },
+        };
+        var (initialState, initialDecision) = AuthorizeRegularV4FrontierRepair(source);
         initialState = initialState with
         {
             PersistentState = initialState.PersistentState with
@@ -4359,7 +4382,10 @@ public sealed partial class FileTransferCoordinatorTests
             RegularV4PressureAuthorityRequest("regular-v4-pressure:12:1"),
             "regular_v4_frontier_repair_successor_pressure");
         var successor = successorStage.Binding!.Value;
-        Assert.Equal(2, successor.InstallGeneration);
+        Assert.Equal(independentGenerations ? 8 : 2, successor.InstallGeneration);
+        Assert.Equal(independentGenerations ? 17 : 1, initial.Authority.DecisionGeneration);
+        Assert.Equal(independentGenerations ? 7 : 1, initial.InstallGeneration);
+        Assert.Equal(independentGenerations ? 18 : 2, successor.Authority.DecisionGeneration);
         Assert.Null(PressureState(successorStage.State).RetainedPredecessorBinding);
 
         var installedSuccessor = FileTransferCoordinator.CommitRegularV4FrontierRepairPressureBinding(
@@ -4465,11 +4491,17 @@ public sealed partial class FileTransferCoordinatorTests
             initial.Authority.AuthorityId.ToString(),
             successorAttempt.PredecessorAuthorityId);
         Assert.Equal(
-            successor.InstallGeneration,
+            successor.Authority.DecisionGeneration,
             successorAttempt.OperationGeneration);
+        Assert.Equal(successorAttempt.OperationGeneration, successorAttempt.CommandGeneration);
+        Assert.Equal(successorAttempt.OperationGeneration, successorAttempt.ReceiptGeneration);
+        Assert.Equal(successorAttempt.OperationGeneration,
+            successorAttempt.RegularV4FrontierRepairPressure!.DecisionGeneration);
         Assert.Equal(
             predecessorTerminal.ReceiptGeneration,
-            successorAttempt.OperationGeneration);
+            successorAttempt.RegularV4FrontierRepairPressure.PressureInstallGeneration);
+        Assert.Equal(successor.InstallGeneration, predecessorTerminal.ReceiptGeneration);
+        Assert.Equal(initial.Authority.DecisionGeneration, predecessorTerminal.OperationGeneration);
         Assert.Equal(
             predecessorTerminal.ReceiptFingerprint,
             successorAttempt.CommandFingerprint);
@@ -4651,6 +4683,7 @@ public sealed partial class FileTransferCoordinatorTests
         Assert.Equal(
             RegularV4FrontierRepairPressureBindingDecisionStatus.Rejected,
             mismatchedSuccessorDuplicate.Status);
+        return predecessorRetiredEnvelope;
     }
 
     [Theory]

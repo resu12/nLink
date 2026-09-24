@@ -6418,17 +6418,15 @@ function Get-FileTransferCoordinatorSnapshotFamily5PressureSettlementFailure {
                 [string]$_.authorityId -ceq $successorAuthorityId -and
                 [string]$_.predecessorAuthorityId -ceq
                     [string]$settlement.authorityId -and
-                [long]$_.operationGeneration -eq
-                    [long]$settlement.receiptGeneration -and
-                [long]$_.operationGeneration -eq
-                    $pressureInstallGeneration -and
+                [long]$_.operationGeneration -gt
+                    [long]$settlement.operationGeneration -and
                 [long]$_.commandGeneration -eq
-                    $pressureInstallGeneration -and
+                    [long]$_.operationGeneration -and
                 [long]$_.receiptGeneration -eq
-                    $pressureInstallGeneration -and
+                    [long]$_.operationGeneration -and
                 [long]($_.regularV4FrontierRepairPressure.
                     decisionGeneration) -eq
-                    $pressureInstallGeneration -and
+                    [long]$_.operationGeneration -and
                 [long]($_.regularV4FrontierRepairPressure.
                     pressureInstallGeneration) -eq
                     $pressureInstallGeneration -and
@@ -6443,7 +6441,7 @@ function Get-FileTransferCoordinatorSnapshotFamily5PressureSettlementFailure {
             })
         if ($successorAuthorityId -in @('', '(none)') -or
             $pressureInstallGeneration -le 0 -or
-            [long]$settlement.operationGeneration -ge
+            [long]$settlement.receiptGeneration -ne
                 $pressureInstallGeneration) {
             return ('snapshot_regular_v4_pressure_settlement_transition_invalid|' +
                 'pressure_settlement_attempt_binding_invalid')
