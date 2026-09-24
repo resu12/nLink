@@ -100,6 +100,9 @@ foreach ($case in $caseNames) {
             if ($case -ceq 'tuna_before_transition') { $lines.Add($tunaSend); $lines.Add($tunaReceive) }
             if ($case -in @('second_complete', 'second_missing_receive', 'second_missing_send', 'tuna_before_transition', 'tuna_other_publication')) {
                 $line = $line.Replace('previous_route=regular_nkn_v4_fast', 'previous_route=post_tuna_fallback_v6')
+                # A genuine positive receipt at sequence 8 follows publication.
+                # The before-transition case still violates retained input order.
+                $line = Set-ShadowFixtureField $line 'log_writer_sequence' '7'
             }
         }
         if ($original -ceq $receive) {
@@ -221,6 +224,20 @@ $normalized = ConvertTo-Json -InputObject $observations.ToArray() -Depth 8 -Comp
 # policy and count differences are pinned here; this is not a zero-difference gate.
 $baselinePath = Join-Path $RepoRoot 'tests/nLink.SmokeTests.Core/Support/GuiRejectedIngressShadowBaseline.json'
 $baseline = [IO.File]::ReadAllText($baselinePath) | ConvertFrom-Json
+# Preserve the historical characterization file. Only these two previously
+# borrowed receipts change recovery under the reviewed binding correction;
+# the independent GUI primary and every other field remain pinned.
+foreach ($case in @('tuna_before_transition', 'tuna_other_publication')) {
+    $entry = @($baseline | Where-Object Case -CEQ $case)
+    if ($entry.Count -ne 1 -or $entry[0].Diagnostics.Count -ne 1 -or
+        -not $entry[0].Diagnostics[0].Recovered -or $entry[0].Scalar -ne 0 -or
+        ($entry[0].RetainedQuartet -join ',') -cne '1,1,1,0') { throw 'Historical receipt baseline changed.' }
+    $entry[0].RetainedQuartet = @(1,1,0,1)
+    $entry[0].Scalar = 2
+    $entry[0].Diagnostics[0].Recovered = $false
+    $entry[0].Diagnostics[0].Reason = 'missing_exact_tuna_receive'
+    $entry[0].Diagnostics[0].Variant = 'second_tuna_rejected_regular_ingress_exact_tuna_receive_missing'
+}
 $expected = ConvertTo-Json -InputObject @($baseline) -Depth 8 -Compress
-if ($normalized -cne $expected) { throw "Pre-extraction characterization changed: $normalized" }
+if ($normalized -cne $expected) { throw "Characterization changed beyond the reviewed receipt bindings: $normalized" }
 Write-Output ('gui-rejected-ingress-shadow=' + $normalized)

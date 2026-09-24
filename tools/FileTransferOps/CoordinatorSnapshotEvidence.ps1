@@ -4099,7 +4099,7 @@ function Get-FileTransferCoordinatorSnapshotFallbackTailFailedSupersessionShape 
     $failedCurrent = @($family4Operations | Where-Object {
             [string]$_.operationRole -ceq 'yield_current' -and
             [string]$_.operationKind -ceq 'Failed' -and
-            [string]$_.beforeState -ceq 'PeerProofObserved' -and
+            [string]$_.beforeState -cin @('YieldIssued', 'PeerProofObserved') -and
             [string]$_.afterState -ceq 'None' -and
             [bool]$_.stateApplied
         })
@@ -4107,7 +4107,7 @@ function Get-FileTransferCoordinatorSnapshotFallbackTailFailedSupersessionShape 
             [string]$_.operationRole -ceq 'yield_current' -and
             [string]$_.operationKind -ceq 'Quiescent' -and
             [string]$_.beforeState -ceq 'None' -and
-            [string]$_.afterState -ceq 'PeerProofObserved' -and
+            [string]$_.afterState -cin @('YieldIssued', 'PeerProofObserved') -and
             [bool]$_.stateApplied
         })
     $failedTerminal = @($family4Operations | Where-Object {
@@ -4125,6 +4125,8 @@ function Get-FileTransferCoordinatorSnapshotFallbackTailFailedSupersessionShape 
     $prior = $failedCurrent[0]
     $successor = $quiescentCurrent[0]
     $terminal = $failedTerminal[0]
+    if ([string]$prior.beforeState -cne [string]$successor.afterState) { return $null }
+    $carriesPeerProof = [string]$prior.beforeState -ceq 'PeerProofObserved'
     $displaced = $null
     if ($Operations.Count -eq 4) {
         $retirements = @($family4Operations | Where-Object {
@@ -4184,6 +4186,8 @@ function Get-FileTransferCoordinatorSnapshotFallbackTailFailedSupersessionShape 
                 [System.Globalization.CultureInfo]::InvariantCulture),
             [string]$operation.operationKind) -join '|'
         if ($null -eq $typed -or
+            $typed.PSObject.Properties.Name -notcontains 'failedSupersessionCarriedPeerProof' -or
+            $typed.failedSupersessionCarriedPeerProof -isnot [bool] -or
             [string]$operation.operationKey -cne $expectedKey -or
             [string]$operation.authorityId -in @('', '(none)') -or
             [long]$operation.operationGeneration -le 0 -or
@@ -4211,19 +4215,17 @@ function Get-FileTransferCoordinatorSnapshotFallbackTailFailedSupersessionShape 
             [long]$prior.operationGeneration -or
         [string]$prior.fallbackTailYield.yieldKind -cne 'Failed' -or
         [string]$prior.fallbackTailYield.pairingState -cne
-            'PeerProofObserved' -or
+            [string]$prior.beforeState -or
         [string]$successor.fallbackTailYield.yieldKind -cne 'Quiescent' -or
         [string]$successor.fallbackTailYield.pairingState -cne
-            'PeerProofObserved' -or
+            [string]$successor.afterState -or
         [string]$terminal.fallbackTailYield.yieldKind -cne 'Failed' -or
         [string]$terminal.fallbackTailYield.pairingState -cne 'Invalidated' -or
         [string](Get-FileTransferCoordinatorSnapshotObjectProperty `
             -InputObject $successor.fallbackTailYield `
             -Name 'failedPredecessorAuthorityId' -Default '(none)') -cne
             [string]$prior.authorityId -or
-        -not [bool](Get-FileTransferCoordinatorSnapshotObjectProperty `
-            -InputObject $successor.fallbackTailYield `
-            -Name 'failedSupersessionCarriedPeerProof' -Default $false) -or
+        $successor.fallbackTailYield.failedSupersessionCarriedPeerProof -ne $carriesPeerProof -or
         [string](Get-FileTransferCoordinatorSnapshotObjectProperty `
             -InputObject $prior.fallbackTailYield `
             -Name 'failedPredecessorAuthorityId' -Default '(none)') -cne
@@ -4243,9 +4245,12 @@ function Get-FileTransferCoordinatorSnapshotFallbackTailFailedSupersessionShape 
         return $null
     }
 
-    foreach ($field in @('ownerKey', 'pairKey', 'peerProofAuthorityId',
-            'peerProofIdentity', 'peerProofFingerprint',
-            'peerProofYieldGeneration')) {
+    $matchingFields = @('ownerKey', 'pairKey')
+    if ($carriesPeerProof) {
+        $matchingFields += @('peerProofAuthorityId', 'peerProofIdentity',
+            'peerProofFingerprint', 'peerProofYieldGeneration')
+    }
+    foreach ($field in $matchingFields) {
         $expected = [string]$prior.fallbackTailYield.$field
         if ($expected -in @('', '(none)', '0') -or
             [string]$successor.fallbackTailYield.$field -cne $expected -or
@@ -4254,6 +4259,12 @@ function Get-FileTransferCoordinatorSnapshotFallbackTailFailedSupersessionShape 
         }
     }
     foreach ($operation in @($prior, $successor, $terminal)) {
+        if (-not $carriesPeerProof) {
+            foreach ($field in @('peerProofAuthorityId', 'peerProofIdentity', 'peerProofFingerprint')) {
+                if ([string]$operation.fallbackTailYield.$field -cne '(none)') { return $null }
+            }
+            if ([long]$operation.fallbackTailYield.peerProofYieldGeneration -ne 0L) { return $null }
+        }
         foreach ($field in @('localProofIdentity', 'localProofFingerprint',
                 'pairedReleaseAuthorityId', 'pairedReleaseOutcome',
                 'reservedRetryAuthorityId')) {
@@ -4314,19 +4325,21 @@ function Get-FileTransferCoordinatorSnapshotFallbackTailFailedSupersessionShape 
             [string]$_.receiptStatus -ceq 'Invalidated' -and
             [bool]$_.receiptValidated
         })
-    if (@($prior.fallbackTailYield.receipts).Count -ne 2 -or
-        @($successor.fallbackTailYield.receipts).Count -ne 3 -or
-        @($terminal.fallbackTailYield.receipts).Count -ne 3 -or
-        $priorYield.Count -ne 1 -or $priorPeer.Count -ne 1 -or
-        $successorYield.Count -ne 1 -or $successorPeer.Count -ne 1 -or
+    $peerReceiptCount = [int]$carriesPeerProof
+    if (@($prior.fallbackTailYield.receipts).Count -ne (1 + $peerReceiptCount) -or
+        @($successor.fallbackTailYield.receipts).Count -ne (2 + $peerReceiptCount) -or
+        @($terminal.fallbackTailYield.receipts).Count -ne (2 + $peerReceiptCount) -or
+        $priorYield.Count -ne 1 -or $priorPeer.Count -ne $peerReceiptCount -or
+        $successorYield.Count -ne 1 -or $successorPeer.Count -ne $peerReceiptCount -or
         $supersession.Count -ne 1 -or $terminalYield.Count -ne 1 -or
-        $terminalPeer.Count -ne 1 -or $invalidation.Count -ne 1 -or
+        $terminalPeer.Count -ne $peerReceiptCount -or $invalidation.Count -ne 1 -or
         -not (Test-FileTransferCoordinatorSnapshotFallbackTailReceiptEqual `
             -Left $priorYield[0] -Right $terminalYield[0]) -or
-        -not (Test-FileTransferCoordinatorSnapshotFallbackTailReceiptEqual `
-            -Left $priorPeer[0] -Right $successorPeer[0]) -or
-        -not (Test-FileTransferCoordinatorSnapshotFallbackTailReceiptEqual `
-            -Left $priorPeer[0] -Right $terminalPeer[0]) -or
+        ($carriesPeerProof -and (
+            -not (Test-FileTransferCoordinatorSnapshotFallbackTailReceiptEqual `
+                -Left $priorPeer[0] -Right $successorPeer[0]) -or
+            -not (Test-FileTransferCoordinatorSnapshotFallbackTailReceiptEqual `
+                -Left $priorPeer[0] -Right $terminalPeer[0]))) -or
         [long]$priorYield[0].commandGeneration -ne
             [long]$prior.operationGeneration -or
         [long]$priorYield[0].receiptGeneration -ne
@@ -4346,8 +4359,14 @@ function Get-FileTransferCoordinatorSnapshotFallbackTailFailedSupersessionShape 
         return $null
     }
 
+    $peerReceipt = $null
+    $priorPrimaryReceipt = $priorYield[0]
+    if ($carriesPeerProof) {
+        $peerReceipt = $priorPeer[0]
+        $priorPrimaryReceipt = $peerReceipt
+    }
     foreach ($pair in @(
-            @($prior, $priorPeer[0]),
+            @($prior, $priorPrimaryReceipt),
             @($successor, $supersession[0]),
             @($terminal, $invalidation[0]))) {
         foreach ($field in @('commandIdentity', 'commandGeneration',
@@ -4364,7 +4383,7 @@ function Get-FileTransferCoordinatorSnapshotFallbackTailFailedSupersessionShape 
         QuiescentCurrent = $successor
         FailedTerminal = $terminal
         DisplacedTerminal = $displaced
-        PeerReceipt = $priorPeer[0]
+        PeerReceipt = $peerReceipt
         YieldReceipt = $successorYield[0]
         SupersessionReceipt = $supersession[0]
         InvalidationReceipt = $invalidation[0]

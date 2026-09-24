@@ -1439,7 +1439,8 @@ public sealed class FileTransferRetainedAuthorityProofAnalyzerTests : FileTransf
         var result = await RunAnalyzeFixtureAsync(
             BuildFileTunaV4RejectedReceiveFixture(
                 transferId,
-                secondTunaCycle: true),
+                secondTunaCycle: true,
+                physicalRouteOrder: true),
             environment: compact
                 ? new Dictionary<string, string>
                 {

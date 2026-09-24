@@ -190,9 +190,62 @@ $cases = @(
     @{ Name='route_rejection_poison'; Reason='missing_rejection_companion'; Unbound=$true },
     @{ Name='adjacent_ignore_borrow'; Reason='missing_rejection_companion'; Unbound=$true; Candidates=2; RecoveredCount=1 }
 )
+function Set-SecondTunaFixtureFields {
+    param([string]$Line, [hashtable]$Fields)
+    foreach ($field in $Fields.Keys) {
+        $pattern = '; ' + [regex]::Escape($field) + '=[^;]*'
+        if ($Line -cnotmatch $pattern) { throw "Missing fixture field: $field" }
+        $replacement = if ($null -eq $Fields[$field]) { '' } else { '; ' + $field + '=' + $Fields[$field] }
+        $Line = $Line -creplace $pattern, $replacement
+    }
+    return $Line
+}
+$bindingCases = @(
+    @{ Name='foreign_tuna_receive_writer'; ReceiveFields=@{log_writer_id='foreign_receiver'} },
+    @{ Name='prior_publication_receive'; ReceiveFields=@{live_route_epoch='1'; runtime_generation='2'; leg_generation='2'; route_publication_generation='2'; route_commit_generation='1'} },
+    @{ Name='receive_before_transition'; ReceiveBeforeTransition=$true; ReceiveFields=@{log_writer_sequence='6'} },
+    @{ Name='receive_before_transition_input_only'; ReceiveBeforeTransition=$true },
+    @{ Name='foreign_tuna_resend_writer'; SendFields=@{log_writer_id='foreign_sender'}; MissingSend=$true },
+    @{ Name='missing_tuna_resend_writer'; SendFields=@{log_writer_id=$null}; MissingSend=$true },
+    @{ Name='missing_source_sequence'; SourceFields=@{log_writer_sequence=$null}; MissingSend=$true },
+    @{ Name='zero_source_sequence'; SourceFields=@{log_writer_sequence='0'}; MissingSend=$true },
+    @{ Name='missing_transition_sequence'; TransitionFields=@{log_writer_sequence=$null} },
+    @{ Name='zero_transition_sequence'; TransitionFields=@{log_writer_sequence='0'} },
+    @{ Name='different_sender_generations'; SendFields=@{runtime_generation='19'; leg_generation='23'; route_publication_generation='21'; route_commit_generation='12'}; Positive=$true },
+    @{ Name='valid_and_foreign_receipt'; ExtraReceiveFields=@{log_writer_id='foreign_receiver'}; Positive=$true },
+    @{ Name='exact_receipt_duplicate'; ExtraReceiveFields=@{}; Positive=$true },
+    @{ Name='valid_and_foreign_resend'; ExtraSendFields=@{log_writer_id='foreign_sender'}; Positive=$true }
+)
+foreach ($field in @('log_writer_id','route','protocol_version','live_route_epoch','runtime_generation',
+    'terminal_generation','leg_generation','route_publication_generation','route_commit_generation',
+    'target_route','target_protocol_version','target_transport')) {
+    $bindingCases += @{ Name="missing_receipt_$field"; ReceiveFields=@{ $field=$null } }
+    if ($field -cne 'log_writer_id') {
+        $bindingCases += @{ Name="wrong_receipt_$field"; ReceiveFields=@{ $field='99' } }
+    }
+}
+foreach ($sequence in @($null,'0','7','10','11')) {
+    $label = if ($null -eq $sequence) { 'missing' } else { $sequence }
+    $bindingCases += @{ Name="receipt_sequence_$label"; ReceiveFields=@{log_writer_sequence=$sequence} }
+}
+foreach ($sequence in @($null,'0','1')) {
+    $label = if ($null -eq $sequence) { 'missing' } else { $sequence }
+    $bindingCases += @{ Name="resend_sequence_$label"; SendFields=@{log_writer_sequence=$sequence}; MissingSend=$true }
+}
+foreach ($case in $bindingCases) {
+    $case.AddTunaReceive = $true
+    $case.Reason = 'missing_exact_tuna_receive'; $case.Variant = $variant
+    if ($case.ContainsKey('MissingSend')) {
+        $case.Reason = 'missing_tuna_resend'; $case.Variant = 'second_tuna_rejected_regular_ingress_exact_tuna_resend_missing'
+    }
+    if ($case.ContainsKey('Positive')) { $case.Recovered=$true; $case.Reason='recovered'; $case.Remove('Variant') }
+    $cases += $case
+}
 $normalized = [Collections.Generic.List[object]]::new()
 foreach ($case in $cases) {
     $lines = [Collections.Generic.List[string]]::new()
+    $bindingReceipt = $tunaReceive
+    if ($case.ContainsKey('ReceiveFields')) { $bindingReceipt = Set-SecondTunaFixtureFields $bindingReceipt $case.ReceiveFields }
     foreach ($original in $base) {
         $line = $original
         if (($case.Name -in @('missing_ignore','adjacent_ignore_borrow') -and $line -ceq $ignore) -or
@@ -212,7 +265,13 @@ foreach ($case in $cases) {
         if ($line -ceq $source -and $case.Name -ceq 'wrong_source_session') { $line = $line.Replace('session_id=sess_a', 'session_id=sess_foreign') }
         if ($line -ceq $transition -and $case.Name -ceq 'wrong_transition_publication') { $line = $line.Replace('route_publication_generation=4', 'route_publication_generation=99') }
         if ($line -ceq $resend -and $case.Name -ceq 'wrong_resend_bytes') { $line = $line.Replace('raw_payload_bytes=64512', 'raw_payload_bytes=64511') }
+        if ($original -ceq $source -and $case.ContainsKey('SourceFields')) { $line = Set-SecondTunaFixtureFields $line $case.SourceFields }
+        if ($original -ceq $resend -and $case.ContainsKey('SendFields')) { $line = Set-SecondTunaFixtureFields $line $case.SendFields }
+        if ($original -ceq $transition -and $case.ContainsKey('TransitionFields')) { $line = Set-SecondTunaFixtureFields $line $case.TransitionFields }
+        if ($original -ceq $transition -and $case.ContainsKey('ReceiveBeforeTransition')) { $lines.Add($bindingReceipt) }
         if ($line -ceq $receive) {
+            if ($case.ContainsKey('AddTunaReceive') -and -not $case.ContainsKey('ReceiveBeforeTransition')) { $lines.Add($bindingReceipt) }
+            if ($case.ContainsKey('ExtraReceiveFields')) { $lines.Add((Set-SecondTunaFixtureFields $tunaReceive $case.ExtraReceiveFields)) }
             if ($case.Name -in @('complete','adjacent_ignore_borrow','borrowed_receive_session','borrowed_receive_transfer','wrong_receive_range','wrong_receive_count')) {
                 $proof = $tunaReceive
                 switch ($case.Name) {
@@ -228,6 +287,7 @@ foreach ($case in $cases) {
             }
         }
         $lines.Add($line)
+        if ($original -ceq $resend -and $case.ContainsKey('ExtraSendFields')) { $lines.Add((Set-SecondTunaFixtureFields $resend $case.ExtraSendFields)) }
         if ($original -ceq $transition -and $case.Name -ceq 'ambiguous_transition') {
             $lines.Add($transition.Replace('log_writer_sequence=7', 'log_writer_sequence=8'))
         }

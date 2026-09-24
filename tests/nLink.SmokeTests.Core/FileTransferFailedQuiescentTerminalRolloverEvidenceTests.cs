@@ -17,6 +17,44 @@ public sealed class FileTransferFailedQuiescentTerminalRolloverEvidenceTests : F
     [InlineData(FileTransferDirection.Outbound, false)]
     [InlineData(FileTransferDirection.Inbound, true)]
     [InlineData(FileTransferDirection.Outbound, true)]
+    public async Task FailedQuiescentTerminalRollover_NoPeerProofPreservesExactEvidenceAcrossBothHosts(
+        FileTransferDirection direction, bool priorTerminal)
+    {
+        if (!OperatingSystem.IsWindows()) { return; }
+        var envelopes = FileTransferCoordinatorTests.CreateFailedQuiescentTerminalRolloverSnapshotFixture(
+            direction, priorTerminal, out var supersession, out var failed, out var oldTerminal,
+            includeSuccessorHistory: true, includePeerProof: false);
+        var directory = Path.Combine(Path.GetTempPath(), "nlink-no-peer-supersession-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(directory);
+        try
+        {
+            var path = Path.Combine(directory, "production-evidence.log");
+            await File.WriteAllLinesAsync(path, Emit(envelopes), new UTF8Encoding(false));
+            var script = await File.ReadAllTextAsync(Path.Combine(FindRepoRoot(), "tests", "nLink.SmokeTests.Core",
+                "Support", "NoPeerFailedQuiescentSnapshotEvidence.ps1"));
+            string? firstHostOutput = null;
+            foreach (var host in new[] { "powershell", "pwsh" })
+            {
+                var result = await RunPowerShellScriptTextAsync(script,
+                    [FindRepoRoot(), path, directory,
+                        SessionFileTransferService.CreateCoordinatorSnapshotEvidenceForTesting(supersession).TransitionId,
+                        SessionFileTransferService.CreateCoordinatorSnapshotEvidenceForTesting(failed).TransitionId,
+                        oldTerminal is null ? "(none)" : SessionFileTransferService.CreateCoordinatorSnapshotEvidenceForTesting(oldTerminal).TransitionId], host);
+                Assert.True(result.ExitCode == 0, $"{direction}/{priorTerminal}/{host} STDOUT:{result.Stdout}{Environment.NewLine}STDERR:{result.Stderr}");
+                var normalized = Assert.Single(result.Stdout.Split('\n').Select(line => line.Trim()).Where(line =>
+                    line.StartsWith("no-peer-supersession-normalized=", StringComparison.Ordinal)));
+                if (firstHostOutput is not null) { Assert.Equal(firstHostOutput, normalized); }
+                firstHostOutput = normalized;
+            }
+        }
+        finally { TryDeleteDirectory(directory); }
+    }
+
+    [Theory]
+    [InlineData(FileTransferDirection.Inbound, false)]
+    [InlineData(FileTransferDirection.Outbound, false)]
+    [InlineData(FileTransferDirection.Inbound, true)]
+    [InlineData(FileTransferDirection.Outbound, true)]
     public async Task FailedQuiescentTerminalRollover_PendingOriginProvenanceIsExactAcrossBothHosts(
         FileTransferDirection direction, bool priorTerminal)
     {

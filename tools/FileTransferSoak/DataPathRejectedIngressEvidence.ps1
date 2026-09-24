@@ -885,6 +885,9 @@ function Get-FileTransferFileTunaV4DataPathMismatchRejectedFailClosedResult {
                     -Name 'previous_route' `
                     -Default ''
                 if ($previousRoute -eq 'post_tuna_fallback_v6') {
+                    $sourceWriterSequence = Get-FileTransferEventInt64Field -Event $sourceSend -Name 'log_writer_sequence' -Default 0
+                    $transitionWriterSequence = Get-FileTransferEventInt64Field -Event $receiverTransition -Name 'log_writer_sequence' -Default 0
+                    $receiveWriterSequence = Get-FileTransferEventInt64Field -Event $receive -Name 'log_writer_sequence' -Default 0
                     [object[]]$tunaResends = @(
                         Get-FileTransferFileTunaV4DataPathIndexedPayloadEvents `
                             -Index $DataPathIndex `
@@ -893,6 +896,11 @@ function Get-FileTransferFileTunaV4DataPathMismatchRejectedFailClosedResult {
                             $_.Sequence -gt $sourceSend.Sequence -and
                             $_.Sequence -lt $mismatchSequence -and
                             $_.EventName -eq 'filetransfer_data_path_send_result' -and
+                            $sourceWriterSequence -gt 0 -and
+                            [string]::Equals(
+                                (Get-FileTransferEventField -Event $_ -Name 'log_writer_id' -Default ''),
+                                $sourceWriterId, [System.StringComparison]::OrdinalIgnoreCase) -and
+                            (Get-FileTransferEventInt64Field -Event $_ -Name 'log_writer_sequence' -Default 0) -gt $sourceWriterSequence -and
                             (Get-FileTransferEventField -Event $_ -Name 'direction' -Default '') -eq 'outbound' -and
                             (Get-FileTransferEventField -Event $_ -Name 'route' -Default '') -eq 'file_tuna_v4' -and
                             (Get-FileTransferEventField -Event $_ -Name 'protocol_version' -Default '') -eq '4' -and
@@ -909,16 +917,40 @@ function Get-FileTransferFileTunaV4DataPathMismatchRejectedFailClosedResult {
                             -Event $Mismatch |
                         Where-Object {
                             $_.Sequence -gt $sourceSend.Sequence -and
+                            $_.Sequence -gt $receiverTransition.Sequence -and
                             $_.Sequence -lt $mismatchSequence -and
                             $_.EventName -eq 'filetransfer_data_path_receive_result' -and
+                            $transitionWriterSequence -gt 0 -and
+                            [string]::Equals(
+                                (Get-FileTransferEventField -Event $_ -Name 'log_writer_id' -Default ''),
+                                $writerId, [System.StringComparison]::OrdinalIgnoreCase) -and
+                            (Get-FileTransferEventInt64Field -Event $_ -Name 'log_writer_sequence' -Default 0) -gt $transitionWriterSequence -and
+                            (Get-FileTransferEventInt64Field -Event $_ -Name 'log_writer_sequence' -Default 0) -lt $receiveWriterSequence -and
                             (Get-FileTransferEventField -Event $_ -Name 'direction' -Default '') -eq 'inbound' -and
                             (Get-FileTransferEventField -Event $_ -Name 'route' -Default '') -eq 'file_tuna_v4' -and
                             (Get-FileTransferEventField -Event $_ -Name 'protocol_version' -Default '') -eq '4' -and
                             (Get-FileTransferEventField -Event $_ -Name 'actual_transport' -Default '') -eq 'tuna' -and
                             (Get-FileTransferEventField -Event $_ -Name 'delivery_transport' -Default '') -eq 'tuna' -and
+                            (Get-FileTransferEventField -Event $_ -Name 'target_route' -Default '') -eq 'file_tuna_v4' -and
+                            (Get-FileTransferEventField -Event $_ -Name 'target_protocol_version' -Default '') -eq '4' -and
+                            (Get-FileTransferEventField -Event $_ -Name 'target_transport' -Default '') -eq 'tuna' -and
                             (Get-FileTransferEventInt64Field -Event $_ -Name 'raw_payload_bytes' -Default 0) -eq $mismatchRawBytes -and
                             (Get-FileTransferEventInt64Field -Event $_ -Name 'batch_chunk_count' -Default 0) -eq $mismatchChunkCount -and
                             (Test-FileTransferFileTunaV4DataPathRangeMatches -Intent $Mismatch -Actual $_)
+                        } | Where-Object {
+                            # These are receiver-local bindings, not a comparison
+                            # with the sender's independently numbered authority.
+                            foreach ($fieldName in @('live_route_epoch', 'runtime_generation',
+                                    'terminal_generation', 'leg_generation', 'route_publication_generation',
+                                    'route_commit_generation', 'target_route', 'target_protocol_version', 'target_transport')) {
+                                $receiptValue = Get-FileTransferEventField -Event $_ -Name $fieldName -Default ''
+                                $transitionValue = Get-FileTransferEventField -Event $receiverTransition -Name $fieldName -Default ''
+                                if ([string]::IsNullOrWhiteSpace($receiptValue) -or
+                                    -not [string]::Equals($receiptValue, $transitionValue, [System.StringComparison]::OrdinalIgnoreCase)) {
+                                    return $false
+                                }
+                            }
+                            return $true
                         })
                     if ($tunaResends.Count -eq 0 -or $tunaReceipts.Count -eq 0) {
                         if ($tunaResends.Count -eq 0) {

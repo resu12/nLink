@@ -17,6 +17,17 @@ public sealed partial class FileTransferCoordinatorTests
         FileTransferDirection direction, bool priorTerminal)
         => CreateFailedQuiescentTerminalRolloverSnapshotFixture(direction, priorTerminal, out _, out _, out _);
 
+    [Theory]
+    [InlineData(FileTransferDirection.Inbound, false)]
+    [InlineData(FileTransferDirection.Outbound, false)]
+    [InlineData(FileTransferDirection.Inbound, true)]
+    [InlineData(FileTransferDirection.Outbound, true)]
+    [Trait("FileTransferCoordinatorSuite", "CoordinatorSnapshots")]
+    public void FallbackTailYield_NoPeerFailedQuiescentSupersessionPreservesExactTerminalRollover(
+        FileTransferDirection direction, bool priorTerminal)
+        => CreateFailedQuiescentTerminalRolloverSnapshotFixture(direction, priorTerminal, out _, out _, out _,
+            includeSuccessorHistory: true, includePeerProof: false);
+
     [MethodImpl(MethodImplOptions.NoInlining)]
     internal static FileTransferCoordinatorTransitionEnvelope[] CreateFailedQuiescentTerminalRolloverSnapshotFixture(
         FileTransferDirection direction,
@@ -24,11 +35,12 @@ public sealed partial class FileTransferCoordinatorTests
         out FileTransferCoordinatorTransitionEnvelope supersessionEnvelope,
         out FileTransferCoordinatorTransitionEnvelope failedEnvelope,
         out FileTransferCoordinatorTransitionEnvelope? priorTerminalEnvelope,
-        bool includeSuccessorHistory = false)
+        bool includeSuccessorHistory = false,
+        bool includePeerProof = true)
     {
         // The prior terminal is born, paired/installed where applicable and retired
         // by the real Coordinator before this branch issues the Failed successor.
-        var fixture = CreateCheckpointFailedYieldSource(direction, priorTerminal);
+        var fixture = CreateCheckpointFailedYieldSource(direction, priorTerminal, includePeerProof);
         var envelope = SupersedeCheckpointFailedYieldWithQuiescence(fixture);
         AssertFailedQuiescentRolloverShape(fixture, envelope, priorTerminal);
         AssertFailedQuiescentRolloverReceipts(fixture, envelope);
@@ -42,10 +54,33 @@ public sealed partial class FileTransferCoordinatorTests
         priorTerminalEnvelope = fixture.PriorTerminalEnvelope;
         if (includeSuccessorHistory)
         {
+            if (!includePeerProof) { ObserveNoPeerQuiescentSuccessorPeerProof(fixture); }
             PairAndRetireFailedQuiescentSuccessor(fixture);
             AssertCheckpointPriorEnvelopesImmutable(fixture);
         }
         return fixture.Snapshots.ToArray();
+    }
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static void ObserveNoPeerQuiescentSuccessorPeerProof(CheckpointFailedYieldFixture fixture)
+    {
+        var successor = fixture.State.PersistentState.FallbackTailYield.CurrentOperation!.Value;
+        Assert.Null(successor.PeerProof);
+        var proof = CreateCoordinatorFallbackTailPeerProof(fixture.State, successor.Decision) with
+        {
+            AuthorityId = new FileTransferAuthorityId("fta2-fallback_tail_yield-fedcba9876543210fedcba98"),
+            YieldGeneration = 7,
+        };
+        fixture.PeerProof = FileTransferCoordinator.CreateFallbackTailPeerProofReceipt(
+            fixture.State, proof, "no-peer-successor-later-proof", 45_000);
+        var observed = FileTransferCoordinator.ApplyFallbackTailPeerProofReceipt(fixture.State, fixture.PeerProof);
+        Assert.True(observed.Accepted, observed.Reason);
+        Assert.Equal(FileTransferFallbackTailYieldPairingState.PeerProofObserved,
+            observed.State.PersistentState.FallbackTailYield.CurrentOperation!.Value.PairingState);
+        Assert.False(observed.State.PersistentState.FallbackTailYield.CurrentOperation!.Value
+            .FailedYieldSupersession!.Value.CarriedPeerProof);
+        fixture.Capture(Assert.IsType<FileTransferCoordinatorTransitionEnvelope>(observed.SnapshotEnvelope));
+        fixture.State = observed.State;
     }
 
     [MethodImpl(MethodImplOptions.NoInlining)]
@@ -97,7 +132,8 @@ public sealed partial class FileTransferCoordinatorTests
         var envelope = Assert.IsType<FileTransferCoordinatorTransitionEnvelope>(successor.SnapshotEnvelope);
         fixture.Capture(envelope);
         Assert.Equal(immutableBefore, FileTransferCoordinator.CalculateSnapshotFingerprint(before));
-        AssertFailedQuiescentRolloverState(before, successor.State, fixture.PeerProof);
+        AssertFailedQuiescentRolloverState(before, successor.State,
+            before.PersistentState.FallbackTailYield.CurrentOperation!.Value.PeerProof);
         fixture.State = successor.State;
         return envelope;
     }
@@ -106,7 +142,7 @@ public sealed partial class FileTransferCoordinatorTests
     private static void AssertFailedQuiescentRolloverState(
         FileTransferCoordinatorState before,
         FileTransferCoordinatorState after,
-        FileTransferFallbackTailPeerProofReceipt peerProof)
+        FileTransferFallbackTailPeerProofReceipt? peerProof)
     {
         var failed = before.PersistentState.FallbackTailYield.CurrentOperation!.Value;
         var substate = after.PersistentState.FallbackTailYield;
@@ -118,14 +154,15 @@ public sealed partial class FileTransferCoordinatorTests
         Assert.Null(successor.Decision.PredecessorAuthorityId);
         Assert.Equal(failed.Scope, successor.Scope);
         Assert.Equal(peerProof, successor.PeerProof);
-        Assert.Equal(FileTransferFallbackTailYieldPairingState.PeerProofObserved, successor.PairingState);
+        Assert.Equal(peerProof is null ? FileTransferFallbackTailYieldPairingState.YieldIssued :
+            FileTransferFallbackTailYieldPairingState.PeerProofObserved, successor.PairingState);
         Assert.Null(successor.LocalProof);
         Assert.Null(successor.PairedRelease);
         var binding = successor.FailedYieldSupersession!.Value;
         Assert.Equal(failed.Decision, binding.FailedDecision);
         Assert.Equal(successor.Decision, binding.SuccessorDecision);
         Assert.Equal(failed.Scope, binding.Scope);
-        Assert.True(binding.CarriedPeerProof);
+        Assert.Equal(peerProof is not null, binding.CarriedPeerProof);
         Assert.Equal(failed with
         {
             PairingState = FileTransferFallbackTailYieldPairingState.Invalidated,
@@ -167,10 +204,10 @@ public sealed partial class FileTransferCoordinatorTests
             operation.OperationKind == "Failed");
         Assert.Equal(JsonSerializer.Serialize(fixture.FailedCurrent with
         {
-            BeforeState = "PeerProofObserved", AfterState = "None",
+            BeforeState = fixture.FailedCurrent.AfterState, AfterState = "None",
         }), JsonSerializer.Serialize(failed));
         Assert.Equal("None", current.BeforeState);
-        Assert.Equal("PeerProofObserved", current.AfterState);
+        Assert.Equal(fixture.FailedCurrent.AfterState, current.AfterState);
         Assert.Equal("None", terminal.BeforeState);
         Assert.Equal("Invalidated", terminal.AfterState);
         Assert.Equal(failed.AuthorityId, terminal.AuthorityId);
@@ -179,7 +216,7 @@ public sealed partial class FileTransferCoordinatorTests
         Assert.Equal(failed.OperationGeneration + 1, current.OperationGeneration);
         Assert.Equal("(none)", current.PredecessorAuthorityId);
         Assert.Equal(failed.AuthorityId, current.FallbackTailYield!.FailedPredecessorAuthorityId);
-        Assert.True(current.FallbackTailYield.FailedSupersessionCarriedPeerProof);
+        Assert.Equal(fixture.FailedCurrent.AfterState == "PeerProofObserved", current.FallbackTailYield.FailedSupersessionCarriedPeerProof);
         foreach (var value in new[] { current, terminal })
         {
             var typed = value.FallbackTailYield!;
@@ -210,21 +247,42 @@ public sealed partial class FileTransferCoordinatorTests
             operation.OperationKind == "Quiescent");
         var terminal = Assert.Single(operations, operation => operation.OperationRole == "yield_terminal" &&
             operation.OperationKind == "Failed");
-        var pending = Assert.Single(fixture.Snapshots.SelectMany(value => value.Aggregate.Operations),
-            operation => operation.OperationRole == "peer_proof_pending_initial" && operation.BeforeState == "None");
-        var pendingPeer = Assert.Single(pending.FallbackTailYield!.Receipts, receipt => receipt.Stage == "peer_proof");
-        var peer = Assert.Single(failed.FallbackTailYield!.Receipts, receipt => receipt.Stage == "peer_proof");
-        Assert.Equal("fallback_tail_peer_proof_retained", pendingPeer.ReceiptReason);
-        Assert.Equal(pendingPeer with { ReceiptReason = "fallback_tail_peer_proof_observed" }, peer);
+        var hasPeerProof = failed.BeforeState == "PeerProofObserved";
+        if (hasPeerProof)
+        {
+            var pending = Assert.Single(fixture.Snapshots.SelectMany(value => value.Aggregate.Operations),
+                operation => operation.OperationRole == "peer_proof_pending_initial" && operation.BeforeState == "None");
+            var pendingPeer = Assert.Single(pending.FallbackTailYield!.Receipts, receipt => receipt.Stage == "peer_proof");
+            var peer = Assert.Single(failed.FallbackTailYield!.Receipts, receipt => receipt.Stage == "peer_proof");
+            Assert.Equal("fallback_tail_peer_proof_retained", pendingPeer.ReceiptReason);
+            Assert.Equal(pendingPeer with { ReceiptReason = "fallback_tail_peer_proof_observed" }, peer);
+            foreach (var operation in new[] { failed, current, terminal })
+            {
+                Assert.Equal(peer, Assert.Single(operation.FallbackTailYield!.Receipts, receipt => receipt.Stage == "peer_proof"));
+            }
+            Assert.Equal(7, peer.ReceiptGeneration);
+        }
+        else
+        {
+            foreach (var operation in new[] { failed, current, terminal })
+            {
+                var typed = operation.FallbackTailYield!;
+                Assert.Equal("(none)", typed.PeerProofAuthorityId);
+                Assert.Equal("(none)", typed.PeerProofIdentity);
+                Assert.Equal("(none)", typed.PeerProofFingerprint);
+                Assert.Equal(0, typed.PeerProofYieldGeneration);
+                Assert.False(typed.FailedSupersessionCarriedPeerProof);
+                Assert.DoesNotContain(typed.Receipts, receipt => receipt.Stage == "peer_proof");
+            }
+            AssertCheckpointTopLevelReceipt(failed, Assert.Single(failed.FallbackTailYield!.Receipts));
+        }
         foreach (var operation in new[] { failed, current, terminal })
         {
-            Assert.Equal(peer, Assert.Single(operation.FallbackTailYield!.Receipts, receipt => receipt.Stage == "peer_proof"));
-            Assert.All(operation.FallbackTailYield.Receipts, receipt => Assert.True(receipt.ReceiptValidated));
+            Assert.All(operation.FallbackTailYield!.Receipts, receipt => Assert.True(receipt.ReceiptValidated));
         }
-        Assert.Equal(7, peer.ReceiptGeneration);
-        Assert.Equal(2, failed.FallbackTailYield!.Receipts.Length);
-        Assert.Equal(3, terminal.FallbackTailYield!.Receipts.Length);
-        Assert.Equal(3, current.FallbackTailYield!.Receipts.Length);
+        Assert.Equal(hasPeerProof ? 2 : 1, failed.FallbackTailYield!.Receipts.Length);
+        Assert.Equal(hasPeerProof ? 3 : 2, terminal.FallbackTailYield!.Receipts.Length);
+        Assert.Equal(hasPeerProof ? 3 : 2, current.FallbackTailYield!.Receipts.Length);
         foreach (var receipt in failed.FallbackTailYield.Receipts)
         {
             Assert.Equal(receipt, Assert.Single(terminal.FallbackTailYield.Receipts, value => value.Stage == receipt.Stage));

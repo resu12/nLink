@@ -39,7 +39,7 @@ public sealed partial class FileTransferCoordinatorTests
 
     [MethodImpl(MethodImplOptions.NoInlining)]
     private static CheckpointFailedYieldFixture CreateCheckpointFailedYieldSource(
-        FileTransferDirection direction, bool priorTerminal)
+        FileTransferDirection direction, bool priorTerminal, bool includePeerProof = true)
     {
         var fixture = new CheckpointFailedYieldFixture();
         if (priorTerminal)
@@ -64,8 +64,8 @@ public sealed partial class FileTransferCoordinatorTests
             InitializeCheckpointWithoutPriorTerminal(fixture, direction);
         }
         SettleCheckpointBeforeFailedYield(fixture);
-        RetainCheckpointFailedPeerProof(fixture);
-        IssueCheckpointFailedYield(fixture);
+        if (includePeerProof) { RetainCheckpointFailedPeerProof(fixture); }
+        IssueCheckpointFailedYield(fixture, includePeerProof);
         return fixture;
     }
 
@@ -210,7 +210,7 @@ public sealed partial class FileTransferCoordinatorTests
     }
 
     [MethodImpl(MethodImplOptions.NoInlining)]
-    private static void IssueCheckpointFailedYield(CheckpointFailedYieldFixture fixture)
+    private static void IssueCheckpointFailedYield(CheckpointFailedYieldFixture fixture, bool includePeerProof = true)
     {
         var fallback = FileTransferRouteResolver.Resolve(FileTransferRoute.PostTunaFallbackV6);
         var failed = MarkFallbackTailFailed(fixture.State, fallback, fixture.State.CurrentLeg!.TransportEpochId);
@@ -219,20 +219,25 @@ public sealed partial class FileTransferCoordinatorTests
         fixture.Capture(fixture.FailedEnvelope);
         var operation = failed.State.PersistentState.FallbackTailYield.CurrentOperation!.Value;
         Assert.Equal(FallbackTailYieldKind.Failed, operation.Decision.YieldKind);
-        Assert.Equal(FileTransferFallbackTailYieldPairingState.PeerProofObserved, operation.PairingState);
-        Assert.Equal(fixture.PeerProof, operation.PeerProof);
+        Assert.Equal(includePeerProof ? FileTransferFallbackTailYieldPairingState.PeerProofObserved :
+            FileTransferFallbackTailYieldPairingState.YieldIssued, operation.PairingState);
+        if (includePeerProof) { Assert.Equal(fixture.PeerProof, operation.PeerProof); }
+        else { Assert.Null(operation.PeerProof); }
         Assert.Null(operation.LocalProof);
         Assert.Null(operation.PairedRelease);
         Assert.Null(operation.Decision.PredecessorAuthorityId);
         var operations = fixture.FailedEnvelope.Aggregate.Operations
             .Where(value => value.Family == "fallback_tail_yield").ToArray();
-        Assert.Equal(2, operations.Length);
-        var pending = Assert.Single(operations, value => value.OperationRole == "peer_proof_pending_initial");
-        Assert.Equal("Pending", pending.BeforeState);
-        Assert.Equal("None", pending.AfterState);
+        Assert.Equal(includePeerProof ? 2 : 1, operations.Length);
+        if (includePeerProof)
+        {
+            var pending = Assert.Single(operations, value => value.OperationRole == "peer_proof_pending_initial");
+            Assert.Equal("Pending", pending.BeforeState);
+            Assert.Equal("None", pending.AfterState);
+        }
         fixture.FailedCurrent = Assert.Single(operations, value => value.OperationRole == "yield_current");
         Assert.Equal("None", fixture.FailedCurrent.BeforeState);
-        Assert.Equal("PeerProofObserved", fixture.FailedCurrent.AfterState);
+        Assert.Equal(includePeerProof ? "PeerProofObserved" : "YieldIssued", fixture.FailedCurrent.AfterState);
         fixture.State = failed.State;
     }
 
