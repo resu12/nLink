@@ -9717,11 +9717,15 @@ function Test-FileTransferCoordinatorResponderProbeHandoffObservationConsumed {
     $candidateBoundary = $Candidate.Boundary
     $candidateOperation = $Candidate.Operation
     $candidatePayload = $candidateOperation.responderProbeHandoff
+    $isInitialStaleAvailability = $null -ne $candidatePayload -and
+        [string]$candidateBoundary.decisionReason -ceq 'data_session_availability_stale' -and
+        [string]$candidateBoundary.direction -ceq 'inbound' -and
+        [string]$candidatePayload.transitionMode -ceq 'initial_regular_v4'
     if ($null -eq $candidatePayload -or
         [string]$candidateBoundary.decisionKind -cne
             'ObserveRuntimeUnlockResponderPeerProbeHandoff' -or
         [string]$candidateBoundary.decisionStatus -cne 'Rejected' -or
-        [string]$candidateBoundary.decisionReason -cne 'accepted' -or
+        ([string]$candidateBoundary.decisionReason -cne 'accepted' -and -not $isInitialStaleAvailability) -or
         [string]$candidateOperation.operationRole -cne 'attempted_decision' -or
         [string]$candidateOperation.beforeState -cne 'None' -or
         [string]$candidateOperation.afterState -cne 'Rejected' -or
@@ -9736,13 +9740,15 @@ function Test-FileTransferCoordinatorResponderProbeHandoffObservationConsumed {
     }
 
     $isPostFallbackBinding = [string]$candidatePayload.transitionMode -ceq 'post_fallback_v6_paired'
-    if ($isPostFallbackBinding) {
+    if ($isPostFallbackBinding -or $isInitialStaleAvailability) {
         $candidateLifecycleKey = Get-FileTransferCoordinatorResponderProbeHandoffLifecycleKey `
             -Boundary $candidateBoundary -Operation $candidateOperation
         $History = @($History | Where-Object {
             (Get-FileTransferCoordinatorResponderProbeHandoffLifecycleKey `
                 -Boundary $_.Boundary -Operation $_.Operation) -ceq $candidateLifecycleKey
         })
+    }
+    if ($isPostFallbackBinding) {
         foreach ($field in @('ownerKey','pairKey','localProofIdentity','localProofFingerprint',
                 'peerProofIdentity','peerProofFingerprint','pairedReleaseAuthorityId')) {
             if ([string]$candidatePayload.$field -in @('', '(none)')) { return $false }
@@ -9849,6 +9855,38 @@ function Test-FileTransferCoordinatorResponderProbeHandoffObservationConsumed {
         -Accepted @($accepted) -Prepared $preparedEntry
     if ($null -eq $acceptance) {
         return $false
+    }
+    if ($isInitialStaleAvailability) {
+        # A stale availability callback remains rejected. Only the exact
+        # completed initial observation can discharge its diagnostic incident.
+        if ($accepted.Count -ne 1 -or
+            [string]$candidatePayload.sourceBoundary.route -cne 'regular_nkn_v4_fast' -or
+            [long]$candidatePayload.sourceBoundary.protocolVersion -ne 4 -or
+            [string]$candidatePayload.targetBoundary.route -cne 'file_tuna_v4' -or
+            [long]$candidatePayload.targetBoundary.protocolVersion -ne 4 -or
+            [long]$candidatePayload.pendingPreCommitGeneration -ne 0) { return $false }
+        $immutableObservation = ConvertTo-Json -InputObject ($candidatePayload | Select-Object * -ExcludeProperty `
+            role,decisionStatus,decisionReason,effectiveBoundary,targetBoundary,linkedTransitionAuthorityId,
+            linkedTransitionGeneration,pendingPreCommitGeneration,receipts) -Depth 32 -Compress
+        foreach ($entry in @($acceptance, $Candidate)) {
+            $operation = $entry.Operation
+            $payload = $operation.responderProbeHandoff
+            $observation = ConvertTo-Json -InputObject ($payload | Select-Object * -ExcludeProperty `
+                role,decisionStatus,decisionReason,effectiveBoundary,targetBoundary,linkedTransitionAuthorityId,
+                linkedTransitionGeneration,pendingPreCommitGeneration,receipts) -Depth 32 -Compress
+            if ($observation -cne $immutableObservation -or
+                [string]$payload.decisionStatus -cne [string]$operation.receiptStatus -or
+                [string]$payload.decisionReason -cne [string]$entry.Boundary.decisionReason) { return $false }
+            $receipts = @($payload.receipts)
+            $stage = if ($operation.receiptStatus -ceq 'Accepted') { 'handoff_bind' } else { 'attempted_decision' }
+            if ($receipts.Count -ne 1 -or
+                [string]$receipts[0].stage -cne $stage -or
+                [string]$receipts[0].receiptReason -cne [string]$payload.decisionReason) { return $false }
+            foreach ($field in @('commandIdentity','commandGeneration','commandFingerprint',
+                    'receiptIdentity','receiptGeneration','receiptStatus','receiptFingerprint','receiptValidated')) {
+                if ([string]$receipts[0].$field -cne [string]$operation.$field) { return $false }
+            }
+        }
     }
     $acceptedGeneration = [long]$acceptance.Boundary.afterStateGeneration
 

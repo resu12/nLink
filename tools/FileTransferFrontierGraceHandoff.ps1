@@ -1504,7 +1504,7 @@ function Get-FileTransferRecentProgressGraceStallProgressClosure {
     }
     $stalls = @(Named 'filetransfer_v6_frontier_request_deferred' | Where-Object {
         [long]$_.Sequence -gt [long]$Episode.Event.Sequence -and (Equal $_ $recheck $wakeScope) -and
-        (Field $_ 'reason') -ceq 'frontier_recent_progress_grace_elapsed' -and
+        (Field $_ 'reason') -cin @('frontier_recent_progress_grace_elapsed', 'frontier_stall_repair_due') -and
         (Field $_ 'authority_effect') -ceq 'none' -and (Number $_ 'wake_generation') -gt 0 -and
         (Number $_ 'elapsed_ms') -eq 0 -and (Number $_ 'stall_grace_ms') -eq 750 -and
         (Number $_ 'highest_received_chunk_index') -ge (Number $recheck 'highest_received_chunk_index') -and
@@ -1514,6 +1514,17 @@ function Get-FileTransferRecentProgressGraceStallProgressClosure {
     if ($stalls.Count -ne 1) { return $null }
     $stall = $stalls[0]
     $deadline = Ticks $stall 'wake_deadline_utc'
+    $watchdogFirst = (Field $stall 'reason') -ceq 'frontier_stall_repair_due'
+    if ($watchdogFirst) {
+        # The watchdog can arm the current stall before the recent callback.
+        # Its origin is not authority: require the exact, still-current interval.
+        $stallTicks = Number $stall 'log_writer_attempt_utc_ticks'
+        $recheckTicks = Number $recheck 'log_writer_attempt_utc_ticks'
+        if ([long]$stall.Sequence -ge [long]$recheck.Sequence -or
+            $stallTicks -lt (Ticks $stall 'stall_started_utc') -or $stallTicks -gt $recheckTicks -or
+            $recheckTicks -ge $deadline -or
+            (Number $stall 'highest_received_chunk_index') -ne (Number $recheck 'highest_received_chunk_index')) { return $null }
+    }
     $writes = @(Named 'filetransfer_v6_sparse_write_committed' | Where-Object {
         [long]$_.Sequence -gt [Math]::Max([long]$stall.Sequence, [long]$recheck.Sequence)
     })
@@ -1555,6 +1566,13 @@ function Get-FileTransferRecentProgressGraceStallProgressClosure {
         $poisoned = $false
         foreach ($event in $scoped) {
             if ([long]$event.Sequence -gt [long]$state.Sequence) { continue }
+            if ($watchdogFirst -and [long]$event.Sequence -gt [long]$Episode.Event.Sequence -and
+                (Field $event 'event') -ceq 'filetransfer_v6_frontier_request_deferred' -and
+                (Number $event 'elapsed_ms') -eq 0 -and -not [object]::ReferenceEquals($event, $stall)) {
+                # Do not skip a competing/replacement root because its reason
+                # or scope failed the candidate filter above.
+                $poisoned = $true; break
+            }
             if ((Field $event 'event') -in @('file_transfer_inbound_terminal', 'filetransfer_live_route_epoch_terminal',
                     'filetransfer_terminalized_by_session_end', 'filetransfer_data_session_recreated', 'filetransfer_data_session_removed') -or
                 (Field $event 'transfer_paused') -ceq '1') { $poisoned = $true; break }

@@ -1,4 +1,4 @@
-param([string]$RepoRoot, [string]$SourcePath)
+param([string]$RepoRoot, [string]$SourcePath, [switch]$WatchdogOnly)
 $ErrorActionPreference = 'Stop'
 . (Join-Path $RepoRoot 'tools/FileTransferSoak/LogParsing.ps1')
 . (Join-Path $RepoRoot 'tools/FileTransferSoak/ArtifactWriters.ps1')
@@ -117,6 +117,18 @@ $scopeChanges = @('session_id', 'transfer_id', 'log_writer_id', 'direction', 'ro
     'route_publication_generation', 'route_commit_generation', 'data_session_identity', 'data_session_generation',
     'frontier_chunk_index', 'committed_progress_utc', 'wake_deadline_utc', 'decision_status', 'decision_reason', 'authority_effect')
 $cases += @($scopeChanges | ForEach-Object { "chain_scope_$_" })
+if ($WatchdogOnly) {
+    $cases = @('watchdog_exact', 'watchdog_rearm', 'watchdog_duplicate', 'watchdog_close_publication', 'watchdog_zero_write', 'watchdog_late',
+        'watchdog_at_deadline', 'watchdog_unknown_reason', 'watchdog_no_stall', 'watchdog_root_after_recheck',
+        'watchdog_root_clock', 'watchdog_recheck_expired', 'watchdog_stall_before_recent_deadline',
+        'watchdog_stall_duration', 'watchdog_highest_mismatch', 'watchdog_invalid_wake',
+        'watchdog_second_root', 'watchdog_replaced_after_recheck', 'watchdog_conflicting_copy',
+        'watchdog_missing_recheck', 'watchdog_stale_recheck', 'watchdog_wrong_recheck_wake',
+        'watchdog_missing_write', 'watchdog_regressed_write', 'watchdog_no_publication',
+        'watchdog_wrong_publication', 'watchdog_terminal', 'watchdog_pause', 'watchdog_source_replaced')
+    $cases += @($scopeChanges | Where-Object { $_ -notin @('committed_progress_utc', 'wake_deadline_utc',
+        'decision_status', 'decision_reason') } | ForEach-Object { "watchdog_scope_$_" })
+}
 function CopyEvent($event) { $copy = $event.PSObject.Copy(); $copy.Fields = $event.Fields.Clone(); return $copy }
 function Boundary($result) {
     $records = @(foreach ($record in $result.CandidateRecords) { [ordered]@{
@@ -126,12 +138,81 @@ function Boundary($result) {
         recovered=$result.RecoveredCount;unresolved=$result.UnresolvedCount;records=$records}) -Depth 8 -Compress
 }
 foreach ($case in $cases) {
-    $items = @(Fixture ($case.StartsWith('chain_') -or $case -in @('rearm_only', 'live_ordering')) ($case -in @('late_only', 'live_ordering')))
+    $items = @(Fixture ($case.StartsWith('chain_') -or ($WatchdogOnly -and $case -ne 'watchdog_exact') -or
+        $case -in @('rearm_only', 'live_ordering')) ($case -in @('late_only', 'live_ordering', 'watchdog_late')))
     $recheck = @($items | Where-Object { $_.EventName -eq 'filetransfer_v6_frontier_recent_progress_grace_recheck_decided' -and $_.Fields.decision_status -eq 'rechecked' })[0]
     $arms = @($items | Where-Object EventName -eq 'filetransfer_v6_frontier_recent_progress_grace_deferred')
     $stall = @($items | Where-Object EventName -eq 'filetransfer_v6_frontier_request_deferred')[0]
     if ($case.StartsWith('chain_scope_')) { $arms[1].Fields[$case.Substring('chain_scope_'.Length)] = 'other' }
+    if ($WatchdogOnly) { $stall.Fields.reason = 'frontier_stall_repair_due' }
+    if ($case.StartsWith('watchdog_scope_')) { $stall.Fields[$case.Substring('watchdog_scope_'.Length)] = 'other' }
     switch ($case) {
+        'watchdog_duplicate' { $items += (CopyEvent $stall) }
+        'watchdog_close_publication' {
+            $state = @($items | Where-Object EventName -eq 'filetransfer_v6_receiver_state_sent')[-1]
+            $state.Fields.log_writer_attempt_utc_ticks = [string]$origin.AddMilliseconds(1825).UtcTicks
+            $state.TimestampUtc = $origin.AddMilliseconds(1825)
+        }
+        'watchdog_zero_write' {
+            $copy = CopyEvent @($items | Where-Object EventName -eq 'filetransfer_v6_sparse_write_committed')[0]
+            $copy.Sequence--; $copy.LineNumber = [int]$copy.Sequence; $copy.Fields.log_writer_sequence = [string]$copy.Sequence
+            $copy.Fields.contiguous_chunks_committed = '0'; $copy.Fields.next_chunk_index = [string]$frontier
+            $copy.Fields.highest_received_chunk_index = $recheck.Fields.highest_received_chunk_index
+            $copy.Fields.log_writer_attempt_utc_ticks = [string]$origin.AddMilliseconds(1300).UtcTicks
+            $copy.TimestampUtc = $origin.AddMilliseconds(1300); $items += $copy
+        }
+        'watchdog_at_deadline' {
+            $state = @($items | Where-Object EventName -eq 'filetransfer_v6_receiver_state_sent')[-1]
+            $state.Fields.log_writer_attempt_utc_ticks = [string]$origin.AddMilliseconds(1855).UtcTicks
+        }
+        'watchdog_unknown_reason' { $stall.Fields.reason = 'other' }
+        'watchdog_no_stall' { $items = @($items | Where-Object { $_ -ne $stall }) }
+        'watchdog_root_after_recheck' {
+            $stall.Sequence = $recheck.Sequence + 1; $stall.LineNumber = [int]$stall.Sequence
+            $stall.Fields.log_writer_sequence = [string]$stall.Sequence
+        }
+        'watchdog_root_clock' { $stall.Fields.log_writer_attempt_utc_ticks = [string]$origin.AddMilliseconds(1107).UtcTicks }
+        'watchdog_recheck_expired' { $recheck.Fields.log_writer_attempt_utc_ticks = [string]$origin.AddMilliseconds(1855).UtcTicks }
+        'watchdog_stall_before_recent_deadline' {
+            $stall.Fields.stall_started_utc = $origin.AddMilliseconds(1099).ToString('o')
+            $stall.Fields.wake_deadline_utc = $origin.AddMilliseconds(1849).ToString('o')
+        }
+        'watchdog_stall_duration' { $stall.Fields.wake_deadline_utc = $origin.AddMilliseconds(1856).ToString('o') }
+        'watchdog_highest_mismatch' { $stall.Fields.highest_received_chunk_index = [string]($highest + 7) }
+        'watchdog_invalid_wake' { $stall.Fields.wake_generation = '0' }
+        {$_ -in @('watchdog_second_root', 'watchdog_replaced_after_recheck')} {
+            $copy = CopyEvent $stall
+            $copy.Sequence = $(if ($case -eq 'watchdog_second_root') { $stall.Sequence + 1 } else { $recheck.Sequence + 1 })
+            $copy.LineNumber = [int]$copy.Sequence; $copy.Fields.log_writer_sequence = [string]$copy.Sequence
+            $copy.Fields.wake_generation = '259'; $copy.Fields.reason = 'other'
+            $items += $copy
+        }
+        'watchdog_conflicting_copy' { $copy = CopyEvent $stall; $copy.LineNumber++; $copy.Fields.wake_generation = '259'; $items += $copy }
+        'watchdog_missing_recheck' { $items = @($items | Where-Object { $_ -ne $recheck }) }
+        'watchdog_stale_recheck' { $recheck.Fields.decision_status = 'stale'; $recheck.Fields.decision_reason = 'wake_generation_replaced' }
+        'watchdog_wrong_recheck_wake' { $recheck.Fields.wake_generation = '999' }
+        'watchdog_missing_write' {
+            $first = @($items | Where-Object EventName -eq 'filetransfer_v6_sparse_write_committed')[0]
+            $items = @($items | Where-Object { $_ -ne $first })
+        }
+        'watchdog_regressed_write' {
+            $last = @($items | Where-Object EventName -eq 'filetransfer_v6_sparse_write_committed')[-1]
+            $last.Fields.highest_received_chunk_index = [string]$highest
+        }
+        'watchdog_no_publication' { $items = @($items | Where-Object { $_.EventName -ne 'filetransfer_v6_receiver_state_sent' -or $_.Sequence -lt 100 }) }
+        'watchdog_wrong_publication' {
+            $state = @($items | Where-Object EventName -eq 'filetransfer_v6_receiver_state_sent')[-1]
+            $state.Fields.durable_received_highest_chunk_index = [string]($highest + 10)
+        }
+        {$_ -in @('watchdog_terminal', 'watchdog_pause', 'watchdog_source_replaced')} {
+            $copy = CopyEvent $stall; $copy.Sequence = $recheck.Sequence + 1; $copy.LineNumber = [int]$copy.Sequence
+            $copy.Fields.log_writer_sequence = [string]$copy.Sequence
+            $copy.Fields.event = switch ($case) { 'watchdog_terminal' { 'file_transfer_inbound_terminal' }
+                'watchdog_pause' { 'filetransfer_v6_receiver_state_sent' } 'watchdog_source_replaced' { 'filetransfer_data_session_recreated' } }
+            $copy.EventName = $copy.Fields.event
+            if ($case -eq 'watchdog_pause') { $copy.Fields.transfer_paused = '1' }
+            $items += $copy
+        }
         {$_ -in @('no_publication', 'chain_no_publication')} {
             $items = @($items | Where-Object { $_.EventName -ne 'filetransfer_v6_receiver_state_sent' -or $_.Sequence -lt 100 })
         }
@@ -210,7 +291,8 @@ foreach ($case in $cases) {
     }
     $items = @($items | Sort-Object Sequence, LineNumber)
     $expected = $case -in @('exact', 'rearm_only', 'chain_duplicate', 'chain_no_stale', 'chain_family_same', 'chain_earlier_root',
-        'chain_unrelated_transfer_conflict')
+        'chain_unrelated_transfer_conflict', 'watchdog_exact', 'watchdog_rearm', 'watchdog_duplicate',
+        'watchdog_close_publication', 'watchdog_zero_write')
     $plain = & $script:FileTransferFallbackFrontierRecentProgressGraceLegacyCorrelation -Events $items
     $index = New-FileTransferFallbackFrontierGraceCorrelationIndex $items
     $indexed = Get-FileTransferFallbackFrontierRecentProgressGraceRecheckCorrelation -Events $items -Index $index
