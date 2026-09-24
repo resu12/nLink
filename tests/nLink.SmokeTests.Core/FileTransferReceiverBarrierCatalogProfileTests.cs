@@ -9,6 +9,8 @@ public sealed class FileTransferReceiverBarrierCatalogProfileTests : FileTransfe
 
     [Theory]
     [InlineData("filetransfer_coordinator_transition_snapshot", PreAdmissionProfile, true)]
+    [InlineData("filetransfer_coordinator_transition_snapshot", PreAdmissionProfile + "-initial-data-session-v1", true)]
+    [InlineData("filetransfer_coordinator_transition_snapshot", PreAdmissionProfile + "-initial-data-session-v1-unknown", false)]
     [InlineData("filetransfer_coordinator_transition_snapshot", PreAdmissionProfile + "-unknown", false)]
     [InlineData("filetransfer_coordinator_transition_snapshot", "snapshot-authority-v1-receiver-barrier-v1", true)]
     [InlineData("filetransfer_coordinator_authority_effect", "snapshot-authority-v1-receiver-barrier-v1", true)]
@@ -49,6 +51,7 @@ public sealed class FileTransferReceiverBarrierCatalogProfileTests : FileTransfe
 
     [Theory]
     [InlineData(PreAdmissionProfile)]
+    [InlineData(PreAdmissionProfile + "-initial-data-session-v1")]
     [InlineData("snapshot-authority-v1")]
     [InlineData("snapshot-authority-v1-receiver-barrier-v1")]
     public async Task ReceiverBarrierCatalog_ExactProfileEvaluatesBothInputPaths(string profileVersion)

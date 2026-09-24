@@ -6112,6 +6112,13 @@ public sealed partial class SessionFileTransferService
             return true;
         }
 
+        if (context.DataSession is null && context.DataSessionGeneration == 0 &&
+            context.RouteSelection.Route == FileTransferRoute.PostTunaFallbackV6 &&
+            context.CurrentLiveRouteEpoch is null && context.LastLiveRouteEpochId == 0)
+        {
+            return AttachInitialFallbackDataSessionLocked(context, session);
+        }
+
         if (context.CoordinatorPersistentState.FileTransferRouteTransition
                 .CurrentOperation is { } activeRouteTransition)
         {
@@ -6183,6 +6190,13 @@ public sealed partial class SessionFileTransferService
         if (ReferenceEquals(context.DataSession, session))
         {
             return true;
+        }
+
+        if (context.DataSession is null && context.DataSessionGeneration == 0 &&
+            context.RouteSelection.Route == FileTransferRoute.PostTunaFallbackV6 &&
+            context.CurrentLiveRouteEpoch is null && context.LastLiveRouteEpochId == 0)
+        {
+            return AttachInitialFallbackDataSessionLocked(context, session);
         }
 
         if (context.CoordinatorPersistentState.FileTransferRouteTransition

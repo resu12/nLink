@@ -45,7 +45,7 @@ public sealed class FileTransferInitialFallbackRouteEvidenceTests : FileTransfer
 public sealed partial class FileTransferCoordinatorTests
 {
     internal static FileTransferCoordinatorTransitionEnvelope[] CreateInitialFallbackPublicationSnapshotFixture(
-        FileTransferDirection direction, bool independentGenerations, int publicationCount)
+        FileTransferDirection direction, bool independentGenerations, int publicationCount, bool startup = false)
     {
         var fallback = FileTransferRouteResolver.Resolve(FileTransferRoute.PostTunaFallbackV6);
         var empty = EmptyState(fallback, direction) with
@@ -90,6 +90,22 @@ public sealed partial class FileTransferCoordinatorTests
             Assert.True(FileTransferCoordinator.IsRoutePublicationTokenCurrent(publication.State, token, out _));
             envelopes.Add(publication.SnapshotEnvelope!);
             state = publication.State;
+        }
+        if (startup)
+        {
+            Assert.Equal(1, publicationCount);
+            var binding = FileTransferCoordinator.BindInitialFallbackDataSession(state,
+                InitialFallbackDataSessionRequestForTest(state));
+            Assert.NotNull(binding.Binding);
+            envelopes.Add(binding.SnapshotEnvelope!);
+            var successor = FileTransferCoordinator.Apply(CoordinatorEvent(FileTransferCoordinatorEventKind.StartTransfer,
+                fallback, targetTransport: FileTransferTransportKind.RegularNkn, reason: "post_tuna_fallback_v6_route",
+                state: FileTransferLegState.CheckpointPending, canSendData: false), binding.State);
+            Assert.Equal(owner.RuntimeGeneration + 1, successor.State.CurrentRuntimeOwner!.Value.RuntimeGeneration);
+            Assert.Equal(leg.Generation + 1, successor.State.CurrentLeg!.Generation);
+            Assert.False(successor.State.CurrentLeg.CanSendData);
+            Assert.Equal(2, successor.State.CurrentRoutePublicationToken!.Value.PublicationGeneration);
+            envelopes.Add(successor.SnapshotEnvelope!);
         }
         return envelopes.ToArray();
     }

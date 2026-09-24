@@ -7,6 +7,7 @@ Set-StrictMode -Version Latest
 . (Join-Path $PSScriptRoot 'RepairOwnerEvidence.ps1')
 . (Join-Path $PSScriptRoot 'ActivationRetryEvidence.ps1')
 . (Join-Path $PSScriptRoot 'ReceiverPreAdmissionEvidence.ps1')
+. (Join-Path $PSScriptRoot 'InitialDataSessionEvidence.ps1')
 
 $script:FileTransferCoordinatorSnapshotContractVersion = 1
 $script:FileTransferCoordinatorSnapshotCatalogVersion = 'snapshot-authority-v1'
@@ -536,6 +537,9 @@ function Get-FileTransferCoordinatorEvidenceCatalog {
     [CmdletBinding()]
     param([string]$ProfileVersion = $script:FileTransferCoordinatorSnapshotCatalogVersion)
 
+    if ($ProfileVersion -ceq $script:FileTransferCoordinatorInitialDataSessionCatalogVersion) {
+        return Get-FileTransferCoordinatorInitialDataSessionCatalog
+    }
     if ($ProfileVersion -ceq $script:FileTransferCoordinatorReceiverPreAdmissionCatalogVersion) {
         return Get-FileTransferCoordinatorReceiverPreAdmissionCatalog
     }
@@ -10557,7 +10561,7 @@ function Get-FileTransferCoordinatorSnapshotEvaluation {
                     $script:FileTransferCoordinatorCheckpointRepairContinuityCatalogVersion,
                     $script:FileTransferCoordinatorBootstrapCorrelationCatalogVersion,
                     $script:FileTransferCoordinatorBootstrapInitiationCatalogVersion, $script:FileTransferCoordinatorBootstrapCallbackCatalogVersion,
-                    $script:FileTransferCoordinatorRepairOwnerCatalogVersion, $script:FileTransferCoordinatorActivationRetryCatalogVersion, $script:FileTransferCoordinatorReceiverPreAdmissionCatalogVersion)) {
+                    $script:FileTransferCoordinatorRepairOwnerCatalogVersion, $script:FileTransferCoordinatorActivationRetryCatalogVersion, $script:FileTransferCoordinatorReceiverPreAdmissionCatalogVersion, $script:FileTransferCoordinatorInitialDataSessionCatalogVersion)) {
                 $catalog = Get-FileTransferCoordinatorEvidenceCatalog -ProfileVersion $profileVersion
             }
         }
@@ -10890,6 +10894,13 @@ function Get-FileTransferCoordinatorSnapshotEvaluation {
                         $errors.Add("snapshot_activation_retry_operation_invalid:$($record.LineIndex)")
                         break
                     }
+                    if (Test-FileTransferCoordinatorInitialDataSessionMarker $operation) {
+                        if (-not (Test-FileTransferCoordinatorInitialDataSessionOperation $envelope $operation $catalog)) {
+                            $errors.Add("snapshot_initial_data_session_binding_invalid:$($record.LineIndex)")
+                            break
+                        }
+                        continue
+                    }
                     if (Test-FileTransferCoordinatorRepairOwnerMarker $operation) {
                         if (-not (Test-FileTransferCoordinatorRepairOwnerOperation $envelope $operation $catalog)) {
                             $errors.Add("snapshot_repair_owner_operation_invalid:$($record.LineIndex)")
@@ -10898,7 +10909,7 @@ function Get-FileTransferCoordinatorSnapshotEvaluation {
                         continue
                     }
                     if ((Test-FileTransferCoordinatorBootstrapCallbackMarker $operation) -or
-                        ($catalog.Version -cin @($script:FileTransferCoordinatorBootstrapCallbackCatalogVersion, $script:FileTransferCoordinatorRepairOwnerCatalogVersion, $script:FileTransferCoordinatorActivationRetryCatalogVersion, $script:FileTransferCoordinatorReceiverPreAdmissionCatalogVersion) -and $operation.operationRole -ceq 'fallback_bootstrap_source_hold')) {
+                        ($catalog.Version -cin @($script:FileTransferCoordinatorBootstrapCallbackCatalogVersion, $script:FileTransferCoordinatorRepairOwnerCatalogVersion, $script:FileTransferCoordinatorActivationRetryCatalogVersion, $script:FileTransferCoordinatorReceiverPreAdmissionCatalogVersion, $script:FileTransferCoordinatorInitialDataSessionCatalogVersion) -and $operation.operationRole -ceq 'fallback_bootstrap_source_hold')) {
                         if (-not (Test-FileTransferCoordinatorBootstrapCallbackOperation $envelope $operation $catalog)) {
                             $errors.Add("snapshot_bootstrap_callback_operation_invalid:$($record.LineIndex)")
                             break
@@ -11413,10 +11424,10 @@ function Get-FileTransferCoordinatorSnapshotEvaluation {
     if ((Test-FileTransferCoordinatorBootstrapCorrelationCatalogCapability $catalog.Version) -and $errors.Count -eq 0) {
         foreach ($error in @(Get-FileTransferBootstrapCorrelationHistoryErrors -Boundaries @($boundaries))) { $errors.Add($error) }
     }
-    if ($catalog.Version -cin @($script:FileTransferCoordinatorBootstrapInitiationCatalogVersion, $script:FileTransferCoordinatorBootstrapCallbackCatalogVersion, $script:FileTransferCoordinatorRepairOwnerCatalogVersion, $script:FileTransferCoordinatorActivationRetryCatalogVersion, $script:FileTransferCoordinatorReceiverPreAdmissionCatalogVersion) -and $errors.Count -eq 0) {
+    if ($catalog.Version -cin @($script:FileTransferCoordinatorBootstrapInitiationCatalogVersion, $script:FileTransferCoordinatorBootstrapCallbackCatalogVersion, $script:FileTransferCoordinatorRepairOwnerCatalogVersion, $script:FileTransferCoordinatorActivationRetryCatalogVersion, $script:FileTransferCoordinatorReceiverPreAdmissionCatalogVersion, $script:FileTransferCoordinatorInitialDataSessionCatalogVersion) -and $errors.Count -eq 0) {
         foreach ($error in @(Get-FileTransferBootstrapInitiationHistoryErrors -Boundaries @($boundaries))) { $errors.Add($error) }
     }
-    if ($catalog.Version -cin @($script:FileTransferCoordinatorBootstrapCallbackCatalogVersion, $script:FileTransferCoordinatorRepairOwnerCatalogVersion, $script:FileTransferCoordinatorActivationRetryCatalogVersion, $script:FileTransferCoordinatorReceiverPreAdmissionCatalogVersion) -and $errors.Count -eq 0) {
+    if ($catalog.Version -cin @($script:FileTransferCoordinatorBootstrapCallbackCatalogVersion, $script:FileTransferCoordinatorRepairOwnerCatalogVersion, $script:FileTransferCoordinatorActivationRetryCatalogVersion, $script:FileTransferCoordinatorReceiverPreAdmissionCatalogVersion, $script:FileTransferCoordinatorInitialDataSessionCatalogVersion) -and $errors.Count -eq 0) {
         foreach ($error in @(Get-FileTransferBootstrapCallbackHistoryErrors -Boundaries @($boundaries))) { $errors.Add($error) }
     }
 
@@ -12520,6 +12531,8 @@ function Get-FileTransferCoordinatorSnapshotEvaluation {
     $aggregateBoundaryIndex = New-FileTransferCoordinatorSnapshotAggregateIntervalIndex -Entries @($aggregateEntries)
     $initialPublications = Get-FileTransferCoordinatorSnapshotInitialPublications `
         -AggregateIndex $aggregateBoundaryIndex -Effects @($effects)
+    $initialStartupPublications = Get-FileTransferCoordinatorInitialFallbackStartupPublications `
+        -AggregateIndex $aggregateBoundaryIndex -InitialPublications $initialPublications -Effects @($effects) -CatalogVersion $catalog.Version
     foreach ($group in @($operationHistory | Group-Object Key)) {
         $history = @($group.Group | Sort-Object {
                 [long]$_.Boundary.decisionUtcMilliseconds
@@ -12678,7 +12691,8 @@ function Get-FileTransferCoordinatorSnapshotEvaluation {
                         -Name 'legGeneration' `
                         -Default 0L)
                 $initialKey = "$($latest.Boundary.coordinatorInstanceId)|$($latest.Boundary.writer)|$($latest.Boundary.boundaryId)|$($latest.Operation.operationKey)"
-                if (($liveRouteEpoch -le 0 -and -not $initialPublications.ContainsKey($initialKey)) -or
+                if (($liveRouteEpoch -le 0 -and -not $initialPublications.ContainsKey($initialKey) -and
+                        -not $initialStartupPublications.ContainsKey($initialKey)) -or
                     $runtimeGeneration -le 0 -or
                     $legGeneration -le 0) {
                 $latest.Boundary.taxonomyClass =
@@ -15298,17 +15312,19 @@ function ConvertTo-FileTransferCoordinatorSnapshotRouteFailureSemanticBoundary {
 
 function Test-FileTransferCoordinatorSnapshotFallbackOwnerPublication {
     param($Entry, $Previous, [object[]]$RetiredPublications, [object[]]$RetiredOwners,
-        [object[]]$RuntimeOperations, [object[]]$PublicationOperations, [object[]]$Effects, $AggregateIndex)
+        [object[]]$RuntimeOperations, [object[]]$PublicationOperations, [object[]]$Effects, $AggregateIndex,
+        $InitialPublications, [string]$CatalogVersion)
 
     $boundary = $Entry.Boundary
     $before = $boundary.beforeBoundary
     $after = $boundary.afterBoundary
-    if (-not $Previous.Valid -or $null -eq $Previous.LastTransition -or $null -eq $Entry.RuntimeOwner -or
+    $initialStartup = $boundary.decisionReason -ceq 'post_tuna_fallback_v6_route'
+    if (-not $Previous.Valid -or (-not $initialStartup -and $null -eq $Previous.LastTransition) -or $null -eq $Entry.RuntimeOwner -or
         $RetiredPublications.Count -ne 1 -or $RetiredOwners.Count -ne 1 -or
         $RuntimeOperations.Count -ne 3 -or $PublicationOperations.Count -ne 2 -or
         [string]$boundary.decisionKind -cne 'StartTransfer' -or
         [string]$boundary.decisionStatus -cne 'Accepted' -or
-        [string]$boundary.decisionReason -cne 'state_refresh_received' -or
+        (-not $initialStartup -and [string]$boundary.decisionReason -cne 'state_refresh_received') -or
         [long]$boundary.afterStateGeneration -ne ([long]$boundary.beforeStateGeneration + 1L) -or
         [string]$boundary.beforeStateHash -ceq [string]$boundary.afterStateHash -or
         [string]$before.route -cne 'post_tuna_fallback_v6' -or [long]$before.protocolVersion -ne 6L -or
@@ -15324,7 +15340,24 @@ function Test-FileTransferCoordinatorSnapshotFallbackOwnerPublication {
     $generation = [long]$Previous.Boundary.afterStateGeneration
     $hash = [string]$Previous.Boundary.afterStateHash
     $scope = $Previous.RouteBoundary
-    while ($generation -lt [long]$boundary.beforeStateGeneration) {
+    if ($initialStartup) {
+        if (-not (Test-FileTransferCoordinatorInitialFallbackStartupInterval -Boundary $boundary -Previous $Previous `
+                -AggregateIndex $AggregateIndex -InitialPublications $InitialPublications -CatalogVersion $CatalogVersion)) { return $false }
+        if ($Entry.RuntimeOwner.authorityId -ceq $Previous.RuntimeOwner.authorityId -or
+            $Entry.Operation.authorityId -ceq $Previous.Operation.authorityId -or
+            $Entry.RuntimeOwner.operationGeneration -ne $after.runtimeGeneration -or
+            $Entry.Operation.operationGeneration -ne $after.routePublicationGeneration) { return $false }
+        foreach ($operation in @($boundary.operations)) {
+            $expected = if ($operation.beforeState -ceq 'None') { $after } else { $before }
+            if ($operation.family -cne 'route_runtime' -or
+                -not (Test-FileTransferCoordinatorSnapshotBoundaryTupleEqual $operation.routeRuntime.boundary $expected)) { return $false }
+            foreach ($field in @('authorityId','commandIdentity','commandFingerprint')) {
+                if ([string]::IsNullOrWhiteSpace([string]$operation.$field) -or $operation.$field -ceq '(none)') { return $false }
+            }
+        }
+        $generation=[long]$boundary.beforeStateGeneration; $hash=[string]$boundary.beforeStateHash; $scope=$before
+    }
+    while (-not $initialStartup -and $generation -lt [long]$boundary.beforeStateGeneration) {
         if (-not $stream.Mutations.ContainsKey($generation) -or $stream.Mutations[$generation].Count -ne 1) { return $false }
         $step = $stream.Mutations[$generation][0].Boundary
         if ([long]$step.afterStateGeneration -ne ($generation + 1L) -or $step.beforeStateHash -cne $hash -or
@@ -15371,6 +15404,9 @@ function Test-FileTransferCoordinatorSnapshotFallbackOwnerPublication {
         (Test-FileTransferCoordinatorSnapshotBoundaryEqual -Left $_.routeRuntime.boundary -Right $before)
     })
     if ($attempts.Count -ne 1) { return $false }
+    if ($initialStartup -and @($RuntimeOperations | Where-Object { $_.predecessorAuthorityId -cne '(none)' }).Count -ne 0) {
+        return $false
+    }
     foreach ($operation in $RuntimeOperations) {
         if ([string]$operation.operationKey -cne
                 "route_runtime|runtime_owner|$($operation.authorityId)|$($operation.operationGeneration)|$($operation.operationKind)" -or
@@ -15394,6 +15430,9 @@ function Test-FileTransferCoordinatorSnapshotFallbackOwnerPublication {
         }
     }
     foreach ($publication in $PublicationOperations) {
+        if ($initialStartup -and ($publication.operationKey -cne
+                "route_runtime|route_publication|$($publication.authorityId)|$($publication.operationGeneration)|RoutePublication" -or
+                $publication.routeRuntime.role -cne 'route_publication')) { return $false }
         if ($publication.operationKind -cne 'RoutePublication' -or
             $publication.predecessorAuthorityId -cne '(none)' -or -not $publication.receiptValidated -or
             $publication.receiptStatus -cne 'Accepted' -or
@@ -15415,8 +15454,9 @@ function Test-FileTransferCoordinatorSnapshotFallbackOwnerPublication {
         $_.operationRole -ceq 'fallback_v6_bootstrap' -and $_.operationKind -ceq 'FallbackV6ProofBootstrap' -and
         $_.beforeState -ceq 'Delivered' -and $_.afterState -ceq 'Delivered' -and $_.receiptValidated
     })
-    if ($null -eq $Previous.LastTransition -or $carries.Count -ne 2 -or
-        $terminal.Count -ne 1 -or $bootstrap.Count -ne 1 -or
+    if (($initialStartup -and $carries.Count -ne 0) -or
+        (-not $initialStartup -and ($null -eq $Previous.LastTransition -or $carries.Count -ne 2 -or
+            $terminal.Count -ne 1 -or $bootstrap.Count -ne 1)) -or
         @($boundary.operations | Where-Object {
             $_.family -ceq 'route_runtime' -and $_.operationRole -ceq 'route_commit'
         }).Count -ne 0) { return $false }
@@ -15693,6 +15733,17 @@ function Get-FileTransferCoordinatorSnapshotRouteConsistency {
             }
             $entry.Valid = $validPublication
 
+        }
+        if ($boundary.decisionKind -ceq 'StartTransfer' -and
+            $boundary.decisionReason -ceq 'post_tuna_fallback_v6_route' -and
+            $boundary.beforeBoundary.routePublicationGeneration -eq 1 -and
+            $boundary.beforeBoundary.liveRouteEpoch -eq 0 -and
+            @($boundary.operations | Where-Object {
+                $_.family -ceq 'route_runtime' -and $_.operationRole -ceq 'route_publication' -and
+                $_.beforeState -ceq 'None' -and $_.afterState -ceq 'Published' -and $_.stateApplied
+            }).Count -ne 1) {
+            & $addFinding "initial-startup-publication|$($boundary.boundaryId)" `
+                'snapshot initial fallback startup has no unique successor publication' (& $newBoundaryEvidence $boundary)
         }
     }
 
@@ -15974,7 +16025,8 @@ function Get-FileTransferCoordinatorSnapshotRouteConsistency {
                     (Test-FileTransferCoordinatorSnapshotFallbackOwnerPublication -Entry $entry -Previous $previous `
                         -RetiredPublications $retiredPublications -RetiredOwners $retiredRuntimeOwners `
                         -RuntimeOperations $allRuntimeOwnerOperations -PublicationOperations $allPublicationOperations `
-                        -Effects $effectEvidence -AggregateIndex $routeAggregateIndex)
+                        -Effects $effectEvidence -AggregateIndex $routeAggregateIndex -InitialPublications $initialPublications `
+                        -CatalogVersion (Get-FileTransferCoordinatorSnapshotObjectProperty $Evaluation 'CatalogVersion' ''))
                 $entry.Valid = $entry.SameRouteOwnerSuccessor
                 if (-not $entry.Valid) {
                     & $addFinding "owner-successor|$($entry.Boundary.boundaryId)|$($entry.Operation.operationKey)" `

@@ -96,7 +96,7 @@ function Test-FileTransferCoordinatorReceiverBarrierCatalogCapability {
         $script:FileTransferCoordinatorCheckpointRepairContinuityCatalogVersion,
         $script:FileTransferCoordinatorBootstrapCorrelationCatalogVersion,
         $script:FileTransferCoordinatorBootstrapInitiationCatalogVersion, $script:FileTransferCoordinatorBootstrapCallbackCatalogVersion,
-        $script:FileTransferCoordinatorRepairOwnerCatalogVersion, $script:FileTransferCoordinatorActivationRetryCatalogVersion, $script:FileTransferCoordinatorReceiverPreAdmissionCatalogVersion)
+        $script:FileTransferCoordinatorRepairOwnerCatalogVersion, $script:FileTransferCoordinatorActivationRetryCatalogVersion, $script:FileTransferCoordinatorReceiverPreAdmissionCatalogVersion, $script:FileTransferCoordinatorInitialDataSessionCatalogVersion)
 }
 
 function Test-FileTransferCoordinatorCheckpointRepairContinuityCatalogCapability {
@@ -104,7 +104,7 @@ function Test-FileTransferCoordinatorCheckpointRepairContinuityCatalogCapability
     return $Version -cin @($script:FileTransferCoordinatorCheckpointRepairContinuityCatalogVersion,
         $script:FileTransferCoordinatorBootstrapCorrelationCatalogVersion,
         $script:FileTransferCoordinatorBootstrapInitiationCatalogVersion, $script:FileTransferCoordinatorBootstrapCallbackCatalogVersion,
-        $script:FileTransferCoordinatorRepairOwnerCatalogVersion, $script:FileTransferCoordinatorActivationRetryCatalogVersion, $script:FileTransferCoordinatorReceiverPreAdmissionCatalogVersion)
+        $script:FileTransferCoordinatorRepairOwnerCatalogVersion, $script:FileTransferCoordinatorActivationRetryCatalogVersion, $script:FileTransferCoordinatorReceiverPreAdmissionCatalogVersion, $script:FileTransferCoordinatorInitialDataSessionCatalogVersion)
 }
 
 function Get-FileTransferCoordinatorCheckpointRepairContinuityCatalog {

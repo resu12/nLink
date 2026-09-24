@@ -9,10 +9,10 @@ namespace NLink.Core.FileTransfer;
 public sealed partial class SessionFileTransferService
 {
     private const string CoordinatorSnapshotCatalogVersion =
-        "snapshot-authority-v1-receiver-barrier-v1-checkpoint-repair-continuity-v1-fallback-bootstrap-correlation-v1-fallback-bootstrap-initiation-v1-source-callback-v1-repair-owner-v1-activation-retry-v1-receiver-pre-admission-v1";
+        "snapshot-authority-v1-receiver-barrier-v1-checkpoint-repair-continuity-v1-fallback-bootstrap-correlation-v1-fallback-bootstrap-initiation-v1-source-callback-v1-repair-owner-v1-activation-retry-v1-receiver-pre-admission-v1-initial-data-session-v1";
 
     private const string CoordinatorSnapshotCatalogHash =
-        "17196929ff74bd92c4866ccb8da33de05eb5b22d5436f56488f3a7fd2f4d086b";
+        "90cf0fdafc50d49c866bbb9bdda9097b3306ae5a7fd9d1198b03c02c66ef18ab";
 
     private const string CoordinatorSnapshotEmittedFamilyCoverage =
         "route_runtime,route_transition,runtime_unlock_retry_lifecycle,receive_recovery,fallback_tail_yield,regular_v4_frontier_repair_pressure,responder_probe_handoff";
@@ -3679,6 +3679,13 @@ public sealed partial class SessionFileTransferService
                 CheckpointRepairContinuity = operation.CheckpointRepairContinuity is { } continuity
                     ? CreateCheckpointContinuityEvidence(continuity)
                     : null,
+                InitialDataSessionBinding = operation.InitialDataSessionBinding is { } binding ? binding with
+                {
+                    SourceBoundary = CreateEvidenceBoundary(binding.SourceBoundary),
+                    EffectiveBoundary = CreateEvidenceBoundary(binding.EffectiveBoundary),
+                    RuntimeOwnerFingerprint = EvidenceToken(binding.RuntimeOwnerFingerprint),
+                    PublicationFingerprint = EvidenceToken(binding.PublicationFingerprint),
+                } : null,
                 RepairOwner = operation.RepairOwner is { } owner ? owner with
                 {
                     CoordinatorInstanceId = EvidenceToken(owner.CoordinatorInstanceId),

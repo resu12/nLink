@@ -62,11 +62,17 @@ public sealed class SensitiveDataRedactorCheckpointContinuityTests
     public void CheckpointContinuity_ExactProfileAndOmittedPayloadPreserveExistingSnapshotEvidence()
     {
         foreach (var profile in new[] { "snapshot-authority-v1", "snapshot-authority-v1-receiver-barrier-v1", Profile,
-            Profile + "-fallback-bootstrap-correlation-v1-fallback-bootstrap-initiation-v1-source-callback-v1-repair-owner-v1-activation-retry-v1-receiver-pre-admission-v1" })
+            Profile + "-fallback-bootstrap-correlation-v1-fallback-bootstrap-initiation-v1-source-callback-v1-repair-owner-v1-activation-retry-v1-receiver-pre-admission-v1",
+            Profile + "-fallback-bootstrap-correlation-v1-fallback-bootstrap-initiation-v1-source-callback-v1-repair-owner-v1-activation-retry-v1-receiver-pre-admission-v1-initial-data-session-v1" })
         {
             var line = $"event=filetransfer_coordinator_snapshot_stream_started; snapshot_catalog_version={profile}; coordinator_instance_id={Token}; initial_state_generation=0";
             Assert.Equal(line, SensitiveDataRedactor.Redact(line));
         }
+        var currentProfile = Profile + "-fallback-bootstrap-correlation-v1-fallback-bootstrap-initiation-v1-source-callback-v1-repair-owner-v1-activation-retry-v1-receiver-pre-admission-v1-initial-data-session-v1";
+        var continuity = $"event=filetransfer_v6_frontier_request_deferred; continuity_profile={currentProfile}; secret={Secret}";
+        var projected = SensitiveDataRedactor.Redact(continuity);
+        Assert.Contains($"continuity_profile={currentProfile};", projected, StringComparison.Ordinal);
+        Assert.DoesNotContain(Secret, projected, StringComparison.Ordinal);
         var malformed = SensitiveDataRedactor.Redact($"event=filetransfer_v6_frontier_request_deferred; continuity_profile={Profile}-raw-{Secret}; continuity_receipt_id=fte1-{Secret}");
         Assert.DoesNotContain(Secret, malformed, StringComparison.Ordinal);
         Assert.DoesNotContain($"continuity_profile={Profile}-raw-", malformed, StringComparison.Ordinal);
