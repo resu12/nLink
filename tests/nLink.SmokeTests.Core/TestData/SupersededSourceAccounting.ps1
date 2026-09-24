@@ -23,6 +23,8 @@ Invoke-Expression $definition[0].Extent.Text
 $lines=[IO.File]::ReadAllLines($InputPath)
 $snapshot=Get-FileTransferCoordinatorSnapshotEvaluation -Lines $lines
 Check ($snapshot.ArtifactEvidenceVerdict -ceq 'pass' -and $snapshot.StreamComplete) $snapshot.ArtifactEvidenceFailureReason
+Check ($snapshot.CatalogVersion -ceq $script:FileTransferCoordinatorInitialDataSessionCatalogVersion -and
+    $snapshot.CatalogHash -ceq (Get-FileTransferCoordinatorInitialDataSessionCatalog).Hash) 'Fresh producer must use the exact current catalog.'
 $events=@(Parse $lines)
 $hold=@($events | Where-Object EventName -CEQ 'filetransfer_v6_frontier_request_deferred')[0]
 $index=New-FileTransferStallGraceCurrentSourceIndex -Events $events -SnapshotEvidence $snapshot
@@ -126,7 +128,8 @@ foreach ($poison in @('pause','terminal','data-replacement')) {
 
 # Mutate already validated DTOs only to unit-test fail-closed selection. These
 # copies do not constitute valid producer evidence or acceptance artifacts.
-foreach ($case in @('legacy','incomplete','peer-pair','peer-proof','retry-link','dispatch','responder-link',
+foreach ($case in @('legacy','incomplete','shadow','evidence-failed','catalog-unknown','catalog-hash','family',
+    'peer-pair','peer-proof','retry-link','dispatch','responder-link',
     'local-commit','peer-commit','local-disposition','peer-disposition','local-publication','peer-publication',
     'checkpoint','data','duplicate','source-aba','target-aba')) {
     $copy=Copy-Value $snapshot
@@ -135,6 +138,11 @@ foreach ($case in @('legacy','incomplete','peer-pair','peer-proof','retry-link',
     switch ($case) {
         'legacy' { $copy.CatalogVersion=$script:FileTransferCoordinatorRepairOwnerCatalogVersion }
         'incomplete' { $copy.StreamComplete=$false }
+        'shadow' { $copy.Mode='SnapshotV1Shadow' }
+        'evidence-failed' { $copy.ArtifactEvidenceVerdict='fail' }
+        'catalog-unknown' { $copy.CatalogVersion+='-unknown' }
+        'catalog-hash' { $copy.CatalogHash='invalid' }
+        'family' { $copy.AuthoritativeFamilies=@($copy.AuthoritativeFamilies | Where-Object {$_ -cne 'route_transition'}) }
         'peer-pair' { $copy.__FallbackTailPeerProofBindings=@($copy.__FallbackTailPeerProofBindings | Where-Object CoordinatorInstanceId -CEQ $closure.LocalTarget.CoordinatorInstanceId) }
         'peer-proof' { foreach ($p in $copy.__FallbackTailPeerProofBindings) { if ($p.CoordinatorInstanceId -ceq $closure.PeerTarget.CoordinatorInstanceId) { $p.PeerProofFingerprint='foreign' } } }
         'retry-link' { $copy.__ActivationRetryEvidence=$null }

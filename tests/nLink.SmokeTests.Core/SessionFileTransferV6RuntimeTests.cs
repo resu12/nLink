@@ -2292,11 +2292,16 @@ public sealed class SessionFileTransferV6RuntimeTests : SessionFileTransferServi
     }
 
     [Theory]
-    [InlineData(false)]
-    [InlineData(true)]
+    [InlineData(false, null)]
+    [InlineData(true, null)]
+    [InlineData(false, 0L)]
+    [InlineData(false, 1L)]
+    [InlineData(true, 0L)]
+    [InlineData(true, 1L)]
     [Trait("FileTransferRuntimeSuite", "PostTunaFallbackV6FrontierStallGrace")]
     public async Task V6SparseReceiver_PostTunaFallbackRecentProgressGraceWake_BlockedReceiverStateCannotStarveStallRecheck(
-        bool adoptValueEquivalentCoordinatorState)
+        bool adoptValueEquivalentCoordinatorState,
+        long? deadlineOffsetTicks)
     {
         const string transferId = "transfer_v6_post_fallback_recent_progress_wake";
         const string sessionId = "session_v6_post_fallback_recent_progress_wake";
@@ -2306,7 +2311,7 @@ public sealed class SessionFileTransferV6RuntimeTests : SessionFileTransferServi
         SessionFileTransferService.V6PostTunaFallbackFrontierRequestStallGraceOverrideForTests =
             TimeSpan.FromMilliseconds(200);
         SessionFileTransferService.V6RegularNknFrontierRequestProgressGraceOverrideForTests =
-            TimeSpan.FromMilliseconds(adoptValueEquivalentCoordinatorState ? 1000 : 200);
+            TimeSpan.FromMilliseconds(adoptValueEquivalentCoordinatorState || deadlineOffsetTicks is not null ? 1000 : 200);
         var logStart = GetOperationalLogLength();
         var payload = Enumerable.Range(0, 64 * chunkSize).Select(static index => (byte)(index % 251)).ToArray();
         var sha256 = Convert.ToBase64String(new byte[FileTransferProtocol.Sha256LengthBytes]);
@@ -2402,6 +2407,11 @@ public sealed class SessionFileTransferV6RuntimeTests : SessionFileTransferServi
             if (adoptValueEquivalentCoordinatorState)
             {
                 AssertInboundGraceWakeSurvivesCoordinatorAdoption(receiver, recentProgress: true);
+            }
+
+            if (deadlineOffsetTicks is { } offset)
+            {
+                AssertRecentProgressWakeSurvivesElapsedUnchangedRefresh(receiver, offset);
             }
 
             await Task.Delay(300);
@@ -4713,6 +4723,84 @@ public sealed class SessionFileTransferV6RuntimeTests : SessionFileTransferServi
         }
 
         return count;
+    }
+
+    private static void AssertRecentProgressWakeSurvivesElapsedUnchangedRefresh(
+        SessionFileTransferService receiver,
+        long deadlineOffsetTicks)
+    {
+        lock (GetPrivateField(receiver, "gate")!)
+        {
+            var context = GetPrivateField(receiver, "inboundTransfer")!;
+            var wake = Property(context, "CurrentV6FrontierRecentProgressGraceWake")!;
+            Assert.NotNull(wake);
+            var due = Assert.IsType<DateTimeOffset>(Property(wake, "DueUtc"));
+            var generation = Property(context, "V6FrontierRecentProgressGraceWakeScheduledGeneration");
+            var lastGeneration = Property(context, "LastV6FrontierRecentProgressGraceWakeGeneration");
+            Assert.True(DateTimeOffset.UtcNow < due, "The fixture must retain control before the scheduled callback.");
+
+            // Exercise the deadline race deterministically through the production
+            // helper's clock input; the real callback and blocked send continue below.
+            var refresh = typeof(SessionFileTransferService).GetMethod(
+                "ArmOrClearInboundV6FrontierRecentProgressGraceWakeLocked",
+                BindingFlags.Static | BindingFlags.NonPublic)!;
+            refresh.Invoke(null, [context, due.AddTicks(-1)]);
+            Assert.Same(wake, Property(context, "CurrentV6FrontierRecentProgressGraceWake"));
+            refresh.Invoke(null, [context, due.AddTicks(deadlineOffsetTicks)]);
+            Assert.Same(wake, Property(context, "CurrentV6FrontierRecentProgressGraceWake"));
+            Assert.Equal(generation, Property(context, "V6FrontierRecentProgressGraceWakeScheduledGeneration"));
+            Assert.Equal(lastGeneration, Property(context, "LastV6FrontierRecentProgressGraceWakeGeneration"));
+            Assert.Equal(due, Property(wake, "DueUtc"));
+            object?[] arguments = [context, wake, null];
+            Assert.True(Assert.IsType<bool>(typeof(SessionFileTransferService).GetMethod(
+                "IsInboundV6FrontierRecentProgressGraceWakeCurrentLocked",
+                BindingFlags.Instance | BindingFlags.NonPublic)!.Invoke(receiver, arguments)));
+            Assert.Equal("current", arguments[2]);
+
+            // Changed source/progress cannot borrow this wake or arm a new one
+            // after expiry. Mutations here are rejection-only fixture inputs.
+            var owner = Assert.IsType<RuntimeOwnerToken>(Property(context, "CurrentRuntimeOwner"));
+            var publication = Assert.IsType<RoutePublicationToken>(Property(context, "CurrentRoutePublicationToken"));
+            var changes = new (string Name, object? Value)[]
+            {
+                ("NextChunkIndex", Assert.IsType<int>(Property(context, "NextChunkIndex")) + 1),
+                ("PullHighestReceivedChunkIndex", Assert.IsType<int>(Property(context, "PullHighestReceivedChunkIndex")) + 1),
+                ("PullLastCommittedProgressUtc", Assert.IsType<DateTimeOffset>(Property(context, "PullLastCommittedProgressUtc")).AddTicks(1)),
+                ("CurrentRuntimeOwner", owner with { RuntimeGeneration = owner.RuntimeGeneration + 1 }),
+                ("CurrentRoutePublicationToken", publication with { PublicationGeneration = publication.PublicationGeneration + 1 }),
+                ("TerminalGeneration", Assert.IsType<int>(Property(context, "TerminalGeneration")) + 1),
+                ("DataSessionGeneration", Assert.IsType<long>(Property(context, "DataSessionGeneration")) + 1),
+                ("DataSession", null),
+            };
+            foreach (var (name, value) in changes)
+            {
+                var previous = Property(context, name);
+                try
+                {
+                    SetPrivateProperty(context, name, value);
+                    refresh.Invoke(null, [context, due.AddSeconds(1)]);
+                    Assert.Null(Property(context, "CurrentV6FrontierRecentProgressGraceWake"));
+                    Assert.Equal(0L, Property(context, "V6FrontierRecentProgressGraceWakeScheduledGeneration"));
+                    Assert.Equal(lastGeneration, Property(context, "LastV6FrontierRecentProgressGraceWakeGeneration"));
+                }
+                finally
+                {
+                    SetPrivateProperty(context, name, previous);
+                    SetPrivateProperty(context, "CurrentV6FrontierRecentProgressGraceWake", wake);
+                    SetPrivateProperty(context, "V6FrontierRecentProgressGraceWakeScheduledGeneration", generation);
+                }
+            }
+            SetPrivateProperty(context, "CurrentV6FrontierRecentProgressGraceWake", null);
+            SetPrivateProperty(context, "V6FrontierRecentProgressGraceWakeScheduledGeneration", 0L);
+            refresh.Invoke(null, [context, due.AddTicks(1)]);
+            Assert.Null(Property(context, "CurrentV6FrontierRecentProgressGraceWake"));
+            Assert.Equal(lastGeneration, Property(context, "LastV6FrontierRecentProgressGraceWakeGeneration"));
+            SetPrivateProperty(context, "CurrentV6FrontierRecentProgressGraceWake", wake);
+            SetPrivateProperty(context, "V6FrontierRecentProgressGraceWakeScheduledGeneration", generation);
+        }
+
+        static object? Property(object target, string name)
+            => target.GetType().GetProperty(name, BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)!.GetValue(target);
     }
 
     private static void StartInboundCoordinatorEpochForGraceWakeTest(SessionFileTransferService receiver)

@@ -1719,7 +1719,8 @@ function Get-FileTransferStallGraceUnresolvedDiagnostic {
     }
     $cache = $Index['__StallGraceDiagnosticRouteIndex']
     $exactRepairOwner = (P $cache.Snapshot 'CatalogVersion') -cin @($script:FileTransferCoordinatorRepairOwnerCatalogVersion,
-        $script:FileTransferCoordinatorActivationRetryCatalogVersion, $script:FileTransferCoordinatorReceiverPreAdmissionCatalogVersion)
+        $script:FileTransferCoordinatorActivationRetryCatalogVersion, $script:FileTransferCoordinatorReceiverPreAdmissionCatalogVersion,
+        $script:FileTransferCoordinatorInitialDataSessionCatalogVersion)
     $sourcePublication = $null
     function BoundRepair($Event) {
         $binding = Resolve-FileTransferRepairOwnerEvidence $cache.Snapshot $Event

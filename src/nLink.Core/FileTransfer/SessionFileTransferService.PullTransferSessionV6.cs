@@ -7963,7 +7963,6 @@ public sealed partial class SessionFileTransferService
         if (!IsStrictFallbackFrontierRuntime(context) ||
             !HasInboundV6SparseFrontierGapLocked(context) ||
             context.PullLastCommittedProgressUtc is not { } committedProgressUtc ||
-            now >= committedProgressUtc + CurrentV6RegularNknFrontierRequestProgressGrace ||
             context.CurrentRoutePublicationToken is not { IsDefault: false } publication ||
             context.CurrentRuntimeOwner is not { IsDefault: false } runtimeOwner ||
             context.CurrentTransferLeg is not { } leg ||
@@ -8006,6 +8005,14 @@ public sealed partial class SessionFileTransferService
             ReferenceEquals(current.DataSession, dataSession) &&
             current.DataSessionGeneration == context.DataSessionGeneration)
         {
+            return;
+        }
+
+        // An unchanged wake owns its due recheck. A concurrent sparse write or
+        // state send must not retire it merely because the deadline elapsed.
+        if (now >= committedProgressUtc + CurrentV6RegularNknFrontierRequestProgressGrace)
+        {
+            ResetInboundV6FrontierRecentProgressGraceWakeLocked(context);
             return;
         }
 
