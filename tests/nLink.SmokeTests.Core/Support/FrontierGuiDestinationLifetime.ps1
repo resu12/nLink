@@ -103,6 +103,17 @@ function Test-GuiDestinationLifetime {
         [void]$script:signals['destination.send'].Set()
         if(-not $script:signals['destination.done'].WaitOne(15000)) {throw 'Synthetic receiver handoff deadline'}
     }
+    if($script:destinationCase -cin @('valid','cancel','deadline','reject','dispose')) {
+        $tokenMethod=[NLink.Tools.LocalGuiWriterRequest+CanonicalAttemptDestination].GetMethod('TerminalToken',[Reflection.BindingFlags]'Static,NonPublic')
+        $session=$tokenMethod.Invoke($null,@('synthetic-session'))
+        $transfer=$tokenMethod.Invoke($null,@('synthetic-transfer'))
+        $deadline=[Threading.CancellationTokenSource]::new(5000)
+        try {$measured=$Attempt.TryMeasureDestination($session,$transfer,$deadline.Token)} finally {$deadline.Dispose()}
+        if(($null -ne $measured) -ne ($script:destinationCase -ceq 'valid')) {throw 'Armed destination measurement acceptance mismatch'}
+        if($null -ne $measured -and ($measured.ByteCount -ne 268435456 -or
+            $measured.Sha256 -cne $script:testCanonicalSource.Sha256)) {throw 'Armed destination measured wrong bytes'}
+        'armed-terminal-measurement='+$script:destinationCase
+    }
 }
 $writer=(Get-Item Function:Write-FileTransferGuiLogLedgerEvidence).Definition
 $writer=Replace-AttemptSeam $writer '$script:reportCount=@($FrontierReports | Where-Object {$null -ne $_}).Count' @'

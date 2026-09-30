@@ -55,7 +55,17 @@ if($env:NLINK_TEST_DESTINATION_RETIRE) {
     else {throw 'Unknown destination retirement'}
     if($attemptDestination.IsCurrent -or $attemptDestination.ByteCount -ne 0 -or
         $null -ne $attemptDestination.FileIdentity -or $null -ne $attemptDestination.Sha256Base64) {throw 'Retired custody left destination current'}
+    if($null -ne $attemptTicket.TryMeasureDestination('(unused)','(unused)',[Threading.CancellationToken]::None)) {
+        throw 'Retired source/attempt measured destination'
+    }
     'canonical-destination-retired='+$env:NLINK_TEST_DESTINATION_RETIRE
+}
+if($env:NLINK_TEST_TERMINAL_MEASUREMENT) {
+    $measurementPath=@(Get-ChildItem -LiteralPath (Join-Path $Directory 'native-received') -Recurse -File -Filter '*.bin')
+    if($measurementPath.Count -ne 1) {throw 'Measurement destination inventory mismatch'}
+    . (Join-Path $RepoRoot 'tests/nLink.SmokeTests.Core/Support/FrontierTerminalMeasurement.ps1') `
+        -Attempt $attemptTicket -Destination $attemptDestination -ExpectedHash $attemptSource.Sha256 `
+        -Path $measurementPath[0].FullName -Fault $env:NLINK_TEST_TERMINAL_MEASUREMENT
 }
 $attemptDestination.Dispose()
 if($attemptDestination.IsCurrent) {throw 'Retired destination current'}

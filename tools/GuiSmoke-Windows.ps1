@@ -2591,6 +2591,56 @@ function Get-FileTransferTunaSourceHash {
     return Get-FileSha256Hex -Path $Path
 }
 
+function Get-FileTransferTunaTerminalIntegrity {
+    param(
+        [Parameter(Mandatory = $true)]$Inbound,
+        [Parameter(Mandatory = $true)]$Outbound,
+        [AllowEmptyString()][string]$Path,
+        [Parameter(Mandatory = $true)][long]$PayloadSizeBytes,
+        [Parameter(Mandatory = $true)][string]$ExpectedHash,
+        [AllowNull()]$CanonicalAttempt = $null,
+        [int]$TimeoutMs = 75000
+    )
+    Set-Variable -Name CanonicalAttempt -Option Private
+    $result = [pscustomobject]@{
+        InboundState = Get-GuiSmokeFieldValue -Fields $Inbound -Name 'state' -Default '(unknown)'
+        OutboundState = Get-GuiSmokeFieldValue -Fields $Outbound -Name 'state' -Default '(unknown)'
+        InboundError = Get-GuiSmokeFieldValue -Fields $Inbound -Name 'error_code' -Default '(none)'
+        OutboundError = Get-GuiSmokeFieldValue -Fields $Outbound -Name 'error_code' -Default '(none)'
+        Completed = $false; IntegrityOk = $false
+        ActualHash = '(none)'; SavedSize = -1L; MeasurementError = ''
+    }
+    $result.Completed = $result.InboundState -eq 'Completed' -and $result.OutboundState -eq 'Completed' -and
+        $result.InboundError -eq '(none)' -and $result.OutboundError -eq '(none)'
+    $deadline = $null
+    try {
+        if ($null -ne $CanonicalAttempt) {
+            $session = Get-GuiSmokeFieldValue -Fields $Inbound -Name 'terminal_session_id' -Default ''
+            $transfer = Get-GuiSmokeFieldValue -Fields $Inbound -Name 'terminal_transfer_id' -Default ''
+            if ([string]::IsNullOrWhiteSpace($session) -or [string]::IsNullOrWhiteSpace($transfer) -or
+                $session -cne (Get-GuiSmokeFieldValue -Fields $Outbound -Name 'terminal_session_id' -Default '') -or
+                $transfer -cne (Get-GuiSmokeFieldValue -Fields $Outbound -Name 'terminal_transfer_id' -Default '')) {
+                throw 'terminal_destination_scope_mismatch'
+            }
+            $deadline = [Threading.CancellationTokenSource]::new((Get-GuiSmokeScenarioRemainingTimeoutMs -DefaultTimeoutMs $TimeoutMs))
+            $measurement = $CanonicalAttempt.TryMeasureDestination($session, $transfer, $deadline.Token)
+            if ($null -eq $measurement) { throw 'terminal_destination_measurement_unavailable' }
+            $result.ActualHash = $measurement.Sha256
+            $result.SavedSize = $measurement.ByteCount
+        }
+        elseif (-not [string]::IsNullOrWhiteSpace($Path) -and (Test-Path -LiteralPath $Path -PathType Leaf)) {
+            $result.ActualHash = Get-FileSha256Hex -Path $Path
+            $result.SavedSize = (Get-Item -LiteralPath $Path).Length
+        }
+        else { throw 'terminal_destination_path_unavailable' }
+    }
+    catch { $result.MeasurementError = $_.Exception.Message }
+    finally { if ($null -ne $deadline) { $deadline.Dispose() } }
+    $result.IntegrityOk = $result.Completed -and [string]::IsNullOrWhiteSpace($result.MeasurementError) -and
+        $result.SavedSize -eq $PayloadSizeBytes -and $result.ActualHash -eq $ExpectedHash
+    return $result
+}
+
 function Get-GuiSmokeStringHashPrefix {
     param(
         [string]$Value,
@@ -37688,19 +37738,17 @@ function Invoke-FileTransferTunaHandoffFallbackCycle {
             -NotBeforeUtc $cycleStartedUtc
     }
 
-    $actualHash = '(none)'
-    $savedSize = -1L
-    if (-not [string]::IsNullOrWhiteSpace($resolvedSavedPath) -and (Test-Path -LiteralPath $resolvedSavedPath -PathType Leaf)) {
-        $actualHash = Get-FileSha256Hex -Path $resolvedSavedPath
-        $savedSize = (Get-Item -LiteralPath $resolvedSavedPath).Length
-    }
-
-    $inboundState = Get-GuiSmokeFieldValue -Fields $inbound -Name 'state' -Default '(unknown)'
-    $outboundState = Get-GuiSmokeFieldValue -Fields $outbound -Name 'state' -Default '(unknown)'
-    $inboundError = Get-GuiSmokeFieldValue -Fields $inbound -Name 'error_code' -Default '(none)'
-    $outboundError = Get-GuiSmokeFieldValue -Fields $outbound -Name 'error_code' -Default '(none)'
-    $completed = $inboundState -eq 'Completed' -and $outboundState -eq 'Completed' -and $inboundError -eq '(none)' -and $outboundError -eq '(none)'
-    $integrityOk = $completed -and $savedSize -eq $PayloadSizeBytes -and $actualHash -eq $expectedHash
+    $terminalIntegrity = Get-FileTransferTunaTerminalIntegrity -Inbound $inbound -Outbound $outbound `
+        -Path $resolvedSavedPath -PayloadSizeBytes $PayloadSizeBytes -ExpectedHash $expectedHash `
+        -CanonicalAttempt $CanonicalAttempt -TimeoutMs $TimeoutMs
+    $actualHash = $terminalIntegrity.ActualHash
+    $savedSize = $terminalIntegrity.SavedSize
+    $inboundState = $terminalIntegrity.InboundState
+    $outboundState = $terminalIntegrity.OutboundState
+    $inboundError = $terminalIntegrity.InboundError
+    $outboundError = $terminalIntegrity.OutboundError
+    $completed = $terminalIntegrity.Completed
+    $integrityOk = $terminalIntegrity.IntegrityOk
     if ($RouteMode -eq 'v4-restart-v6-fallback') {
         $observedEvidenceLines.Add(("[{0}] [INFO] [GuiSmoke] event=filetransfer_tuna_gui_phase_marker; phase=measured_post_tuna_fallback_v6_terminal; inbound_state={1}; outbound_state={2}; inbound_error={3}; outbound_error={4}; integrity_ok={5}" -f ([datetime]::UtcNow.ToString('yyyy-MM-dd HH:mm:ssZ')), $inboundState, $outboundState, $inboundError, $outboundError, ($(if ($integrityOk) { 1 } else { 0 })))) | Out-Null
     }
@@ -37844,8 +37892,9 @@ function Invoke-FileTransferTunaHandoffFallbackCycle {
         }
         completed = $completed
         integrityOk = $integrityOk
-        failurePhase = if ($liveSwitchOffTerminalCompletedBeforeFault) { 'completed_before_fault_injection' } else { 'none' }
-        failureReason = if ($liveSwitchOffTerminalCompletedBeforeFault) { 'transfer_completed_before_fault_injection' } else { 'none' }
+        failurePhase = if ($terminalIntegrity.MeasurementError) { 'terminal_integrity_measurement' } elseif ($liveSwitchOffTerminalCompletedBeforeFault) { 'completed_before_fault_injection' } else { 'none' }
+        failureReason = if ($terminalIntegrity.MeasurementError) { 'terminal_destination_measurement_failed' } elseif ($liveSwitchOffTerminalCompletedBeforeFault) { 'transfer_completed_before_fault_injection' } else { 'none' }
+        integrityMeasurementError = $terminalIntegrity.MeasurementError
         inboundState = $inboundState
         outboundState = $outboundState
         inboundErrorCode = $inboundError
@@ -37902,14 +37951,15 @@ function Invoke-FileTransferTunaHandoffFallbackCycle {
     Update-FileTransferGuiEvidenceFinalizationStage -Stage 'scenario_summary_persisted'
 
     if (-not $integrityOk) {
-        throw ("Tuna GUI file-transfer cycle failed terminal/integrity check: transfer_id={0}; inbound_state={1}; outbound_state={2}; inbound_error={3}; outbound_error={4}; saved_size={5}; expected_size={6}" -f `
+        throw ("Tuna GUI file-transfer cycle failed terminal/integrity check: transfer_id={0}; inbound_state={1}; outbound_state={2}; inbound_error={3}; outbound_error={4}; saved_size={5}; expected_size={6}; measurement_error={7}" -f `
             $terminal.TransferId,
             $inboundState,
             $outboundState,
             $inboundError,
             $outboundError,
             $savedSize,
-            $PayloadSizeBytes)
+            $PayloadSizeBytes,
+            $terminalIntegrity.MeasurementError)
     }
 
     $secondTransferProofOk = $false

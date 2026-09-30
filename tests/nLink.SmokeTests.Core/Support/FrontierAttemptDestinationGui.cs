@@ -37,6 +37,17 @@ namespace NLink.Tools
                 if (destinationFault == "bad-ack") acknowledgment[0] ^= 1;
             }
         }
+
+        public sealed partial class CanonicalAttemptDestination
+        {
+            internal Action MeasurementChunkForTest;
+            partial void ObserveMeasurementChunk()
+            {
+                var callback = MeasurementChunkForTest;
+                MeasurementChunkForTest = null;
+                if (callback != null) callback();
+            }
+        }
     }
 }
 #endif

@@ -81,6 +81,29 @@ namespace NLink.Tools
                 catch (ObjectDisposedException) { }
             }
 
+            // Measurement only: neither adoption nor this result grants route or
+            // publication authority. The caller supplies its remaining deadline.
+            public DestinationMeasurement TryMeasureDestination(string terminalSession, string terminalTransfer,
+                CancellationToken token)
+            {
+                if (token.IsCancellationRequested || !IsCurrent) return null;
+                try
+                {
+                    Task<CanonicalAttemptDestination> pending;
+                    lock (rolesSync) { pending = destinationWaitTask; }
+                    using (token.Register(CancelDestinationAdoption))
+                    {
+                        if (pending != null) pending.Wait(token);
+                        CanonicalAttemptDestination current;
+                        lock (rolesSync) { current = destination; }
+                        return current == null ? null : current.Measure(terminalSession, terminalTransfer, token);
+                    }
+                }
+                catch (OperationCanceledException) { return null; }
+                catch (ObjectDisposedException) { return null; }
+                catch (IOException) { return null; }
+            }
+
             private string DestinationExpectedHash(FrontierAppRequest request,
                 CanonicalAttemptSource expectedSource, CancellationToken cancellationToken)
             {
@@ -209,6 +232,14 @@ namespace NLink.Tools
             partial void ValidateDestinationAssociation(CanonicalAttemptDestination candidate, ref bool current);
         }
 
+        public sealed class DestinationMeasurement
+        {
+            internal DestinationMeasurement(long bytes, byte[] hash)
+            { ByteCount = bytes; Sha256 = BitConverter.ToString(hash).Replace("-", "").ToLowerInvariant(); }
+            public long ByteCount { get; private set; }
+            public string Sha256 { get; private set; }
+        }
+
         // Provisional GUI custody only. Parent/analyzer adoption is not supplied.
         public sealed partial class CanonicalAttemptDestination : IDisposable
         {
@@ -242,27 +273,48 @@ namespace NLink.Tools
             }
             internal bool VerifyHash(CancellationToken token)
             {
+                var measured = ReadHash(token, false);
+                return measured != null && Convert.ToBase64String(measured) == hash;
+            }
+            internal DestinationMeasurement Measure(string terminalSession, string terminalTransfer, CancellationToken token)
+            {
+                if (token.IsCancellationRequested || !IsCurrent ||
+                    terminalSession != TerminalToken(session) || terminalTransfer != TerminalToken(transfer)) return null;
+                var measured = ReadHash(token, true);
+                return measured != null && !token.IsCancellationRequested && IsCurrent
+                    ? new DestinationMeasurement(bytes, measured) : null;
+            }
+            private static string TerminalToken(string value)
+            {
+                using (var sha = SHA256.Create())
+                    return "fte1-" + BitConverter.ToString(sha.ComputeHash(Encoding.UTF8.GetBytes(value)))
+                        .Replace("-", "").ToLowerInvariant().Substring(0, 24);
+            }
+            partial void ObserveMeasurementChunk();
+            private byte[] ReadHash(CancellationToken token, bool measurement)
+            {
                 IntPtr map = IntPtr.Zero, view = IntPtr.Zero;
                 try
                 {
-                    if (bytes <= 0 || bytes > 268435456 || !MatchesFile()) return false;
+                    if (bytes <= 0 || bytes > 268435456 || !MatchesFile()) return null;
                     map = CreateFileMapping(file, IntPtr.Zero, 2, 0, 0, null);
-                    if (map == IntPtr.Zero) return false;
+                    if (map == IntPtr.Zero) return null;
                     view = MapViewOfFile(map, 4, 0, 0, new UIntPtr((ulong)bytes));
-                    if (view == IntPtr.Zero) return false;
+                    if (view == IntPtr.Zero) return null;
                     using (var sha = SHA256.Create())
                     {
                         var buffer = new byte[65536];
                         for (long offset = 0; offset < bytes; offset += buffer.Length)
                         {
                             token.ThrowIfCancellationRequested();
-                            if (!owner.IsCurrent || !MatchesFile()) return false;
+                            if (!owner.IsCurrent || !MatchesFile()) return null;
                             int count = (int)Math.Min(buffer.Length, bytes - offset);
                             Marshal.Copy(new IntPtr(view.ToInt64() + offset), buffer, 0, count);
                             sha.TransformBlock(buffer, 0, count, buffer, 0);
+                            if (measurement) ObserveMeasurementChunk();
                         }
                         sha.TransformFinalBlock(new byte[0], 0, 0);
-                        return MatchesFile() && Convert.ToBase64String(sha.Hash) == hash;
+                        return !token.IsCancellationRequested && MatchesFile() ? sha.Hash : null;
                     }
                 }
                 finally { if (view != IntPtr.Zero) UnmapViewOfFile(view); if (map != IntPtr.Zero) CloseHandle(map); }
