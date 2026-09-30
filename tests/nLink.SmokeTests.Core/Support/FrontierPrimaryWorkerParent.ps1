@@ -1,4 +1,6 @@
 $workerCase=$primaryCase.Substring('worker-'.Length)
+$sourceDiagnostics=$workerCase.StartsWith('source-diagnostic-',[StringComparison]::Ordinal)
+if($sourceDiagnostics) {$workerCase='source-'+$workerCase.Substring('source-diagnostic-'.Length)}
 $piping=$workerCase.StartsWith('join-pipes-',[StringComparison]::Ordinal); $primaryOutput=$null
 $nativeProcess=$null; $offerMap=$null; $offerView=$null; $factsMap=$null; $factsView=$null; $signals=@{}
 $endpoint=$primary.Name+'.frontier-primary-v1.files-v1'
@@ -8,12 +10,15 @@ try {
     $start.UseShellExecute=$false; $start.CreateNoWindow=$true; $start.RedirectStandardOutput=$true; $start.RedirectStandardError=$true
     $script=Join-Path $RepoRoot 'tests/nLink.SmokeTests.Core/Support/FrontierPrimaryWorker.ps1'
     if($workerCase.StartsWith('source-',[StringComparison]::Ordinal)) {$script=Join-Path $RepoRoot 'tests/nLink.SmokeTests.Core/Support/FrontierPrimarySource.ps1'}
+    if($workerCase.StartsWith('read-validation-',[StringComparison]::Ordinal)) {$script=Join-Path $RepoRoot 'tests/nLink.SmokeTests.Core/Support/FrontierPrimaryReadValidation.ps1'}
+    if($workerCase.StartsWith('origin-batch-',[StringComparison]::Ordinal)) {$script=Join-Path $RepoRoot 'tests/nLink.SmokeTests.Core/Support/FrontierPrimaryOrigins.ps1'}
     if($workerCase.StartsWith('evaluations-',[StringComparison]::Ordinal)) {$script=Join-Path $RepoRoot 'tests/nLink.SmokeTests.Core/Support/FrontierPrimaryEvaluations.ps1'}
     if($workerCase.StartsWith('payloads-',[StringComparison]::Ordinal)) {$script=Join-Path $RepoRoot 'tests/nLink.SmokeTests.Core/Support/FrontierPrimaryPayloads.ps1'}
     if($workerCase.StartsWith('witnesses-',[StringComparison]::Ordinal)) {$script=Join-Path $RepoRoot 'tests/nLink.SmokeTests.Core/Support/FrontierPrimaryWitnesses.ps1'}
     if($workerCase.StartsWith('join-',[StringComparison]::Ordinal)) {$script=Join-Path $RepoRoot 'tests/nLink.SmokeTests.Core/Support/FrontierPrimaryJoin.ps1'}
     $arguments=@('-NoProfile','-ExecutionPolicy','Bypass','-File',$script,'-RepoRoot',$RepoRoot,'-Name',$primary.Name,
         '-RequestId',$primary.RequestId.ToString('D'),'-SourcePath',$completion.Outputs[3].Path,'-Case',$workerCase)
+    if($sourceDiagnostics) {$arguments+='-SourceDiagnostics'}
     if($workerCase.StartsWith('join-pipes-terminal-',[StringComparison]::Ordinal)) {$arguments+=@('-TerminalDirectory',$Directory)}
     $diagnosticCase=Get-Variable rendezvousCase -ValueOnly -ErrorAction SilentlyContinue
     if($diagnosticCase) {$arguments+=@('-RendezvousCase',$diagnosticCase)}

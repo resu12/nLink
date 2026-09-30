@@ -1,4 +1,6 @@
 using System.IO;
+using Microsoft.Win32.SafeHandles;
+using NLink.Core.SessionSecurity;
 
 namespace NLink.Core.FileTransfer;
 
@@ -10,6 +12,8 @@ public delegate Task<FileTransferReceiveDestination> FileTransferWriteDestinatio
 
 public sealed class FileTransferReceiveDestination : IDisposable, IAsyncDisposable
 {
+    private readonly FileTransferReceiveDestination original;
+    private FileTransferWriteHandle? guardHandle;
     private readonly Func<CancellationToken, Task>? finalizeAsync;
     private readonly Action? dispose;
     private readonly Func<ValueTask>? disposeAsync;
@@ -23,6 +27,7 @@ public sealed class FileTransferReceiveDestination : IDisposable, IAsyncDisposab
         string? finalPath = null,
         string? safeFileName = null)
     {
+        original = this;
         Stream = stream ?? throw new ArgumentNullException(nameof(stream));
         this.finalizeAsync = finalizeAsync;
         this.dispose = dispose;
@@ -46,6 +51,20 @@ public sealed class FileTransferReceiveDestination : IDisposable, IAsyncDisposab
 
     public static FileTransferReceiveDestination FromStream(Stream stream)
         => new(stream);
+
+    internal static FileTransferReceiveDestination FromGuardOwnedHandle(FileTransferWriteHandle handle)
+        => new(handle.Stream, handle.FinalizeAsync, handle.Dispose, handle.DisposeAsync,
+            handle.Plan.FinalPath, handle.Plan.SafeFileName) { guardHandle = handle };
+
+    internal bool HasGuardOwnedHandle => ReferenceEquals(original, this) && guardHandle is not null;
+
+    internal SafeFileHandle? TryTakeFinalizedNativeRead()
+        => HasGuardOwnedHandle && finalized ? guardHandle!.TryTakeFinalizedWindowsRead() : null;
+
+    internal void ReleaseFinalizedNativeRead()
+    {
+        if (HasGuardOwnedHandle && finalized) guardHandle!.ReleaseFinalizedWindowsRead();
+    }
 
     public async Task FinalizeAsync(CancellationToken ct)
     {

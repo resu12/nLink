@@ -1,12 +1,70 @@
 Set-StrictMode -Version Latest
 . (Join-Path $PSScriptRoot 'LocalPublicationRows.ps1')
 
+# Read-only diagnostic projection. Never repairs missing scope or changes a row.
+function Read-FileTransferNativeFrontierScope {
+    param([string]$Line,$Fields)
+    $result=[pscustomobject]@{Session='';Transfer='';Error='native_frontier_scope_unavailable'}
+    if($Line.Contains("`r") -or $Line.Contains("`n")) {$result.Error='native_frontier_scope_invalid'; return $result}
+    $counts=@{}
+    foreach($name in @('session_id','transfer_id','frontier_scope_session_id','frontier_scope_transfer_id')) {
+        $counts[$name]=[regex]::Matches($Line,'(?i)(?:^|;)\s*'+$name+'\s*=').Count
+        if($counts[$name] -gt 1) {$result.Error='native_frontier_duplicate_scope'; return $result}
+    }
+    $projected=$counts.frontier_scope_session_id -gt 0 -or $counts.frontier_scope_transfer_id -gt 0
+    if($projected) {
+        foreach($name in @('frontier_scope_session_id','frontier_scope_transfer_id')) {
+            if($counts[$name] -ne 1 -or [string]$Fields[$name] -cnotmatch '\Afte1-[a-f0-9]{24}\z') {
+                $result.Error='native_frontier_scope_invalid'; return $result
+            }
+        }
+    }
+    foreach($pair in @(@('session','Session'),@('transfer','Transfer'))) {
+        $key=$pair[0]+'_id'; $raw=[string]$Fields[$key]
+        if($counts[$key] -ne 1 -or [string]::IsNullOrWhiteSpace($raw) -or $raw -ceq '(none)') {return $result}
+        $redacted=$raw -ceq '[redacted]' -or ($pair[0] -ceq 'session' -and $raw -ceq 'sess_[redacted]')
+        if($raw.Contains('[redacted]') -and (-not $projected -or -not $redacted)) {return $result}
+        $token=if($projected) {[string]$Fields['frontier_scope_'+$key]} else {ConvertTo-FileTransferCoordinatorEvidenceToken $raw}
+        if($projected -and -not $redacted -and (ConvertTo-FileTransferCoordinatorEvidenceToken $raw) -cne $token) {
+            $result.Error='native_frontier_scope_conflict'; return $result
+        }
+        $result.($pair[1])=$token
+    }
+    $result.Error=''; return $result
+}
+
+# Resolve only this row's diagnostic identity; callers decide whether it is
+# relevant. Unrelated/coordinator rows must not acquire new parsing obligations.
+function Read-FileTransferNativeFrontierDataSession {
+    param([string]$Line,$Fields)
+    $rawCount=[regex]::Matches($Line,'(?i)(?:^|;)\s*data_session_identity\s*=').Count
+    $projectedCount=[regex]::Matches($Line,'(?i)(?:^|;)\s*frontier_scope_data_session_identity\s*=').Count
+    $result=[pscustomobject]@{Token='';Present=($rawCount -gt 0 -or $projectedCount -gt 0);
+        Projected=($projectedCount -gt 0);Error='native_frontier_data_session_unavailable'}
+    if($Line.Contains("`r") -or $Line.Contains("`n")) {$result.Error='native_frontier_data_session_invalid'; return $result}
+    if($rawCount -gt 1 -or $projectedCount -gt 1) {$result.Error='native_frontier_duplicate_data_session'; return $result}
+    $projected=[string]$Fields['frontier_scope_data_session_identity']
+    if($result.Projected -and $projected -cnotmatch '\Afte1-[a-f0-9]{24}\z') {
+        $result.Error='native_frontier_data_session_invalid'; return $result
+    }
+    $raw=[string]$Fields['data_session_identity']
+    if($rawCount -ne 1 -or [string]::IsNullOrWhiteSpace($raw) -or $raw -ceq '(none)') {return $result}
+    $redacted=$raw -cmatch '\A\[redacted\](?::[0-9]+)?\z'
+    if($raw.Contains('[redacted]') -and (-not $result.Projected -or -not $redacted)) {return $result}
+    $token=if($result.Projected) {$projected} else {ConvertTo-FileTransferCoordinatorEvidenceToken $raw}
+    if($result.Projected -and -not $redacted -and (ConvertTo-FileTransferCoordinatorEvidenceToken $raw) -cne $token) {
+        $result.Error='native_frontier_data_session_conflict'; return $result
+    }
+    $result.Token=$token; $result.Error=''; return $result
+}
+
 # Optional native diagnostic only. The trusted primary supplies its already
 # chosen failure and original proof/views. No correlator or evaluator is called.
 function Resolve-FileTransferNativeFrontierWitness {
     param($Custody,$Evaluations,$Context,[string[]]$Full,[string[]]$Compact,$FullView,$CompactView,
-        $Payloads,$Index,$Failure,$Candidates,$RecentProof,[ref]$OmissionReason)
-    $state=@{Error='native_frontier_unavailable';Details=$null;Marker=$null;Completion=0;Failure=0}
+        $Payloads,$Index,$Failure,$Candidates,$RecentProof,[ref]$OmissionReason,$TransferEvaluation=$null)
+    $state=@{Error='native_frontier_unavailable';Details=$null;Marker=$null;Completion=0;Failure=0;
+        Receipt=$null;Payload=$null;SamePairMatched=$false}
     $batch=$null
     try {
         if($Custody -isnot [NLink.Tools.LocalRetainedSourceRequest+FrontierWorkerInputs+EvaluationCustody] -or
@@ -17,7 +75,7 @@ function Resolve-FileTransferNativeFrontierWitness {
         $resolve=[Func[Action,NLink.Tools.LocalRetainedSourceRequest+FrontierWorkerInputs+NativeWitnessSelection]]{
             param([Action]$visit)
             $selected=[Collections.Generic.SortedSet[int]]::new(); $rows=[Collections.Generic.List[object]]::new()
-            $work=@{Units=0L}; $owned=[Collections.Generic.List[object]]::new(); $receipt=$null; $completionPosition=-1
+            $owned=[Collections.Generic.List[object]]::new(); $receipt=$null; $completionPosition=-1
             function Require([bool]$Value,[string]$Reason) {if(-not $Value) {throw $Reason}}
             function Pick($Row,[switch]$Opaque) {
                 Require ($null -ne $Row -and -not $Row.Fields.ContainsKey('__nlink_duplicate_writer_evidence_field') -and
@@ -26,6 +84,12 @@ function Resolve-FileTransferNativeFrontierWitness {
             }
             function Token([string]$Value) {ConvertTo-FileTransferCoordinatorEvidenceToken $Value}
             function Ticks([string]$Value) {([DateTimeOffset]::Parse($Value,[Globalization.CultureInfo]::InvariantCulture)).UtcTicks}
+            function Number($Fields,[string]$Name) {
+                $value=0L
+                Require ($Fields.ContainsKey($Name) -and [long]::TryParse($Fields[$Name],[Globalization.NumberStyles]::None,
+                    [Globalization.CultureInfo]::InvariantCulture,[ref]$value)) 'native_frontier_watchdog_number'
+                return $value
+            }
             function Named([string]$Name,[scriptblock]$Predicate) {
                 foreach($row in $owned) {$visit.Invoke(); if($row.Fields.event -ceq $Name -and (& $Predicate $row.Fields)) {$row}}
             }
@@ -33,8 +97,8 @@ function Resolve-FileTransferNativeFrontierWitness {
                 $found=@(Named $Name $Predicate); Require ($found.Count -eq 1) ('native_frontier_unique_'+$Name)
                 Pick $found[0]; return $found[0]
             }
-            function Scope($Fields,[switch]$Wake) {
-                $s=$receipt.Source
+            function Scope($Row,[switch]$Wake) {
+                $Fields=$Row.Fields; $s=$receipt.Source
                 foreach($pair in @(@('route','Route'),@('protocol_version','ProtocolVersion'),@('live_route_epoch','LiveRouteEpoch'),
                     @('leg_generation','LegGeneration'),@('transport_epoch','TransportEpoch'))) {
                     Require ($Fields[$pair[0]] -ceq [string]$s.($pair[1])) 'native_frontier_source_scope'
@@ -47,7 +111,8 @@ function Resolve-FileTransferNativeFrontierWitness {
                         @('checkpoint_generation','CheckpointGeneration'),@('data_session_generation','DataSessionGeneration'))) {
                         Require ($Fields[$pair[0]] -ceq [string]$s.($pair[1])) 'native_frontier_wake_scope'
                     }
-                    Require ((Token $Fields.data_session_identity) -ceq $s.DataSessionIdentity) 'native_frontier_data_session'
+                    Require ($Row.DataSession.Error -ceq '') $Row.DataSession.Error
+                    Require ($Row.DataSession.Token -ceq $s.DataSessionIdentity) 'native_frontier_data_session'
                 }
             }
             function Snapshot {
@@ -78,20 +143,10 @@ function Resolve-FileTransferNativeFrontierWitness {
                 $before=Snapshot
                 Require ($Index.AllEvents.Count -eq $Full.Length -and $Index.LogFiles.Count -eq 1) 'native_frontier_index'
                 $failurePosition=-1
-                for($i=0;$i -lt $Full.Length;$i++) {
-                    $visit.Invoke(); $line=$Full[$i]; $event=$Index.AllEvents[$i]
-                    Require ([object]::ReferenceEquals($line,$event.RawLine) -and $event.FilePath -ceq $Index.LogFiles[0] -and
-                        $line.Length -le 262144 -and $line.Length -le [NLink.Tools.LocalPublicationInputLimits]::ProducerCodeUnits-$work.Units -and
-                        $line.Split([char[]]@(';'),257).Length -le 256) 'native_frontier_input'
-                    $work.Units+=$line.Length
-                    $fields=ConvertFrom-GuiSmokeLogLedgerStructuredFields $line
-                    Require ([regex]::Matches($line,'(?i)(?:^|;)\s*session_id\s*=').Count -le 1 -and
-                        [regex]::Matches($line,'(?i)(?:^|;)\s*transfer_id\s*=').Count -le 1) 'native_frontier_duplicate_scope'
-                    $rows.Add([pscustomobject]@{Position=$i;Fields=$fields})
-                    if([object]::ReferenceEquals($event,$Failure.Event)) {Require ($failurePosition -eq -1) 'native_frontier_failure_duplicate'; $failurePosition=$i}
-                }
+                $failurePosition=[NLink.Tools.LocalFrontierInputRows]::Project($Full,$Index.AllEvents,$Index.LogFiles[0],$Failure.Event,$rows,$visit,@{})
                 Require ($failurePosition -ge 0) 'native_frontier_failure_origin'
                 $failureRow=$rows[$failurePosition]; $f=$failureRow.Fields; Pick $failureRow
+                Require ($failureRow.Identity.Error -ceq '') $failureRow.Identity.Error
                 Require ($Failure.Event.EventName -ceq 'filetransfer_v6_receiver_state_deferred' -and $f.event -ceq $Failure.Event.EventName -and
                     $f.reason -ceq 'frontier_stalled' -and $f.route -ceq 'post_tuna_fallback_v6' -and $f.protocol_version -ceq '6') 'native_frontier_failure_kind'
                 $matches=[Collections.Generic.List[object]]::new()
@@ -101,15 +156,23 @@ function Resolve-FileTransferNativeFrontierWitness {
                         $r.ClockDomain -ceq 'frontier_publication_boundary_utc_qpc_v1' -and [guid]$r.ObservationId -eq $native.ObservationId -and
                         $r.Outcome -cin @('PublishedBeforeOriginalDeadline','PublishedWithinObservationBound') -and -not $r.LiveProofEligible -and
                         -not $r.NativeWriterCustodyEstablished -and -not $r.PublicationCompletionIssued -and $r.Lifecycle.Count -ge 8 -and $r.Lifecycle.Count -le 64) 'native_frontier_receipt_profile'
-                    if($native.WriterId -ceq $f.log_writer_id -and $r.Source.SessionId -ceq (Token $f.session_id) -and $r.Source.TransferId -ceq (Token $f.transfer_id) -and
+                    if($native.WriterId -ceq $f.log_writer_id -and $r.Source.SessionId -ceq $failureRow.Identity.Session -and $r.Source.TransferId -ceq $failureRow.Identity.Transfer -and
                         @($r.Lifecycle | Where-Object {$_.Kind -ceq 'RepairProgress' -and $_.Binding.After -eq [long]$f.next_chunk_index}).Count -eq 1) {
                         $matches.Add(@{Native=$native;Receipt=$r})
                     }
                 }
                 Require ($matches.Count -eq 1) 'native_frontier_receipt_ambiguity'
-                $chosen=$matches[0].Native; $receipt=$matches[0].Receipt; Scope $f
-                foreach($row in $rows) {$visit.Invoke(); if($row.Fields.log_writer_id -ceq $f.log_writer_id -and
-                    $row.Fields['session_id'] -ceq $f.session_id -and $row.Fields['transfer_id'] -ceq $f.transfer_id) {$owned.Add($row)}}
+                $chosen=$matches[0].Native; $receipt=$matches[0].Receipt; Scope $failureRow
+                foreach($row in $rows) {
+                    $visit.Invoke(); if($row.Fields.log_writer_id -cne $f.log_writer_id) {continue}
+                    # Resolve relevant rows before filtering ownership: an unknown
+                    # scope cannot hide a required or competing event.
+                    if($row.Fields.event -cmatch '\Afiletransfer_(fallback_frontier_repair_|control_plane_delivery_observed|v[46]_sparse_write_committed|v6_frontier_|v6_fallback_frontier_repair_progress_state_forced|v6_receiver_state_)') {
+                        Require ($row.Identity.Error -ceq '') $row.Identity.Error
+                    }
+                    if($row.Identity.Error -ceq '' -and $row.Identity.Session -ceq $failureRow.Identity.Session -and
+                        $row.Identity.Transfer -ceq $failureRow.Identity.Transfer) {$owned.Add($row)}
+                }
                 $entries=@{}; $last=0
                 foreach($entry in $receipt.Lifecycle) {
                     $visit.Invoke(); $last++; Require ($entry.Sequence -eq $last) 'native_frontier_lifecycle_sequence'
@@ -124,7 +187,14 @@ function Resolve-FileTransferNativeFrontierWitness {
                 $progressBinding=$entries.RepairProgress[0].Binding; $root=$entries.StallCaptured[0].Binding; $repair=$receipt.Repair
                 $progresses=@(Named 'filetransfer_fallback_frontier_repair_progress_observed' {param($x) $x.current_frontier_chunk_index -ceq [string]$progressBinding.After})
                 $prior=@($progresses | Where-Object {$_.Position -lt $failurePosition})
-                Require ($prior.Count -ge 1) 'native_frontier_progress_missing'; $progress=$prior[-1]; Pick $progress; Scope $progress.Fields
+                Require ($prior.Count -ge 1) 'native_frontier_progress_missing'; $progress=$prior[-1]; Pick $progress; Scope $progress
+                foreach($row in $rows) {
+                    $visit.Invoke()
+                    if($row.Position -lt $progress.Position -and $row.Fields.log_writer_id -ceq $f.log_writer_id -and
+                        $row.Fields['authority_id'] -ceq $progress.Fields.authority_id -and $row.Fields['repair_generation'] -ceq $progress.Fields.repair_generation) {
+                        Require ($row.Identity.Error -ceq '') $row.Identity.Error
+                    }
+                }
                 foreach($pair in @(@('continuity_repair_authority_id','AuthorityId'),@('continuity_repair_generation','DecisionGeneration'),
                     @('continuity_source_fingerprint','SourceScopeFingerprint'),@('continuity_current_scope_fingerprint','CurrentScopeFingerprint'),
                     @('continuity_acceptance_id','AcceptanceIdentity'),@('continuity_accepted_state_generation','AcceptedStateGeneration'),
@@ -139,17 +209,20 @@ function Resolve-FileTransferNativeFrontierWitness {
                 Require ($progress.Fields.previous_frontier_chunk_index -ceq [string]$progressBinding.Before -and
                     $root.FrontierChunkIndex -eq $progressBinding.After -and $root.WakeGeneration -eq $receipt.RootGeneration -and
                     $root.DeadlineUtcTicks -eq $receipt.OriginalDeadlineUtcTicks) 'native_frontier_root'
+                $recentRows=[Collections.Generic.List[object]]::new()
                 foreach($entry in $entries.RecentArmed) {
                     $arm=$entry.Binding
                     $row=One 'filetransfer_v6_frontier_recent_progress_grace_deferred' {param($x) $x.wake_generation -ceq [string]$arm.WakeGeneration -and $x.frontier_chunk_index -ceq [string]$root.FrontierChunkIndex}
-                    Scope $row.Fields -Wake
+                    Scope $row -Wake
+                    $recentRows.Add($row)
                     Require ($row.Position -gt $progress.Position -and (Ticks $row.Fields.committed_progress_utc) -eq $arm.ProgressUtcTicks -and
                         (Ticks $row.Fields.wake_deadline_utc) -eq $arm.DeadlineUtcTicks -and $row.Fields.highest_received_chunk_index -ceq [string]$arm.HighestReceivedChunkIndex -and
                         $row.Fields.authority_effect -ceq 'none' -and $entry.Sequence -lt $entries.StallCaptured[0].Sequence) 'native_frontier_recent_arm'
                 }
                 $stall=One 'filetransfer_v6_frontier_request_deferred' {param($x) $x.wake_generation -ceq [string]$root.WakeGeneration -and $x.frontier_chunk_index -ceq [string]$root.FrontierChunkIndex}
-                Scope $stall.Fields -Wake
-                Require ($stall.Position -gt $failurePosition -and $stall.Fields.reason -ceq 'frontier_recent_progress_grace_elapsed' -and
+                Scope $stall -Wake
+                $watchdog=$stall.Fields.reason -ceq 'frontier_stall_repair_due'
+                Require ($stall.Position -gt $failurePosition -and ($watchdog -or $stall.Fields.reason -ceq 'frontier_recent_progress_grace_elapsed') -and
                     (Ticks $stall.Fields.stall_started_utc) -eq $root.StartedUtcTicks -and (Ticks $stall.Fields.wake_deadline_utc) -eq $root.DeadlineUtcTicks) 'native_frontier_stall'
                 Require ([long]$f.log_writer_attempt_utc_ticks -lt [long]$entries.RecentArmed[-1].Binding.DeadlineUtcTicks -and
                     [long]$f.highest_received_chunk_index -le [long]$entries.RecentArmed[-1].Binding.HighestReceivedChunkIndex) 'native_frontier_original_obligation'
@@ -159,14 +232,41 @@ function Resolve-FileTransferNativeFrontierWitness {
                         $link=$entry.Binding; Require ($link.PredecessorGeneration -eq $tip -and $link.SuccessorGeneration -eq $tip+1 -and
                             $entry.Sequence -lt $entries.Write[0].Sequence) 'native_frontier_successor_chain'; $tip=[long]$link.SuccessorGeneration
                         $row=One 'filetransfer_v6_frontier_stall_grace_recheck_decided' {param($x) $x.wake_generation -ceq [string]$tip -and $x.frontier_chunk_index -ceq [string]$root.FrontierChunkIndex -and $x.decision_status -ceq 'rearmed'}
-                        Scope $row.Fields -Wake
+                        Scope $row -Wake
                         Require ($row.Fields.decision_reason -ceq 'highest_received_advanced' -and $row.Fields.highest_received_chunk_index -ceq [string]$link.HighestReceivedChunkIndex -and
                             (Ticks $row.Fields.wake_deadline_utc) -eq $root.DeadlineUtcTicks -and (Ticks $row.Fields.stall_started_utc) -eq $root.StartedUtcTicks) 'native_frontier_successor'
                     } elseif($entry.Kind -ceq 'RecentRechecked') {Require ($tip -eq $rechecked.StallGeneration -and $tip -eq $receipt.RecheckedGeneration) 'native_frontier_rechecked_tip'}
                 }
                 Require ($tip -eq $receipt.FirstWriteGeneration -and $rechecked.RecentGeneration -eq $entries.RecentArmed[-1].Binding.WakeGeneration) 'native_frontier_write_tip'
                 $recheck=One 'filetransfer_v6_frontier_recent_progress_grace_recheck_decided' {param($x) $x.wake_generation -ceq [string]$rechecked.RecentGeneration -and $x.frontier_chunk_index -ceq [string]$root.FrontierChunkIndex -and $x.decision_status -ceq 'rechecked'}
-                Scope $recheck.Fields -Wake; Require ($recheck.Fields.decision_reason -ceq 'stall_grace_armed' -and $recheck.Position -ge $stall.Position) 'native_frontier_recheck'
+                Scope $recheck -Wake; Require ($recheck.Fields.decision_reason -ceq 'stall_grace_armed' -and $recheck.Position -ge $stall.Position) 'native_frontier_recheck'
+                if($watchdog) {
+                    # Diagnostic binding only. Do not reuse the recovery closure:
+                    # its timely-publication requirement excludes this late diagnostic.
+                    Require (-not $entries.ContainsKey('StallSuccessor') -and $root.WakeGeneration -gt 0 -and
+                        $root.WakeGeneration -eq $rechecked.StallGeneration -and $root.WakeGeneration -eq $receipt.FirstWriteGeneration) 'native_frontier_watchdog_root'
+                    $arm=$entries.RecentArmed[-1].Binding
+                    $stallTicks=Number $stall.Fields 'log_writer_attempt_utc_ticks'
+                    $recheckTicks=Number $recheck.Fields 'log_writer_attempt_utc_ticks'
+                    Require ($stall.Fields['elapsed_ms'] -ceq '0' -and $stall.Fields.stall_grace_ms -ceq '750' -and
+                        $stall.Fields.direction -ceq 'inbound' -and $stall.Fields.authority_effect -ceq 'none' -and
+                        $recheck.Fields.direction -ceq 'inbound' -and $recheck.Fields.authority_effect -ceq 'none' -and
+                        $stall.Fields.highest_received_chunk_index -ceq [string]$root.HighestReceivedChunkIndex -and
+                        $root.HighestReceivedChunkIndex -eq $arm.HighestReceivedChunkIndex -and
+                        $recheck.Fields.highest_received_chunk_index -ceq [string]$arm.HighestReceivedChunkIndex) 'native_frontier_watchdog_fields'
+                    Require ($stall.Position -lt $recheck.Position -and $arm.ProgressUtcTicks -ge 0 -and
+                        $arm.DeadlineUtcTicks-$arm.ProgressUtcTicks -eq 10000000L -and $root.StartedUtcTicks -ge $arm.DeadlineUtcTicks -and
+                        $root.DeadlineUtcTicks-$root.StartedUtcTicks -eq 7500000L -and
+                        $stallTicks -ge $root.StartedUtcTicks -and $stallTicks -le $recheckTicks -and $recheckTicks -lt $root.DeadlineUtcTicks -and
+                        (Ticks $recheck.Fields.committed_progress_utc) -eq $arm.ProgressUtcTicks -and
+                        (Ticks $recheck.Fields.wake_deadline_utc) -eq $arm.DeadlineUtcTicks) 'native_frontier_watchdog_interval'
+                    $lastRecentPosition=$progress.Position
+                    foreach($row in $recentRows) {
+                        Require ($row.Position -gt $lastRecentPosition -and $row.Position -lt $stall.Position -and
+                            $row.Fields.direction -ceq 'inbound' -and $row.Fields.decision_status -cin @('held','rearmed')) 'native_frontier_watchdog_recent_order'
+                        $lastRecentPosition=$row.Position
+                    }
+                }
                 $frontier=[long]$root.FrontierChunkIndex; $write=$null
                 foreach($entry in $entries.Write) {
                     $w=$entry.Binding; Require ($w.Path -cin @('v4_sparse','v6_sparse') -and $w.Before -eq $frontier -and $w.Count -ge 0 -and $w.After-$w.Before -eq $w.Count -and
@@ -210,6 +310,39 @@ function Resolve-FileTransferNativeFrontierWitness {
                     $boundaries.Add(($b | Select-Object coordinatorInstanceId,boundaryId,evidenceLineIndex,verdict,decisionKind,decisionStatus,boundaryHash,writer,writerSequence))
                 }
                 $boundarySnapshot=$boundaries.ToArray() | ConvertTo-Json -Depth 4 -Compress
+                if($watchdog) {
+                    foreach($row in $rows) {
+                        $visit.Invoke(); $x=$row.Fields
+                        if($x.log_writer_id -cne $f.log_writer_id -or $row.Position -le $failurePosition -or
+                            $row.Position -gt [Math]::Max($sent.Position,$completionPosition)) {continue}
+                        if($x.event -cin @('file_transfer_inbound_terminal','filetransfer_live_route_epoch_terminal',
+                            'filetransfer_terminalized_by_session_end','filetransfer_data_session_recreated','filetransfer_data_session_removed') -or
+                            $x['transfer_paused'] -ceq '1') {Require ($row.Identity.Error -ceq '') $row.Identity.Error}
+                    }
+                    foreach($row in $owned) {
+                        $visit.Invoke()
+                        if($row.Position -le $failurePosition -or $row.Position -gt [Math]::Max($sent.Position,$completionPosition)) {continue}
+                        $x=$row.Fields
+                        if($x.event -ceq 'filetransfer_v6_frontier_request_deferred' -and -not [object]::ReferenceEquals($row,$stall)) {
+                            Require ((Number $x 'elapsed_ms') -gt 0) 'native_frontier_watchdog_competing_root'
+                        }
+                        Require ($x.event -cnotin @('file_transfer_inbound_terminal','filetransfer_live_route_epoch_terminal',
+                            'filetransfer_terminalized_by_session_end','filetransfer_data_session_recreated','filetransfer_data_session_removed') -and
+                            $x['transfer_paused'] -cne '1') 'native_frontier_watchdog_invalidated'
+                        if($x.event -cnotmatch '\Afiletransfer_(fallback_frontier_repair_|v[46]_sparse_write_committed|v6_frontier_|v6_fallback_frontier_repair_progress_state_forced|v6_receiver_state_)') {continue}
+                        foreach($name in @('direction','route','protocol_version','live_route_epoch','runtime_generation','terminal_generation',
+                            'leg_generation','transport_epoch','bridge_recovery_generation','bridge_decision_generation','checkpoint_request_id',
+                            'checkpoint_generation','route_publication_generation','route_commit_generation','data_session_generation')) {
+                            if($x.ContainsKey($name)) {Require ($x[$name] -ceq $stall.Fields[$name]) 'native_frontier_watchdog_scope_changed'}
+                        }
+                        if($row.DataSession.Present -or $x.event -cin @('filetransfer_v6_frontier_request_deferred',
+                            'filetransfer_v6_frontier_stall_grace_recheck_decided','filetransfer_v6_frontier_recent_progress_grace_deferred',
+                            'filetransfer_v6_frontier_recent_progress_grace_recheck_decided','filetransfer_v6_fallback_frontier_repair_progress_state_forced')) {
+                            Require ($row.DataSession.Error -ceq '') $row.DataSession.Error
+                            Require ($row.DataSession.Token -ceq $stall.DataSession.Token) 'native_frontier_watchdog_scope_changed'
+                        }
+                    }
+                }
                 $startCount=0; $endCount=0
                 foreach($row in $rows) {
                     $visit.Invoke(); $x=$row.Fields
@@ -228,7 +361,11 @@ function Resolve-FileTransferNativeFrontierWitness {
                     # Preserve uninterpreted diagnostics verbatim (the existing
                     # forced-state event repeats range_fingerprint). They do
                     # not satisfy a required unique link or grant authority.
-                    if($repairLink -or ($episode -and $x.event -cmatch '\Afiletransfer_(fallback_frontier_repair_|control_plane_delivery_observed|v[46]_sparse_write_committed|v6_frontier_|v6_fallback_frontier_repair_progress_state_forced|v6_receiver_state_)')) {Pick $row -Opaque}
+                    if($repairLink -or ($episode -and $x.event -cmatch '\Afiletransfer_(fallback_frontier_repair_|control_plane_delivery_observed|v[46]_sparse_write_committed|v6_frontier_|v6_fallback_frontier_repair_progress_state_forced|v6_receiver_state_)')) {
+                        Require ($row.DataSession.Error -cne 'native_frontier_duplicate_data_session') 'native_frontier_duplicate_data_session'
+                        if($row.DataSession.Projected) {Require ($row.DataSession.Error -ceq '') $row.DataSession.Error}
+                        Pick $row -Opaque
+                    }
                 }
                 Require ((Snapshot) -ceq $before -and [object]::ReferenceEquals($Failure.Event,$Index.AllEvents[$failurePosition]) -and
                     [object]::ReferenceEquals($Failure.Event.RawLine,$Full[$failurePosition])) 'native_frontier_failure_changed'
@@ -240,6 +377,7 @@ function Resolve-FileTransferNativeFrontierWitness {
                 Require ($afterBoundaries -ceq $boundarySnapshot) 'native_frontier_completion_changed'
                 $state.Marker=$m; $state.Completion=$completionPosition+1; $state.MarkerPosition=$marker.Position+1; $state.Failure=$failurePosition+1
                 $state.Outcome=$receipt.Outcome; $state.Error=''
+                $state.Receipt=$receipt; $state.Payload=$chosen
                 $state.Details=([ordered]@{OriginalFailureAndViews=$before;OriginalCompletionViews=$boundarySnapshot;Outcome=$receipt.Outcome;
                     FailureFullIndex=$failurePosition+1;CompletionFullIndex=$completionPosition+1;MarkerFullIndex=$marker.Position+1} | ConvertTo-Json -Compress)
                 return [NLink.Tools.LocalRetainedSourceRequest+FrontierWorkerInputs+NativeWitnessSelection]::new($chosen,[int[]]@($selected),$state.Details)
@@ -258,8 +396,22 @@ function Resolve-FileTransferNativeFrontierWitness {
             $state.Marker.frontier_completion_sha256 -cne $batch.Completion.BatchSha256 -or -not $batch.IsCurrent) {
             $state.Error='native_frontier_native_range_join'; $batch.Dispose(); return $null
         }
+        if ($null -ne $TransferEvaluation) {
+            # Reuse this resolver's original decoded receipt and exact selection.
+            # A same-pair match is diagnostic evidence, never route authority.
+            if(-not $Custody.TryCheckCanonicalSamePairWitness($TransferEvaluation,$batch,$state.Payload,
+                $state.Receipt.Source.SessionId,$state.Receipt.Source.TransferId,
+                $state.Receipt.ProcessId,$state.Receipt.ProcessCreationFileTime)) {
+                $state.Error='native_frontier_same_pair_unavailable'; $batch.Dispose(); return $null
+            }
+            $state.SamePairMatched=$true
+        }
         return [pscustomobject]@{Status='matched_native_frontier_diagnostic';Batch=$batch;OriginalSnapshot=$batch.DiagnosticSnapshot;DiagnosticOutcome=$state.Outcome;
+            SamePairMatched=$state.SamePairMatched;
             FailureFullIndex=$state.Failure;LiveProofEligible=$false;PublicationCompletionIssued=$false;NativeWriterCustodyEstablished=$false}
     } catch {if($null -ne $batch) {$batch.Dispose()}; $state.Error=$_.Exception.Message; return $null}
-    finally {if($null -ne $OmissionReason) {$OmissionReason.Value=$state.Error}}
+    finally {
+        $state.Receipt=$null; $state.Payload=$null
+        if($null -ne $OmissionReason) {$OmissionReason.Value=$state.Error}
+    }
 }

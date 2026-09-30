@@ -11,6 +11,33 @@ namespace NLink.SmokeTests;
 public sealed partial class FrontierFileAdoptionTests : FileTransferOpsScriptsTestBase
 {
     [Fact]
+    public void Adoption_ApprovedGuiBudgetKeepsOriginalClockAndAccumulatedWork()
+    {
+        Assert.Equal(10000, LocalFrontierFileAdoption.MaximumActiveMilliseconds);
+        var work = new Stopwatch();
+        var flags = BindingFlags.NonPublic | BindingFlags.Instance;
+        var elapsed = typeof(Stopwatch).GetField("_elapsed", flags)!;
+        elapsed.SetValue(work, Stopwatch.Frequency * 6);
+        using var owner = new LocalFrontierFileAdoption(Guid.NewGuid(), Guid.NewGuid(), Guid.NewGuid(), () => true, work);
+        Assert.Same(work, typeof(LocalFrontierFileAdoption).GetField("work", flags)!.GetValue(owner));
+        Assert.True(owner.TryRunControl(() =>
+        {
+            Assert.True(work.IsRunning);
+            Assert.True(owner.IsRetained);
+            return work.IsRunning;
+        }));
+        Assert.False(work.IsRunning);
+        Assert.True(work.ElapsedTicks >= Stopwatch.Frequency * 6);
+        elapsed.SetValue(work, Stopwatch.Frequency * 9);
+        Assert.True(owner.TryRunControl(() => true));
+        Assert.True(work.ElapsedTicks >= Stopwatch.Frequency * 9);
+        elapsed.SetValue(work, Stopwatch.Frequency * 11);
+        Assert.False(owner.TryRunControl(() => throw new InvalidOperationException("Expired work ran")));
+        Assert.False(work.IsRunning);
+        Assert.False(owner.IsRetained);
+    }
+
+    [Fact]
     public void Adoption_ControlBudgetContinuesThroughNestedAdoptionAndPostChecks()
     {
         if (!OperatingSystem.IsWindows()) { return; }
@@ -24,7 +51,7 @@ public sealed partial class FrontierFileAdoptionTests : FileTransferOpsScriptsTe
             Assert.True(work.IsRunning);
             Assert.True(owner.TryAdopt(0, app.Handle, app.Bytes));
             Assert.True(work.IsRunning);
-            typeof(Stopwatch).GetField("_elapsed", BindingFlags.NonPublic | BindingFlags.Instance)!.SetValue(work, Stopwatch.Frequency * 6);
+            typeof(Stopwatch).GetField("_elapsed", BindingFlags.NonPublic | BindingFlags.Instance)!.SetValue(work, Stopwatch.Frequency * 11);
             return true;
         }));
         Assert.False(work.IsRunning); Assert.False(owner.IsRetained);
@@ -248,7 +275,7 @@ public sealed partial class FrontierFileAdoptionTests : FileTransferOpsScriptsTe
             if (fault == "budget")
             {
                 var work = (Stopwatch)typeof(LocalFrontierFileAdoption).GetField("work", BindingFlags.NonPublic | BindingFlags.Instance)!.GetValue(owner)!;
-                typeof(Stopwatch).GetField("_elapsed", BindingFlags.NonPublic | BindingFlags.Instance)!.SetValue(work, Stopwatch.Frequency * 6);
+                typeof(Stopwatch).GetField("_elapsed", BindingFlags.NonPublic | BindingFlags.Instance)!.SetValue(work, Stopwatch.Frequency * 11);
             }
             Assert.False(fault == "repeat" ? owner.TryAdopt(0, a.Handle, a.Bytes) : owner.TryAdopt(1, b.Handle, bytes));
         }

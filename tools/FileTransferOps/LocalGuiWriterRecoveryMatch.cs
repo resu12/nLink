@@ -17,8 +17,22 @@ namespace NLink.Tools
             { get { lock (sourceSync) { return OwnsRecoveryMatch(recoveryMatch) ? recoveryMatch : null; } } }
             private void CheckRecoveryWork()
             {
+#if NLINK_TEST_BUFFERED_LEDGER
+                NLink.Tests.RecoveryBufferProbe.Boundary("full");
+#endif
+#if NLINK_TEST_ATTEMPT_DISPATCH
+                long started = System.Diagnostics.Stopwatch.GetTimestamp();
+                bool completed = false;
+                try
+                {
+#endif
                 if (!IsCurrent || sourceReader == null || !sourceReader.ProcessingWorkActive)
                     throw new InvalidDataException("recovery_work_not_current");
+#if NLINK_TEST_ATTEMPT_DISPATCH
+                    completed = true;
+                }
+                finally { NLink.Tests.AttemptWorkProfileForTest.RecordRecoveryCheck(started, completed); }
+#endif
             }
             public FrontierRecoveryMarkers TryCaptureRecoveryMarkers()
             {
@@ -33,7 +47,10 @@ namespace NLink.Tools
                         if (sourceReader.Position != 0) return null;
                         var readers = TryOpenRecoveryOutputs();
                         if (readers == null) return null;
-                        var scan = new FrontierRecoveryMarkerScan(CheckRecoveryWork);
+#if NLINK_TEST_BUFFERED_LEDGER
+                        NLink.Tests.RecoveryBufferProbe.Boundary("readers", readers);
+#endif
+                        var scan = new FrontierRecoveryMarkerScan(CheckRecoveryWork, sourceReader, readers);
                         for (int i = 0; i < readers.Count; i++)
                         {
                             scan.Read(readers[i], i, finalizer.run, finalizer.scenario);
@@ -48,6 +65,9 @@ namespace NLink.Tools
                         }
                         recoveryScan = scan;
                         recoveryMarkers = new FrontierRecoveryMarkers(this, scan);
+#if NLINK_TEST_BUFFERED_LEDGER
+                        NLink.Tests.RecoveryBufferProbe.Boundary("before-return", recoveryMarkers);
+#endif
                         CheckRecoveryWork(); success = OwnsRecoveryMarkers(recoveryMarkers);
                         return success ? recoveryMarkers : null;
                     }

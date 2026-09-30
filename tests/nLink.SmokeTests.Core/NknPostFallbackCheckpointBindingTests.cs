@@ -61,7 +61,8 @@ public sealed partial class NknAccelerationTransportTests
             Set("ChunkSizeBytes", 1024);
             Set("ChunkCount", 128);
             Set("NextChunkIndex", 8);
-            Set("PullHighestReceivedChunkIndex", 8);
+            // This positive binding fixture has no outstanding frontier gap.
+            Set("PullHighestReceivedChunkIndex", 7);
             Set("PullSessionActive", true);
             Set("PullManifestReceived", true);
             Set("ReceiverSparseWriteActive", true);

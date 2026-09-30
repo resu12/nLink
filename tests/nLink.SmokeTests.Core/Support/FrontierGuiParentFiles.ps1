@@ -17,7 +17,7 @@ try {
     }
     if($filesCase -ceq 'budget') {
         $elapsed=@($work.GetType().GetFields($flags) | Where-Object {$_.Name -match '^_?elapsed$'})[0]
-        $elapsed.SetValue($work,[long]([Diagnostics.Stopwatch]::Frequency*6))
+        $elapsed.SetValue($work,[long]([Diagnostics.Stopwatch]::Frequency*11))
     }
     $before=$work.ElapsedTicks; $submission=$binding.TryPublishParentFiles()
     if($filesCase -cin @('no-preparation','closed-pin','budget')) {

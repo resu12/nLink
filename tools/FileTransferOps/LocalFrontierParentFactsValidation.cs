@@ -55,7 +55,7 @@ namespace NLink.Tools
                     int origins = 0; int[] semanticOrigins = null;
                     for (int role = 0; role < 3; role++)
                     {
-                        int count = reader.Count(MaximumLines - origins); origins += count; Require(count == outputLines[role]); int last = 0;
+                        int count = reader.Count(Math.Min(lines, MaximumOriginEntries - origins)); origins += count; Require(count == outputLines[role]); int last = 0;
                         if (role == 0) Require(count == lines - bookmark);
                         if (role == 2) semanticOrigins = new int[count];
                         for (int i = 0; i < count; i++)

@@ -58,7 +58,8 @@ try {
     } else {
         $expected=if($filesCase -cin @('both-positive','two-payloads','facts-two-payloads',
             'facts-ack-commit-primary-worker-payloads-two-payloads','facts-ack-commit-primary-worker-payloads-both-writers',
-            'facts-ack-commit-primary-worker-payloads-partial-hash')) {12} else {11}
+            'facts-ack-commit-primary-worker-payloads-partial-hash','facts-ack-commit-primary-worker-join-scope-two-transfers',
+            'facts-ack-commit-primary-worker-join-scope-duplicate-receipt')) {12} else {11}
         if($null -eq $pending -or -not $pending.IsCurrent -or $pending.FileCount -ne $expected -or $pending.PayloadCount -ne $expected-10 -or
             $pending.LiveProofEligible -or $pending.NativeWriterCustodyEstablished -or $pending.PublicationCompletionIssued) {throw 'Complete pending native set missing/authority'}
         $pulledHandles=@($pending.GetType().GetField('handles',$parentFlags).GetValue($pending))

@@ -7,7 +7,7 @@ using NLink.Core.Logging;
 namespace NLink.SmokeTests;
 
 [Collection(FakeNknNetworkCollection.Name)]
-public sealed class FileTransferPublicationUseConsumerTests : FileTransferOpsScriptsTestBase
+public sealed partial class FileTransferPublicationUseConsumerTests : FileTransferOpsScriptsTestBase
 {
     [Fact]
     [Trait("FileTransferAnalyzerSuite", "PublicationUseConsumer")]
@@ -132,6 +132,90 @@ public sealed class FileTransferPublicationUseConsumerTests : FileTransferOpsScr
             twoWriterFixture: true, serviceIngressFixture: true, tunaPayloadMode: mode);
 
     [Fact]
+    [Trait("FileTransferAnalyzerSuite", "PublicationPeerLineagePrototype")]
+    public async Task PublicationPeerLineagePrototype_ExactCandidateLinksDoNotEstablishAuthenticatedLineage()
+        => await RunGeneratedConsumerAsync("PublicationPeerLineageGenerated", "peer-lineage-prototype=", "publication-peer-lineage-prototype-20260924",
+            twoWriterFixture: true, serviceIngressFixture: true, tunaPayloadMode: "missing_receive");
+
+    [Fact]
+    [Trait("FileTransferAnalyzerSuite", "PublicationServiceYieldHistory")]
+    public async Task PublicationServiceYieldHistory_OriginalReceiptsPreserveStrictPrimaryAndWriterHistories()
+        => await RunGeneratedConsumerAsync("PublicationServiceYieldGenerated", "service-yield-history=", "publication-service-yield-history-20260924",
+            twoWriterFixture: true, serviceIngressFixture: true, tunaPayloadMode: "missing_receive", serviceYieldFixture: true);
+
+    [Fact]
+    [Trait("FileTransferAnalyzerSuite", "PublicationServiceYieldConsumer")]
+    public async Task PublicationServiceYieldConsumer_OriginalCustodyBindsReceiptsWithoutRecovery()
+        => await RunGeneratedConsumerAsync("PublicationServiceYieldConsumerGenerated", "service-yield-consumer=", "publication-service-yield-consumer-20260924",
+            twoWriterFixture: true, serviceIngressFixture: true, tunaPayloadMode: "missing_receive", serviceYieldFixture: true);
+
+    [Theory]
+    [InlineData("both")]
+    [InlineData("control_only")]
+    [InlineData("bulk_only")]
+    [InlineData("receiver_local_first")]
+    [Trait("FileTransferAnalyzerSuite", "PublicationReciprocalYield")]
+    public async Task PublicationReciprocalYield_OriginalCopiesBindBothReceiptDirections(string yieldCase)
+        => await RunGeneratedConsumerAsync("PublicationReciprocalYieldGenerated", "reciprocal-yield-consumer=", "publication-reciprocal-yield-20260925",
+            twoWriterFixture: true, serviceIngressFixture: true, tunaPayloadMode: "missing_receive", serviceYieldFixture: true, yieldCase: yieldCase);
+
+    [Fact]
+    [Trait("FileTransferAnalyzerSuite", "PublicationRejectionChain")]
+    public async Task PublicationRejectionChain_OriginalCompanionsPreserveStrictPrimary()
+        => await RunGeneratedConsumerAsync("PublicationRejectionChainGenerated", "rejection-chain-consumer=", "publication-rejection-chain-20260925",
+            twoWriterFixture: true, serviceIngressFixture: true, tunaPayloadMode: "missing_receive", serviceYieldFixture: true, yieldCase: "both");
+
+    [Fact]
+    [Trait("FileTransferAnalyzerSuite", "PublicationRejectionChain")]
+    public async Task PublicationRejectionChain_OptionalOmissionPreservesYieldAndPrimary()
+        => await RunGeneratedConsumerAsync("PublicationRejectionChainOmissionGenerated", "rejection-chain-omission=", "publication-rejection-chain-20260925",
+            twoWriterFixture: true, serviceIngressFixture: true, tunaPayloadMode: "missing_receive", serviceYieldFixture: true, yieldCase: "both");
+
+    [Fact]
+    [Trait("FileTransferAnalyzerSuite", "PublicationDispatchWindow")]
+    public async Task PublicationDispatchWindow_OriginalCapturePreservesStrictPrimary()
+        => await RunGeneratedConsumerAsync("PublicationDispatchWindowGenerated", "dispatch-window-consumer=", "publication-dispatch-window-20260925",
+            twoWriterFixture: true, serviceIngressFixture: true, tunaPayloadMode: "missing_receive", serviceYieldFixture: true, yieldCase: "both");
+
+    [Fact]
+    [Trait("FileTransferAnalyzerSuite", "PublicationDispatchWindow")]
+    public async Task PublicationDispatchWindow_OptionalOmissionPreservesYieldAndPrimary()
+        => await RunGeneratedConsumerAsync("PublicationDispatchWindowOmissionGenerated", "dispatch-window-omission=", "publication-dispatch-window-20260925",
+            twoWriterFixture: true, serviceIngressFixture: true, tunaPayloadMode: "missing_receive", serviceYieldFixture: true, yieldCase: "both");
+
+    [Fact]
+    [Trait("FileTransferAnalyzerSuite", "PublicationSecurityLifecycle")]
+    public async Task PublicationSecurityLifecycle_OriginalSpansPreserveStrictPrimary()
+        => await RunGeneratedConsumerAsync("PublicationSecurityLifecycleGenerated", "security-lifecycle-consumer=", "publication-security-lifecycle-consumer-20260925",
+            twoWriterFixture: true, serviceIngressFixture: true, tunaPayloadMode: "missing_receive", serviceYieldFixture: true, yieldCase: "both");
+
+    [Fact]
+    [Trait("FileTransferAnalyzerSuite", "PublicationSecurityLifecycle")]
+    public async Task PublicationSecurityLifecycle_OptionalOmissionPreservesPriorResults()
+        => await RunGeneratedConsumerAsync("PublicationSecurityLifecycleOmissionGenerated", "security-lifecycle-omission=", "publication-security-lifecycle-consumer-20260925",
+            twoWriterFixture: true, serviceIngressFixture: true, tunaPayloadMode: "missing_receive", serviceYieldFixture: true, yieldCase: "both");
+
+    [Fact]
+    [Trait("FileTransferAnalyzerSuite", "AlternativeAcceptanceShadow")]
+    public async Task AlternativeAcceptanceShadow_OriginalRejectionCannotSupplyScenarioProof()
+        => await RunGeneratedConsumerAsync("PublicationAlternativeAcceptanceGenerated", "alternative-acceptance-shadow=", "publication-alternative-acceptance-shadow-20260925",
+            twoWriterFixture: true, serviceIngressFixture: true, tunaPayloadMode: "missing_receive", serviceYieldFixture: true, yieldCase: "both");
+
+    [Fact]
+    [Trait("FileTransferAnalyzerSuite", "AlternativeAcceptanceShadow")]
+    public async Task AlternativeAcceptanceShadow_OmittedPrerequisitePreservesPrimary()
+        => await RunGeneratedConsumerAsync("PublicationAlternativeAcceptanceOmissionGenerated", "alternative-acceptance-shadow=", "publication-alternative-acceptance-shadow-20260925",
+            twoWriterFixture: true, serviceIngressFixture: true, tunaPayloadMode: "missing_receive", serviceYieldFixture: true, yieldCase: "both");
+
+    [Theory]
+    [InlineData("independent_pairs")]
+    [InlineData("independent_missing_receive")]
+    [Trait("FileTransferAnalyzerSuite", "TunaPublicationPayloadPairs")]
+    public async Task TunaPublicationPayloadPairs_OriginalCustodyPreservesStrictFailure(string mode)
+        => await RunGeneratedConsumerAsync("PublicationTunaPairGenerated", "tuna-pair-shadow=", "publication-tuna-pairs-20260925",
+            twoWriterFixture: true, serviceIngressFixture: true, tunaPayloadMode: mode, serviceYieldFixture: true, yieldCase: "both");
+
+    [Fact]
     [Trait("FileTransferAnalyzerSuite", "PublicationPersistence")]
     public async Task PublicationPersistence_RealAdoptedFailurePersistsWithoutChangingPrimaryOutcome()
         => await RunGeneratedConsumerAsync("PublicationPersistenceGenerated", "persistence-integration=", "publication-persistence-20260914", failureFixture: true);
@@ -155,7 +239,8 @@ public sealed class FileTransferPublicationUseConsumerTests : FileTransferOpsScr
     private static async Task RunGeneratedConsumerAsync(string supportScript, string resultPrefix, string artifactName,
         bool failureFixture = false, bool liveScaleFixture = false, string observationBudgetFixture = "none", bool receiveFixture = false,
         bool twoWriterFixture = false, bool serviceIngressFixture = false, string tunaPayloadMode = "none",
-        bool finalFallbackFixture = false)
+        bool finalFallbackFixture = false, bool serviceYieldFixture = false, string yieldCase = "none", string membershipBorrowerCase = "none",
+        string sameTransferFixture = "none")
     {
         if (!OperatingSystem.IsWindows()) { return; }
         if (Environment.GetEnvironmentVariable("NLINK_PUBLICATION_CONSUMER_FIXTURE") == "1")
@@ -164,7 +249,17 @@ public sealed class FileTransferPublicationUseConsumerTests : FileTransferOpsScr
             {
                 await NknFileTransferTransportTests.ProducePublicationBulkConsumerFixture();
             }
-            if (Environment.GetEnvironmentVariable("NLINK_PUBLICATION_TWO_WRITER_FIXTURE") == "1")
+            if (Environment.GetEnvironmentVariable("NLINK_PUBLICATION_SAME_TRANSFER_FIXTURE") is "authenticated-positive" or "authenticated-foreign")
+            {
+                await FileTransferTerminalIntegrityEvidenceTests.ProduceAuthenticatedPublicationFixtureAsync(
+                    Environment.GetEnvironmentVariable("NLINK_PUBLICATION_SAME_TRANSFER_FIXTURE") == "authenticated-foreign");
+            }
+            else if (Environment.GetEnvironmentVariable("NLINK_PUBLICATION_SAME_TRANSFER_FIXTURE") is "positive" or "foreign")
+            {
+                await FileTransferTerminalIntegrityEvidenceTests.ProduceSameTransferPublicationFixtureAsync(
+                    Environment.GetEnvironmentVariable("NLINK_PUBLICATION_SAME_TRANSFER_FIXTURE") == "foreign");
+            }
+            else if (Environment.GetEnvironmentVariable("NLINK_PUBLICATION_TWO_WRITER_FIXTURE") == "1")
             {
                 await NknFileTransferTransportTests.ProduceTwoWriterIngressFixture();
             }
@@ -207,6 +302,9 @@ public sealed class FileTransferPublicationUseConsumerTests : FileTransferOpsScr
         child.StartInfo.Environment["NLINK_PUBLICATION_SERVICE_INGRESS_FIXTURE"] = serviceIngressFixture ? "1" : "0";
         child.StartInfo.Environment["NLINK_PUBLICATION_TUNA_PAYLOAD_MODE"] = tunaPayloadMode;
         child.StartInfo.Environment["NLINK_PUBLICATION_FINAL_FALLBACK_FIXTURE"] = finalFallbackFixture ? "1" : "0";
+        child.StartInfo.Environment["NLINK_PUBLICATION_SERVICE_YIELD_FIXTURE"] = serviceYieldFixture ? "1" : "0";
+        child.StartInfo.Environment["NLINK_PUBLICATION_YIELD_CASE"] = yieldCase;
+        child.StartInfo.Environment["NLINK_PUBLICATION_SAME_TRANSFER_FIXTURE"] = sameTransferFixture;
         child.StartInfo.Environment["NLINK_FILETRANSFER_SOAK_ARTIFACT_DIR"] = directory;
         child.StartInfo.Environment["NLINK_FILETRANSFER_ACCEPTANCE_LOG_PATH"] = Path.Combine(directory, "nlink.log");
         child.StartInfo.Environment["NLINK_FILETRANSFER_ACCEPTANCE_RUN_ID"] = runId;
@@ -229,7 +327,10 @@ public sealed class FileTransferPublicationUseConsumerTests : FileTransferOpsScr
         }
 
         const string script = """
-            param([string]$RepoRoot,[string]$Directory,[string]$RunId,[string]$ScenarioId,[string]$SupportScript,[string]$ObservationBudgetFixture,[string]$TunaPayloadMode)
+            param([string]$RepoRoot,[string]$Directory,[string]$RunId,[string]$ScenarioId,[string]$SupportScript,[string]$ObservationBudgetFixture,[string]$TunaPayloadMode,[string]$YieldCase,[string]$MembershipBorrowerCase,[string]$SameTransferFixture)
+            $env:NLINK_PUBLICATION_YIELD_CASE=$YieldCase
+            $env:NLINK_TEST_MEMBERSHIP_BORROWER_CASE=$MembershipBorrowerCase
+            $env:NLINK_PUBLICATION_SAME_TRANSFER_FIXTURE=$SameTransferFixture
             $extra=@{}
             if($ObservationBudgetFixture -cne 'none') { $extra.ObservationScope=$ObservationBudgetFixture }
             if($TunaPayloadMode -cne 'none') { $extra.TunaPayloadMode=$TunaPayloadMode }
@@ -241,7 +342,7 @@ public sealed class FileTransferPublicationUseConsumerTests : FileTransferOpsScr
         {
             // Large input keeps the original 1,800-second analyzer watchdog plus
             // the 150-second GUI hard deadline and 30 seconds for parent cleanup.
-            var result = await RunPowerShellScriptTextAsync(script, [root, directory, runId, scenarioId, supportScript, observationBudgetFixture, tunaPayloadMode], host,
+            var result = await RunPowerShellScriptTextAsync(script, [root, directory, runId, scenarioId, supportScript, observationBudgetFixture, tunaPayloadMode, yieldCase, membershipBorrowerCase, sameTransferFixture], host,
                 liveScaleFixture ? TimeSpan.FromSeconds(1980) : null);
             Assert.True(result.ExitCode == 0 && result.Stdout.Contains(resultPrefix, StringComparison.Ordinal),
                 $"{host}: {result.Stdout}{Environment.NewLine}{result.Stderr}");

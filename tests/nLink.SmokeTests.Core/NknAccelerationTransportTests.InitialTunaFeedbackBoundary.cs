@@ -63,6 +63,7 @@ public sealed partial class NknAccelerationTransportTests
                 }
                 release.TrySetResult();
                 await WaitUntilAsync(() => (int)Value(outbound, "PullV4StateReceivedCountTotal")! > 0 &&
+                    (int)Value(outbound, "ChunksAcceptedForTransport")! > 0 &&
                     receiver.Snapshot.Inbound?.BytesTransferred == 4, TimeSpan.FromSeconds(3));
                 Assert.Equal(new byte[4], destination.ToArray());
                 Assert.True((int)Value(outbound, "ChunksAcceptedForTransport")! > 0);

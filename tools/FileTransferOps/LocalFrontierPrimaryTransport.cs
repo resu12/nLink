@@ -30,8 +30,10 @@ namespace NLink.Tools
             {
                 try
                 {
-                    for (int i = 0; i < header.Length; i++) if (view.ReadByte(i) != header[i]) return false;
-                    for (int i = 0; i < body.Length; i++) if (view.ReadByte(64 + i) != body[i]) return false;
+                    var current = new byte[header.Length + body.Length];
+                    if (view.ReadArray(0, current, 0, current.Length) != current.Length) return false;
+                    for (int i = 0; i < header.Length; i++) if (current[i] != header[i]) return false;
+                    for (int i = 0; i < body.Length; i++) if (current[64 + i] != body[i]) return false;
                     return true;
                 }
                 catch { return false; }

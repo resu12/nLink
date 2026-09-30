@@ -99,15 +99,34 @@ namespace NLink.Tools
                         var events = semanticEventNames == null ? new string[0] : (string[])semanticEventNames.Clone();
                         var source = TryOpenSource();
                         if (source == null || !source.TryBeginProcessingWork()) return null;
-                        var final = TryCaptureLedgerFinal(); var markers = TryCaptureRecoveryMarkers();
+#if NLINK_TEST_ATTEMPT_DISPATCH
+                        NLink.Tests.AttemptWorkProfileForTest.Mark("processing_open");
+#endif
+                        var final = TryCaptureLedgerFinal();
+#if NLINK_TEST_ATTEMPT_DISPATCH
+                        NLink.Tests.AttemptWorkProfileForTest.Mark("processing_after_final_capture");
+#endif
+                        var markers = TryCaptureRecoveryMarkers();
+#if NLINK_TEST_ATTEMPT_DISPATCH
+                        NLink.Tests.AttemptWorkProfileForTest.Mark("processing_after_recovery_capture");
+#endif
                         if (final == null || markers == null) return null;
                         string prefix = Path.Combine(finalizer.root, "frontier-cursor-" + Guid.NewGuid().ToString("N"));
                         var keys = new string[markers.DeferredBatchKeys.Count]; markers.DeferredBatchKeys.CopyTo(keys, 0);
+#if NLINK_TEST_ATTEMPT_DISPATCH
+                        NLink.Tests.AttemptWorkProfileForTest.Mark("processing_before_parse");
+#endif
                         result = GuiSmokeLogLedgerStreamingProcessor.ProcessOwnedCursor(source, final.LineCount, final.Bookmark,
                             prefix + "-retained.tmp", prefix + "-writer.tmp", finalizer.run, finalizer.scenario,
                             keys, prefix + "-semantic.tmp", events, source.ProcessingLifetime);
+#if NLINK_TEST_ATTEMPT_DISPATCH
+                        NLink.Tests.AttemptWorkProfileForTest.Mark("processing_after_parse");
+#endif
                         if (TryMatchProcessedWriters(result) == null || TryMatchRecovery(result) == null ||
                             TryMatchProcessedCursor(result) == null || !source.TryFinishProcessingWork()) return null;
+#if NLINK_TEST_ATTEMPT_DISPATCH
+                        NLink.Tests.AttemptWorkProfileForTest.Mark("processing_after_matches");
+#endif
                         success = OwnsCursorMatch(cursorMatch); return success ? result : null;
                     }
                     catch { return null; }

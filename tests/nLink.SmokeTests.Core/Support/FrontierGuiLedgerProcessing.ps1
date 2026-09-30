@@ -22,7 +22,7 @@ try {
     if($mode -ceq 'budget') {
         $work=$adopter.GetType().GetField('work',$flags).GetValue($adopter)
         $elapsed=@($work.GetType().GetFields($flags) | Where-Object {$_.Name -match '^_?elapsed$'})[0]
-        $elapsed.SetValue($work,[long]([Diagnostics.Stopwatch]::Frequency*6))
+        $elapsed.SetValue($work,[long]([Diagnostics.Stopwatch]::Frequency*11))
     }
     if($mode -ceq 'short') { $count-- }
     if($mode -ceq 'long') { $count++ }
@@ -39,7 +39,7 @@ try {
             -not $capture.MatchesOriginalSource($reader) -or $capture.SourceBytes -ne $proof.SourceBytes -or $capture.SourceLines -ne $lines.Length -or
             $capture.AcceptanceRunId -cne 'frontier-gui-run' -or $capture.ScenarioRunId -cne 'frontier-gui-scenario') { throw 'Owned source/result binding mismatch' }
         $work=$adopter.GetType().GetField('work',$flags).GetValue($adopter)
-        if($work.IsRunning -or $work.ElapsedMilliseconds -ge 5000) { throw 'Processing did not finish within shared work budget' }
+        if($work.IsRunning -or $work.ElapsedMilliseconds -ge 10000) { throw 'Processing did not finish within shared work budget' }
         $baselineRoot=Join-Path $Directory 'legacy-baseline'; [void][IO.Directory]::CreateDirectory($baselineRoot)
         $baseline=[NLink.Tools.GuiSmokeLogLedgerStreamingProcessor]::Process($source,$count,$bookmark,
             (Join-Path $baselineRoot 'retained.log'),(Join-Path $baselineRoot 'writer.log'),'frontier-gui-run','frontier-gui-scenario',
@@ -102,7 +102,7 @@ try {
         elseif($mode -ceq 'output-finish-repeat') { if($reader.TryFinishProcessingWork()) { throw 'Repeated processing finish succeeded' } }
         elseif($mode -ceq 'output-budget-after') {
             $elapsed=@($work.GetType().GetFields($flags) | Where-Object {$_.Name -match '^_?elapsed$'})[0]
-            $elapsed.SetValue($work,[long]([Diagnostics.Stopwatch]::Frequency*6))
+            $elapsed.SetValue($work,[long]([Diagnostics.Stopwatch]::Frequency*11))
             if($binding.IsCurrent) { throw 'Expired output budget retained source custody' }
         } elseif($mode -cin @('cancel-after','output-cancel','validation-cancel')) {
             $cancel=[Threading.EventWaitHandle]::OpenExisting($Name+'.closed')

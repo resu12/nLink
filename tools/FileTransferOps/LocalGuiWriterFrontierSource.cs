@@ -63,6 +63,8 @@ namespace NLink.Tools
                 binding.Dispose(); return false;
             }
             internal bool ProcessingWorkActive { get { return IsCurrent && adoption.ProcessingWorkActive(this) && IsCurrent; } }
+            internal bool BufferedProcessingWorkCurrent
+            { get { return Object.ReferenceEquals(original, this) && adoption.BufferedWorkCurrent(this); } }
             public bool TryFinishProcessingWork()
             {
                 if (!Object.ReferenceEquals(original, this)) return false;

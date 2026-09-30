@@ -9,6 +9,12 @@ public sealed class FrontierEvidencePersistenceTests : FileTransferOpsScriptsTes
     public async Task EvidencePersistence_BoundedNativeWriteAndRename(string host)
         => await RunAsync(host, "primitive", true);
 
+    [Theory]
+    [InlineData("powershell")]
+    [InlineData("pwsh")]
+    public async Task EvidencePersistence_DefaultCatalogPreservesNativePayloadMarkerOrigins(string host)
+        => await RunAsync(host, "catalog-marker", false);
+
     public static IEnumerable<object[]> Cases =>
         from host in new[] { "powershell", "pwsh" }
         from scenario in new[] { "valid", "empty-semantic", "early", "before-copy", "missing-copy", "active-work", "copied-binding", "copied-evidence",

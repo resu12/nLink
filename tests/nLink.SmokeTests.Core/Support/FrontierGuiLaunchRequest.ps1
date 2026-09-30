@@ -89,6 +89,9 @@ foreach($case in $cases) {
         if(-not $process.WaitForExit(20000)) { throw "GUI fixture timed out: $case" }
         $process.WaitForExit()
         $out=$stdout.GetAwaiter().GetResult(); $err=$stderr.GetAwaiter().GetResult()
+        if($case.StartsWith('markers-buffered-',[StringComparison]::Ordinal)) {
+            [IO.File]::WriteAllText((Join-Path $Directory 'recovery-buffer-probe.log'),$out+[Environment]::NewLine+$err)
+        }
         $expectedExitCode=if($case -cin @('cursor-parent-files-facts-ack-gui-failure','cursor-parent-files-facts-ack-commit-gui-failure','cursor-parent-rendezvous-gui-failure')) {7} else {0}
         if($process.ExitCode -ne $expectedExitCode -or $out -notmatch 'frontier-gui-worker=') { throw "Fixture failed $case`: $out $err" }
         if($null -ne $parentRegistration -and ($parentRegistration.IsCurrent -or $parentRegistration.GuiAttached)) { throw 'Parent registration survived GUI exit' }

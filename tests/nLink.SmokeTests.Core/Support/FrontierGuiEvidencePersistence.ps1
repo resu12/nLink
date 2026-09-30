@@ -18,6 +18,10 @@ try {
             $foreign.Dispose(); if(-not $binding.IsCurrent) {throw 'Copied binding retired original'}
         }
         $events=if($mode -ceq 'empty-semantic') {[string[]]@()} else {[string[]]@('operational_log_writer_started','writer_only_contribution')}
+        if($mode -ceq 'catalog-marker') {
+            . (Join-Path $RepoRoot 'tools/GuiSmokeLogLedger.ps1')
+            $events=[string[]]@(Get-GuiSmokeSemanticEvidenceEventNames)
+        }
         $result=$binding.TryProcessObservedLedger($events)
         if($null -eq $result) {throw 'Persistence original processing missing'}
         $copy=$null
@@ -35,7 +39,7 @@ try {
         if($mode -ceq 'over-bound') {$capture.Writer.GetType().GetProperty('CreationPath').SetValue($capture.Writer,('x'*4097),$null)}
         if($mode -ceq 'budget') {
             $elapsed=@($work.GetType().GetFields($flags) | Where-Object {$_.Name -match '^_?elapsed$'})[0]
-            $elapsed.SetValue($work,[long]([Diagnostics.Stopwatch]::Frequency*6))
+            $elapsed.SetValue($work,[long]([Diagnostics.Stopwatch]::Frequency*11))
         }
         $evidence=$binding.TryPersistEvidence()
         if($mode -cin @('before-copy','missing-copy','active-work','collision','directory','closed-output','closed-copy','budget','over-bound')) {
@@ -72,6 +76,27 @@ try {
             for($i=0;$i -lt 2;$i++) {
                 $actual=$json.writers[$i]; $original=$capture.Validation.Writers[$i]
                 if($actual.writerId -cne $original.WriterId -or $actual.lastSequence -ne $original.LastSequence -or $actual.drainSequence -ne $original.DrainSequence) {throw 'Persistence imported mutable writer facts'}
+            }
+            if($mode -ceq 'catalog-marker') {
+                $readLines={param($path)
+                    $stream=[IO.File]::Open($path,[IO.FileMode]::Open,[IO.FileAccess]::Read,([IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete))
+                    $reader=[IO.StreamReader]::new($stream)
+                    try {while(-not $reader.EndOfStream) {$reader.ReadLine()}} finally {$reader.Dispose()}
+                }
+                $sourceLines=@(& $readLines $source)
+                $semanticLines=@(& $readLines $capture.Semantic.CreationPath)
+                $copyLines=@(& $readLines $copy.Output.CreationPath)
+                $sourceMarkers=@(for($i=0;$i -lt $sourceLines.Length;$i++) {if($sourceLines[$i].Contains('event=filetransfer_frontier_payload_marker;')) {$i}})
+                $semanticMarkers=@(for($i=0;$i -lt $semanticLines.Length;$i++) {if($semanticLines[$i].Contains('event=filetransfer_frontier_payload_marker;')) {$i}})
+                if($sourceMarkers.Count -ne 1 -or $semanticMarkers.Count -ne 1) {throw 'Native payload marker missing or duplicated in semantic evidence'}
+                $position=$semanticMarkers[0]; $physical=$sourceMarkers[0]+1
+                if($semanticLines[$position] -cne $sourceLines[$physical-1] -or $copyLines.Length -ne $semanticLines.Length -or
+                    $copyLines[$position] -cne $sourceLines[$physical-1] -or $capture.SemanticOrigins[$position] -ne $physical -or
+                    -not [object]::ReferenceEquals($copy.Origins,$capture.SemanticOrigins)) {throw 'Native payload marker text or physical origin changed'}
+                foreach($stage in @($capture,$copy,$evidence)) {
+                    if($stage.LiveProofEligible -or $stage.NativeWriterCustodyEstablished -or $stage.PublicationCompletionIssued) {throw 'Retained marker granted authority'}
+                }
+                Write-Output ('frontier-marker-retention=physical:'+ $physical +';semantic:'+($position+1)+';diagnosticOnly:true')
             }
             if($mode -ceq 'copied-evidence') {
                 $foreign=$clone.Invoke($evidence,$null)

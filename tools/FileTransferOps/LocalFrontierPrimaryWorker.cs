@@ -32,15 +32,26 @@ namespace NLink.Tools
                         return frontierWorkerInputs.Attach(name);
                     }
                     catch { if (frontierWorkerInputs == null && scope != null) scope.Dispose(); CloseFrontierWorker(); return false; }
+#if NLINK_TEST_ATTEMPT_DISPATCH
+                    finally { work.Stop(); if (frontierWorkerInputs != null) frontierWorkerInputs.PrimaryAttachWorkTicksForTest = work.ElapsedTicks; }
+#else
                     finally { work.Stop(); }
+#endif
                 }
             }
             internal bool FrontierBaseCurrent
             {
                 get
                 {
+#if NLINK_TEST_ATTEMPT_DISPATCH
+                    try { return PrimaryBaseCheckForTest("identity", Object.ReferenceEquals(frontierOriginal, this)) &&
+                        PrimaryBaseCheckForTest("disposed", Volatile.Read(ref disposed) == 0) && PrimaryBaseCheckForTest("parent-missing", parentExit != null) &&
+                        PrimaryBaseCheckForTest("parent-exit", !parentExit.WaitOne(0)) && PrimaryBaseCheckForTest("request-closed", !closed.WaitOne(0)); }
+                    catch (Exception error) { PrimaryBaseCheckForTest("exception:" + error.GetType().FullName, false); return false; }
+#else
                     try { return Object.ReferenceEquals(frontierOriginal, this) && Volatile.Read(ref disposed) == 0 && parentExit != null && !parentExit.WaitOne(0) && !closed.WaitOne(0); }
                     catch { return false; }
+#endif
                 }
             }
             private bool FrontierWorkerCurrent
@@ -66,12 +77,19 @@ namespace NLink.Tools
             private bool attached, closed;
             internal FrontierWorkerInputs(Worker owner, LocalFrontierPrimaryScope scope, Stopwatch work) { this.owner = owner; this.scope = scope; this.work = work; }
             private bool ResourceCurrent
+            { get { return ResourceCurrentWithin(LocalPublicationInputLimits.ProducerMilliseconds); } }
+            // Evaluation may use its larger cumulative allowance; source APIs
+            // keep the producer limit and every original resource check.
+            private bool ResourceCurrentWithin(int maximumMilliseconds)
             {
-                get
-                {
-                    return !closed && work.ElapsedMilliseconds <= LocalPublicationInputLimits.ProducerMilliseconds &&
-                        owner.FrontierBaseCurrent && scope.IsCurrent && (files == null || files.IsCurrent) && (pins == null || pins.IsCurrent);
-                }
+#if NLINK_TEST_ATTEMPT_DISPATCH
+                return PrimarySourceCheckForTest("resource:closed", !closed) && PrimarySourceBudgetForTest("resource:budget", work.ElapsedMilliseconds, maximumMilliseconds) &&
+                    PrimarySourceCheckForTest("resource:base", PrimaryMeasuredCurrentForTest(0)) && PrimarySourceCheckForTest("resource:scope", PrimaryMeasuredCurrentForTest(1)) &&
+                    PrimarySourceCheckForTest("resource:files", PrimaryMeasuredCurrentForTest(2)) && PrimarySourceCheckForTest("resource:pins", PrimaryMeasuredCurrentForTest(3));
+#else
+                return !closed && work.ElapsedMilliseconds <= maximumMilliseconds &&
+                    owner.FrontierBaseCurrent && scope.IsCurrent && (files == null || files.IsCurrent) && (pins == null || pins.IsCurrent);
+#endif
             }
             internal bool Attach(string name)
             {
@@ -96,8 +114,18 @@ namespace NLink.Tools
                         pins = LocalGuiWriterRequest.FrontierParentFilesPending.CommitPins.PullPrimary(owner.parentExit.SafeWaitHandle, files.Body, () => ResourceCurrent);
                         if (pins == null || !ResourceCurrent || !files.Facts.MarkReceived() || !files.MarkPulled()) return false;
                         attached = true;
+#if NLINK_TEST_ATTEMPT_DISPATCH
+                        int watchIndex = 0;
+                        foreach (var signal in new WaitHandle[] { owner.closed, owner.parentExit, files.Cancelled, files.Facts.Cancelled })
+                        {
+                            string reason = new[] { "request-closed", "parent-exit", "files-cancelled", "facts-cancelled" }[watchIndex++];
+                            watches.Add(ThreadPool.RegisterWaitForSingleObject(signal, (s,t) => Close("watch:" + reason), null, Timeout.Infinite, true));
+                        }
+#else
                         foreach (var signal in new WaitHandle[] { owner.closed, owner.parentExit, files.Cancelled, files.Facts.Cancelled })
                             watches.Add(ThreadPool.RegisterWaitForSingleObject(signal, (s,t) => Close(), null, Timeout.Infinite, true));
+#endif
+                        AttachTransferPair(name);
                         success = ResourceCurrent; return success;
                     }
                     catch { return false; }
@@ -120,11 +148,20 @@ namespace NLink.Tools
             public bool NativeWriterCustodyEstablished { get { return false; } }
             public bool PublicationCompletionIssued { get { return false; } }
             public bool LiveProofEligible { get { return false; } }
+#if NLINK_TEST_ATTEMPT_DISPATCH
+            internal void Close([System.Runtime.CompilerServices.CallerMemberName] string caller = "")
+#else
             internal void Close()
+#endif
             {
                 lock (sync)
                 {
                     if (closed) return; closed = true;
+#if NLINK_TEST_ATTEMPT_DISPATCH
+                    PrimarySourceCloseForTest = caller;
+                    PrimarySourceCloseSnapshotForTest = PrimarySourceProgressForTest(work.ElapsedMilliseconds);
+#endif
+                    CloseTransferPair();
                     foreach (var watch in watches) watch.Unregister(null);
                     CloseDiagnosticOutput();
                     CloseEvaluation();

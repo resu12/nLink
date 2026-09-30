@@ -102,6 +102,7 @@ namespace NLink.Tools
                 if (frontierInputAttempted) return null; frontierInputAttempted = true;
                 frontierInputs = custody.Transfer(this);
                 if (frontierInputs != null && !frontierInputs.IsCurrent) { frontierInputs.Close(); return null; }
+                if (frontierInputs != null) custody.CopyTransferPairToPrimary(frontierInputs);
                 return frontierInputs;
             }
         }

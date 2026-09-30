@@ -335,22 +335,32 @@ public sealed partial class NknSignalingTransport
         }
 
         var serializedFrame = SerializeFileTransferDataFrameForWire(frame);
-        var controlPayload = CreateSecureFileTransferPayload(
+        var captureYield = frame is FileTransferFallbackTailYieldFrameV6;
+        var controlPayload = CreateSecureFileTransferPayloadWithEvidence(
             MsgType.FileTransferDataFrame,
             normalizedTransferId,
-            serializedFrame);
+            serializedFrame,
+            useBulkIdentity: false,
+            out var controlSecurityEvidence,
+            captureEvidence: captureYield);
         var controlEnvelope = CreateEnvelope(envelopeCode, MsgType.FileTransferDataFrame, controlPayload, replyTo: null);
 
         Envelope? bulkEnvelope = null;
+        FileTransferSecurityEvidence? bulkSecurityEvidence = null;
         if (!string.IsNullOrWhiteSpace(remoteBulkEndpoint))
         {
-            var bulkPayload = CreateSecureFileTransferPayload(
+            var bulkPayload = CreateSecureFileTransferPayloadWithEvidence(
                 MsgType.FileTransferDataFrame,
                 normalizedTransferId,
                 serializedFrame,
-                useBulkIdentity: true);
+                useBulkIdentity: true,
+                out bulkSecurityEvidence,
+                captureEvidence: captureYield);
             bulkEnvelope = CreateEnvelope(envelopeCode, MsgType.FileTransferDataFrame, bulkPayload, replyTo: null);
         }
+
+        var yieldEvidence = CaptureYieldSendEvidence(frame, controlEnvelope, controlSecurityEvidence,
+            bulkEnvelope, bulkSecurityEvidence);
 
         var result = await SendLifecycleEnvelopeAsync(
                 new LifecycleDeliveryOptions(
@@ -369,13 +379,15 @@ public sealed partial class NknSignalingTransport
                     PeerCopyAttempts: Math.Max(1, request.PeerCopyAttempts),
                     ThrowOnFailure: false,
                     CopyTimeout: request.CopyTimeout,
-                    PreSendValidator: request.PreTransportDeliveryValidator),
+                    PreSendValidator: request.PreTransportDeliveryValidator,
+                    OfflinePublicationDelay: BindOfflinePublicationDelay(request, controlEnvelope, bulkEnvelope)),
                 new LifecycleEnvelopeSet(controlEnvelope, bulkEnvelope),
                 ct)
             .ConfigureAwait(false);
 
         if (IsLifecyclePreSendValidationFailure(result))
         {
+            LogYieldSendCopies(yieldEvidence, result, current: false);
             return new FileTransferControlPlaneDeliveryResult(
                 request.Kind,
                 normalizedTransferId,
@@ -390,10 +402,11 @@ public sealed partial class NknSignalingTransport
                 result.ControlQueueErrorName,
                 result.ControlAckErrorName,
                 result.ControlCopyErrorName,
-                result.BulkCopyErrorName);
+                result.BulkCopyErrorName) { YieldEvidence = yieldEvidence };
         }
 
         var postSendAuthorityCurrent = request.PreTransportDeliveryValidator?.Invoke() ?? request.AuthorityId.IsDefault;
+        LogYieldSendCopies(yieldEvidence, result, postSendAuthorityCurrent);
         if (!postSendAuthorityCurrent)
         {
             LocalOperationalLog.Warn(
@@ -429,7 +442,7 @@ public sealed partial class NknSignalingTransport
             result.ControlQueueErrorName,
             result.ControlAckErrorName,
             result.ControlCopyErrorName,
-            result.BulkCopyErrorName);
+            result.BulkCopyErrorName) { YieldEvidence = yieldEvidence };
     }
 
     private static string FormatControlPlaneFrameCorrelationSuffix(FileTransferDataFrame frame)
@@ -497,7 +510,7 @@ public sealed partial class NknSignalingTransport
                 fileTransferPostTunaFallbackHandoffEvidence.Remove(normalizedTransferId);
                 LocalOperationalLog.Warn(
                     "SessionSecurity",
-                    $"event=filetransfer_data_session_recreated; transport=nkn; transfer_id={normalizedTransferId}; session_id={normalizedSessionId}; reason=disposed_existing_session_on_open");
+                    $"event=filetransfer_data_session_recreated; {FileTransferDiagnosticScopeEvidence.Format(normalizedSessionId, normalizedTransferId)}transport=nkn; transfer_id={normalizedTransferId}; session_id={normalizedSessionId}; reason=disposed_existing_session_on_open");
                 session = null;
             }
 
@@ -976,6 +989,7 @@ public sealed partial class NknSignalingTransport
         var publicationUse = FileTransferPublicationUseEvidence.GetSend(dataPathSendAuthority);
         var envelope = CreateEnvelope(envelopeCode, messageType, securePayload, replyTo: null);
         var transportPayload = EnvelopeCodec.Serialize(envelope);
+        ObserveOfflineFileFrame(dataFrame, transportPayload);
         using var deliveryTraceScope = messageType == MsgType.FileTransferDataFrame
             ? NknTunaDeliveryTrace.BeginSend(transportPayload) : null;
         var lane = useBulkLane ? "bulk" : "control";
@@ -3174,7 +3188,7 @@ public sealed partial class NknSignalingTransport
         var routePublicationGeneration = hasRouteHint ? routeHint.RoutePublicationGeneration : 0;
         LocalOperationalLog.Warn(
             "SessionSecurity",
-            $"event=filetransfer_v6_frontier_request_receive_dispatch_rejected; direction=outbound; transfer_id={SanitizeLogToken(request.TransferId)}; session_id={SanitizeLogToken(request.SessionId)}; route={SanitizeLogToken(routeToken)}; protocol_version={protocolVersion}; live_route_epoch={liveRouteEpoch}; leg_generation={fallbackLegGeneration}; transport_epoch={request.TransportEpoch}; current_transport_epoch={fallbackTransportEpoch}; bridge_recovery_generation={fallbackBridgeRecoveryGeneration}; checkpoint_request_id={SanitizeLogToken(fallbackCheckpointRequestId ?? "(none)")}; route_publication_generation={routePublicationGeneration}; repair_request_id={SanitizeLogToken(request.RepairRequestId ?? "(none)")}; request_correlation_id={SanitizeLogToken(request.RequestCorrelationId ?? "(none)")}; first_start_chunk_index={firstStartChunkIndex}; first_chunk_count={firstChunkCount}; range_count={request.MissingRanges.Count}; received_transport={FormatFileTransferTransportKindForLog(transportKind)}; lane={SanitizeLogToken(MapBridgeChannel(channel))}; decision_reason={SanitizeLogToken(resolvedDecisionReason)}");
+            $"event=filetransfer_v6_frontier_request_receive_dispatch_rejected; {FileTransferDiagnosticScopeEvidence.Format(request.SessionId, request.TransferId)}direction=outbound; transfer_id={SanitizeLogToken(request.TransferId)}; session_id={SanitizeLogToken(request.SessionId)}; route={SanitizeLogToken(routeToken)}; protocol_version={protocolVersion}; live_route_epoch={liveRouteEpoch}; leg_generation={fallbackLegGeneration}; transport_epoch={request.TransportEpoch}; current_transport_epoch={fallbackTransportEpoch}; bridge_recovery_generation={fallbackBridgeRecoveryGeneration}; checkpoint_request_id={SanitizeLogToken(fallbackCheckpointRequestId ?? "(none)")}; route_publication_generation={routePublicationGeneration}; repair_request_id={SanitizeLogToken(request.RepairRequestId ?? "(none)")}; request_correlation_id={SanitizeLogToken(request.RequestCorrelationId ?? "(none)")}; first_start_chunk_index={firstStartChunkIndex}; first_chunk_count={firstChunkCount}; range_count={request.MissingRanges.Count}; received_transport={FormatFileTransferTransportKindForLog(transportKind)}; lane={SanitizeLogToken(MapBridgeChannel(channel))}; decision_reason={SanitizeLogToken(resolvedDecisionReason)}");
     }
 
     private bool TryResolveFallbackFrontierRequestRouteHintForDispatchProof(
@@ -4429,6 +4443,8 @@ public sealed partial class NknSignalingTransport
         var receivedTransportKind = ResolveInboundFileTransferDataFrameTransportKind(channel);
         var envelopeEvidence = CreateFileTransferDataPathEnvelopeEvidence(
             env.MessageId, frame.SessionId, frame.TransferId) with { SecurityEvidence = securityEvidence };
+        var yieldEvidence = CaptureYieldEvidence(frame, envelopeEvidence,
+            channel == NknBridgeChannel.Bulk ? "bulk" : "control");
         if (ShouldRejectFileTunaV4PayloadReceive(frame, channel, receivedTransportKind, envelopeEvidence))
         {
             return false;
@@ -4557,7 +4573,8 @@ public sealed partial class NknSignalingTransport
                 LogFileTransferDataPathReceiveResult(
                     frame, channel, receivedTransportKind, dispatchEvidence,
                     "dispatch_entered", hasRouteAuthority, routeHint);
-                DeliverFileTransferDataFrame(frame, channel, receivedTransportKind, source);
+                yieldEvidence?.WriteCopy("receive_dispatch", yieldEvidence.First);
+                DeliverFileTransferDataFrame(frame, channel, receivedTransportKind, source, yieldEvidence);
                 LogFileTransferEnvelopeEvent("received", MsgType.FileTransferDataFrame, frame.TransferId, source, effectiveTransport);
             },
             usesDedicatedChunkDispatch);
@@ -7387,7 +7404,8 @@ public sealed partial class NknSignalingTransport
         FileTransferDataFrame frame,
         NknBridgeChannel channel,
         FileTransferTransportKind receivedTransportKind,
-        string? source)
+        string? source,
+        FileTransferFallbackTailYieldEvidence? yieldEvidence = null)
     {
         TransportFileTransferDataSession? session;
         var createdSession = false;
@@ -7410,7 +7428,7 @@ public sealed partial class NknSignalingTransport
                 RemoveFileTransferRouteHintsForTransferUnsafe(frame.TransferId, frame.SessionId);
                 LocalOperationalLog.Warn(
                     "SessionSecurity",
-                    $"event=filetransfer_data_session_recreated; transport=nkn; transfer_id={frame.TransferId}; session_id={frame.SessionId}; frame_type={frame.Type}; chunk_index={GetFileTransferDataFrameChunkIndex(frame)}; reason=disposed_existing_session_on_deliver");
+                    $"event=filetransfer_data_session_recreated; {FileTransferDiagnosticScopeEvidence.Format(frame.SessionId, frame.TransferId)}transport=nkn; transfer_id={frame.TransferId}; session_id={frame.SessionId}; frame_type={frame.Type}; chunk_index={GetFileTransferDataFrameChunkIndex(frame)}; reason=disposed_existing_session_on_deliver");
                 session = null;
             }
 
@@ -7456,13 +7474,14 @@ public sealed partial class NknSignalingTransport
             ApplyActiveTunaActivationPauseToNewFileTransferDataSession(session!, "remote_open");
         }
 
-        session!.Deliver(frame, channel, receivedTransportKind, source);
+        session!.Deliver(frame, channel, receivedTransportKind, source, yieldEvidence);
     }
 
-    private void RaiseFileTransferFallbackTailYieldProofReceived(FileTransferFallbackTailYieldFrameV6 frame, string? peerId)
+    private void RaiseFileTransferFallbackTailYieldProofReceived(FileTransferFallbackTailYieldFrameV6 frame, string? peerId,
+        FileTransferFallbackTailYieldEvidence? yieldEvidence)
         => FileTransferFallbackTailYieldProofReceived?.Invoke(
             this,
-            new FileTransferFallbackTailYieldProofReceivedEventArgs(frame, peerId));
+            new FileTransferFallbackTailYieldProofReceivedEventArgs(frame, peerId) { YieldEvidence = yieldEvidence });
 
     private static void LogFileTransferEnvelopeEvent(
         string direction,
@@ -7816,7 +7835,7 @@ public sealed partial class NknSignalingTransport
                 removed = true;
                 LocalOperationalLog.Info(
                     "SessionSecurity",
-                    $"event=filetransfer_data_session_removed; transport=nkn; transfer_id={session.TransferId}; session_id={session.SessionId}; reason={reason}");
+                    $"event=filetransfer_data_session_removed; {FileTransferDiagnosticScopeEvidence.Format(session.SessionId, session.TransferId)}transport=nkn; transfer_id={session.TransferId}; session_id={session.SessionId}; reason={reason}");
             }
         }
 
@@ -9304,7 +9323,8 @@ public sealed partial class NknSignalingTransport
             FileTransferDataFrame frame,
             NknBridgeChannel channel,
             FileTransferTransportKind receivedTransportKind = FileTransferTransportKind.Unknown,
-            string? peerId = null)
+            string? peerId = null,
+            FileTransferFallbackTailYieldEvidence? yieldEvidence = null)
         {
             var isRuntimeUnlockPreCommitFrame = IsRuntimeUnlockPreCommitProbeFrame(frame);
             var isRuntimeUnlockPreCommitAckFrame = frame is FileTransferRuntimeUnlockPreCommitProbeAckFrame;
@@ -9349,7 +9369,7 @@ public sealed partial class NknSignalingTransport
                 frame,
                 effectiveTransportKind,
                 MapBridgeChannel(channel),
-                DateTimeOffset.UtcNow);
+                DateTimeOffset.UtcNow) { YieldEvidence = yieldEvidence };
             if (isRuntimeUnlockPreCommitAckFrame &&
                 runtimeUnlockAuthorityHandler is not null)
             {
@@ -9470,7 +9490,7 @@ public sealed partial class NknSignalingTransport
 
             if (frame is FileTransferFallbackTailYieldFrameV6 yieldFrame)
             {
-                owner.RaiseFileTransferFallbackTailYieldProofReceived(yieldFrame, peerId);
+                owner.RaiseFileTransferFallbackTailYieldProofReceived(yieldFrame, peerId, yieldEvidence);
             }
 
             if (FileTransferDiagnosticLogPolicy.TraceEnabled)
@@ -9509,7 +9529,7 @@ public sealed partial class NknSignalingTransport
 
             LocalOperationalLog.Info(
                 "SessionSecurity",
-                $"event=filetransfer_v6_frontier_request_transport_{outcome}; transport=nkn; transfer_id={SanitizeLogToken(request.TransferId)}; session_id={SanitizeLogToken(request.SessionId)}; frame_type={SanitizeLogToken(request.Type)}; lane={MapBridgeChannel(channel)}; actual_transport={FormatFileTransferTransportKindForLog(transportKind)}; priority=1; queue_capacity_bypassed={(bypassedQueueCapacity ? 1 : 0)}; queued_frames={queuedFramesAfter}; queued_bytes={queuedBytesAfter}; transport_epoch={request.TransportEpoch}; repair_request_id={SanitizeLogToken(request.RepairRequestId ?? "(none)")}; request_correlation_id={SanitizeLogToken(request.RequestCorrelationId ?? "(none)")}; range_count={request.MissingRanges.Count}; first_start_chunk_index={(request.MissingRanges.Count > 0 ? request.MissingRanges[0].StartChunkIndex : -1)}; requested_chunk_count={(request.MissingRanges.Count > 0 ? request.MissingRanges[0].ChunkCount : 0)}; decision_reason={SanitizeLogToken(reason)}");
+                $"event=filetransfer_v6_frontier_request_transport_{outcome}; {FileTransferDiagnosticScopeEvidence.Format(request.SessionId, request.TransferId)}transport=nkn; transfer_id={SanitizeLogToken(request.TransferId)}; session_id={SanitizeLogToken(request.SessionId)}; frame_type={SanitizeLogToken(request.Type)}; lane={MapBridgeChannel(channel)}; actual_transport={FormatFileTransferTransportKindForLog(transportKind)}; priority=1; queue_capacity_bypassed={(bypassedQueueCapacity ? 1 : 0)}; queued_frames={queuedFramesAfter}; queued_bytes={queuedBytesAfter}; transport_epoch={request.TransportEpoch}; repair_request_id={SanitizeLogToken(request.RepairRequestId ?? "(none)")}; request_correlation_id={SanitizeLogToken(request.RequestCorrelationId ?? "(none)")}; range_count={request.MissingRanges.Count}; first_start_chunk_index={(request.MissingRanges.Count > 0 ? request.MissingRanges[0].StartChunkIndex : -1)}; requested_chunk_count={(request.MissingRanges.Count > 0 ? request.MissingRanges[0].ChunkCount : 0)}; decision_reason={SanitizeLogToken(reason)}");
             if (string.Equals(outcome, "rejected", StringComparison.Ordinal))
             {
                 owner.LogFallbackFrontierRequestReceiveDispatchRejectedFromTransportQueue(

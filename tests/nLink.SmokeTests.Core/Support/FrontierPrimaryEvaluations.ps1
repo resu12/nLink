@@ -6,6 +6,11 @@ Set-StrictMode -Version Latest
 $mode=$Case.Substring('evaluations-'.Length)
 $flags=[Reflection.BindingFlags]'Instance,NonPublic'; $clone=[object].GetMethod('MemberwiseClone',$flags)
 $signals=@{}; $worker=$null; $reader=$null; $custody=$null; $pair=$null; $script:evaluationCalls=0
+function Set-EvaluationWork([long]$Milliseconds) {
+    $watch=$owned.GetType().GetField('work',$flags).GetValue($owned)
+    $elapsed=@($watch.GetType().GetFields($flags) | Where-Object {$_.Name -match '^_?elapsed$'})[0]
+    $elapsed.SetValue($watch,[long]([Diagnostics.Stopwatch]::Frequency*$Milliseconds/1000))
+}
 try {
     foreach($part in @('begin','attached','release')) {$signals[$part]=[Threading.EventWaitHandle]::OpenExisting($Name+'.test.worker.'+$part)}
     if(-not $signals.begin.WaitOne(30000)) {throw 'Evaluation begin deadline'}
@@ -18,6 +23,11 @@ try {
         $events=@(Read-FileTransferLogEvents -LogFiles @($SourcePath) -OwnedSource $reader)
         if(-not $reader.InputReadComplete -or $events.Count -ne 3) {throw 'Original parser/source association failed'}
         [string[]]$full=@($events | ForEach-Object RawLine); [int[]]$fullOrdinals=@($events | ForEach-Object LineNumber)
+        # Preserve the original reader's exact physical mapping; diagnostic log
+        # rows can shift it, so fixed physical line numbers are not a fixture contract.
+        $expectedOrigins=@(for($i=0;$i -lt $full.Length;$i++) {$reader.GetFrontierPhysicalOrigin($i+1,$full[$i])})
+        if($expectedOrigins[0] -ne 2 -or $expectedOrigins[1] -le $expectedOrigins[0]+1 -or
+            $expectedOrigins[2] -le $expectedOrigins[1]) {throw 'Evaluation fixture lost its non-copy physical mapping'}
         [string[]]$compact=@($full[1],$full[2]); [int[]]$compactOrdinals=@(2,3)
         if($mode -ceq 'actual-evaluations') {
             . (Join-Path $RepoRoot 'tools/FileTransferOps/CoordinatorSnapshotEvidence.ps1')
@@ -39,35 +49,40 @@ try {
         'origin-order' {$fullOrdinals[2]=1}
         'record-cap' {$full=[string[]]::new(262145); $fullOrdinals=[int[]]::new(262145)}
         'null-context' {$context=$null}
+        'producer-budget' {Set-EvaluationWork 21000}
     }
-    $initialReject=$mode -cin @('pre-eof','wrong-ordinal','equal-line','compact-not-full','origin-order','record-cap','null-context')
+    $initialReject=$mode -cin @('pre-eof','wrong-ordinal','equal-line','compact-not-full','origin-order','record-cap','null-context','producer-budget')
     $custody=$worker.TryBeginFrontierPrimary($reader,$context,$full,$fullOrdinals,$compact,$compactOrdinals)
     if(($null -eq $custody) -ne $initialReject) {throw ('Evaluation admission mismatch: '+$mode)}
+    if($mode -ceq 'producer-budget' -and $null -ne $owned.GetType().GetField('evaluation',$flags).GetValue($owned)) {throw 'Expired producer acquired evaluation time'}
     if($null -ne $custody) {
+        if($mode -cin @('evaluation-extended','evaluation-replay')) {Set-EvaluationWork 21000}
         # Caller-owned ordinal arrays are not retained as authority.
         $fullOrdinals[0]=999; if($compactOrdinals.Length) {$compactOrdinals[0]=999}
-        if($mode -ceq 'valid') {
+        if($mode -cin @('valid','evaluation-extended')) {
+            $visitsBefore=$owned.GetType().GetField('evaluationVisits',$flags).GetValue($owned)
             $copiedWorker=$clone.Invoke($worker,$null); $copiedReader=$clone.Invoke($reader,$null)
             if($null -ne $copiedWorker.TryBeginFrontierPrimary($reader,$context,$full,$fullOrdinals,$compact,$compactOrdinals) -or
                 $null -ne $worker.TryBeginFrontierPrimary($copiedReader,$context,$full,$fullOrdinals,$compact,$compactOrdinals)) {throw 'Copied owner/source began evaluation'}
             $copied=$clone.Invoke($custody,$null)
             if($copied.RecordFull($full,$fullView) -or $null -ne $copied.Take($context,$full,$compact,$fullView,$compactView)) {throw 'Copied custody acted'}
             $copied.Dispose(); $copiedWorker.Dispose(); $copiedReader.Dispose()
+            if($owned.GetType().GetField('evaluationVisits',$flags).GetValue($owned) -ne $visitsBefore) {throw 'Foreign calls changed cumulative visits'}
         }
-        $recordRejected=$mode -cin @('mutated-full','mutated-compact','wrong-array','record-order','repeat-full','missing-view','budget','record-budget','repeat-begin','early-take')
+        $recordRejected=$mode -cin @('mutated-full','mutated-compact','wrong-array','record-order','repeat-full','missing-view','budget','record-budget','repeat-begin','early-take','evaluation-replay')
         switch($mode) {
             'mutated-full' {$full[0]=[string]::new($full[0].ToCharArray())}
             'mutated-compact' {$compact[0]=[string]::new($compact[0].ToCharArray())}
             'budget' {
                 $watch=$owned.GetType().GetField('work',$flags).GetValue($owned)
                 $elapsed=@($watch.GetType().GetFields($flags) | Where-Object {$_.Name -match '^_?elapsed$'})[0]
-                $elapsed.SetValue($watch,[long]([Diagnostics.Stopwatch]::Frequency*21))
+                $elapsed.SetValue($watch,[long]([Diagnostics.Stopwatch]::Frequency*([NLink.Tools.LocalPublicationInputLimits]::EvaluationMilliseconds+1000)/1000))
             }
-            'record-budget' {$owned.GetType().GetField('evaluationVisits',$flags).SetValue($owned,2097152L)}
+            'record-budget' {$owned.GetType().GetField('evaluationVisits',$flags).SetValue($owned,[long][NLink.Tools.LocalPublicationInputLimits]::EvaluationVisits)}
         }
         if($mode -ceq 'record-order') {
             if($custody.RecordCompact($compact,$compactView)) {throw 'Compact recorded before full'}
-        } elseif($mode -ceq 'repeat-begin') {
+        } elseif($mode -cin @('repeat-begin','evaluation-replay')) {
             # Keep the repeated request otherwise valid: the one-shot gate,
             # not the deliberately mutated caller maps above, must reject it.
             if($null -ne $worker.TryBeginFrontierPrimary($reader,$context,$full,([int[]]@(1,2,3)),$compact,([int[]]@(2,3)))) {throw 'Evaluation began twice'}
@@ -95,9 +110,9 @@ try {
                         $pair.CompactInvocationId -eq [guid]::Empty -or $pair.FullInvocationId -eq $pair.CompactInvocationId -or
                         -not $custody.Owns($pair,$context,$full,$compact,$fullView,$compactView)) {throw 'Original invocation ownership missing'}
                     $origins=@(for($i=0;$i -lt $full.Length;$i++) {$custody.GetPhysicalOrigin($pair,$full,$fullView,$i+1)})
-                    if(($origins -join ',') -cne '2,74,75') {throw 'Evaluation origins used copy ordinals'}
+                    if(($origins -join ',') -cne ($expectedOrigins -join ',')) {throw 'Evaluation origins differ from original reader'}
                     'frontier-primary-source-origins='+($origins -join ',')
-                    if($compact.Length -and $custody.GetPhysicalOrigin($pair,$compact,$compactView,1) -ne 74) {throw 'Compact origin differs'}
+                    if($compact.Length -and $custody.GetPhysicalOrigin($pair,$compact,$compactView,1) -ne $expectedOrigins[1]) {throw 'Compact origin differs'}
                     if($mode -ceq 'valid') {
                         $pairCopy=$clone.Invoke($pair,$null); $arrayCopy=[string[]]$full.Clone()
                         if($custody.Owns($pairCopy,$context,$full,$compact,$fullView,$compactView) -or
@@ -114,6 +129,14 @@ try {
                         'post-mutation' {$full[0]+='changed'}
                         'source-close' {$reader.Dispose()}
                         'custody-dispose' {$custody.Dispose()}
+                        'evaluation-source-origin' {
+                            Set-EvaluationWork 21000
+                            if($reader.GetFrontierPhysicalOrigin(1,$full[0]) -ne 0) {throw 'Raw origin acquired evaluation allowance'}
+                        }
+                        'evaluation-source-complete' {
+                            Set-EvaluationWork 21000
+                            if($reader.InputReadComplete) {throw 'Source completion acquired evaluation allowance'}
+                        }
                     }
                     if(($fullView | ConvertTo-Json -Depth 60 -Compress) -cne $beforeFull -or
                         ($compactView | ConvertTo-Json -Depth 60 -Compress) -cne $beforeCompact) {throw 'Original evaluation views changed'}
@@ -123,8 +146,22 @@ try {
     }
     [void]$signals.attached.Set()
     if(-not $signals.release.WaitOne(30000)) {throw 'Evaluation review deadline'}
-    $positive=$mode -cin @('valid','actual-evaluations')
+    $positive=$mode -cin @('valid','actual-evaluations','evaluation-extended')
     if($null -ne $custody -and $custody.Owns($pair,$context,$full,$compact,$fullView,$compactView) -ne $positive) {throw 'Final pair ownership mismatch'}
+    if($mode -like 'evaluation-*' -or $mode -ceq 'producer-budget') {
+        $watch=$owned.GetType().GetField('work',$flags).GetValue($owned)
+        if($watch.ElapsedMilliseconds -lt 21000 -or $watch.IsRunning) {throw 'Phase/rejection reset the original clock'}
+    }
+    if($mode -ceq 'evaluation-extended') {
+        Set-EvaluationWork 61000
+        $beforeExpired=$owned.GetType().GetField('evaluationVisits',$flags).GetValue($owned)
+        if($custody.Owns($pair,$context,$full,$compact,$fullView,$compactView) -or
+            $custody.Owns($pair,$context,$full,$compact,$fullView,$compactView) -or
+            $null -ne $worker.TryBeginFrontierPrimary($reader,$context,$full,([int[]]@(1,2,3)),$compact,([int[]]@(2,3)))) {throw 'Expired evaluation reopened'}
+        if($watch.ElapsedMilliseconds -lt 61000 -or $watch.IsRunning -or
+            $owned.GetType().GetField('evaluationVisits',$flags).GetValue($owned) -ne $beforeExpired) {throw 'Expired calls changed clock or visits'}
+        $positive=$false
+    }
     if($worker.IsCurrent -ne $positive -or $owned.IsCurrent -ne $positive) {throw 'Native evaluation retirement mismatch'}
     if($owned.NativeWriterCustodyEstablished -or $owned.PublicationCompletionIssued -or $owned.LiveProofEligible -or
         $null -ne $worker.TryBeginPrimary($reader,$context,$full,$compact) -or $null -ne $worker.TryOpenWriter()) {throw 'Evaluation custody enabled legacy authority'}

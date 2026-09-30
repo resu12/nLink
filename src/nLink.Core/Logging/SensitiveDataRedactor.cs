@@ -44,6 +44,7 @@ public static partial class SensitiveDataRedactor
         redacted = ProtectRepairOwnerEvidenceValues(redacted, protectedSnapshotEvidenceValues);
         redacted = ProtectDataPathEnvelopeEvidenceValues(redacted, protectedSnapshotEvidenceValues);
         redacted = ProtectFileTransferSecurityEvidenceValues(redacted, protectedSnapshotEvidenceValues);
+        redacted = ProtectYieldEvidenceValues(redacted, protectedSnapshotEvidenceValues);
         redacted = ProtectFrontierReceiptEvidenceValues(redacted, protectedSnapshotEvidenceValues);
         redacted = ProtectFrontierPayloadMarkerValues(redacted, protectedSnapshotEvidenceValues);
         redacted = ProtectTunaDeliveryTraceValues(redacted, protectedSnapshotEvidenceValues);
@@ -145,17 +146,35 @@ public static partial class SensitiveDataRedactor
             });
         });
 
-    [GeneratedRegex(@"^[^\r\n]*(?<![A-Za-z0-9._/-])event=(?:filetransfer_data_path_(?:send|receive)_result|filetransfer_tuna_data_path_(?:peer_visible|mismatch)|filetransfer_data_frame_ignored)(?=;\s|$)[^\r\n]*(?=\r?$)", RegexOptions.Multiline | RegexOptions.CultureInvariant)]
+    [GeneratedRegex(@"^[^\r\n]*(?<![A-Za-z0-9._/-])event=(?:filetransfer_data_path_(?:send|receive)_result|filetransfer_tuna_data_path_(?:peer_visible|mismatch)|filetransfer_data_frame_ignored|filetransfer_fallback_tail_yield_evidence)(?=;\s|$)[^\r\n]*(?=\r?$)", RegexOptions.Multiline | RegexOptions.CultureInvariant)]
     private static partial Regex DataPathEnvelopeEvidenceLineRegex();
 
     [GeneratedRegex(@"(?<![A-Za-z0-9._/-])(?:(?<key>data_path_envelope_fingerprint)=(?<value>ftenv1-[a-f0-9]{64})|(?<key>data_path_(?:session|transfer)_id)=(?<value>fte1-[a-f0-9]{24}))(?=;\s|$)", RegexOptions.CultureInvariant)]
     private static partial Regex DataPathEnvelopeEvidenceValueRegex();
 
-    [GeneratedRegex(@"^[^\r\n]*(?<![A-Za-z0-9._/-])event=(?:filetransfer_security_context_(?:installed|retired)|filetransfer_data_path_(?:send|receive)_result|filetransfer_tuna_data_path_(?:peer_visible|mismatch)|filetransfer_data_frame_ignored)(?=;\s|$)[^\r\n]*(?=\r?$)", RegexOptions.Multiline | RegexOptions.CultureInvariant)]
+    [GeneratedRegex(@"^[^\r\n]*(?<![A-Za-z0-9._/-])event=(?:filetransfer_security_context_(?:installed|retired)|filetransfer_data_path_(?:send|receive)_result|filetransfer_tuna_data_path_(?:peer_visible|mismatch)|filetransfer_data_frame_ignored|filetransfer_fallback_tail_yield_evidence)(?=;\s|$)[^\r\n]*(?=\r?$)", RegexOptions.Multiline | RegexOptions.CultureInvariant)]
     private static partial Regex FileTransferSecurityEvidenceLineRegex();
 
     [GeneratedRegex(@"(?<![A-Za-z0-9._/-])(?:(?<key>security_transport_id)=(?<value>ftst1-[a-f0-9]{32})|(?<key>security_installation_id)=(?<value>ftsi1-[a-f0-9]{32})|(?<key>security_establishment_fingerprint)=(?<value>ftest1-[a-f0-9]{64})|(?<key>security_payload_fingerprint)=(?<value>ftpay1-[a-f0-9]{64})|(?<key>security_(?:session|transfer)_id)=(?<value>fte1-[a-f0-9]{24}))(?=;\s|$)", RegexOptions.CultureInvariant)]
     private static partial Regex FileTransferSecurityEvidenceValueRegex();
+
+    [GeneratedRegex(@"^[^\r\n]*(?<![A-Za-z0-9._/-])event=filetransfer_fallback_tail_yield_evidence(?=;\s|$)[^\r\n]*(?=\r?$)", RegexOptions.Multiline | RegexOptions.CultureInvariant)]
+    private static partial Regex YieldEvidenceLineRegex();
+
+    [GeneratedRegex(@"(?<![A-Za-z0-9._/-])yield_evidence_id=(?<value>ftye1-[a-f0-9]{32})(?=;\s|$)", RegexOptions.CultureInvariant)]
+    private static partial Regex YieldEvidenceValueRegex();
+
+    private static string ProtectYieldEvidenceValues(string text, List<string> protectedValues)
+        => YieldEvidenceLineRegex().Replace(text, line =>
+        {
+            if (EventKeyValueRegex().Matches(line.Value).Count != 1) { return line.Value; }
+            return YieldEvidenceValueRegex().Replace(line.Value, match =>
+            {
+                var placeholder = $"SEVP{protectedValues.Count}";
+                protectedValues.Add(match.Groups["value"].Value);
+                return $"yield_evidence_id={placeholder}";
+            });
+        });
 
     [GeneratedRegex(@"^[^\r\n]*(?<![A-Za-z0-9._/-])event=filetransfer_frontier_publication_receipt_closed(?=;\s|$)[^\r\n]*(?=\r?$)", RegexOptions.Multiline | RegexOptions.CultureInvariant)]
     private static partial Regex FrontierReceiptEvidenceLineRegex();

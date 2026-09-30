@@ -24,7 +24,7 @@ function Read-CopyFixtureBytes([string]$Path) {
     finally { $bytes.Dispose(); $read.Dispose() }
 }
 foreach($mode in @('valid','empty','multiblock','separator-boundary','unicode','collision','directory','hash','lines','origins','bytes',
-    'closed-input','copied-capture','copied-lease','repeat','cancel-before','cancel-mid','closed-copy','dispose')) {
+    'origin-count-over','origin-count-negative','closed-input','copied-capture','copied-lease','repeat','cancel-before','cancel-mid','closed-copy','dispose')) {
     $root=[IO.Path]::Combine($Directory,$mode); [void][IO.Directory]::CreateDirectory($root)
     $text="event=copy_fixture; value=one`nevent=copy_fixture; value=two`n"
     if($mode -cin @('multiblock','cancel-mid')) { $text=(('event=copy_fixture; value='+('x'*70000))+"`n") }
@@ -60,8 +60,13 @@ foreach($mode in @('valid','empty','multiblock','separator-boundary','unicode','
             $copy=$clone.Invoke($lease,$null)
             if($null -ne $copy.GetType().GetMethod('CopySemantic',$flags).Invoke($copy,[object[]]@($destination,$original,[int]$capture.SemanticOrigins.Count,$current)) -or -not $capture.IsCurrent) { throw 'Copied lease copied/retired original' }
         }
-        $output=$method.Invoke($capture,[object[]]@($destination,$current))
-        if($mode -cin @('collision','directory','hash','lines','origins','bytes','closed-input','cancel-before','cancel-mid')) {
+        if($mode -cin @('origin-count-over','origin-count-negative')) {
+            $count=if($mode -ceq 'origin-count-over') {262145} else {-1}
+            $original.GetType().GetProperty('LineCount').SetValue($original,[long]$count,$null)
+            $output=$lease.GetType().GetMethod('CopySemantic',$flags).Invoke($lease,[object[]]@($destination,$original,[int]$count,$current))
+            if($state.Calls -ne 0 -or [IO.File]::Exists($destination)) {throw 'Semantic count rejection reached copying'}
+        } else { $output=$method.Invoke($capture,[object[]]@($destination,$current)) }
+        if($mode -cin @('collision','directory','hash','lines','origins','bytes','origin-count-over','origin-count-negative','closed-input','cancel-before','cancel-mid')) {
             if($null -ne $output -or $capture.IsCurrent -or @($files | Where-Object {$_.CanRead}).Count) { throw ('Invalid copy survived: '+$mode) }
             if($mode -ceq 'collision' -and [IO.File]::ReadAllText($destination) -cne 'sentinel') { throw 'Collision overwritten' }
             if($mode -ceq 'cancel-mid' -and ([IO.FileInfo]::new($destination).Length -le 0 -or [IO.FileInfo]::new($destination).Length -ge $original.ByteCount)) { throw 'Mid-copy cancellation did not exercise partial output' }

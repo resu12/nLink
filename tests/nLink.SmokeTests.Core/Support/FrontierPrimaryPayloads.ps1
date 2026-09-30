@@ -57,7 +57,7 @@ try {
             $elapsed=@($watch.GetType().GetFields($flags) | Where-Object {$_.Name -match '^_?elapsed$'})[0]
             $elapsed.SetValue($watch,[long]([Diagnostics.Stopwatch]::Frequency*21))
         }
-        'record-budget' {$owned.GetType().GetField('evaluationVisits',$flags).SetValue($owned,2097152L)}
+        'record-budget' {$owned.GetType().GetField('evaluationVisits',$flags).SetValue($owned,[long][NLink.Tools.LocalPublicationInputLimits]::EvaluationVisits)}
     }
     $rejected=$mode -cin @('pre-mutation','hash-mismatch','partial-hash','pin-close','pin-swap','budget','record-budget')
     $set=$custody.TryCapturePayloads($pair,$context,$full,$compact,$fullView,$compactView)

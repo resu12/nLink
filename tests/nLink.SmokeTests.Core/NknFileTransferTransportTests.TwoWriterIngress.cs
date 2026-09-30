@@ -59,6 +59,11 @@ public sealed partial class NknFileTransferTransportTests
         finally
         {
             if (peer is not null && !peer.HasExited) { peer.Kill(entireProcessTree: true); }
+            if (stdout is not null && stderr is not null)
+            {
+                await File.WriteAllTextAsync(Path.Combine(directory, "sender-test-stdout.log"), await stdout);
+                await File.WriteAllTextAsync(Path.Combine(directory, "sender-test-stderr.log"), await stderr);
+            }
         }
     }
 
@@ -69,16 +74,24 @@ public sealed partial class NknFileTransferTransportTests
         const string transferId = "transfer_two_writer_ingress";
         var finalFallbackFixture = Environment.GetEnvironmentVariable("NLINK_PUBLICATION_FINAL_FALLBACK_FIXTURE") == "1";
         var serviceFixture = Environment.GetEnvironmentVariable("NLINK_PUBLICATION_SERVICE_INGRESS_FIXTURE") == "1";
+        var serviceYieldFixture = Environment.GetEnvironmentVariable("NLINK_PUBLICATION_SERVICE_YIELD_FIXTURE") == "1";
+        var yieldCase = Environment.GetEnvironmentVariable("NLINK_PUBLICATION_YIELD_CASE") ?? "none";
+        Assert.Contains(yieldCase, new[] { "none", "both", "control_only", "bulk_only", "receiver_local_first" });
+        var yieldCopies = yieldCase is "control_only" or "bulk_only" ? 1 : 2;
         var serviceFallback = finalFallbackFixture && serviceFixture;
         var startChunk = serviceFallback ? 100 : 12;
         var chunkSize = serviceFallback ? 21 * 1024 : 1024;
         var tunaPayloadMode = Environment.GetEnvironmentVariable("NLINK_PUBLICATION_TUNA_PAYLOAD_MODE") ?? "none";
+        var independentPairs = tunaPayloadMode is "independent_pairs" or "independent_missing_receive";
+        var omitSecondReceive = tunaPayloadMode is "missing_receive" or "independent_missing_receive";
+        var secondTunaStart = independentPairs ? 20 : tunaPayloadMode == "wrong_range" ? 13 : 12;
+        if (independentPairs) { Assert.True(serviceFixture && serviceYieldFixture); }
         using var tunaLane = tunaPayloadMode == "none" ? null : new FakeNknAccelerationLane();
         var client = new FakeNknClient(sender ? senderAddress : receiverAddress);
         using var transport = new NknSignalingTransport(client, NknTransportOptions.Load(),
             new NknIdentity(sender ? "two-writer-sender" : "two-writer-receiver", client.Address),
             NknTunaAccelerationOptions.Disabled, tunaLane);
-        await using var link = new IngressPacketPipe(pipe, client, ct, tunaLane);
+        await using var link = new IngressPacketPipe(pipe, client, ct, tunaLane, yieldCase);
         var approved = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var join = new TaskCompletionSource<IncomingJoinRequestEventArgs>(TaskCreationOptions.RunContinuationsAsynchronously);
         transport.Approved += (_, _) => approved.TrySetResult();
@@ -134,11 +147,12 @@ public sealed partial class NknFileTransferTransportTests
         using var dataSession = await transport.OpenFileTransferDataSessionAsync(sessionId, transferId, ct);
         if (serviceFixture && !sender)
         {
+            link.SendingYield = serviceYieldFixture;
             await link.SignalAsync("regular-ready");
             await link.WaitAsync("held");
             await SessionFileTransferV4SenderTests.CreateSecondTunaPublicationEvidenceFixtureAsync(
                 replayPostCommitCallbacks: false, sessionId: sessionId, suppliedTransferId: transferId,
-                receivePeerYield: async hints =>
+                receivePeerYield: serviceYieldFixture ? null : async hints =>
                 {
                     foreach (var hint in hints)
                     {
@@ -149,6 +163,7 @@ public sealed partial class NknFileTransferTransportTests
                 },
                 afterSecondTuna: async (publication, hints) =>
                 {
+                    link.SendingYield = false;
                     var hint = Assert.Single(hints.Where(hint => hint.PublicationAuthority?.LiveRouteEpoch == 3));
                     Assert.IsAssignableFrom<IFileTransferRouteHintObserver>(transport).ObserveFileTransferRouteHint(hint);
                     var receivedTunaStart = -1;
@@ -157,10 +172,10 @@ public sealed partial class NknFileTransferTransportTests
                         transport.SetAccelerationAcceptedForTests(NknAccelerationLaneKind.File, sessionId);
                         await link.SignalAsync("tuna-receiver-ready");
                         await link.WaitAsync("tuna-payload-sent");
-                        if (tunaPayloadMode != "missing_receive")
+                        if (!omitSecondReceive)
                         {
                             var received = Assert.IsType<FileTransferChunkBatchFrameV4>(await dataSession.ReceiveAsync(ct));
-                            receivedTunaStart = tunaPayloadMode == "wrong_range" ? 13 : 12;
+                            receivedTunaStart = secondTunaStart;
                             Assert.Equal(receivedTunaStart, received.StartChunkIndex);
                             Assert.Equal(2, received.ChunkCount);
                             Assert.Equal(Enumerable.Repeat((byte)17, 1024), received.DataSegments[0]);
@@ -169,9 +184,10 @@ public sealed partial class NknFileTransferTransportTests
                         await link.SignalAsync("tuna-payload-checked");
                     }
                     await CheckDelayedIngressAsync(transport, dataSession, publication, link, peerYieldReceived: true, receivedTunaStart,
-                        startChunk, chunkSize);
+                        startChunk, chunkSize, peerYieldDispatches: serviceYieldFixture ? yieldCopies : 1,
+                        firstTunaReceived: independentPairs);
                 },
-                sendLocalYield: tunaLane is null && !serviceFallback ? null : frame => dataSession.SendAsync(frame, ct),
+                sendLocalYield: serviceYieldFixture || (tunaLane is null && !serviceFallback) ? null : frame => dataSession.SendAsync(frame, ct),
                 prepareFinalFallbackReceive: !serviceFallback ? null : async (hints, repairId) =>
                 {
                     foreach (var hint in hints)
@@ -181,13 +197,39 @@ public sealed partial class NknFileTransferTransportTests
                     await link.SignalAsync("final-fallback-ready", repairId ?? "");
                     await link.WaitAsync("final-fallback-ready");
                 },
-                receiveData: !serviceFallback ? null : dataSession.ReceiveWithMetadataAsync);
+                receiveData: !serviceFallback ? null : dataSession.ReceiveWithMetadataAsync,
+                yieldTransport: serviceYieldFixture ? Assert.IsAssignableFrom<IFileTransferControlPlaneDeliveryTransport>(transport) : null,
+                receivePeerYieldWithEvidence: !serviceYieldFixture ? null : async hints =>
+                {
+                    foreach (var hint in hints)
+                    {
+                        Assert.IsAssignableFrom<IFileTransferRouteHintObserver>(transport).ObserveFileTransferRouteHint(hint);
+                    }
+                    await link.SignalAsync("fallback-ready");
+                    return await ReceiveYieldCopiesAsync();
+                }, receiverLocalYieldFirst: yieldCase == "receiver_local_first",
+                afterFirstTuna: !independentPairs ? null : async hints =>
+                {
+                    var hint = Assert.Single(hints.Where(hint => hint.PublicationAuthority?.LiveRouteEpoch == 1));
+                    Assert.IsAssignableFrom<IFileTransferRouteHintObserver>(transport).ObserveFileTransferRouteHint(hint);
+                    transport.SetAccelerationAcceptedForTests(NknAccelerationLaneKind.File, sessionId);
+                    await link.SignalAsync("first-tuna-ready");
+                    var received = Assert.IsType<FileTransferChunkBatchFrameV4>(await dataSession.ReceiveAsync(ct));
+                    Assert.Equal(16, received.StartChunkIndex);
+                    Assert.Equal(2, received.ChunkCount);
+                    Assert.Equal(Enumerable.Repeat((byte)17, 1024), received.DataSegments[0]);
+                    Assert.Equal(Enumerable.Repeat((byte)34, 1024), received.DataSegments[1]);
+                    transport.SetAccelerationAcceptedForTests(NknAccelerationLaneKind.None, sessionId);
+                    await link.SignalAsync("first-tuna-checked");
+                });
             if (serviceFallback) { await link.SignalAsync("final-fallback-delivered"); }
             await WriteProcessAsync();
             return;
         }
         using var history = new FileTransferPublicationIngressHistory(sessionId, transferId,
-            sender ? FileTransferDirection.Outbound : FileTransferDirection.Inbound, stopAtFallbackYield: serviceFixture);
+            sender ? FileTransferDirection.Outbound : FileTransferDirection.Inbound, stopAtFallbackYield: serviceFixture,
+            serviceYieldData: serviceYieldFixture ? dataSession : null,
+            serviceYieldTransport: serviceYieldFixture ? Assert.IsAssignableFrom<IFileTransferControlPlaneDeliveryTransport>(transport) : null);
         var evidence = history.Publish(0);
         PublishDataPathFixtureAuthority(transport, history.Tokens[0], evidence);
         await link.SignalAsync("regular-ready");
@@ -210,17 +252,42 @@ public sealed partial class NknFileTransferTransportTests
             await link.SignalAsync("held");
         }
         else { await link.WaitAsync("held"); }
-        for (var i = 1; i < history.Tokens.Count; i++) { PublishDataPathFixtureAuthority(transport, history.Tokens[i], history.Publish(i)); }
+        for (var i = 1; i < history.Tokens.Count; i++)
+        {
+            var published = history.Publish(i);
+            PublishDataPathFixtureAuthority(transport, history.Tokens[i], published);
+            if (independentPairs && i == 1)
+            {
+                transport.SetAccelerationAcceptedForTests(NknAccelerationLaneKind.File, sessionId);
+                await link.WaitAsync("first-tuna-ready");
+                await SendTunaPayloadAsync(history.Tokens[i], published, 16, deliver: true);
+                await link.WaitAsync("first-tuna-checked");
+                transport.SetAccelerationAcceptedForTests(NknAccelerationLaneKind.None, sessionId);
+            }
+        }
         if (serviceFixture)
         {
-            history.PublishFallbackYield();
+            if (!serviceYieldFixture) { history.PublishFallbackYield(); }
             await link.WaitAsync("fallback-ready");
             link.HoldDataFrame = false;
-            await dataSession.SendAsync(history.FallbackYieldFrame!, ct);
+            if (serviceYieldFixture)
+            {
+                link.SendingYield = true;
+                await history.SendServiceYieldAsync();
+                link.SendingYield = false;
+            }
+            else { await dataSession.SendAsync(history.FallbackYieldFrame!, ct); }
             if (tunaLane is not null || serviceFallback)
             {
-                var peerFrame = Assert.IsType<FileTransferFallbackTailYieldFrameV6>(await dataSession.ReceiveAsync(ct));
-                evidence = history.ActivateFromPeerYield(peerFrame);
+                if (serviceYieldFixture)
+                {
+                    evidence = history.ActivateFromServicePeerYield(await ReceiveYieldCopiesAsync());
+                }
+                else
+                {
+                    var peerFrame = Assert.IsType<FileTransferFallbackTailYieldFrameV6>(await dataSession.ReceiveAsync(ct));
+                    evidence = history.ActivateFromPeerYield(peerFrame);
+                }
                 var publication = history.Tokens[3];
                 PublishDataPathFixtureAuthority(transport, publication, evidence);
             }
@@ -229,22 +296,7 @@ public sealed partial class NknFileTransferTransportTests
                 var publication = history.Tokens[3];
                 transport.SetAccelerationAcceptedForTests(NknAccelerationLaneKind.File, sessionId);
                 await link.WaitAsync("tuna-receiver-ready");
-                var authority = Assert.IsType<FileTransferDataPathSendAuthority>(typeof(SessionFileTransferService)
-                    .GetMethod("CreateDataPathSendAuthority", BindingFlags.Static | BindingFlags.NonPublic)!
-                    .Invoke(null, [publication, "two_writer_exact_tuna_payload_fixture"]));
-                FileTransferPublicationUseEvidence.CaptureSend(authority, evidence, FileTransferPublicationUseKind.V4PhysicalSubmission);
-                await Assert.IsAssignableFrom<IFileTransferDataPathAuthoritySession>(dataSession).SendAsync(new FileTransferChunkBatchFrameV4
-                {
-                    SessionId = sessionId, TransferId = transferId, StartChunkIndex = tunaPayloadMode == "wrong_range" ? 13 : 12,
-                    ChunkCount = 2, BatchProfile = "v4_default_21k",
-                    DataSegments = [Enumerable.Repeat((byte)17, 1024).ToArray(), Enumerable.Repeat((byte)34, 1024).ToArray()],
-                }, authority, ct);
-                var sent = Assert.Single(tunaLane.Sent);
-                Assert.Equal(NknBridgeChannel.Bulk, sent.Lane);
-                if (tunaPayloadMode != "missing_receive")
-                {
-                    await link.SendAsync(new IngressPacketPipe.Packet(null, null, null, null, null, sent.Lane, sent.Payload, Tuna: true));
-                }
+                await SendTunaPayloadAsync(publication, evidence, secondTunaStart, deliver: !omitSecondReceive);
                 await link.SignalAsync("tuna-payload-sent");
                 await link.WaitAsync("tuna-payload-checked");
             }
@@ -307,6 +359,37 @@ public sealed partial class NknFileTransferTransportTests
         }
         await WriteProcessAsync();
 
+        async Task SendTunaPayloadAsync(RoutePublicationToken publication, FileTransferRoutePublicationEvidence publicationEvidence,
+            int firstChunk, bool deliver)
+        {
+            Assert.NotNull(tunaLane);
+            var before = tunaLane.Sent.Count;
+            var authority = Assert.IsType<FileTransferDataPathSendAuthority>(typeof(SessionFileTransferService)
+                .GetMethod("CreateDataPathSendAuthority", BindingFlags.Static | BindingFlags.NonPublic)!
+                .Invoke(null, [publication, "two_writer_exact_tuna_payload_fixture"]));
+            FileTransferPublicationUseEvidence.CaptureSend(authority, publicationEvidence, FileTransferPublicationUseKind.V4PhysicalSubmission);
+            await Assert.IsAssignableFrom<IFileTransferDataPathAuthoritySession>(dataSession).SendAsync(new FileTransferChunkBatchFrameV4
+            {
+                SessionId = sessionId, TransferId = transferId, StartChunkIndex = firstChunk,
+                ChunkCount = 2, BatchProfile = "v4_default_21k",
+                DataSegments = [Enumerable.Repeat((byte)17, 1024).ToArray(), Enumerable.Repeat((byte)34, 1024).ToArray()],
+            }, authority, ct);
+            var sent = Assert.Single(tunaLane.Sent.Skip(before));
+            Assert.Equal(NknBridgeChannel.Bulk, sent.Lane);
+            if (deliver) { await link.SendAsync(new IngressPacketPipe.Packet(null, null, null, null, null, sent.Lane, sent.Payload, Tuna: true)); }
+        }
+
+        async Task<FileTransferReceivedDataFrame[]> ReceiveYieldCopiesAsync()
+        {
+            var first = await dataSession.ReceiveWithMetadataAsync(ct);
+            Assert.IsType<FileTransferFallbackTailYieldFrameV6>(first.Frame);
+            if (yieldCopies == 1) { return [first]; }
+            if (yieldCase != "none") { await link.ReleaseSecondYieldCopyAsync(); }
+            var second = await dataSession.ReceiveWithMetadataAsync(ct);
+            Assert.IsType<FileTransferFallbackTailYieldFrameV6>(second.Frame);
+            return [first, second];
+        }
+
         async Task WriteProcessAsync()
         {
             await File.WriteAllTextAsync(Path.Combine(directory, sender ? "sender-process.json" : "receiver-process.json"),
@@ -317,7 +400,7 @@ public sealed partial class NknFileTransferTransportTests
 
     private static async Task CheckDelayedIngressAsync(NknSignalingTransport transport, IFileTransferDataSession dataSession,
         RoutePublicationToken publication, IngressPacketPipe link, bool peerYieldReceived = false, int receivedTunaStart = -1,
-        int startChunk = 12, int chunkSize = 1024)
+        int startChunk = 12, int chunkSize = 1024, int peerYieldDispatches = 1, bool firstTunaReceived = false)
     {
         var states = Assert.IsAssignableFrom<IDictionary>(GetPrivateField(transport, "fileTransferStates"));
         var before = states[publication.TransferId];
@@ -325,13 +408,16 @@ public sealed partial class NknFileTransferTransportTests
         var dispatchedBefore = FindOperationalLogLines(line => line.Contains("event=filetransfer_data_frame_dispatched;", StringComparison.Ordinal));
         if (peerYieldReceived)
         {
-            Assert.Contains("frame_type=filetransfer.fallback_tail.yield.v6;", dispatchedBefore[0], StringComparison.Ordinal);
-            Assert.Equal(receivedTunaStart < 0 ? 1 : 2, dispatchedBefore.Count);
+            var firstCount = firstTunaReceived ? 1 : 0;
+            if (firstTunaReceived) { Assert.Contains("frame_type=filetransfer.chunk_batch.v4;", dispatchedBefore[0], StringComparison.Ordinal); }
+            Assert.All(dispatchedBefore.Skip(firstCount).Take(peerYieldDispatches), line =>
+                Assert.Contains("frame_type=filetransfer.fallback_tail.yield.v6;", line, StringComparison.Ordinal));
+            Assert.Equal(firstCount + peerYieldDispatches + (receivedTunaStart < 0 ? 0 : 1), dispatchedBefore.Count);
             if (receivedTunaStart >= 0)
             {
-                Assert.Contains("frame_type=filetransfer.chunk_batch.v4;", dispatchedBefore[1], StringComparison.Ordinal);
+                Assert.Contains("frame_type=filetransfer.chunk_batch.v4;", dispatchedBefore[firstCount + peerYieldDispatches], StringComparison.Ordinal);
                 var tunaReceive = Assert.Single(FindOperationalLogLines(line => line.Contains("event=filetransfer_data_path_receive_result;", StringComparison.Ordinal) &&
-                    line.Contains("actual_transport=tuna;", StringComparison.Ordinal)));
+                    line.Contains("actual_transport=tuna;", StringComparison.Ordinal) && line.Contains("live_route_epoch=3;", StringComparison.Ordinal)));
                 Assert.Contains($"start_chunk_index={receivedTunaStart};", tunaReceive, StringComparison.Ordinal);
             }
         }
@@ -368,8 +454,14 @@ public sealed partial class NknFileTransferTransportTests
         private readonly Task pump;
         internal bool HoldDataFrame { get; set; }
         internal Packet? HeldFrame { get; private set; }
+        internal bool SendingYield { get; set; }
+        private readonly TaskCompletionSource secondYieldCopy = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private readonly List<Packet> heldYieldPackets = [];
+        private readonly Action<Packet> deliver;
+        private bool yieldCopiesReleased;
 
-        internal IngressPacketPipe(PipeStream pipe, FakeNknClient client, CancellationToken ct, FakeNknAccelerationLane? tunaLane = null)
+        internal IngressPacketPipe(PipeStream pipe, FakeNknClient client, CancellationToken ct, FakeNknAccelerationLane? tunaLane = null,
+            string yieldCase = "none")
         {
             stop = CancellationTokenSource.CreateLinkedTokenSource(ct);
             this.ct = ct = stop.Token;
@@ -382,9 +474,19 @@ public sealed partial class NknFileTransferTransportTests
                 var packet = new Packet(null, null, source, destination, null, channel, payload.ToArray());
                 if (HoldDataFrame && EnvelopeCodec.TryDeserialize(payload, out var envelope) && envelope.Type == MsgType.FileTransferDataFrame)
                 { Assert.Null(HeldFrame); HeldFrame = packet; return; }
+                if (SendingYield && (yieldCase == "control_only" && channel == NknBridgeChannel.Bulk ||
+                    yieldCase == "bulk_only" && channel == NknBridgeChannel.Control) &&
+                    EnvelopeCodec.TryDeserialize(payload, out var yieldEnvelope) && yieldEnvelope.Type == MsgType.FileTransferDataFrame)
+                { throw new IOException("fixture_yield_copy_unavailable"); }
                 await SendAsync(packet);
             };
             client.BeforePublishAsync = (topic, payload, _) => SendAsync(new Packet(null, null, client.Address, null, topic, NknBridgeChannel.Control, payload.ToArray()));
+            deliver = packet =>
+            {
+                if (packet.Topic is null) { Assert.Contains(packet.Destination, new[] { client.Address, client.MediaAddress, client.BulkAddress }); }
+                typeof(FakeNknClient).GetMethod("Receive", BindingFlags.Instance | BindingFlags.NonPublic)!
+                    .Invoke(client, [new NknIncomingMessage(packet.Source!, packet.Payload!, packet.Topic is not null, packet.Topic, packet.Channel)]);
+            };
             pump = Task.Run(async () =>
             {
                 while (await reader.ReadLineAsync(ct) is { } line)
@@ -394,15 +496,40 @@ public sealed partial class NknFileTransferTransportTests
                     else if (packet.Tuna) { Assert.NotNull(tunaLane); tunaLane.InjectInbound(packet.Channel, packet.Payload!); }
                     else
                     {
-                        if (packet.Topic is null) { Assert.Contains(packet.Destination, new[] { client.Address, client.MediaAddress, client.BulkAddress }); }
-                        typeof(FakeNknClient).GetMethod("Receive", BindingFlags.Instance | BindingFlags.NonPublic)!
-                            .Invoke(client, [new NknIncomingMessage(packet.Source!, packet.Payload!, packet.Topic is not null, packet.Topic, packet.Channel)]);
+                        var secondChannel = yieldCase == "receiver_local_first" ? NknBridgeChannel.Control : NknBridgeChannel.Bulk;
+                        if (yieldCase is "both" or "receiver_local_first" && packet.Channel == secondChannel &&
+                            EnvelopeCodec.TryDeserialize(packet.Payload!, out var envelope) && envelope.Type == MsgType.FileTransferDataFrame)
+                        {
+                            lock (heldYieldPackets)
+                            {
+                                if (!yieldCopiesReleased)
+                                {
+                                    // Queue and direct-copy paths can deliver the same
+                                    // envelope twice. Preserve both for normal dedup.
+                                    Assert.True(heldYieldPackets.Count < 2);
+                                    heldYieldPackets.Add(packet);
+                                    secondYieldCopy.TrySetResult();
+                                    continue;
+                                }
+                            }
+                        }
+                        deliver(packet);
                     }
                 }
             }, ct);
         }
 
         private TaskCompletionSource<string> Signal(string name) => signals.GetOrAdd(name, _ => new(TaskCreationOptions.RunContinuationsAsynchronously));
+        internal async Task ReleaseSecondYieldCopyAsync()
+        {
+            await secondYieldCopy.Task.WaitAsync(ct);
+            lock (heldYieldPackets)
+            {
+                yieldCopiesReleased = true;
+                foreach (var packet in heldYieldPackets) { deliver(packet); }
+                heldYieldPackets.Clear();
+            }
+        }
         internal async Task<string> WaitAsync(string name)
         {
             var signal = Signal(name).Task;

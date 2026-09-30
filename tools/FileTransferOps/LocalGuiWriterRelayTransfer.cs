@@ -10,8 +10,14 @@ namespace NLink.Tools
     public sealed partial class LocalGuiWriterRequest
     {
         private FrontierRelayCustody frontierRelayCustody;
+#if NLINK_TEST_ATTEMPT_DISPATCH
+        private void RetireFrontierRelayCustody([System.Runtime.CompilerServices.CallerMemberName] string caller = "",
+            [System.Runtime.CompilerServices.CallerFilePath] string file = "")
+        { lock (frontierRelaySync) { if (frontierRelayCustody != null && !frontierRelayCustody.Detached) frontierRelayCustody.Close("retire:" + Path.GetFileName(file) + ":" + caller); } }
+#else
         private void RetireFrontierRelayCustody()
         { lock (frontierRelaySync) { if (frontierRelayCustody != null && !frontierRelayCustody.Detached) frontierRelayCustody.Close(); } }
+#endif
         private static byte[] EncodeRelayCompletion(Completion completion)
         {
             using (var stream = new MemoryStream())
@@ -82,25 +88,49 @@ namespace NLink.Tools
             {
                 lock (owner.frontierRelaySync)
                 {
+#if NLINK_TEST_ATTEMPT_DISPATCH
+                    NativeForwardDiagnosticForTest = "evaluating";
+#endif
                     try
                     {
                         var work = Stopwatch.StartNew();
                         Action check = () => { if (work.ElapsedMilliseconds > 5000) throw new IOException("frontier_relay_forward_budget"); };
                         // Forward ended registration's pre-forward scope. Check
                         // the original peer, held pins and exact offered body.
+#if NLINK_TEST_ATTEMPT_DISPATCH
+                        if (NativeForwardCheckForTest("closed", !closed) && NativeForwardCheckForTest("transfer-missing", transfer != null) &&
+                            NativeForwardCheckForTest("pins-missing", offerPins != null) && NativeForwardCheckForTest("pins-current", offerPins.IsCurrent) &&
+                            NativeForwardCheckForTest("channel-current", channel.IsCurrent) && NativeForwardCheckForTest("channel-attached", channel.Attached) &&
+                            NativeForwardCheckForTest("owner-current", owner.owner.IsCurrent) && NativeForwardCheckForTest("mark-forwarded", transfer.MarkForwarded(body, check)))
+                        { NativeForwardDiagnosticForTest = "forwarded"; return; }
+#else
                         if (!closed && transfer != null && offerPins != null && offerPins.IsCurrent &&
                             channel.IsCurrent && channel.Attached && owner.owner.IsCurrent && transfer.MarkForwarded(body, check)) return;
+#endif
                     }
+#if NLINK_TEST_ATTEMPT_DISPATCH
+                    catch (Exception error) { NativeForwardDiagnosticForTest = "exception:" + error.GetType().FullName + ":" + error.Message; }
+#else
                     catch { }
+#endif
                     if (transfer != null) transfer.Dispose();
                     CloseTransfer();
                 }
             }
+#if NLINK_TEST_ATTEMPT_DISPATCH
+            private void CloseTransfer([System.Runtime.CompilerServices.CallerMemberName] string caller = "")
+#else
             private void CloseTransfer()
+#endif
             {
                 if (transfer != null)
                 {
+#if NLINK_TEST_ATTEMPT_DISPATCH
+                    if (transfer.State == 3 && transfer.IsCurrent) { NativeTransferCloseDiagnosticForTest = caller + ":release"; transfer.Release(); }
+                    else { NativeTransferCloseDiagnosticForTest = caller + ":cancel"; transfer.Dispose(); }
+#else
                     if (transfer.State == 3 && transfer.IsCurrent) transfer.Release(); else transfer.Dispose();
+#endif
                     transfer = null;
                 }
                 if (offerPins != null) { offerPins.Dispose(); offerPins = null; }
@@ -140,12 +170,28 @@ namespace NLink.Tools
                         pins = FrontierParentFilesPending.CommitPins.PullPrimary(owner.workerExit.SafeWaitHandle, transfer.Files,
                             () => current() && transfer.IsCurrent);
                         if (pins == null || !current() || !transfer.CheckCurrent(check)) return null;
+#if NLINK_TEST_ATTEMPT_DISPATCH
+                        owner.NativePullDiagnosticForTest = "construct-watch";
+#endif
                         owner.frontierRelayCustody = new FrontierRelayCustody(owner, scope, facts, pins, transfer);
                         owner.frontierRelayCustody.Watch();
-                        if (!transfer.MarkPulled() || !current()) return null;
+                        // Validate registration before releasing the wrapper to forward or exit.
+                        // After publication, keep the work limit without reusing pre-forward scope.
+#if NLINK_TEST_ATTEMPT_DISPATCH
+                        if (owner.NativePullRejectForTest("pre-pull-current", !current()) ||
+                            owner.NativePullRejectForTest("mark-pulled", !ObserveNativePullForTest(transfer.MarkPulled())) ||
+                            owner.NativePullRejectForTest("post-pull-budget", transferWork.ElapsedMilliseconds > 5000)) return null;
+                        owner.NativePullDiagnosticForTest = "pulled";
+#else
+                        if (!current() || !transfer.MarkPulled() || transferWork.ElapsedMilliseconds > 5000) return null;
+#endif
                         success = true; return owner.frontierRelayCustody;
                     }
+#if NLINK_TEST_ATTEMPT_DISPATCH
+                    catch (Exception error) { owner.NativePullDiagnosticForTest = "exception:" + error.GetType().FullName + ":" + error.Message; return null; }
+#else
                     catch { return null; }
+#endif
                     finally
                     {
                         transferWork.Stop();
@@ -192,29 +238,70 @@ namespace NLink.Tools
             private void TransferCancelled(object state, bool timedOut)
             { lock (sync) { if (!detached) Close(); } }
             private void WrapperExited(object state, bool timedOut)
+#if NLINK_TEST_ATTEMPT_DISPATCH
+            { lock (sync) { if (!closed && !detached && (NativeExitRejectForTest("wrapper-exit", !WrapperSucceeded()) ||
+                NativeExitRejectForTest("transfer-state", transfer.State != 3) || NativeExitRejectForTest("transfer-current", !transfer.IsCurrent))) Close(); } }
+#else
             { lock (sync) { if (!closed && !detached && (!WrapperSucceeded() || transfer.State != 3 || !transfer.IsCurrent)) Close(); } }
+#endif
             internal void BeginTake()
             {
                 lock (sync)
                 {
+#if NLINK_TEST_ATTEMPT_DISPATCH
+                    NativeBeginDiagnosticForTest = "evaluating";
+                    try
+                    {
+                    if (NativeRejectForTest("begin", "closed", closed) || NativeRejectForTest("begin", "taking", taking) ||
+                        NativeRejectForTest("begin", "owner-closed", owner.closed.WaitOne(0)) || NativeRejectForTest("begin", "wrapper-exit", !WrapperSucceeded()) ||
+                        NativeRejectForTest("begin", "transfer-state", transfer.State != 3) || NativeRejectForTest("begin", "transfer-current", !transfer.IsCurrent) ||
+                        NativeRejectForTest("begin", "pins-current", !pins.IsCurrent))
+#else
                     if (closed || taking || owner.closed.WaitOne(0) || !WrapperSucceeded() || transfer.State != 3 || !transfer.IsCurrent || !pins.IsCurrent)
+#endif
                     { Close(); return; }
                     taking = true;
+#if NLINK_TEST_ATTEMPT_DISPATCH
+                    NativeBeginDiagnosticForTest = "ready";
+                    }
+                    catch (Exception error) { NativeBeginDiagnosticForTest = "exception:" + error.GetType().FullName + ":" + error.Message; throw; }
+#endif
                 }
             }
             internal bool Accept(byte[] body, RelayedCompletion result)
             {
                 lock (sync)
                 {
+#if NLINK_TEST_ATTEMPT_DISPATCH
+                    NativeAcceptDiagnosticForTest = "evaluating";
+#endif
                     try
                     {
+#if NLINK_TEST_ATTEMPT_DISPATCH
+                        if (NativeRejectForTest("accept", "closed", closed) || NativeRejectForTest("accept", "not-taking", !taking) ||
+                            NativeRejectForTest("accept", "already-accepted", accepted != null) || NativeRejectForTest("accept", "wrapper-exit", !WrapperSucceeded()) ||
+                            NativeRejectForTest("accept", "transfer-current", !transfer.IsCurrent) || NativeRejectForTest("accept", "transfer-state", transfer.State != 3) ||
+                            NativeRejectForTest("accept", "transfer-body", !transfer.Matches(body)) || NativeRejectForTest("accept", "pins-current", !pins.IsCurrent) ||
+                            NativeRejectForTest("accept", "completion-facts", !facts.MatchesCompletion(result.WriterContext))) return false;
+#else
                         if (closed || !taking || accepted != null || !WrapperSucceeded() || !transfer.IsCurrent || transfer.State != 3 ||
                             !transfer.Matches(body) || !pins.IsCurrent || !facts.MatchesCompletion(result.WriterContext)) return false;
+#endif
                         for (int i = 0; i < scope.Length; i++)
+#if NLINK_TEST_ATTEMPT_DISPATCH
+                            if ((i < 48 || i >= 56) && owner.view.ReadByte(i) != scope[i])
+                            { NativeAcceptDiagnosticForTest = "scope-byte:" + i; return false; }
+                        NativeAcceptDiagnosticForTest = "accepted";
+#else
                             if ((i < 48 || i >= 56) && owner.view.ReadByte(i) != scope[i]) return false;
+#endif
                         accepted = result; return true;
                     }
+#if NLINK_TEST_ATTEMPT_DISPATCH
+                    catch (Exception error) { NativeAcceptDiagnosticForTest = "exception:" + error.GetType().FullName + ":" + error.Message; return false; }
+#else
                     catch { return false; }
+#endif
                 }
             }
             internal FrontierRelayCustody Detach(RelayedCompletion result)
@@ -243,11 +330,21 @@ namespace NLink.Tools
             public bool NativeWriterCustodyEstablished { get { return false; } }
             public bool LiveProofEligible { get { return false; } }
             public bool PublicationCompletionIssued { get { return false; } }
+#if NLINK_TEST_ATTEMPT_DISPATCH
+            internal void Close([System.Runtime.CompilerServices.CallerMemberName] string caller = "")
+#else
             internal void Close()
+#endif
             {
                 lock (sync)
                 {
                     if (closed) return; closed = true;
+#if NLINK_TEST_ATTEMPT_DISPATCH
+                    NativeCloseDiagnosticForTest = "begin:" + NativeBeginDiagnosticForTest + ",accept:" + NativeAcceptDiagnosticForTest +
+                        ",taking:" + taking + ",accepted:" + (accepted != null);
+                    NativeRetirementDiagnosticForTest = caller + ",wrapper-exit:" + NativeExitDiagnosticForTest + ",pull:" + owner.NativePullDiagnosticForTest;
+#endif
+                    payloadLifetime.Cancel();
                     foreach (var watch in watches) watch.Unregister(null);
                     pins.Dispose(); transfer.Dispose();
                 }

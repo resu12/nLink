@@ -537,6 +537,9 @@ namespace NLink.Tools
                     }
                     for (int i = 0; i < writers.Count; i++) if (counts[i] != writers[i].LastSequence) return null;
                     var seen = new bool[lines.Count]; int selected = -1;
+#if (NLINK_TEST_TERMINAL_REQUEST || NLINK_TEST_MEMBERSHIP_BORROWER) && NLINK_FRONTIER_LEDGER
+                    var collectorWriterPositions = new int[full.Length];
+#endif
                     for (int i = 0; i < full.Length; i++)
                     {
                         visit(full[i], true);
@@ -550,12 +553,25 @@ namespace NLink.Tools
                         int position = positions[writer][(int)sequence - 1];
                         if (seen[position] || !String.Equals(full[i], lines[position], StringComparison.Ordinal)) return null;
                         seen[position] = true;
+#if (NLINK_TEST_TERMINAL_REQUEST || NLINK_TEST_MEMBERSHIP_BORROWER) && NLINK_FRONTIER_LEDGER
+                        collectorWriterPositions[i] = position + 1;
+#endif
                         if (id == selectedWriter && sequence == selectedSequence) selected = i;
                     }
                     check(true);
                     if (!IsVerified || selected < 0 || clock.ElapsedMilliseconds > LocalPublicationInputLimits.MembershipMilliseconds) return null;
                     accepted = true;
+#if NLINK_TEST_SELECTED_NATIVE_WRITER && NLINK_TEST_TERMINAL_REQUEST && NLINK_TEST_MEMBERSHIP_BORROWER && NLINK_FRONTIER_LEDGER
+                    return owner.RetainMembershipForBorrowerForTest(this, source, selected, records, units,
+                        full, fullOriginal, work, collectorWriterPositions, selectedWriter, selectedSequence);
+#elif NLINK_TEST_TERMINAL_REQUEST && NLINK_FRONTIER_LEDGER
+                    return new NativeMembership(selected, records, units, this, full, fullOriginal, work, collectorWriterPositions);
+#elif NLINK_TEST_MEMBERSHIP_BORROWER && NLINK_FRONTIER_LEDGER
+                    return owner.RetainMembershipForBorrowerForTest(this, source, selected, records, units,
+                        full, fullOriginal, work, collectorWriterPositions, selectedWriter, selectedSequence);
+#else
                     return new NativeMembership(selected, records, units);
+#endif
                 }
                 catch { return null; }
                 finally { if (!accepted) Dispose(); }
@@ -598,7 +614,7 @@ namespace NLink.Tools
         }
 
         // Bounded membership facts only, never a publication/authority token.
-        public sealed class NativeMembership
+        public sealed partial class NativeMembership
         {
             public int SelectedIndex { get; private set; }
             public long RecordVisits { get; private set; }

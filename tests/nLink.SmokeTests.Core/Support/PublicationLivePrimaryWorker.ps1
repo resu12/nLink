@@ -1,6 +1,16 @@
 param([string]$Mode,[string[]]$LogPath,[string]$ArtifactDir,[int]$TailMinutes,[string]$LiveRouteProofMode)
 $ErrorActionPreference='Stop'; Set-StrictMode -Version Latest
 $root=Split-Path -Parent (Split-Path -Parent (Split-Path -Parent $PSScriptRoot))
+if($env:NLINK_TEST_AUTHENTICATED_PAYLOAD_HANDOFF -ceq '1' -and $env:NLINK_TEST_SELECTED_NATIVE_WRITER -cne '1') {throw 'authenticated_payload_profile_scope'}
+if($env:NLINK_TEST_SELECTED_NATIVE_WRITER -ceq '1') {
+    & (Join-Path $PSScriptRoot 'TerminalRequestFileBinding.ps1') $root
+} elseif($env:NLINK_TEST_MEMBERSHIP_BORROWER -ceq '1') {
+    if($env:NLINK_TEST_NATIVE_PRIMARY_FILES -ceq '1') {throw 'borrower_native_profile_not_implemented'}
+    & (Join-Path $PSScriptRoot 'SelectedMembershipBorrowerLoader.ps1') $root
+}
+if($env:NLINK_TEST_NATIVE_PRIMARY_FILES -ceq '1') {
+    & (Join-Path $PSScriptRoot 'TerminalRequestFileBinding.ps1') $root
+}
 $text=[IO.File]::ReadAllText((Join-Path $root 'tools/FileTransfer-Ops.ps1'))
 $needle='$result = Invoke-FileTransferRetainedAnalysis'
 if($text.Split([string[]]@($needle),[StringSplitOptions]::None).Length -ne 2) {throw 'Original primary invocation changed'}

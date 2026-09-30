@@ -1,11 +1,18 @@
 param([string]$RepoRoot,[string]$Directory,[string]$Case)
 $ErrorActionPreference='Stop'; Set-StrictMode -Version Latest
+$pullOrder=$Case -ceq 'forward-before-post-pull'
+if($pullOrder) {. (Join-Path $RepoRoot 'tests/nLink.SmokeTests.Core/Support/FrontierAttemptDispatchLoader.ps1') $RepoRoot}
 . (Join-Path $RepoRoot 'tools/FileTransferOps/LocalGuiWriterRequest.ps1')
 $request=[NLink.Tools.LocalGuiWriterRequest]::TryCreateRelay([guid]::NewGuid(),'cleanup-adoption-run','cleanup-adoption-scope',$Directory)
 $go=[Threading.EventWaitHandle]::new($false,[Threading.EventResetMode]::ManualReset,$request.Name+'.fixture-go')
 $process=[Diagnostics.Process]::new(); $custody=$null; $exported=$null
 $flags=[Reflection.BindingFlags]'Instance,NonPublic'
+$forwarded=$null; $release=$null; $orderObserved=$false
 try {
+    if($pullOrder) {
+        $forwarded=[Threading.EventWaitHandle]::new($false,[Threading.EventResetMode]::ManualReset,$request.Name+'.fixture-forwarded')
+        $release=[Threading.EventWaitHandle]::new($false,[Threading.EventResetMode]::ManualReset,$request.Name+'.fixture-release')
+    }
     $start=[Diagnostics.ProcessStartInfo]::new((Get-Process -Id $PID).Path)
     $start.UseShellExecute=$false; $start.CreateNoWindow=$true; $start.RedirectStandardOutput=$true; $start.RedirectStandardError=$true
     $start.Arguments=(@('-NoProfile','-ExecutionPolicy','Bypass','-File',(Join-Path $RepoRoot 'tests/nLink.SmokeTests.Core/Support/FrontierRelayTransferWorker.ps1'),'-RepoRoot',$RepoRoot,'-Directory',$Directory,'-Case',$Case,'-Name',$request.Name,'-Id',$request.RequestId) | ForEach-Object {'"'+$_+'"'}) -join ' '
@@ -13,6 +20,7 @@ try {
     if(-not $process.Start() -or -not $request.BindWorker($process)) {throw 'Relay fixture failed to bind actual Wrapper'}
     $out=$process.StandardOutput.ReadToEndAsync(); $err=$process.StandardError.ReadToEndAsync()
     $registration=$request.TryRegisterFrontierRelay(); if($null -eq $registration) {throw 'Relay registration missing'}
+    if($pullOrder) {$registration.GetType().GetField('NativeAfterPullForTest',$flags).SetValue($registration,$forwarded)}
     if($Case -ceq 'pull-budget') {
         $work=$registration.GetType().GetField('transferWork',$flags).GetValue($registration)
         $elapsed=@($work.GetType().GetFields($flags) | Where-Object {$_.Name -match '^_?elapsed$'})[0]
@@ -39,6 +47,17 @@ try {
                 if(-not $mutated) {continue}
             }
             $custody=$registration.TryPullIfOffered()
+            if($pullOrder -and -not $orderObserved -and $forwarded.WaitOne(0)) {
+                $orderObserved=$true
+                $view=$request.GetType().GetField('view',$flags).GetValue($request)
+                $alive=-not $process.HasExited; $state=$view.ReadInt32(48L); $length=$view.ReadInt32(52L)
+                $pending=$request.GetType().GetField('frontierRelayCustody',$flags).GetValue($request)
+                $reason=$pending.GetType().GetField('NativeRetirementDiagnosticForTest',$flags).GetValue($pending)
+                $work=$registration.GetType().GetField('transferWork',$flags).GetValue($registration)
+                Write-Host ('native-pull-order; wrapper_alive='+$alive+'; legacy_state='+$state+'; completion_bytes='+$length+'; work_ms='+$work.ElapsedMilliseconds+'; retirement='+$reason)
+                [void]$release.Set()
+                if(-not $alive -or $state -ne 2 -or $length -le 0 -or $work.ElapsedMilliseconds -gt 5000) {throw 'Native pull ordering preconditions not established'}
+            }
             if($null -ne $custody) {
                 if($custody.IsCurrent -or $custody.LiveProofEligible -or $custody.NativeWriterCustodyEstablished -or $custody.PublicationCompletionIssued) {throw 'Provisional relay offer granted authority'}
                 if($null -ne $registration.TryPullIfOffered()) {throw 'Repeated pull issued custody'}
@@ -47,6 +66,7 @@ try {
         }
     }
     $stdout=$out.GetAwaiter().GetResult(); $stderr=$err.GetAwaiter().GetResult()
+    if($pullOrder -and (-not $orderObserved -or $stdout -notmatch 'native-pull-order-wrapper; transfer_state=3')) {throw "Native ordering barrier not exercised: $stdout $stderr"}
     if($stdout -notmatch 'relay-transfer-worker-ok' -or $process.ExitCode -ne $(if($Case -ceq 'wrapper-nonzero'){7}else{0})) {throw "Relay worker failed: $stdout $stderr"}
     if($Case -cin @('map-collision','event-collision','transfer-tamper','pull-budget')) {
         $completion=$request.TakeRelayAfterExit()
@@ -73,7 +93,7 @@ try {
         $exported=$completion.TryTakeFrontierCustody()
         if($null -ne $completion.TryTakeFrontierCustody()) {throw 'Repeated detach issued custody'}
     }
-    $expected=$Case -cin @('valid','guards','analysis','analysis-changed')
+    $expected=$Case -cin @('valid','guards','analysis','analysis-changed','forward-before-post-pull')
     if(($null -ne $exported) -ne $expected) {throw "Relay terminal adoption mismatch: $Case"}
     $request.Dispose()
     if($expected) {
@@ -93,7 +113,9 @@ try {
     if(@($handles | Where-Object {-not $_.IsClosed}).Count) {throw 'Relay file pins leaked'}
     'frontier-relay-transfer='+$Case
 } finally {
+    if($null -ne $release) {[void]$release.Set()}
     if($null -ne $exported) {$exported.Dispose()}; if($null -ne $custody) {$custody.Dispose()}
     try {if(-not $process.HasExited) {$process.Kill(); [void]$process.WaitForExit(5000)}} catch [InvalidOperationException] {}
     $process.Dispose(); $request.Dispose(); $go.Dispose()
+    if($null -ne $forwarded) {$forwarded.Dispose()}; if($null -ne $release) {$release.Dispose()}
 }

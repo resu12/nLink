@@ -63,19 +63,67 @@ public sealed partial class NknFileTransferTransportTests
             // No scheduler timing or production test hook is needed to reproduce
             // a publication change after ingress but before queued dispatch.
             var queueCount = inbound.GetType().GetField("queuedFrameCount", BindingFlags.Instance | BindingFlags.NonPublic)!;
+            var queueBytes = inbound.GetType().GetField("queuedBytes", BindingFlags.Instance | BindingFlags.NonPublic)!;
             Assert.Equal(0, Assert.IsType<int>(queueCount.GetValue(inbound)));
             var states = Assert.IsAssignableFrom<IDictionary>(GetPrivateField(receiver, "fileTransferStates"));
-            var stateAtDispatch = states[transfer];
-            for (var i = 1; i <= publicationIndex; i++) { PublishPublicationUse(receiver, cycle[i]); }
+            // Preparation may already have tracked the frame. It is not part
+            // of the later rejected callback's no-effect interval.
+            var stateAfterPreparation = states[transfer];
+            Assert.NotNull(stateAfterPreparation);
+            Assert.True(stateAfterPreparation.GetType().IsValueType);
+            var dispatch = Assert.IsType<Action>(SecurityProperty(args[3]!, "Dispatch"));
+            for (var i = 1; i <= publicationIndex; i++)
+            {
+                PublishPublicationUse(receiver, cycle[i]);
+                if (i == 2)
+                {
+                    // Existing production bookkeeping, not a fabricated route
+                    // authority or a pending recovery/worker installation.
+                    Assert.True((bool)SecurityMethod("StartTunaFallbackProofIfNeeded")
+                        .Invoke(receiver, ["header_switch_off", session, NknAccelerationLaneKind.File])!);
+                }
+            }
             if (omitEvidence) { PublishPublicationUse(receiver, cycle[publicationIndex], omitEvidence: true); }
+            var sessions = Assert.IsAssignableFrom<IDictionary>(GetPrivateField(receiver, "fileTransferDataSessions"));
+            var availabilityEvents = 0;
+            inbound.AvailabilityChanged += (_, _) => Interlocked.Increment(ref availabilityEvents);
+            var beforeEffects = CaptureAuthorityAndSession();
+            var beforeFallback = CaptureFallback();
+            var beforeQueueCount = Assert.IsType<int>(queueCount.GetValue(inbound));
+            var beforeQueueBytes = Assert.IsType<long>(queueBytes.GetValue(inbound));
+            Assert.Same(inbound, sessions[transfer]);
+            Assert.Equal(0, beforeQueueCount);
+            Assert.Equal(0L, beforeQueueBytes);
+            if (publicationIndex >= 2)
+            {
+                var fallback = GetPrivateField(receiver, "tunaFallbackProofState")!;
+                Assert.NotNull(fallback);
+                Assert.Equal(session, SecurityProperty(fallback, "SessionId"));
+                Assert.Equal(NknAccelerationLaneKind.File, SecurityProperty(fallback, "Lanes"));
+                Assert.True(Assert.IsType<long>(SecurityProperty(fallback, "Epoch")) > 0);
+            }
             var start = $"event=dispatch_route_guard_started; marker={Guid.NewGuid():D}";
             var end = $"event=dispatch_route_guard_ended; marker={Guid.NewGuid():D}";
             LocalOperationalLog.Info("DispatchRouteGuardTest", start);
-            Assert.IsType<Action>(SecurityProperty(args[3]!, "Dispatch"))();
+            dispatch();
             LocalOperationalLog.Info("DispatchRouteGuardTest", end);
             var reject = publicationIndex is 1 or 3 && !tunaIngress && !controlFrame;
-            Assert.Equal(reject ? 0 : 1, Assert.IsType<int>(queueCount.GetValue(inbound)));
-            Assert.Equal(stateAtDispatch, states[transfer]);
+            Assert.Equal(beforeEffects, CaptureAuthorityAndSession());
+            Assert.Same(inbound, sessions[transfer]);
+            Assert.Equal(beforeQueueCount + (reject ? 0 : 1), Assert.IsType<int>(queueCount.GetValue(inbound)));
+            if (reject)
+            {
+                Assert.Equal(beforeQueueBytes, Assert.IsType<long>(queueBytes.GetValue(inbound)));
+                Assert.Equal(beforeFallback, CaptureFallback());
+            }
+            else if (publicationIndex >= 2)
+            {
+                // The allowed Regular path must actually touch the measured
+                // counter; Tuna delivery must not masquerade as fallback.
+                var fallback = GetPrivateField(receiver, "tunaFallbackProofState")!;
+                Assert.Equal(Assert.IsType<long>(beforeFallback[0]) + (tunaIngress ? 0 : 1),
+                    Assert.IsType<long>(SecurityProperty(fallback, "FileNknFramesReceived")));
+            }
             Assert.True(LocalOperationalLog.TryReadRetainedSlice(start, end, out var log));
             var rows = DataPathProvenanceRows(log, DataPathEnvelopeFingerprint(envelope.MessageId));
             Assert.Equal(reject ? 3 : tunaIngress ? 2 : 1, rows.Length);
@@ -118,5 +166,39 @@ public sealed partial class NknFileTransferTransportTests
             var lookup = new object?[] { session, transfer, FileTransferDirection.Inbound, null, null };
             Assert.True((bool)SecurityMethod("TryGetFileTransferDataPathRouteAuthorityWithEvidence").Invoke(receiver, lookup)!);
             Assert.Equal(omitEvidence ? null : cycle[publicationIndex].Evidence, lookup[4]);
+
+            object?[] CaptureAuthorityAndSession()
+            {
+                var route = new object?[] { session, transfer, FileTransferDirection.Inbound, null, null };
+                Assert.True((bool)SecurityMethod("TryGetFileTransferDataPathRouteAuthorityWithEvidence").Invoke(receiver, route)!);
+                var authorities = Assert.IsAssignableFrom<IDictionary>(GetPrivateField(receiver, "fileTransferRoutePublicationAuthorities"));
+                var authority = Assert.Single(authorities.Values.Cast<FileTransferRoutePublicationAuthority>(),
+                    value => value.SessionId == session && value.TransferId == transfer && value.Direction == FileTransferDirection.Inbound);
+                return [states[transfer], authority with { }, route[3], route[4],
+                    inbound.SessionId, inbound.TransferId, SecurityProperty(inbound, "Generation"),
+                    inbound.IsAvailable, SecurityProperty(inbound, "IsDisposed"), SecurityProperty(inbound, "CurrentAvailabilityReason"),
+                    inbound.GetType().GetField("availabilityGeneration", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(inbound),
+                    GetPrivateField(receiver, "fileTransferDataSessionNextGeneration"),
+                    sessions.Count, Volatile.Read(ref availabilityEvents)];
+            }
+
+            object?[] CaptureFallback()
+            {
+                var fallback = GetPrivateField(receiver, "tunaFallbackProofState");
+                // Copy individual values: comparing the mutable state object to
+                // itself would miss counter, projection or proof mutations.
+                return [fallback is null ? null : SecurityProperty(fallback, "FileNknFramesReceived"),
+                    fallback is null ? null : SecurityProperty(fallback, "Epoch"),
+                    fallback is null ? null : SecurityProperty(fallback, "FileState"),
+                    fallback is null ? null : SecurityProperty(fallback, "FileV6EpochState"),
+                    fallback is null ? null : SecurityProperty(fallback, "FileV6TransportEpoch"),
+                    fallback is null ? null : SecurityProperty(fallback, "FileProjectionPublication"),
+                    fallback is null ? null : SecurityProperty(fallback, "FileProjectionRetirement"),
+                    GetPrivateField(receiver, "fileTransferFallbackProofPending"),
+                    GetPrivateField(receiver, "fileTransferFallbackProofGeneration"),
+                    GetPrivateField(receiver, "fileTransferFallbackProofProbeScheduled"),
+                    GetPrivateField(receiver, "fileTransferFallbackBulkProofObserved"),
+                    GetPrivateField(receiver, "fileTransferFallbackControlProofObserved")];
+            }
         });
 }

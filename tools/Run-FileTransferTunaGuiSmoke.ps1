@@ -437,6 +437,7 @@ function Invoke-TunaGuiSmokeWithHardDeadline {
     $private:frontierGuiReports = $null
     $private:frontierParentCustody = $null
     $private:pendingFrontierSource = $null
+    $private:canonicalPayloadWrapper = $null
     try {
         Remove-Item -LiteralPath $terminalPhaseDeadlinePath -Force -ErrorAction SilentlyContinue
         if (Test-Path -LiteralPath $terminalPhaseDeadlinePath -PathType Leaf) {
@@ -501,14 +502,28 @@ function Invoke-TunaGuiSmokeWithHardDeadline {
             }
             catch { } # Optional control channel never replaces primary startup.
         }
+        if ($private:frontierRelayRequested -and $null -ne $localWriterRequest) {
+            try {
+                # Compare the actual child environment and pin the resolved host
+                # before the one original launch. Omission is diagnostic-only.
+                $private:canonicalGuiHost = (Get-Command $startInfo.FileName -CommandType Application -ErrorAction Stop).Source
+                $startInfo.FileName = $private:canonicalGuiHost
+                [void]$LocalWriterRelay.TryForwardCanonicalAttempt($localWriterRequest, $ExePath, $TimeoutSeconds, $startInfo)
+            }
+            catch { } # Preserve the original child startup and watchdog result.
+        }
         $process = [System.Diagnostics.Process]::new()
         $process.StartInfo = $startInfo
         if ($CaptureFrontierLaunch -and $null -ne $localWriterRequest) {
-            # Internal opt-in only; no live caller enables native GUI ownership.
+            # Explicit local ownership only; this does not enable scenario custody.
             # Readiness omission keeps the one original launch and report tasks.
             $private:frontierGuiReports = $localWriterRequest.StartFrontierGuiWorkerWithReports($process)
             $stdoutTask = $private:frontierGuiReports.Stdout
             $stderrTask = $private:frontierGuiReports.Stderr
+            try {
+                $private:canonicalPayloadWrapper = $localWriterRequest.TryStartPayloadWrapper($private:frontierGuiReports)
+            }
+            catch { } # Optional payload listener never replaces the original launch.
         }
         else {
             if (-not $process.Start()) {
@@ -831,9 +846,12 @@ function Invoke-TunaGuiSmokeWithHardDeadline {
         Write-TunaGuiAtomicJson -Path $statePath -Value $state
         if ($null -ne $localWriterRequest -and $exitCodeAvailable -and $exitCode -eq 0 -and $outputCapture.Completed) {
             try {
-                $private:acceptedWriter = $localWriterRequest.TakeAfterExit()
+                $private:acceptedWriter = $localWriterRequest.TakeAfterExitWithPayloads($private:frontierGuiReports, $private:frontierParentCustody)
                 if ($LocalWriterCompletion -is [ref] -and $null -eq $LocalWriterCompletion.Value) { $LocalWriterCompletion.Value = $private:acceptedWriter }
                 if ($private:frontierRelayRequested -and $null -ne $private:frontierParentCustody) {
+                    if ($null -ne $private:canonicalPayloadWrapper) {
+                        try { $null = $FrontierRelayHandoff.TryOfferPayloadPair($private:canonicalPayloadWrapper, $private:acceptedWriter) } catch { }
+                    }
                     try { $null = $FrontierRelayHandoff.TryOfferAndWait($private:frontierParentCustody, $private:acceptedWriter) } catch { }
                 }
                 if ($null -ne $LocalWriterRelay) { [void]$LocalWriterRelay.Forward($private:acceptedWriter) }
@@ -900,6 +918,7 @@ function Invoke-TunaGuiSmokeWithHardDeadline {
             $process.Dispose()
         }
         if ($null -ne $private:pendingFrontierSource) { $private:pendingFrontierSource.Dispose() }
+        if ($null -ne $private:canonicalPayloadWrapper) { $private:canonicalPayloadWrapper.Dispose() }
         if ($null -ne $private:frontierParentCustody) { $private:frontierParentCustody.Dispose() }
         if ($null -ne $localWriterRequest) { $localWriterRequest.Dispose() }
     }

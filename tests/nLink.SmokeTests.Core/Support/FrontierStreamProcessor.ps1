@@ -2,6 +2,8 @@ param([string]$RepoRoot,[string]$Directory)
 $ErrorActionPreference='Stop'
 Set-StrictMode -Version Latest
 Add-Type -Path (Join-Path $RepoRoot 'tools/GuiSmokeLogLedgerStreamingProcessor.cs')
+Add-Type -Path (Join-Path $RepoRoot 'tests/nLink.SmokeTests.Core/Support/FrontierOriginCapacityProbe.cs')
+[NLink.Tests.FrontierOriginCapacityProbe]::Counts([NLink.Tools.GuiSmokeLogLedgerStreamingProcessor].Assembly.GetType('NLink.Tools.GuiSmokeLedgerStreamRead'))
 . (Join-Path $RepoRoot 'tools/GuiSmokeLogLedger.ps1')
 $flags=[Reflection.BindingFlags]'Instance,NonPublic'
 function Invoke-StreamCase($InputStream,[string]$Mode,[long]$Lines,[long]$Bookmark,[string[]]$Events) {
@@ -57,12 +59,20 @@ foreach($mode in @('valid','bookmark','mixed-newlines','boundary','gap','unknown
         $checks.Add($mode)
     } finally { $input.Dispose() }
 }
-foreach($mode in @('extra','short','prior-read','invalid-utf8','line-limit','origin-limit','metadata-limit','record-limit','event-count-over','metadata-over')) {
+foreach($count in @(131072,131073)) {
+    $input=[IO.MemoryStream]::new([Text.Encoding]::UTF8.GetBytes(("event=selected`n"*$count)),$false)
+    try {
+        $capture=(Invoke-StreamCase $input ('origin-count-'+$count) $count 0 ([string[]]@('selected'))).StreamCapture
+        if($capture.RetainedOrigins.Count -ne $count -or $capture.SemanticOrigins.Count -ne $count -or $capture.WriterOrigins.Count -ne 0 -or
+            $capture.SemanticOrigins[0] -ne 1 -or $capture.SemanticOrigins[$count-1] -ne $count) {throw 'Above-old-cap origins lost'}
+        $checks.Add('origin-count-'+(2*$count))
+    } finally {$input.Dispose()}
+}
+foreach($mode in @('extra','short','prior-read','invalid-utf8','line-limit','metadata-limit','record-limit','event-count-over','metadata-over')) {
     $text="event=selected`n"; $count=1L; $events=[string[]]@('selected')
     if($mode -ceq 'extra') { $text+=$text }
     if($mode -ceq 'short') { $count=2 }
     if($mode -ceq 'line-limit') { $text=('x'*262145)+"`n" }
-    if($mode -ceq 'origin-limit') { $text=$text*131073; $count=131073 }
     if($mode -ceq 'record-limit') { $count=262145 }
     if($mode -ceq 'metadata-limit') { $events=[string[]]@(('a'*1025)) }
     if($mode -ceq 'event-count-over') {$events=[string[]]@(1..2049 | ForEach-Object {'e'+$_})}
@@ -71,7 +81,7 @@ foreach($mode in @('extra','short','prior-read','invalid-utf8','line-limit','ori
     $input=[IO.MemoryStream]::new($bytes,$false); $rejected=$false
     try {
         if($mode -ceq 'prior-read') { [void]$input.ReadByte() }
-        try { [void](Invoke-StreamCase $input $mode $count 0 $events) } catch { $rejected=$true; if($mode -ceq 'origin-limit' -and $_.ToString() -notmatch 'stream_source_origin_limit') { throw } }
+        try { [void](Invoke-StreamCase $input $mode $count 0 $events) } catch { $rejected=$true }
         if(-not $rejected) { throw "Stream failure admitted: $mode" }
         if($mode -cin @('event-count-over','metadata-over') -and $input.Position -ne 0) {throw 'Metadata rejection read source bytes'}
         $checks.Add($mode)

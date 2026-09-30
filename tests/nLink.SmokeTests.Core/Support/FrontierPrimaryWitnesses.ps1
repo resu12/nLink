@@ -53,11 +53,11 @@ try {
         'empty' {$selection=[int[]]@()}; 'null' {$selection=$null}; 'duplicate' {$selection=[int[]]@(1,1)}
         'order' {$selection=[int[]]@(2,1)}; 'zero' {$selection=[int[]]@(0)}; 'out-of-range' {$selection=[int[]]@($full.Length+1)}
         'pre-mutation' {$full[0]=[string]::new($full[0].ToCharArray())}
-        'record-budget' {$owned.GetType().GetField('evaluationVisits',$flags).SetValue($owned,2097152L)}
+        'record-budget' {$owned.GetType().GetField('evaluationVisits',$flags).SetValue($owned,[long][NLink.Tools.LocalPublicationInputLimits]::EvaluationVisits)}
         'budget' {
             $watch=$owned.GetType().GetField('work',$flags).GetValue($owned)
             $elapsed=@($watch.GetType().GetFields($flags) | Where-Object {$_.Name -match '^_?elapsed$'})[0]
-            $elapsed.SetValue($watch,[long]([Diagnostics.Stopwatch]::Frequency*21))
+            $elapsed.SetValue($watch,[long]([Diagnostics.Stopwatch]::Frequency*([NLink.Tools.LocalPublicationInputLimits]::EvaluationMilliseconds+1000)/1000))
         }
     }
     if($mode -cin @('range-start','range-end')) {

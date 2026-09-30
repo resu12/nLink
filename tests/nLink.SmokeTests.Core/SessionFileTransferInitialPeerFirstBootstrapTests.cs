@@ -851,10 +851,20 @@ public sealed partial class SessionFileTransferV4SenderTests
             new(TaskCreationOptions.RunContinuationsAsynchronously);
         public TaskCompletionSource? ReleaseCheckpoint { get; set; }
         public bool PeerVisible { get; set; } = true;
+        public IFileTransferControlPlaneDeliveryTransport? YieldTransportForTest { get; init; }
 
         public async Task<FileTransferControlPlaneDeliveryResult> SendFileTransferControlPlaneFrameAsync(
             FileTransferControlPlaneDeliveryRequest request, CancellationToken ct)
         {
+            if (request.Kind == FileTransferControlPlaneKind.FallbackTailYield && YieldTransportForTest is { } transport)
+            {
+                Requests.Add(request);
+                // Forward the original Service request and return the original
+                // adapter result. Recording the frame is not another wire send.
+                var result = await transport.SendFileTransferControlPlaneFrameAsync(request, ct);
+                if (result.PeerVisibleAny) { await dataSession.SendAsync(request.Frame, ct); }
+                return result;
+            }
             var accepted = request.PreTransportDeliveryValidator?.Invoke() == true;
             Requests.Add(request);
             if (request.Kind == FileTransferControlPlaneKind.FallbackCheckpointProof)

@@ -1224,7 +1224,7 @@ public sealed partial class SessionFileTransferService
             context.PendingOutboundSparseFrontierDispatchProofs.Remove(retiredKey);
             LocalOperationalLog.Warn(
                 "FileTransferService",
-                $"event=filetransfer_v6_frontier_request_receive_dispatch_rejected; {FormatOutboundSparsePumpInstallTuple(install)}; transport_epoch={request.TransportEpoch}; repair_request_id={FormatProtocolLogValue(request.RepairRequestId ?? "(none)")}; request_correlation_id={FormatProtocolLogValue(request.RequestCorrelationId ?? "(none)")}; first_start_chunk_index={firstStartChunkIndex}; first_chunk_count={firstChunkCount}; range_count={rangeCount}; decision_reason=pending_install_dispatch_proof_capacity_replaced; retired_correlation_key={FormatProtocolLogValue(retiredKey)}");
+                $"event=filetransfer_v6_frontier_request_receive_dispatch_rejected; {FileTransferDiagnosticScopeEvidence.Format(install.RuntimeOwner.SessionId, install.RuntimeOwner.TransferId)}{FormatOutboundSparsePumpInstallTuple(install)}; transport_epoch={request.TransportEpoch}; repair_request_id={FormatProtocolLogValue(request.RepairRequestId ?? "(none)")}; request_correlation_id={FormatProtocolLogValue(request.RequestCorrelationId ?? "(none)")}; first_start_chunk_index={firstStartChunkIndex}; first_chunk_count={firstChunkCount}; range_count={rangeCount}; decision_reason=pending_install_dispatch_proof_capacity_replaced; retired_correlation_key={FormatProtocolLogValue(retiredKey)}");
         }
 
         context.PendingOutboundSparseFrontierDispatchProofs[correlationKey] =
@@ -3806,7 +3806,7 @@ public sealed partial class SessionFileTransferService
                             received.TransportKind).ConfigureAwait(false);
                         break;
                     case FileTransferFallbackTailYieldFrameV6 yield:
-                        ApplyOutboundFallbackTailYieldProofFromReceive(context, yield, completedReceiveInstall, completedReceiveRuntimeOwner, completedReceiveDataSession, completedReceiveDataSessionGeneration);
+                        ApplyOutboundFallbackTailYieldProofFromReceive(context, yield, completedReceiveInstall, completedReceiveRuntimeOwner, completedReceiveDataSession, completedReceiveDataSessionGeneration, received.YieldEvidence);
                         break;
                     case FileTransferPauseControlFrameV4 pauseControl:
                         LogPullDataFrameIgnored(context.TransferId, context.SessionId, pauseControl, "lifecycle_data_frame_ignored_phase2");
@@ -15237,7 +15237,7 @@ public sealed partial class SessionFileTransferService
                 receiveInstall);
             LocalOperationalLog.Info(
                 "FileTransferService",
-                $"event=filetransfer_v6_frontier_repair_requested; direction=outbound; transfer_id={context.TransferId}; session_id={context.SessionId}; transport_epoch={repairRequest.TransportEpoch}; repair_request_id={FormatProtocolLogValue(repairRequest.RepairRequestId ?? "(none)")}; priority={FormatProtocolLogValue(repairRequest.Priority ?? "(none)")}; first_start_chunk_index={first.StartChunkIndex}; requested_chunk_count={first.ChunkCount}; range_count={repairRequest.MissingRanges.Count}");
+                $"event=filetransfer_v6_frontier_repair_requested; {FileTransferDiagnosticScopeEvidence.Format(context.SessionId, context.TransferId)}direction=outbound; transfer_id={context.TransferId}; session_id={context.SessionId}; transport_epoch={repairRequest.TransportEpoch}; repair_request_id={FormatProtocolLogValue(repairRequest.RepairRequestId ?? "(none)")}; priority={FormatProtocolLogValue(repairRequest.Priority ?? "(none)")}; first_start_chunk_index={first.StartChunkIndex}; requested_chunk_count={first.ChunkCount}; range_count={repairRequest.MissingRanges.Count}");
         }
 
         return repairDispatchScheduled
@@ -15318,7 +15318,7 @@ public sealed partial class SessionFileTransferService
 
         LocalOperationalLog.Info(
             "FileTransferService",
-            $"event=filetransfer_v6_frontier_request_advanced_remote_frontier; direction=outbound; transfer_id={context.TransferId}; session_id={context.SessionId}; transport_epoch={request.TransportEpoch}; repair_request_id={FormatProtocolLogValue(request.RepairRequestId ?? "(none)")}; previous_remote_frontier_chunk_index={previousRemoteFrontier}; inferred_remote_frontier_chunk_index={context.RemoteNextExpectedChunkIndex}");
+            $"event=filetransfer_v6_frontier_request_advanced_remote_frontier; {FileTransferDiagnosticScopeEvidence.Format(context.SessionId, context.TransferId)}direction=outbound; transfer_id={context.TransferId}; session_id={context.SessionId}; transport_epoch={request.TransportEpoch}; repair_request_id={FormatProtocolLogValue(request.RepairRequestId ?? "(none)")}; previous_remote_frontier_chunk_index={previousRemoteFrontier}; inferred_remote_frontier_chunk_index={context.RemoteNextExpectedChunkIndex}");
     }
 
     private void ApplyOutboundV6RepairProof(
@@ -16574,7 +16574,7 @@ public sealed partial class SessionFileTransferService
         transferredChunkCount = transferredChunks.Count;
         LocalOperationalLog.Info(
             "FileTransferService",
-            $"event=filetransfer_fallback_frontier_repair_successor_dispatch_handoff_decided; {FormatFallbackFrontierRepairAuthorityTuple(successorAuthority)}; predecessor_authority_id={FormatProtocolLogValue(predecessorAuthorityId.ToString())}; predecessor_repair_request_key={FormatProtocolLogValue(predecessorSend.RepairRequestKey)}; predecessor_protocol_repair_request_id={FormatProtocolLogValue(predecessorSend.ProtocolRepairRequestId ?? "(none)")}; successor_repair_request_key={FormatProtocolLogValue(successorAuthority.CanonicalRepairKey)}; successor_protocol_repair_request_id={FormatProtocolLogValue(successorAuthority.ProtocolRepairRequestId)}; transferred_chunk_count={transferredChunkCount}; transferred_chunk_indices={FormatV4ChunkIndicesForLog(transferredChunks)}; result=queued_predecessor_rebound; authority_effect=none; decision_reason=exact_queued_predecessor_dispatch_transferred");
+            $"event=filetransfer_fallback_frontier_repair_successor_dispatch_handoff_decided; {FileTransferDiagnosticScopeEvidence.Format(successorAuthority.SessionId, successorAuthority.TransferId)}{FormatFallbackFrontierRepairAuthorityTuple(successorAuthority)}; predecessor_authority_id={FormatProtocolLogValue(predecessorAuthorityId.ToString())}; predecessor_repair_request_key={FormatProtocolLogValue(predecessorSend.RepairRequestKey)}; predecessor_protocol_repair_request_id={FormatProtocolLogValue(predecessorSend.ProtocolRepairRequestId ?? "(none)")}; successor_repair_request_key={FormatProtocolLogValue(successorAuthority.CanonicalRepairKey)}; successor_protocol_repair_request_id={FormatProtocolLogValue(successorAuthority.ProtocolRepairRequestId)}; transferred_chunk_count={transferredChunkCount}; transferred_chunk_indices={FormatV4ChunkIndicesForLog(transferredChunks)}; result=queued_predecessor_rebound; authority_effect=none; decision_reason=exact_queued_predecessor_dispatch_transferred");
         return true;
     }
 
@@ -21005,21 +21005,21 @@ public sealed partial class SessionFileTransferService
             await dataSession.SendAsync(state, timeout.Token).ConfigureAwait(false);
             LocalOperationalLog.Info(
                 "FileTransferService",
-                $"event=filetransfer_v4_pause_state_sent; transfer_id={state.TransferId}; session_id={state.SessionId}; reason={reason}; epoch={state.Epoch}; transfer_paused={(state.TransferPaused ? 1 : 0)}; pause_reason={FormatProtocolLogValue(state.TransferPauseReason ?? "(none)")}; contiguous_committed_chunk_index={state.ContiguousCommittedChunkIndex}; credit_until_chunk_index_exclusive={state.CreditUntilChunkIndexExclusive}");
+                $"event=filetransfer_v4_pause_state_sent; {FileTransferDiagnosticScopeEvidence.Format(state.SessionId, state.TransferId)}transfer_id={state.TransferId}; session_id={state.SessionId}; reason={reason}; epoch={state.Epoch}; transfer_paused={(state.TransferPaused ? 1 : 0)}; pause_reason={FormatProtocolLogValue(state.TransferPauseReason ?? "(none)")}; contiguous_committed_chunk_index={state.ContiguousCommittedChunkIndex}; credit_until_chunk_index_exclusive={state.CreditUntilChunkIndexExclusive}");
             return true;
         }
         catch (OperationCanceledException)
         {
             LocalOperationalLog.Warn(
                 "FileTransferService",
-                $"event=filetransfer_v4_pause_state_send_failed; transfer_id={context.TransferId}; session_id={context.SessionId}; reason={reason}; transfer_paused={(state.TransferPaused ? 1 : 0)}; error=timeout");
+                $"event=filetransfer_v4_pause_state_send_failed; {FileTransferDiagnosticScopeEvidence.Format(context.SessionId, context.TransferId)}transfer_id={context.TransferId}; session_id={context.SessionId}; reason={reason}; transfer_paused={(state.TransferPaused ? 1 : 0)}; error=timeout");
             return false;
         }
         catch (Exception ex)
         {
             LocalOperationalLog.Warn(
                 "FileTransferService",
-                $"event=filetransfer_v4_pause_state_send_failed; transfer_id={context.TransferId}; session_id={context.SessionId}; reason={reason}; transfer_paused={(state.TransferPaused ? 1 : 0)}; error={FormatProtocolLogValue(ex.Message)}");
+                $"event=filetransfer_v4_pause_state_send_failed; {FileTransferDiagnosticScopeEvidence.Format(context.SessionId, context.TransferId)}transfer_id={context.TransferId}; session_id={context.SessionId}; reason={reason}; transfer_paused={(state.TransferPaused ? 1 : 0)}; error={FormatProtocolLogValue(ex.Message)}");
             return false;
         }
     }
@@ -22934,7 +22934,7 @@ public sealed partial class SessionFileTransferService
                         break;
                     case FileTransferFallbackTailYieldFrameV6 yield:
                         MarkInboundV4PeerFrameReceived(context);
-                        ApplyInboundFallbackTailYieldProof(context, yield);
+                        ApplyInboundFallbackTailYieldProofWithEvidence(context, yield, received.YieldEvidence);
                         break;
                     case FileTransferManifestFrameV6 manifest when ShouldUseV6SparseCreditEnvelope(context):
                         MarkInboundV4PeerFrameReceived(context);
@@ -23122,7 +23122,7 @@ public sealed partial class SessionFileTransferService
             {
                 LocalOperationalLog.Info(
                     "FileTransferService",
-                    $"event=filetransfer_v4_peer_state_received; transfer_id={context.TransferId}; session_id={context.SessionId}; epoch={state.Epoch}; previous_epoch={context.PeerV4LastStateEpoch}; stale=1; applied=0; transfer_paused={(state.TransferPaused ? 1 : 0)}");
+                    $"event=filetransfer_v4_peer_state_received; {FileTransferDiagnosticScopeEvidence.Format(context.SessionId, context.TransferId)}transfer_id={context.TransferId}; session_id={context.SessionId}; epoch={state.Epoch}; previous_epoch={context.PeerV4LastStateEpoch}; stale=1; applied=0; transfer_paused={(state.TransferPaused ? 1 : 0)}");
                 return false;
             }
 
@@ -23133,7 +23133,7 @@ public sealed partial class SessionFileTransferService
             {
                 LocalOperationalLog.Info(
                     "FileTransferService",
-                    $"event=filetransfer_v4_peer_state_received; transfer_id={context.TransferId}; session_id={context.SessionId}; epoch={state.Epoch}; previous_epoch={context.PeerV4LastStateEpoch}; duplicate=1; applied=0; transfer_paused={(state.TransferPaused ? 1 : 0)}");
+                    $"event=filetransfer_v4_peer_state_received; {FileTransferDiagnosticScopeEvidence.Format(context.SessionId, context.TransferId)}transfer_id={context.TransferId}; session_id={context.SessionId}; epoch={state.Epoch}; previous_epoch={context.PeerV4LastStateEpoch}; duplicate=1; applied=0; transfer_paused={(state.TransferPaused ? 1 : 0)}");
                 return false;
             }
 
@@ -23157,7 +23157,7 @@ public sealed partial class SessionFileTransferService
             snapshot = CreateSnapshotLocked();
             LocalOperationalLog.Info(
                 "FileTransferService",
-                $"event=filetransfer_v4_peer_state_received; transfer_id={context.TransferId}; session_id={context.SessionId}; epoch={state.Epoch}; previous_epoch={previousEpoch}; stale=0; applied=1; transfer_paused={(state.TransferPaused ? 1 : 0)}; pause_reason={FormatProtocolLogValue(normalizedPauseReason ?? "(none)")}");
+                $"event=filetransfer_v4_peer_state_received; {FileTransferDiagnosticScopeEvidence.Format(context.SessionId, context.TransferId)}transfer_id={context.TransferId}; session_id={context.SessionId}; epoch={state.Epoch}; previous_epoch={previousEpoch}; stale=0; applied=1; transfer_paused={(state.TransferPaused ? 1 : 0)}; pause_reason={FormatProtocolLogValue(normalizedPauseReason ?? "(none)")}");
         }
 
         if (snapshot is not null)
@@ -24041,7 +24041,7 @@ public sealed partial class SessionFileTransferService
         {
             LocalOperationalLog.Info(
                 "FileTransferService",
-                $"event=filetransfer_v4_sparse_write_committed; transfer_id={context.TransferId}; session_id={context.SessionId}; written_chunk_count={acceptedChunks.Count}; written_bytes={sparseWriteBytes}; contiguous_chunks_committed={committedChunkCount}; contiguous_bytes_committed={committedByteCount}; write_duration_ms={writeStopwatch.ElapsedMilliseconds}; next_chunk_index={nextChunkIndexAfterCommit}; highest_received_chunk_index={highestReceivedChunkIndexAfterCommit}; pending_bytes={pendingBytesAfterCommit}");
+                $"event=filetransfer_v4_sparse_write_committed; {FileTransferDiagnosticScopeEvidence.Format(context.SessionId, context.TransferId)}transfer_id={context.TransferId}; session_id={context.SessionId}; written_chunk_count={acceptedChunks.Count}; written_bytes={sparseWriteBytes}; contiguous_chunks_committed={committedChunkCount}; contiguous_bytes_committed={committedByteCount}; write_duration_ms={writeStopwatch.ElapsedMilliseconds}; next_chunk_index={nextChunkIndexAfterCommit}; highest_received_chunk_index={highestReceivedChunkIndexAfterCommit}; pending_bytes={pendingBytesAfterCommit}");
         }
         if (completed)
         {
@@ -24091,7 +24091,7 @@ public sealed partial class SessionFileTransferService
             {
                 LocalOperationalLog.Info(
                     "FileTransferService",
-                    $"event=filetransfer_v6_frontier_repair_applied; direction=inbound; transfer_id={context.TransferId}; session_id={context.SessionId}; transport_epoch={(repairProofFrame?.TransportEpoch ?? 0)}; repair_request_id={FormatProtocolLogValue(repairProofFrame?.RepairRequestId ?? "(none)")}; committed_frontier_before={repairFrontierBefore}; committed_frontier_after={nextChunkIndexAfterCommit}; accepted_chunk_count={repairAcceptedChunkCount}; requested_missing_range_start={repairRequestedRangeStart}; requested_missing_range_count={repairRequestedRangeCount}");
+                    $"event=filetransfer_v6_frontier_repair_applied; {FileTransferDiagnosticScopeEvidence.Format(context.SessionId, context.TransferId)}direction=inbound; transfer_id={context.TransferId}; session_id={context.SessionId}; transport_epoch={(repairProofFrame?.TransportEpoch ?? 0)}; repair_request_id={FormatProtocolLogValue(repairProofFrame?.RepairRequestId ?? "(none)")}; committed_frontier_before={repairFrontierBefore}; committed_frontier_after={nextChunkIndexAfterCommit}; accepted_chunk_count={repairAcceptedChunkCount}; requested_missing_range_start={repairRequestedRangeStart}; requested_missing_range_count={repairRequestedRangeCount}");
             }
             else
             {
@@ -24153,7 +24153,7 @@ public sealed partial class SessionFileTransferService
 
         if (completed)
         {
-            await SendInboundV4TerminalReadyStateBestEffortAsync(context, writeSource).ConfigureAwait(false);
+            await SendInboundV4TerminalReadyStateBestEffortAsync(context, writeSource, terminalReady: false).ConfigureAwait(false);
         }
         else
         {
@@ -24240,7 +24240,7 @@ public sealed partial class SessionFileTransferService
 
         if (completed)
         {
-            await SendInboundV4TerminalReadyStateBestEffortAsync(context).ConfigureAwait(false);
+            await SendInboundV4TerminalReadyStateBestEffortAsync(context, terminalReady: false).ConfigureAwait(false);
             await FinalizeInboundTransferAsync(context, context.LifetimeCts.Token).ConfigureAwait(false);
             return;
         }
@@ -24369,19 +24369,28 @@ public sealed partial class SessionFileTransferService
     }
 
     private Task<bool> SendInboundSparseCreditStateAsync(
+        InboundTransferContext context, string reason, bool terminalReady, bool requireMissingRange = false,
+        bool forceMissingRange = false, bool forceSend = false, InboundBootstrapWriteSource? requiredWriteSource = null)
+        => SendInboundSparseCreditStateWithFinalizationSourceAsync(context, reason, terminalReady, requireMissingRange,
+            forceMissingRange, forceSend, requiredWriteSource, null);
+
+    private Task<bool> SendInboundSparseCreditStateWithFinalizationSourceAsync(
         InboundTransferContext context,
         string reason,
         bool terminalReady,
         bool requireMissingRange = false,
         bool forceMissingRange = false,
         bool forceSend = false,
-        InboundBootstrapWriteSource? requiredWriteSource = null)
+        InboundBootstrapWriteSource? requiredWriteSource = null,
+        InboundFinalizationSource? requiredFinalizationSource = null)
         => requiredWriteSource is not null
             ? SendInboundV4StateWithWriteBindingAsync(context, reason, terminalReady, requireMissingRange, forceMissingRange,
-                forceSend, null, null, requiredWriteSource)
+                forceSend, null, null, requiredWriteSource, requiredFinalizationSource)
             : ShouldUsePostTunaFallbackV6FeedbackEnvelope(context)
-            ? SendInboundV6ReceiverStateAsync(context, reason, forceSend || requireMissingRange || forceMissingRange, terminalReady)
-            : SendInboundV4StateAsync(context, reason, terminalReady, requireMissingRange, forceMissingRange, forceSend);
+            ? SendInboundV6ReceiverStateWithFinalizationSourceAsync(context, reason, forceSend || requireMissingRange || forceMissingRange, terminalReady,
+                requiredFinalizationSource: requiredFinalizationSource)
+            : SendInboundV4StateWithWriteBindingAsync(context, reason, terminalReady, requireMissingRange, forceMissingRange,
+                forceSend, null, null, null, requiredFinalizationSource);
 
     private Task<bool> SendInboundV4StateAsync(
         InboundTransferContext context,
@@ -24487,7 +24496,8 @@ public sealed partial class SessionFileTransferService
         FileTransferReceiveRecoveryProofStatePublicationCommand?
             proofStatePublicationCommand,
         ReceiveRecoveryProofStateSendCapture? proofStateSendCapture,
-        InboundBootstrapWriteSource? requiredWriteSource)
+        InboundBootstrapWriteSource? requiredWriteSource,
+        InboundFinalizationSource? requiredFinalizationSource = null)
     {
         FileTransferStateFrameV4? state;
         IFileTransferDataSession dataSession;
@@ -24505,6 +24515,7 @@ public sealed partial class SessionFileTransferService
         lock (gate)
         {
             if (HasBootstrapSourceHoldLocked(context)) { return false; }
+            if (requiredFinalizationSource is not null && !IsInboundFinalizationSourceCurrentLocked(context, requiredFinalizationSource)) { return false; }
             if (requiredWriteSource is not null && !IsInboundBootstrapWriteSourceCurrentLocked(context, requiredWriteSource)) { return false; }
             var currentDataSession = context.DataSession;
             if (!ReferenceEquals(inboundTransfer, context) ||
@@ -24777,6 +24788,7 @@ public sealed partial class SessionFileTransferService
             var peerVisibleControlPlaneProof = false;
             lock (gate)
             {
+                if (requiredFinalizationSource is not null && !IsInboundFinalizationSourceCurrentLocked(context, requiredFinalizationSource)) { return false; }
                 if (feedbackOperation is not null && !IsInboundBootstrapFeedbackCurrentLocked(context, feedbackOperation)) { return false; }
                 if (!ReferenceEquals(inboundTransfer, context) ||
                     context.IsTerminal ||
@@ -24974,6 +24986,18 @@ public sealed partial class SessionFileTransferService
                         };
                     }
 
+                    if (requiredFinalizationSource is not null)
+                    {
+                        var existingValidator = request.PreTransportDeliveryValidator;
+                        request = request with { PreTransportDeliveryValidator = () =>
+                        {
+                            lock (gate)
+                            {
+                                return (existingValidator is null || existingValidator()) &&
+                                    IsInboundFinalizationSourceCurrentLocked(context, requiredFinalizationSource);
+                            }
+                        } };
+                    }
                     controlPlaneRequest = request;
                 }
                 else
@@ -25019,6 +25043,7 @@ public sealed partial class SessionFileTransferService
                 {
                     lock (gate)
                     {
+                        if (requiredFinalizationSource is not null && !IsInboundFinalizationSourceCurrentLocked(context, requiredFinalizationSource)) { return false; }
                         if (ReferenceEquals(inboundTransfer, context) &&
                             !context.IsTerminal)
                         {
@@ -25046,6 +25071,7 @@ public sealed partial class SessionFileTransferService
 
             lock (gate)
             {
+                if (requiredFinalizationSource is not null && !IsInboundFinalizationSourceCurrentLocked(context, requiredFinalizationSource)) { return false; }
                 if (feedbackOperation is not null && !IsInboundBootstrapFeedbackCurrentLocked(context, feedbackOperation)) { return false; }
                 if (ReferenceEquals(inboundTransfer, context))
                 {
@@ -25111,7 +25137,7 @@ public sealed partial class SessionFileTransferService
 
             LocalOperationalLog.Info(
                 "FileTransferService",
-                $"event=filetransfer_v4_state_sent; transfer_id={state.TransferId}; session_id={state.SessionId}; direction=inbound; route={FormatProtocolLogValue(stateRepairAuthority?.RouteToken ?? context.RouteSelection.TelemetryToken)}; protocol_version={stateRepairAuthority?.ProtocolVersion ?? context.NegotiatedDataProtocolVersion}; live_route_epoch={stateRepairAuthority?.LiveRouteEpoch ?? context.CurrentLiveRouteEpoch?.EpochId ?? 0}; runtime_generation={stateRepairAuthority?.RuntimeGeneration ?? context.CurrentRuntimeOwner?.RuntimeGeneration ?? 0}; terminal_generation={stateRepairAuthority?.TerminalGeneration ?? context.CurrentRuntimeOwner?.TerminalGeneration ?? 0}; leg_generation={stateRepairAuthority?.LegGeneration ?? context.CurrentTransferLeg?.Generation ?? 0}; transport_epoch={stateRepairAuthority?.TransportEpoch ?? context.CurrentTransferLeg?.TransportEpochId ?? 0}; bridge_recovery_generation={stateRepairAuthority?.BridgeRecoveryGeneration ?? context.CurrentTransferLeg?.BridgeRecoveryGeneration ?? 0}; bridge_decision_generation={stateRepairAuthority?.BridgeDecisionGeneration ?? context.CurrentBridgeRecoveryDecision?.BridgeDecisionGeneration ?? 0}; route_publication_generation={stateRepairAuthority?.RoutePublicationGeneration ?? context.CurrentRoutePublicationToken?.PublicationGeneration ?? 0}; route_commit_generation={stateRepairAuthority?.RouteCommitGeneration ?? context.CurrentRoutePublicationToken?.RouteCommitGeneration ?? 0}; data_session_generation={stateProjection?.DataSessionGeneration ?? stateAttemptAuthority?.DataSessionGeneration ?? context.DataSessionGeneration}; reason={reason}; epoch={state.Epoch}; v4_state_wire_fingerprint={stateWireFingerprint}; repair_request_id={FormatProtocolLogValue(metadataState?.RepairRequestId ?? "(none)")}; priority={FormatProtocolLogValue(metadataState?.Priority ?? "(none)")}; recovery_mode={FormatProtocolLogValue(metadataState?.RecoveryMode ?? "(none)")}; contiguous_committed_chunk_index={state.ContiguousCommittedChunkIndex}; durable_received_highest_chunk_index={state.DurableReceivedHighestChunkIndex}; credit_until_chunk_index_exclusive={state.CreditUntilChunkIndexExclusive}; mixed_screenshare={(IsV4MixedScreenShareActive() ? 1 : 0)}; screen_share_active={(sessionScreenShareActive ? 1 : 0)}; screen_share_degraded={(sessionScreenShareDegraded ? 1 : 0)}; screen_share_observed={(sessionScreenShareObserved ? 1 : 0)}; credit_window_chunks={stateCreditWindowChunks}; frontier_credit_cap_chunk_index_exclusive={frontierCreditCapChunkIndexExclusive}; sparse_credit_target_without_frontier_cap={sparseCreditTargetWithoutFrontierCap}; frontier_window_credit_capped={(frontierWindowCreditCapped ? 1 : 0)}; regular_v4_frontier_repair_credit_capped={(regularV4FrontierRepairCreditCapped ? 1 : 0)}; regular_v4_frontier_repair_credit_cap_chunk_index_exclusive={regularV4FrontierRepairCreditCapChunkIndexExclusive}; frontier_lag_chunks={frontierLagChunks}; missing_range_count={state.MissingRanges.Count}; frontier_stall_age_ms={frontierStallAgeMs}; bytes_committed={state.BytesCommitted}; receiver_memory_pressure={(state.ReceiverMemoryPressure ? 1 : 0)}; receiver_disk_pressure={(state.ReceiverDiskPressure ? 1 : 0)}; terminal_ready={(state.TerminalReady ? 1 : 0)}; transfer_paused={(state.TransferPaused ? 1 : 0)}; repair_publication_kind={repairPublicationKind}; receive_recovery_operation_authority_id={FormatProtocolLogValue(proofStatePublicationCommand?.Authority.AuthorityId.ToString() ?? "(none)")}; receive_recovery_operation_generation={proofStatePublicationCommand?.Authority.OperationGeneration ?? 0}; receive_recovery_closure_generation={proofStatePublicationCommand?.ClosureGeneration ?? 0}; receive_recovery_publication_generation={proofStatePublicationCommand?.PublicationGeneration ?? 0}; receive_recovery_publication_attempt={(proofStatePublicationCommand?.PredecessorReceipt is null ? "initial" : "post_delivery_recheck")}; receive_recovery_predecessor_publication_generation={proofStatePublicationCommand?.PredecessorReceipt?.Command.PublicationGeneration ?? 0}; receive_recovery_predecessor_frame_fingerprint={FormatProtocolLogValue(proofStatePublicationCommand?.PredecessorReceipt?.FrameFingerprint ?? "(none)")}; receive_recovery_predecessor_receipt_observed_utc_ms={proofStatePublicationCommand?.PredecessorReceiptObservedUtcMs ?? 0}; receive_recovery_recheck_heartbeat_generation={proofStatePublicationCommand?.RecheckEvidence?.HeartbeatGeneration ?? 0}; receive_recovery_recheck_heartbeat_sequence={proofStatePublicationCommand?.RecheckEvidence?.HeartbeatSequence ?? 0}; receive_recovery_recheck_proof_kind={FormatProtocolLogValue(proofStatePublicationCommand?.RecheckEvidence?.ProofKind ?? "(none)")}; receive_recovery_recheck_lane={FormatProtocolLogValue(proofStatePublicationCommand?.RecheckEvidence?.Lane ?? "(none)")}; receive_recovery_frame_fingerprint={FormatProtocolLogValue(proofStateSendCapture?.FrameFingerprint ?? "(none)")}; repair_attempt_authority_id={FormatProtocolLogValue(stateAttemptAuthority?.Authority.AuthorityId.ToString() ?? "(none)")}; repair_attempt_install_generation={stateAttemptAuthority?.InstallGeneration ?? 0}; repair_attempt_request_key={FormatProtocolLogValue(stateAttemptAuthority?.RepairRequestKey ?? "(none)")}; repair_attempt_range_fingerprint={FormatProtocolLogValue(stateAttemptAuthority?.RangeFingerprint ?? "(none)")}; repair_attempt_ranges={FormatProtocolLogValue(stateAttemptAuthority is null ? "(none)" : FormatInboundRegularV4FrontierRepairProjectionRanges(stateAttemptAuthority.Ranges))}; repair_projection_generation={stateProjection?.ProjectionGeneration ?? 0}; repair_projection_kind={(stateProjection is null ? "(none)" : FormatInboundRegularV4FrontierRepairProjectionKind(stateProjection.Kind))}; repair_projection_data_session_generation={stateProjection?.DataSessionGeneration ?? 0}; repair_projection_authority_id={FormatProtocolLogValue(stateProjection?.SourceContract.Authority.AuthorityId.ToString() ?? "(none)")}; repair_projection_predecessor_authority_id={FormatProtocolLogValue(stateProjection?.SourceContract.Authority.PredecessorAuthorityId?.ToString() ?? "(none)")}; repair_projection_source_key={FormatProtocolLogValue(stateProjection?.SourceRepairKey ?? "(none)")}; repair_projection_projected_key={FormatProtocolLogValue(stateProjection?.ProjectedRepairKey ?? "(none)")}; repair_projection_source_range_fingerprint={FormatProtocolLogValue(stateProjection?.SourceRangeFingerprint ?? "(none)")}; repair_projection_projected_range_fingerprint={FormatProtocolLogValue(stateProjection?.ProjectedRangeFingerprint ?? "(none)")}; repair_projection_source_ranges={FormatProtocolLogValue(stateProjection is null ? "(none)" : FormatInboundRegularV4FrontierRepairProjectionRanges(stateProjection.SourceRanges))}; repair_projection_projected_ranges={FormatProtocolLogValue(stateProjection is null ? "(none)" : FormatInboundRegularV4FrontierRepairProjectionRanges(stateProjection.ProjectedRanges))}; repair_projection_source_authority_lifecycle={(stateProjection is null ? "none" : stateProjection.SourceContract.Lifecycle.IsSettled ? "retired" : "active")}; repair_projection_source_authority_settlement={FormatProtocolLogValue(stateProjection?.SourceContract.Lifecycle.SettlementOutcome?.ToString() ?? "(none)")}");
+                $"event=filetransfer_v4_state_sent; {FileTransferDiagnosticScopeEvidence.Format(state.SessionId, state.TransferId)}transfer_id={state.TransferId}; session_id={state.SessionId}; direction=inbound; route={FormatProtocolLogValue(stateRepairAuthority?.RouteToken ?? context.RouteSelection.TelemetryToken)}; protocol_version={stateRepairAuthority?.ProtocolVersion ?? context.NegotiatedDataProtocolVersion}; live_route_epoch={stateRepairAuthority?.LiveRouteEpoch ?? context.CurrentLiveRouteEpoch?.EpochId ?? 0}; runtime_generation={stateRepairAuthority?.RuntimeGeneration ?? context.CurrentRuntimeOwner?.RuntimeGeneration ?? 0}; terminal_generation={stateRepairAuthority?.TerminalGeneration ?? context.CurrentRuntimeOwner?.TerminalGeneration ?? 0}; leg_generation={stateRepairAuthority?.LegGeneration ?? context.CurrentTransferLeg?.Generation ?? 0}; transport_epoch={stateRepairAuthority?.TransportEpoch ?? context.CurrentTransferLeg?.TransportEpochId ?? 0}; bridge_recovery_generation={stateRepairAuthority?.BridgeRecoveryGeneration ?? context.CurrentTransferLeg?.BridgeRecoveryGeneration ?? 0}; bridge_decision_generation={stateRepairAuthority?.BridgeDecisionGeneration ?? context.CurrentBridgeRecoveryDecision?.BridgeDecisionGeneration ?? 0}; route_publication_generation={stateRepairAuthority?.RoutePublicationGeneration ?? context.CurrentRoutePublicationToken?.PublicationGeneration ?? 0}; route_commit_generation={stateRepairAuthority?.RouteCommitGeneration ?? context.CurrentRoutePublicationToken?.RouteCommitGeneration ?? 0}; data_session_generation={stateProjection?.DataSessionGeneration ?? stateAttemptAuthority?.DataSessionGeneration ?? context.DataSessionGeneration}; reason={reason}; epoch={state.Epoch}; v4_state_wire_fingerprint={stateWireFingerprint}; repair_request_id={FormatProtocolLogValue(metadataState?.RepairRequestId ?? "(none)")}; priority={FormatProtocolLogValue(metadataState?.Priority ?? "(none)")}; recovery_mode={FormatProtocolLogValue(metadataState?.RecoveryMode ?? "(none)")}; contiguous_committed_chunk_index={state.ContiguousCommittedChunkIndex}; durable_received_highest_chunk_index={state.DurableReceivedHighestChunkIndex}; credit_until_chunk_index_exclusive={state.CreditUntilChunkIndexExclusive}; mixed_screenshare={(IsV4MixedScreenShareActive() ? 1 : 0)}; screen_share_active={(sessionScreenShareActive ? 1 : 0)}; screen_share_degraded={(sessionScreenShareDegraded ? 1 : 0)}; screen_share_observed={(sessionScreenShareObserved ? 1 : 0)}; credit_window_chunks={stateCreditWindowChunks}; frontier_credit_cap_chunk_index_exclusive={frontierCreditCapChunkIndexExclusive}; sparse_credit_target_without_frontier_cap={sparseCreditTargetWithoutFrontierCap}; frontier_window_credit_capped={(frontierWindowCreditCapped ? 1 : 0)}; regular_v4_frontier_repair_credit_capped={(regularV4FrontierRepairCreditCapped ? 1 : 0)}; regular_v4_frontier_repair_credit_cap_chunk_index_exclusive={regularV4FrontierRepairCreditCapChunkIndexExclusive}; frontier_lag_chunks={frontierLagChunks}; missing_range_count={state.MissingRanges.Count}; frontier_stall_age_ms={frontierStallAgeMs}; bytes_committed={state.BytesCommitted}; receiver_memory_pressure={(state.ReceiverMemoryPressure ? 1 : 0)}; receiver_disk_pressure={(state.ReceiverDiskPressure ? 1 : 0)}; terminal_ready={(state.TerminalReady ? 1 : 0)}; transfer_paused={(state.TransferPaused ? 1 : 0)}; repair_publication_kind={repairPublicationKind}; receive_recovery_operation_authority_id={FormatProtocolLogValue(proofStatePublicationCommand?.Authority.AuthorityId.ToString() ?? "(none)")}; receive_recovery_operation_generation={proofStatePublicationCommand?.Authority.OperationGeneration ?? 0}; receive_recovery_closure_generation={proofStatePublicationCommand?.ClosureGeneration ?? 0}; receive_recovery_publication_generation={proofStatePublicationCommand?.PublicationGeneration ?? 0}; receive_recovery_publication_attempt={(proofStatePublicationCommand?.PredecessorReceipt is null ? "initial" : "post_delivery_recheck")}; receive_recovery_predecessor_publication_generation={proofStatePublicationCommand?.PredecessorReceipt?.Command.PublicationGeneration ?? 0}; receive_recovery_predecessor_frame_fingerprint={FormatProtocolLogValue(proofStatePublicationCommand?.PredecessorReceipt?.FrameFingerprint ?? "(none)")}; receive_recovery_predecessor_receipt_observed_utc_ms={proofStatePublicationCommand?.PredecessorReceiptObservedUtcMs ?? 0}; receive_recovery_recheck_heartbeat_generation={proofStatePublicationCommand?.RecheckEvidence?.HeartbeatGeneration ?? 0}; receive_recovery_recheck_heartbeat_sequence={proofStatePublicationCommand?.RecheckEvidence?.HeartbeatSequence ?? 0}; receive_recovery_recheck_proof_kind={FormatProtocolLogValue(proofStatePublicationCommand?.RecheckEvidence?.ProofKind ?? "(none)")}; receive_recovery_recheck_lane={FormatProtocolLogValue(proofStatePublicationCommand?.RecheckEvidence?.Lane ?? "(none)")}; receive_recovery_frame_fingerprint={FormatProtocolLogValue(proofStateSendCapture?.FrameFingerprint ?? "(none)")}; repair_attempt_authority_id={FormatProtocolLogValue(stateAttemptAuthority?.Authority.AuthorityId.ToString() ?? "(none)")}; repair_attempt_install_generation={stateAttemptAuthority?.InstallGeneration ?? 0}; repair_attempt_request_key={FormatProtocolLogValue(stateAttemptAuthority?.RepairRequestKey ?? "(none)")}; repair_attempt_range_fingerprint={FormatProtocolLogValue(stateAttemptAuthority?.RangeFingerprint ?? "(none)")}; repair_attempt_ranges={FormatProtocolLogValue(stateAttemptAuthority is null ? "(none)" : FormatInboundRegularV4FrontierRepairProjectionRanges(stateAttemptAuthority.Ranges))}; repair_projection_generation={stateProjection?.ProjectionGeneration ?? 0}; repair_projection_kind={(stateProjection is null ? "(none)" : FormatInboundRegularV4FrontierRepairProjectionKind(stateProjection.Kind))}; repair_projection_data_session_generation={stateProjection?.DataSessionGeneration ?? 0}; repair_projection_authority_id={FormatProtocolLogValue(stateProjection?.SourceContract.Authority.AuthorityId.ToString() ?? "(none)")}; repair_projection_predecessor_authority_id={FormatProtocolLogValue(stateProjection?.SourceContract.Authority.PredecessorAuthorityId?.ToString() ?? "(none)")}; repair_projection_source_key={FormatProtocolLogValue(stateProjection?.SourceRepairKey ?? "(none)")}; repair_projection_projected_key={FormatProtocolLogValue(stateProjection?.ProjectedRepairKey ?? "(none)")}; repair_projection_source_range_fingerprint={FormatProtocolLogValue(stateProjection?.SourceRangeFingerprint ?? "(none)")}; repair_projection_projected_range_fingerprint={FormatProtocolLogValue(stateProjection?.ProjectedRangeFingerprint ?? "(none)")}; repair_projection_source_ranges={FormatProtocolLogValue(stateProjection is null ? "(none)" : FormatInboundRegularV4FrontierRepairProjectionRanges(stateProjection.SourceRanges))}; repair_projection_projected_ranges={FormatProtocolLogValue(stateProjection is null ? "(none)" : FormatInboundRegularV4FrontierRepairProjectionRanges(stateProjection.ProjectedRanges))}; repair_projection_source_authority_lifecycle={(stateProjection is null ? "none" : stateProjection.SourceContract.Lifecycle.IsSettled ? "retired" : "active")}; repair_projection_source_authority_settlement={FormatProtocolLogValue(stateProjection?.SourceContract.Lifecycle.SettlementOutcome?.ToString() ?? "(none)")}");
             if (IsPrimaryRegularNknFrontierRepairTransactionId(metadataState?.RepairRequestId) &&
                 state.MissingRanges.Count > 0)
             {
@@ -25124,6 +25150,12 @@ public sealed partial class SessionFileTransferService
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
+            if (requiredFinalizationSource is not null)
+            {
+                LocalOperationalLog.Warn("FileTransferService",
+                    $"event=filetransfer_v4_terminal_ready_send_failed; transfer_id={context.TransferId}; reason={ex.GetType().Name}");
+                return false;
+            }
             lock (gate)
             {
                 if (feedbackOperation is not null && !IsInboundBootstrapFeedbackCurrentLocked(context, feedbackOperation)) { return false; }
@@ -25516,11 +25548,13 @@ public sealed partial class SessionFileTransferService
            frontierLagChunks > 0;
 
     private async Task SendInboundV4TerminalReadyStateBestEffortAsync(InboundTransferContext context,
-        InboundBootstrapWriteSource? requiredWriteSource = null)
+        InboundBootstrapWriteSource? requiredWriteSource = null, bool terminalReady = true,
+        InboundFinalizationSource? requiredFinalizationSource = null)
     {
         var transferId = context.TransferId;
         var sessionId = context.SessionId;
-        var sendTask = SendInboundSparseCreditStateAsync(context, "terminal_ready", terminalReady: true, requiredWriteSource: requiredWriteSource);
+        var sendTask = SendInboundSparseCreditStateWithFinalizationSourceAsync(context, terminalReady ? "terminal_ready" : "final_progress",
+            terminalReady, forceSend: true, requiredWriteSource: requiredWriteSource, requiredFinalizationSource: requiredFinalizationSource);
         try
         {
             if (sendTask.IsCompleted)
@@ -28591,7 +28625,7 @@ public sealed partial class SessionFileTransferService
         context.SuppressedV6FrontierRepairStillMissingLogCount = 0;
         LocalOperationalLog.Warn(
             "FileTransferService",
-            $"event=filetransfer_v6_frontier_repair_still_missing; direction=inbound; transfer_id={context.TransferId}; session_id={context.SessionId}; transport_epoch={transportEpoch}; repair_request_id={FormatProtocolLogValue(repairRequestId ?? "(none)")}; reason={FormatProtocolLogValue(reason)}; requested_missing_range_start={requestedRangeStart}; requested_missing_range_count={requestedRangeCount}; committed_frontier_before={frontierBefore}; committed_frontier_after={frontierAfter}; batch_start_chunk_index={batch.StartChunkIndex}; batch_chunk_count={batch.ChunkCount}; accepted_chunk_count={acceptedChunkCount}; duplicate_or_stale_chunk_count={duplicateOrStaleChunkCount}; pending_write_chunk_count={pendingWriteChunkCount}; frontier_chunk_observed={(frontierChunkObserved ? 1 : 0)}; frontier_chunk_status={FormatProtocolLogValue(frontierChunkStatus)}; suppressed_count={suppressedCount}");
+            $"event=filetransfer_v6_frontier_repair_still_missing; {FileTransferDiagnosticScopeEvidence.Format(context.SessionId, context.TransferId)}direction=inbound; transfer_id={context.TransferId}; session_id={context.SessionId}; transport_epoch={transportEpoch}; repair_request_id={FormatProtocolLogValue(repairRequestId ?? "(none)")}; reason={FormatProtocolLogValue(reason)}; requested_missing_range_start={requestedRangeStart}; requested_missing_range_count={requestedRangeCount}; committed_frontier_before={frontierBefore}; committed_frontier_after={frontierAfter}; batch_start_chunk_index={batch.StartChunkIndex}; batch_chunk_count={batch.ChunkCount}; accepted_chunk_count={acceptedChunkCount}; duplicate_or_stale_chunk_count={duplicateOrStaleChunkCount}; pending_write_chunk_count={pendingWriteChunkCount}; frontier_chunk_observed={(frontierChunkObserved ? 1 : 0)}; frontier_chunk_status={FormatProtocolLogValue(frontierChunkStatus)}; suppressed_count={suppressedCount}");
     }
 
     private int ComputeV4CreditUntilExclusiveLocked(InboundTransferContext context)

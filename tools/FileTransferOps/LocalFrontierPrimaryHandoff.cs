@@ -33,6 +33,7 @@ namespace NLink.Tools
                             workerChannel.Facts = LocalFrontierParentFactsChannel.Create(workerChannel.Endpoint, workerChannel.OfferHash, facts.CopyForPrimary(), check);
                             if (workerChannel.Facts == null) return false;
                             WatchRequest(workerChannel.Cancelled); WatchRequest(workerChannel.Facts.Cancelled);
+                            OfferTransferPair();
                             success = IsCurrent && workerScope.IsCurrent; return success;
                         }
                         catch { return false; }

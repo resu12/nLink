@@ -24,6 +24,7 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
             foreach ($required in @(
                 'filetransfer_fallback_tail_terminal_proof_consumed',
                 'filetransfer_frontier_publication_receipt_closed',
+                'filetransfer_frontier_payload_marker',
                 'integrity_verify_passed',
                 'temp_finalize_succeeded',
                 'filetransfer_fallback_v6_proof_bootstrap_peer_first_wake_decided',
@@ -34,8 +35,10 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
                 if ($required -notin $names) { throw "semantic event missing: $required" }
             }
             $authority = Get-FileTransferCoordinatorEvidenceCatalog
-            if ('filetransfer_frontier_publication_receipt_closed' -in @($authority.SnapshotAuthorityV1 + $authority.GenerationStampedEffects)) {
-                throw 'Offline receipt marker must remain non-authoritative'
+            foreach ($marker in @('filetransfer_frontier_publication_receipt_closed', 'filetransfer_frontier_payload_marker')) {
+                if ($marker -in @($authority.SnapshotAuthorityV1 + $authority.GenerationStampedEffects)) {
+                    throw "Offline receipt marker must remain non-authoritative: $marker"
+                }
             }
             Write-Output 'terminal-frontier-semantic-catalog-ok'
             """;

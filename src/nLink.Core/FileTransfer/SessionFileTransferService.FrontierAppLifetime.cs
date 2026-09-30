@@ -8,7 +8,7 @@ public sealed partial class SessionFileTransferService
 {
     // Process-owned, not service-owned: desktop/service disposal precedes the
     // final operational-log drain. No imported catalog or manifest is accepted.
-    internal sealed class FrontierAppLifetime
+    internal sealed partial class FrontierAppLifetime
     {
         private static int startAttempted;
         private static FrontierAppLifetime? current;
@@ -84,6 +84,7 @@ public sealed partial class SessionFileTransferService
                 bool flushed;
                 try
                 {
+                    StopNativeDestinationHandoff();
                     stopping.Set();
                     setup.GetAwaiter().GetResult();
                     FrontierPayloadCatalog? admitted;
@@ -124,6 +125,8 @@ public sealed partial class SessionFileTransferService
 
         private void Release()
         {
+            StopNativeDestinationHandoff();
+            lock (admissionGate) { nativeDestinationEvidence?.Dispose(); nativeSenderSelection?.Dispose(); }
             try { catalog?.Dispose(); }
             finally
             {

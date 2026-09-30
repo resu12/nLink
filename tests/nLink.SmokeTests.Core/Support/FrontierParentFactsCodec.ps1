@@ -93,5 +93,6 @@ foreach($fault in $faults) {
     }
     Test-FactBytes $candidate $fault $false $expected
 }
+if($markers -eq 0) { & { . (Join-Path $RepoRoot 'tests/nLink.SmokeTests.Core/Support/FrontierOriginCapacityCodec.ps1') } }
 if(-not $facts.IsCurrent -or -not $pending.IsCurrent) {throw 'Codec controls retired original receipt'}
 'frontier-parent-facts-codec='+($faults.Count+1)

@@ -65,7 +65,7 @@ try {
     }
     if($mode -ceq 'budget') {
         $elapsed=@($work.GetType().GetFields($flags) | Where-Object {$_.Name -match '^_?elapsed$'})[0]
-        $elapsed.SetValue($work,[long]([Diagnostics.Stopwatch]::Frequency*6))
+        $elapsed.SetValue($work,[long]([Diagnostics.Stopwatch]::Frequency*11))
     }
     if($mode -ceq 'closed-handle') { $nativeFiles[1].Dispose() }
     if($mode -ceq 'position-change') { $nativeFiles[0].Position=1 }

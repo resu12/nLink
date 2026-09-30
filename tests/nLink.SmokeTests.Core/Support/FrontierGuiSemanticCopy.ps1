@@ -40,7 +40,7 @@ try {
         if($mode -ceq 'mutable-result') { $result.SemanticSha256='wrong'; $result.SemanticByteCount=999; $result.SemanticLineCount=999; $result.Writers=@() }
         if($mode -ceq 'budget') {
             $elapsed=@($work.GetType().GetFields($flags) | Where-Object {$_.Name -match '^_?elapsed$'})[0]
-            $elapsed.SetValue($work,[long]([Diagnostics.Stopwatch]::Frequency*6))
+            $elapsed.SetValue($work,[long]([Diagnostics.Stopwatch]::Frequency*11))
         }
         $copy=$binding.TryCopySemanticEvidence()
         if($mode -cin @('missing-cursor','active-work','collision','hash','lines','closed-output','budget')) {

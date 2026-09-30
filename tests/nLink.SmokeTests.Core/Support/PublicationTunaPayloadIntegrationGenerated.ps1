@@ -1,5 +1,5 @@
 param([string]$RepoRoot,[string]$Directory,[string]$RunId,[string]$ScenarioId,
-    [ValidateSet('exact','missing_receive','wrong_range')][string]$TunaPayloadMode)
+    [ValidateSet('exact','missing_receive','wrong_range')][string]$TunaPayloadMode,[switch]$ServiceYieldFixture)
 $ErrorActionPreference='Stop'; Set-StrictMode -Version Latest
 $env:NLINK_PUBLICATION_TUNA_PAYLOAD_OBSERVER='1'
 if($TunaPayloadMode -ceq 'exact') {
@@ -7,7 +7,7 @@ if($TunaPayloadMode -ceq 'exact') {
         -RunId $RunId -ScenarioId $ScenarioId -PersistenceMode write -ObservePrimary -ReceiveFixture -TwoWriterFixture -RecoveredIngressFixture -LiveScaleFixture
 } else {
     $null=& (Join-Path $PSScriptRoot 'PublicationReceiveIntegrationGenerated.ps1') -RepoRoot $RepoRoot -Directory $Directory `
-        -RunId $RunId -ScenarioId $ScenarioId -TwoWriterFixture -ServiceIngressFixture -TunaPayloadMode $TunaPayloadMode
+        -RunId $RunId -ScenarioId $ScenarioId -TwoWriterFixture -ServiceIngressFixture -TunaPayloadMode $TunaPayloadMode -ServiceYieldFixture:$ServiceYieldFixture
 }
 $output=Join-Path $Directory ('whole-wrapper-'+$PSVersionTable.PSVersion.Major+'-write')
 $facts=[IO.File]::ReadAllText((Join-Path $output 'live-primary-observation.json')) | ConvertFrom-Json

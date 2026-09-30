@@ -11,6 +11,7 @@ namespace NLink.Tools
     internal sealed partial class LocalFrontierParentFacts
     {
         internal const int MaximumBytes = 4194304, MaximumText = 262144, MaximumLines = 262144;
+        internal const int MaximumOriginEntries = GuiSmokeLedgerStreamRead.MaximumOriginEntries;
         private static readonly UTF8Encoding Utf8 = new UTF8Encoding(false, true);
         private readonly byte[] bytes;
         internal readonly int SourceLines, OriginCount, MarkerCount;

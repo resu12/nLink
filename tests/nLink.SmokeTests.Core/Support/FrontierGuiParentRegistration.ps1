@@ -53,7 +53,7 @@ try {
     $work=$owner.GetType().GetField('frontierWork',$flags).GetValue($owner); $elapsedBefore=$work.ElapsedTicks
     if($mode -ceq 'budget') {
         $elapsed=@($work.GetType().GetFields($flags) | Where-Object {$_.Name -match '^_?elapsed$'})[0]
-        $elapsed.SetValue($work,[long]([Diagnostics.Stopwatch]::Frequency*6))
+        $elapsed.SetValue($work,[long]([Diagnostics.Stopwatch]::Frequency*11))
     }
     $handoff=$binding.TryAttachParentHandoff()
     $rejected=$mode -cin @('unbound','relay','missing','early','before-persistence','request-id','parent-process','gui-process','parent-incarnation','gui-incarnation','digest','reserved','nonce','version','state','budget')

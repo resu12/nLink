@@ -24,6 +24,7 @@ public sealed class SensitiveDataRedactorSecurityEvidenceTests
     [InlineData("filetransfer_tuna_data_path_peer_visible")]
     [InlineData("filetransfer_tuna_data_path_mismatch")]
     [InlineData("filetransfer_data_frame_ignored")]
+    [InlineData("filetransfer_fallback_tail_yield_evidence")]
     public void SecurityEvidence_ExactFieldsSurviveWithoutProtectingSecrets(string eventName)
     {
         var input = $"event={eventName}; " + string.Join("; ", Evidence.Select(item => $"{item.Field}={item.Value}")) +

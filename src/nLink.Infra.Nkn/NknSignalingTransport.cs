@@ -2560,14 +2560,24 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
         Envelope envelope,
         CancellationToken ct)
     {
-        if (TryCreateLifecyclePreSendValidationFailure(options, "control_queue") is { } validationFailure)
-        {
-            return validationFailure;
-        }
-
+        var succeeded = false;
         try
         {
-            var queued = await QueueControlEnvelopeAsync(options.ControlDestination, envelope, ControlOutboundLane.High, ct).ConfigureAwait(false);
+            if (options.OfflinePublicationDelay is null &&
+                TryCreateLifecyclePreSendValidationFailure(options, "control_queue") is { } validationFailure)
+                return validationFailure;
+            using var selected = options.OfflinePublicationDelay is { } delay
+                ? CancellationTokenSource.CreateLinkedTokenSource(ct, delay.Lifetime) : null;
+            var copyCt = selected?.Token ?? ct;
+            if (options.OfflinePublicationDelay is { } pending)
+            {
+                await pending.BeforeCopyAsync("control_queue", null, copyCt).ConfigureAwait(false);
+                // Run the existing validator once, immediately before the delayed dispatch.
+                if (TryCreateLifecyclePreSendValidationFailure(options, "control_queue") is { } delayedFailure)
+                    return delayedFailure;
+            }
+            var queued = await QueueControlEnvelopeAsync(options.ControlDestination, envelope, ControlOutboundLane.High, copyCt).ConfigureAwait(false);
+            succeeded = queued;
             return new LifecycleCopySendResult("control_queue", queued, null);
         }
         catch (Exception ex)
@@ -2577,6 +2587,7 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
                 $"event=control_plane_lifecycle_control_queue_failed; transport=nkn; message_type={MapControlPlaneLifecycleMessageType(options.MessageType)}; error={ex.GetType().Name}");
             return new LifecycleCopySendResult("control_queue", false, ex);
         }
+        finally { options.OfflinePublicationDelay?.CopyFinished("control_queue", succeeded); }
     }
 
     private async Task<LifecycleCopySendResult> SendLifecycleControlAckCopyAsync(
@@ -2641,16 +2652,24 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
         LifecycleDeliveryOptions options,
         CancellationToken ct)
     {
-        if (TryCreateLifecyclePreSendValidationFailure(options, lane) is { } validationFailure)
-        {
-            return validationFailure;
-        }
-
+        var succeeded = false;
         try
         {
+            if (options.OfflinePublicationDelay is null &&
+                TryCreateLifecyclePreSendValidationFailure(options, lane) is { } validationFailure)
+                return validationFailure;
             var copyTimeout = ResolveLifecycleCopyTimeout(options);
-            using var copyCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            using var copyCts = options.OfflinePublicationDelay is { } delay
+                ? CancellationTokenSource.CreateLinkedTokenSource(ct, delay.Lifetime)
+                : CancellationTokenSource.CreateLinkedTokenSource(ct);
+            var timeoutStarted = options.OfflinePublicationDelay is null ? 0 : Stopwatch.GetTimestamp();
             copyCts.CancelAfter(copyTimeout);
+            if (options.OfflinePublicationDelay is { } pending)
+            {
+                await pending.BeforeCopyAsync(lane, timeoutStarted, copyCts.Token).ConfigureAwait(false);
+                if (TryCreateLifecyclePreSendValidationFailure(options, lane) is { } delayedFailure)
+                    return delayedFailure;
+            }
 
             if (useBulkLane)
             {
@@ -2661,6 +2680,7 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
                 await SendEnvelopeAsync(destination, envelope, copyCts.Token).ConfigureAwait(false);
             }
 
+            succeeded = true;
             return new LifecycleCopySendResult(lane, true, null);
         }
         catch (Exception ex)
@@ -2670,6 +2690,7 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
                 $"event={options.LogEvent}_{lane}_failed; transport=nkn; message_type={MapControlPlaneLifecycleMessageType(options.MessageType)}; error={ex.GetType().Name}");
             return new LifecycleCopySendResult(lane, false, ex);
         }
+        finally { options.OfflinePublicationDelay?.CopyFinished(lane, succeeded); }
     }
 
     private LifecycleCopySendResult? TryCreateLifecyclePreSendValidationFailure(
@@ -2768,7 +2789,8 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
         bool ThrowOnFailure,
         TimeSpan? CopyTimeout = null,
         Func<bool>? PreSendValidator = null,
-        bool DrainChildrenOnCompletion = false);
+        bool DrainChildrenOnCompletion = false,
+        IOfflinePublicationDelay? OfflinePublicationDelay = null);
 
     private sealed class LifecyclePreSendValidationException : Exception
     {

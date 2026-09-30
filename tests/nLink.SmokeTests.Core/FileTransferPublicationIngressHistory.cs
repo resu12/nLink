@@ -19,21 +19,30 @@ internal sealed class FileTransferPublicationIngressHistory : IDisposable
     private bool completed;
     private FileTransferCoordinatorState? fallbackState;
     private FileTransferCoordinatorState? secondTunaState;
+    private readonly SessionFileTransferV4SenderTests.ServiceYieldHistory? serviceYield;
 
     internal IReadOnlyList<RoutePublicationToken> Tokens { get; private set; }
     internal FileTransferFallbackTailYieldFrameV6? FallbackYieldFrame { get; private set; }
 
     internal FileTransferPublicationIngressHistory(string sessionId, string transferId, FileTransferDirection direction,
-        bool stopAtFallbackYield = false)
+        bool stopAtFallbackYield = false, IFileTransferDataSession? serviceYieldData = null,
+        IFileTransferControlPlaneDeliveryTransport? serviceYieldTransport = null)
     {
         this.direction = direction;
-        Tokens = FileTransferCoordinatorTests.CreateDataPathIngressRouteCycle(sessionId, transferId, direction, history.Add,
-            initializeDataSession: true, captureFallbackYield: stopAtFallbackYield ? frame => FallbackYieldFrame = frame : null,
-            captureFallbackState: stopAtFallbackYield ? state => fallbackState = state : null,
-            captureSecondTunaState: state => secondTunaState = state);
         emitter = Activator.CreateInstance(type, nonPublic: true)!;
         type.GetField("drainScheduled", Flags)!.SetValue(emitter, 1);
         pending = (ConcurrentQueue<string>)type.GetField("pending", Flags)!.GetValue(emitter)!;
+        if (serviceYieldData is not null)
+        {
+            Assert.True(stopAtFallbackYield);
+            serviceYield = new(serviceYieldData, serviceYieldTransport!, emitter);
+        }
+        Tokens = FileTransferCoordinatorTests.CreateDataPathIngressRouteCycle(sessionId, transferId, direction, history.Add,
+            initializeDataSession: true, captureFallbackYield: stopAtFallbackYield && serviceYield is null ? frame => FallbackYieldFrame = frame : null,
+            captureFallbackState: stopAtFallbackYield ? state => fallbackState = state : null,
+            captureSecondTunaState: state => secondTunaState = state,
+            stopBeforeFallbackYield: serviceYield is not null, coordinatorInstanceId: serviceYield?.CoordinatorInstanceId,
+            dataSessionIdentity: serviceYield?.DataSessionIdentity);
     }
 
     internal FileTransferRoutePublicationEvidence Publish(int index)
@@ -81,6 +90,7 @@ internal sealed class FileTransferPublicationIngressHistory : IDisposable
         var last = history[^1];
         type.GetMethod("Complete", Flags)!.Invoke(emitter, [last.CoordinatorInstanceId, last.SessionId, last.TransferId, direction]);
         Drain();
+        serviceYield?.Dispose();
     }
 
     internal void PublishFallbackYield()
@@ -90,13 +100,31 @@ internal sealed class FileTransferPublicationIngressHistory : IDisposable
         Drain();
     }
 
+    internal async Task SendServiceYieldAsync()
+    {
+        Assert.NotNull(serviceYield);
+        while (next < history.Count) { Enqueue(history[next++]); }
+        Drain();
+        serviceYield.Initialize(fallbackState!);
+        await serviceYield.SendYieldAsync(Drain);
+    }
+
+    internal FileTransferRoutePublicationEvidence ActivateFromServicePeerYield(FileTransferReceivedDataFrame[] received)
+    {
+        Assert.NotNull(serviceYield);
+        foreach (var copy in received) { serviceYield.ApplyPeer(copy); }
+        Drain();
+        fallbackState = serviceYield.State;
+        return ActivateFromPeerYield(Assert.IsType<FileTransferFallbackTailYieldFrameV6>(received[0].Frame));
+    }
+
     [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
     internal FileTransferRoutePublicationEvidence ActivateFromPeerYield(FileTransferFallbackTailYieldFrameV6 peerFrame)
     {
         Assert.NotNull(fallbackState);
         Assert.Equal(3, Tokens.Count);
         var publication = FileTransferCoordinatorTests.CompleteIngressSecondTunaFromPeerYield(fallbackState!, peerFrame, history.Add,
-            state => secondTunaState = state);
+            state => secondTunaState = state, peerAlreadyApplied: serviceYield is not null);
         fallbackState = null;
         Tokens = [.. Tokens, publication];
         return Publish(3);

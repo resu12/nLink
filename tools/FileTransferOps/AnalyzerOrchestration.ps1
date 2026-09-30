@@ -2782,6 +2782,7 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
     $private:nativePrimaryCustody = $null
     $private:nativePrimaryPair = $null
     $private:nativePrimaryPayloads = $null
+    $private:nativePrimaryTransfer = $null
     $nativeRawSourceLines = $null
     try {
     New-Item -ItemType Directory -Force -Path $ArtifactDir | Out-Null
@@ -3113,7 +3114,8 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         ).Count -gt 0
         if ($compactInboundCompleted -and $compactOutboundCompleted) {
             $guiCompleted = $true
-            $guiIntegrityOk = $true
+            # Terminal status is not a file hash/size observation. Preserve only
+            # the independently supplied GUI integrity evidence above.
             $inboundTerminalState = 'Completed'
             $outboundTerminalState = 'Completed'
         }
@@ -9185,12 +9187,16 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         $firstCompactProofChainFailure.Class -ceq 'filetransfer_fallback_frontier_recent_progress_grace_recheck_missing') {
         try {
             . (Join-Path $PSScriptRoot 'LocalNativeFrontierWitness.ps1')
+            $private:nativePrimaryTransfer = $private:nativePrimaryCustody.TryBindTransferPair($private:nativePrimaryPair,
+                $private:nativePrimaryContext, $private:nativePrimaryFull, $private:nativePrimaryCompact,
+                $fullSnapshotEvaluation, $compactSnapshotEvaluation)
             $private:nativeWitness = Resolve-FileTransferNativeFrontierWitness `
                 -Custody $private:nativePrimaryCustody -Evaluations $private:nativePrimaryPair -Context $private:nativePrimaryContext `
                 -Full $private:nativePrimaryFull -Compact $private:nativePrimaryCompact `
                 -FullView $fullSnapshotEvaluation -CompactView $compactSnapshotEvaluation -Payloads $private:nativePrimaryPayloads `
                 -Index $Index -Failure $firstCompactProofChainFailure -Candidates $compactProofChainCandidateArray `
-                -RecentProof $fileTransferFallbackFrontierRecentProgressGraceRecheckProof
+                -RecentProof $fileTransferFallbackFrontierRecentProgressGraceRecheckProof `
+                -TransferEvaluation $private:nativePrimaryTransfer
             if ($null -ne $private:nativeWitness) {
                 $private:nativePreparation = $private:nativeWitness.Batch.TryPrepareDiagnostic()
                 if ($null -ne $private:nativePreparation -and $private:nativePreparation.TryOfferOutput()) {
@@ -9228,6 +9234,7 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
             try { $private:nativePrimaryCustody.Dispose() } catch { }
         }
         $private:nativePrimaryPayloads = $null
+        $private:nativePrimaryTransfer = $null
         $private:nativePrimaryPair = $null
         $private:nativePrimaryContext = $null
         $private:nativePrimaryFull = $null
@@ -11210,6 +11217,21 @@ function Get-FileTransferEfficiencyFrontierProgressClosures {
             } |
             Sort-Object Sequence, LineNumber
     )
+    # Narrow publication candidates once per window. Keep every copy and apply
+    # the original scope, sequence and numeric predicates after the lookup.
+    $publicationsByFrontier = @{}
+    foreach ($event in $WindowEvents) {
+        if ($event.EventName -ne 'filetransfer_v6_receiver_state_sent') {
+            continue
+        }
+        $frontier = Get-FileTransferEfficiencyIntegerField `
+            -Event $event `
+            -Names @('contiguous_committed_chunk_index')
+        if (-not $publicationsByFrontier.ContainsKey($frontier)) {
+            $publicationsByFrontier[$frontier] = New-Object System.Collections.Generic.List[object]
+        }
+        $publicationsByFrontier[$frontier].Add($event) | Out-Null
+    }
     foreach ($commit in $sparseCommits) {
         $currentFrontier = Get-FileTransferEfficiencyIntegerField -Event $commit -Names @('next_chunk_index')
         $committedChunks = Get-FileTransferEfficiencyIntegerField `
@@ -11228,8 +11250,12 @@ function Get-FileTransferEfficiencyFrontierProgressClosures {
             continue
         }
 
+        [object[]]$frontierPublications = @()
+        if ($publicationsByFrontier.ContainsKey($currentFrontier)) {
+            $frontierPublications = $publicationsByFrontier[$currentFrontier].ToArray()
+        }
         [object[]]$publications = @(
-            $WindowEvents |
+            $frontierPublications |
                 Where-Object {
                     [int]$_.Sequence -gt [int]$commit.Sequence -and
                     $_.EventName -eq 'filetransfer_v6_receiver_state_sent' -and

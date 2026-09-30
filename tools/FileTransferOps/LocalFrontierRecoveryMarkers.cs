@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Collections.ObjectModel;
 using System.Globalization;
 using System.IO;
 using System.Text;
@@ -87,13 +88,21 @@ namespace NLink.Tools
         private readonly Dictionary<string, FrontierRecoveryMarker> deferred = new Dictionary<string, FrontierRecoveryMarker>(StringComparer.OrdinalIgnoreCase);
         private readonly Dictionary<string, FrontierRecoveryMarker> recovered = new Dictionary<string, FrontierRecoveryMarker>(StringComparer.OrdinalIgnoreCase);
         private readonly Action check;
+        private readonly LocalGuiWriterRequest.FrontierSourceRead bufferedSource;
+        private readonly ReadOnlyCollection<LocalGuiWriterRequest.FrontierRecoveryRead> originalReaders;
         internal FrontierRecoveryMarkerScan(Action check) { this.check = check; }
+        internal FrontierRecoveryMarkerScan(Action check, LocalGuiWriterRequest.FrontierSourceRead bufferedSource,
+            ReadOnlyCollection<LocalGuiWriterRequest.FrontierRecoveryRead> originalReaders) : this(check)
+        { this.bufferedSource = bufferedSource; this.originalReaders = originalReaders; }
 
         internal void Read(Stream source, int streamIndex, string run, string scenario)
         {
             check();
             if (!source.CanRead || source.CanWrite || source.Position != 0 || source.Length < 0 || source.Length > LocalGuiWriterRequest.FrontierRecoveryOutput.MaximumBytes)
                 throw new InvalidDataException("recovery_marker_source");
+            // Eligibility for provisional CPU work only, never a custody verdict.
+            bool buffered = bufferedSource != null && originalReaders != null && streamIndex >= 0 &&
+                streamIndex < originalReaders.Count && Object.ReferenceEquals(source, originalReaders[streamIndex]);
             // Framework StreamReader can discard an incomplete UTF-8 tail.
             // Flush our strict decoder explicitly at physical EOF on both hosts.
             var utf8 = new UTF8Encoding(false, true); var decoder = utf8.GetDecoder();
@@ -101,9 +110,15 @@ namespace NLink.Tools
             var line = new StringBuilder(); bool skipLf = false, first = true; long lineNumber = 0;
             while (true)
             {
+#if NLINK_TEST_BUFFERED_LEDGER
+                NLink.Tests.RecoveryBufferProbe.Boundary("before-read");
+#endif
                 check();
                 int read = source.Read(bytes, 0, bytes.Length);
                 int count = decoder.GetChars(bytes, 0, read, buffer, 0, read == 0);
+#if NLINK_TEST_BUFFERED_LEDGER
+                NLink.Tests.RecoveryBufferProbe.Boundary("after-read");
+#endif
                 check();
                 for (int i = 0; i < count; i++)
                 {
@@ -111,24 +126,38 @@ namespace NLink.Tools
                     if (first) { first = false; if (c == '\uFEFF') continue; }
                     if (skipLf) { skipLf = false; if (c == '\n') continue; }
                     if (c == '\r' || c == '\n')
-                    { AcceptLine(line.ToString(), streamIndex, ++lineNumber, run, scenario); line.Length = 0; skipLf = c == '\r'; }
+                    { AcceptLine(line.ToString(), streamIndex, ++lineNumber, run, scenario, buffered); line.Length = 0; skipLf = c == '\r'; }
                     else
                     {
                         if (line.Length == MaximumLineCodeUnits) throw new InvalidDataException("recovery_marker_line_bound");
                         line.Append(c);
                     }
                 }
+#if NLINK_TEST_BUFFERED_LEDGER
+                NLink.Tests.RecoveryBufferProbe.Boundary("buffer-complete");
+#endif
                 check();
                 if (read == 0) break;
             }
-            if (line.Length != 0) AcceptLine(line.ToString(), streamIndex, ++lineNumber, run, scenario);
+            if (line.Length != 0) AcceptLine(line.ToString(), streamIndex, ++lineNumber, run, scenario, buffered);
+#if NLINK_TEST_BUFFERED_LEDGER
+            NLink.Tests.RecoveryBufferProbe.Boundary("eof", source);
+#endif
             check();
             if (source.Position != source.Length) throw new InvalidDataException("recovery_marker_incomplete");
         }
 
-        private void AcceptLine(string line, int stream, long number, string run, string scenario)
+        private void CheckLineWork(bool buffered)
         {
-            check();
+            if (!buffered) { check(); return; }
+            if (!bufferedSource.BufferedProcessingWorkCurrent) throw new InvalidDataException("recovery_work_not_current");
+        }
+        private void AcceptLine(string line, int stream, long number, string run, string scenario, bool buffered)
+        {
+#if NLINK_TEST_BUFFERED_LEDGER
+            NLink.Tests.RecoveryBufferProbe.Boundary("line", buffered);
+#endif
+            CheckLineWork(buffered);
             if (++SourceLines > MaximumLines) throw new InvalidDataException("recovery_marker_lines_bound");
             if (line.IndexOf("operational_log_write_", StringComparison.OrdinalIgnoreCase) < 0) return;
             int prefix = 0;
@@ -164,7 +193,10 @@ namespace NLink.Tools
             if (target.Count == MaximumBatches) throw new InvalidDataException("recovery_marker_batch_bound");
             target.Add(marker.BatchKey, marker); Markers.Add(marker);
             if (Object.ReferenceEquals(target, deferred)) DeferredKeys.Add(marker.BatchKey);
-            check();
+#if NLINK_TEST_BUFFERED_LEDGER
+            NLink.Tests.RecoveryBufferProbe.Boundary("line-end", buffered);
+#endif
+            CheckLineWork(buffered);
         }
         private static bool IsMarker(string value)
         {

@@ -39,6 +39,18 @@ try {
     $request.Dispose()
     if($Case -ceq 'handoff-cancel') {$handoff.Dispose()}
     if(-not $relay.Forward($completion)) {throw 'Original legacy Forward failed'}
+    if($Case -ceq 'forward-before-post-pull') {
+        $flags=[Reflection.BindingFlags]'Instance,NonPublic'
+        $transfer=$handoff.GetType().GetField('transfer',$flags).GetValue($handoff)
+        if($null -eq $transfer -or $transfer.GetType().GetProperty('State',$flags).GetValue($transfer) -ne 3) {throw 'Original native Forward did not publish state 3'}
+        $forwarded=[Threading.EventWaitHandle]::OpenExisting($Name+'.fixture-forwarded')
+        $release=[Threading.EventWaitHandle]::OpenExisting($Name+'.fixture-release')
+        try {
+            [void]$forwarded.Set()
+            if(-not $release.WaitOne(2000)) {throw 'Native pull ordering fixture release timeout'}
+            'native-pull-order-wrapper; transfer_state=3'
+        } finally {$forwarded.Dispose();$release.Dispose()}
+    }
     'relay-transfer-worker-ok'
 } finally {
     if($null -ne $foreignView) {$foreignView.Dispose()}; if($null -ne $foreign) {$foreign.Dispose()}

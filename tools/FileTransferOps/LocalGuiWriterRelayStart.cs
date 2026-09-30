@@ -59,6 +59,7 @@ namespace NLink.Tools
                     if (!ready)
                     { reports.Registration = null; RetireFrontierRelayRegistration(); if (frontierRelayFailed != null) frontierRelayFailed.Set(); }
                 }
+                RememberPayloadRelayReports(reports);
                 return reports;
             }
         }

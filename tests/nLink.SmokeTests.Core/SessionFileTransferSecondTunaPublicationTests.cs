@@ -23,7 +23,11 @@ public sealed partial class SessionFileTransferV4SenderTests
         Func<RoutePublicationToken, IReadOnlyList<FileTransferRouteHintNotification>, Task>? afterSecondTuna = null,
         Func<FileTransferFallbackTailYieldFrameV6, Task>? sendLocalYield = null,
         Func<IReadOnlyList<FileTransferRouteHintNotification>, string?, Task>? prepareFinalFallbackReceive = null,
-        Func<CancellationToken, ValueTask<FileTransferReceivedDataFrame>>? receiveData = null)
+        Func<CancellationToken, ValueTask<FileTransferReceivedDataFrame>>? receiveData = null,
+        IFileTransferControlPlaneDeliveryTransport? yieldTransport = null,
+        Func<IReadOnlyList<FileTransferRouteHintNotification>, Task<FileTransferReceivedDataFrame[]>>? receivePeerYieldWithEvidence = null,
+        bool receiverLocalYieldFirst = false,
+        Func<IReadOnlyList<FileTransferRouteHintNotification>, Task>? afterFirstTuna = null)
     {
         var transferId = suppliedTransferId ?? "second_tuna_service_publication_" + control;
         const string reason = "second_tuna_service_fixture";
@@ -32,7 +36,7 @@ public sealed partial class SessionFileTransferV4SenderTests
         {
             ReceiveWithMetadataForTest = receiveData,
         };
-        using var receiverBridge = new InitialBootstrapCheckpointTransport(receiverData);
+        using var receiverBridge = new InitialBootstrapCheckpointTransport(receiverData) { YieldTransportForTest = yieldTransport };
         var destinationPath = prepareFinalFallbackReceive is null ? null : Path.Combine(
             Environment.GetEnvironmentVariable("NLINK_FILETRANSFER_SOAK_ARTIFACT_DIR")!, "durable-receiver.bin");
         using var destination = destinationPath is null ? null : new FileStream(destinationPath,
@@ -41,7 +45,7 @@ public sealed partial class SessionFileTransferV4SenderTests
         var logStart = GetOperationalLogLength();
         var inbound = await CreateCommittedInitialInboundTunaForBootstrapTestAsync(
             receiver, receiverBridge, receiverData, receiverBarrier: true,
-            beforeActivation: receivePeerYield is null ? null : context =>
+            beforeActivation: receivePeerYield is null && receivePeerYieldWithEvidence is null ? null : context =>
             {
                 // Match the normal service context wiring: committed tokens
                 // pass through its production publication forwarder.
@@ -59,6 +63,7 @@ public sealed partial class SessionFileTransferV4SenderTests
                         GetPrivatePropertyValue(context, "V6DestinationMode")!.GetType(), "SparseSeekable"));
                 }
             });
+        if (afterFirstTuna is not null) { await afterFirstTuna(receiverBridge.ObservedRouteHints.ToArray()); }
         var (frame, evaluation) = CreateInitialPeerFirstBootstrapTrigger(inbound, receiverData);
         AssertInitialPeerFirstBootstrapFrameReceived(receiver, inbound, frame);
         await ProcessInitialPeerFirstBootstrapEvaluationAsync(receiver, receiverBridge, evaluation);
@@ -70,13 +75,14 @@ public sealed partial class SessionFileTransferV4SenderTests
 
         // Standalone service controls use the existing seeded peer baseline;
         // the two-writer integration supplies its frame from the remote host.
-        using var sender = receivePeerYield is null ? new SessionFileTransferService() : null;
+        using var sender = receivePeerYield is null && receivePeerYieldWithEvidence is null ? new SessionFileTransferService() : null;
         using var senderData = new InitialBootstrapRecordingDataSession(receiverData.SessionId, transferId);
         using var senderBridge = new InitialBootstrapCheckpointTransport(senderData);
         object? outbound = null;
         try
         {
             FileTransferFallbackTailYieldFrameV6 peerFrame;
+            FileTransferReceivedDataFrame[]? peerReceived = null;
             if (sender is not null)
             {
                 sender.AttachTransport(senderBridge);
@@ -109,6 +115,17 @@ public sealed partial class SessionFileTransferV4SenderTests
                 Assert.NotNull(peerProof);
                 Assert.Equal(peerProof.Value.Decision.AuthorityId.ToString(), peerFrame.AuthorityId);
             }
+            else if (receivePeerYieldWithEvidence is not null)
+            {
+                var pendingPeer = receivePeerYieldWithEvidence(receiverBridge.ObservedRouteHints.ToArray());
+                if (receiverLocalYieldFirst)
+                {
+                    await StartReceiverLocalYieldFirstAsync(receiver, inbound);
+                }
+                peerReceived = await pendingPeer;
+                peerFrame = Assert.IsType<FileTransferFallbackTailYieldFrameV6>(peerReceived[0].Frame);
+                Assert.All(peerReceived, received => Assert.NotNull(received.YieldEvidence));
+            }
             else
             {
                 // The integration receives the original encoded peer frame from
@@ -126,9 +143,20 @@ public sealed partial class SessionFileTransferV4SenderTests
                 Assert.Equal(2, TransitionRows().Length);
                 return string.Empty;
             }
-            Assert.True(FileTransferDataFrameCodec.TryDeserialize(FileTransferDataFrameCodec.Serialize(peerFrame), out var parsed));
-            typeof(SessionFileTransferService).GetMethod("ApplyInboundFallbackTailYieldProof", BindingFlags.Instance | BindingFlags.NonPublic)!
-                .Invoke(receiver, [inbound, Assert.IsType<FileTransferFallbackTailYieldFrameV6>(parsed)]);
+            if (peerReceived is not null)
+            {
+                foreach (var received in peerReceived)
+                {
+                    typeof(SessionFileTransferService).GetMethod("ApplyInboundFallbackTailYieldProofWithEvidence", BindingFlags.Instance | BindingFlags.NonPublic)!
+                        .Invoke(receiver, [inbound, Assert.IsType<FileTransferFallbackTailYieldFrameV6>(received.Frame), received.YieldEvidence]);
+                }
+            }
+            else
+            {
+                Assert.True(FileTransferDataFrameCodec.TryDeserialize(FileTransferDataFrameCodec.Serialize(peerFrame), out var parsed));
+                typeof(SessionFileTransferService).GetMethod("ApplyInboundFallbackTailYieldProof", BindingFlags.Instance | BindingFlags.NonPublic)!
+                    .Invoke(receiver, [inbound, Assert.IsType<FileTransferFallbackTailYieldFrameV6>(parsed)]);
+            }
             await WaitUntilAsync(() => GetCoordinatorFallbackTailYieldSubstate(inbound).CurrentOperation?.PairedRelease is not null, 5000);
             var paired = GetCoordinatorFallbackTailYieldSubstate(inbound).CurrentOperation!.Value.PairedRelease!.Value;
             Assert.Equal(peerFrame.AuthorityId, paired.PeerProof.Proof.AuthorityId.ToString());
@@ -142,6 +170,10 @@ public sealed partial class SessionFileTransferV4SenderTests
             }
             await WaitUntilAsync(() => CreateCoordinatorStateForTest(inbound).CurrentRuntimeUnlockAdmission is
                 { Route: FileTransferRoute.PostTunaFallbackV6 }, 5000);
+
+            // The packet-order fixture adds receive continuations. Unwind those
+            // before the existing large-value Coordinator snapshot call stack.
+            if (receivePeerYieldWithEvidence is not null) { await Task.Yield(); }
 
             var execution = PrepareSecondTuna();
             if (execution is null)
@@ -281,6 +313,19 @@ public sealed partial class SessionFileTransferV4SenderTests
     }
 
     [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private static async Task StartReceiverLocalYieldFirstAsync(SessionFileTransferService receiver, object inbound)
+    {
+        // Keep large value-type proof assertions out of the route-commit async
+        // state machine's Debug stack frame. No synthetic receipt is installed.
+        lock (GetServiceGate(receiver))
+        {
+            Assert.True((bool)typeof(SessionFileTransferService).GetMethod("TryMarkInboundFallbackTailLocalYieldFromCurrentLegLocked",
+                BindingFlags.Instance | BindingFlags.NonPublic)!.Invoke(receiver, [inbound, "two_writer_receiver_local_first", false, null])!);
+        }
+        await WaitUntilAsync(() => GetCoordinatorFallbackTailYieldSubstate(inbound).CurrentOperation?.LocalProof is not null, 5000);
+        Assert.Null(GetCoordinatorFallbackTailYieldSubstate(inbound).CurrentOperation?.PeerProof);
+    }
+
     private static string SecondTunaStateFingerprint(object inbound)
         => FileTransferCoordinator.CalculateSnapshotStateFingerprint(CreateCoordinatorStateForTest(inbound));
 

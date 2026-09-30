@@ -1,6 +1,11 @@
 $script:GuiSmokeLegacyV0EvidenceCatalog = $null
 $script:GuiSmokeLiveDiagnosticEvidenceEventNames = @(
+    'transfer_terminal',
+    'filetransfer_security_context_installed',
+    'filetransfer_security_context_retired',
+    'filetransfer_fallback_tail_yield_evidence',
     'filetransfer_frontier_publication_receipt_closed',
+    'filetransfer_frontier_payload_marker',
     'filetransfer_fallback_v6_proof_bootstrap_trigger_bound',
     'filetransfer_fallback_v6_proof_bootstrap_peer_first_wake_decided',
     'filetransfer_fallback_v6_proof_bootstrap_pending_write_deferred',

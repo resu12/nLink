@@ -1,5 +1,5 @@
 param([string]$RepoRoot,[string]$Directory,[string]$RunId,[string]$ScenarioId,[switch]$TwoWriterFixture,[switch]$ServiceIngressFixture,
-    [string]$TunaPayloadMode='none',[switch]$LiveScaleFixture,[switch]$LaterFallbackFixture)
+    [string]$TunaPayloadMode='none',[switch]$LiveScaleFixture,[switch]$LaterFallbackFixture,[switch]$ServiceYieldFixture)
 $ErrorActionPreference='Stop'; Set-StrictMode -Version Latest
 $null=& (Join-Path $PSScriptRoot 'PublicationPositiveIntegrationGenerated.ps1') -RepoRoot $RepoRoot -Directory $Directory `
     -RunId $RunId -ScenarioId $ScenarioId -PersistenceMode write -ObservePrimary -ReceiveFixture -TwoWriterFixture:$TwoWriterFixture `
@@ -108,6 +108,12 @@ if($TwoWriterFixture) {
         if([long](Field $transitions[2] 'log_writer_sequence') -ge [long](Field $receive 'log_writer_sequence')) {
             throw 'Service transition did not precede the original delayed receive'
         }
+        if($ServiceYieldFixture) {
+            # This remains a post-run raw capture gate, not primary custody.
+            # Diagnostic retention does not add Snapshot authority events.
+            & (Join-Path $PSScriptRoot 'PublicationServiceYieldCaptureAssertions.ps1') -Lines $merged -OutputDirectory $output `
+                -SenderWriter (Field $sends[0] 'log_writer_id') -ReceiverWriter (Field $receive 'log_writer_id')
+        } else {
         $yieldSends=@($lines | Where-Object { $_.Contains('event=filetransfer_data_path_send_result;') -and
             $_.Contains('frame_type=filetransfer.fallback_tail.yield.v6;') -and $_.Contains('direction=outbound;') })
         $yieldReceives=@($lines | Where-Object { $_.Contains('event=filetransfer_data_path_receive_result;') -and
@@ -122,6 +128,7 @@ if($TwoWriterFixture) {
         }
         if([long](Field $yieldReceives[0] 'log_writer_sequence') -ge [long](Field $transitions[2] 'log_writer_sequence')) {
             throw 'Peer yield arrived after the service transition'
+        }
         }
     }
 }

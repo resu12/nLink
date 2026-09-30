@@ -6381,7 +6381,8 @@ public sealed partial class SessionFileTransferService
         return Task.CompletedTask;
     }
 
-    private Task HandleIncomingFallbackTailYieldProofAsync(FileTransferFallbackTailYieldFrameV6 message)
+    private Task HandleIncomingFallbackTailYieldProofWithEvidenceAsync(FileTransferFallbackTailYieldFrameV6 message,
+        FileTransferFallbackTailYieldEvidence? evidence)
     {
         OutboundTransferContext? outbound = null;
         InboundTransferContext? inbound = null;
@@ -6400,12 +6401,17 @@ public sealed partial class SessionFileTransferService
 
         if (outbound is not null)
         {
-            ApplyOutboundFallbackTailYieldProof(outbound, message);
+            ApplyOutboundFallbackTailYieldProofWithEvidence(outbound, message, evidence);
         }
 
         if (inbound is not null)
         {
-            ApplyInboundFallbackTailYieldProof(inbound, message);
+            ApplyInboundFallbackTailYieldProofWithEvidence(inbound, message, evidence);
+        }
+
+        if (outbound is null && inbound is null)
+        {
+            LogYieldReceiptAssociation(message, evidence, null, false, "peer_proof");
         }
 
         return Task.CompletedTask;
@@ -6449,7 +6455,7 @@ public sealed partial class SessionFileTransferService
         {
             LocalOperationalLog.Info(
                 "FileTransferService",
-                $"event=filetransfer_fallback_frontier_repair_proof_rejected; authority_schema={FileTransferAuthoritySchema.Current}; authority_id={FormatProtocolLogValue(context.CurrentFallbackFrontierRepairContract?.Authority.AuthorityId.ToString() ?? "(none)")}; direction=outbound; transfer_id={context.TransferId}; session_id={context.SessionId}; transport_epoch={message.TransportEpoch}; repair_request_id={FormatProtocolLogValue(repairRequestId)}; decision_reason={FormatProtocolLogValue(fallbackProofRejectionReason)}");
+                $"event=filetransfer_fallback_frontier_repair_proof_rejected; {FileTransferDiagnosticScopeEvidence.Format(context.SessionId, context.TransferId)}authority_schema={FileTransferAuthoritySchema.Current}; authority_id={FormatProtocolLogValue(context.CurrentFallbackFrontierRepairContract?.Authority.AuthorityId.ToString() ?? "(none)")}; direction=outbound; transfer_id={context.TransferId}; session_id={context.SessionId}; transport_epoch={message.TransportEpoch}; repair_request_id={FormatProtocolLogValue(repairRequestId)}; decision_reason={FormatProtocolLogValue(fallbackProofRejectionReason)}");
             return false;
         }
 
@@ -7636,7 +7642,7 @@ public sealed partial class SessionFileTransferService
                 {
                     LocalOperationalLog.Info(
                         "FileTransferService",
-                        $"event=filetransfer_fallback_frontier_repair_proof_rejected; authority_schema={FileTransferAuthoritySchema.Current}; authority_id={FormatProtocolLogValue(context.CurrentFallbackFrontierRepairContract?.Authority.AuthorityId.ToString() ?? "(none)")}; direction=inbound; transfer_id={context.TransferId}; session_id={context.SessionId}; transport_epoch={batch.TransportEpoch}; repair_request_id={FormatProtocolLogValue(repairRequestId)}; decision_reason={FormatProtocolLogValue(fallbackProofRejectionReason)}");
+                        $"event=filetransfer_fallback_frontier_repair_proof_rejected; {FileTransferDiagnosticScopeEvidence.Format(context.SessionId, context.TransferId)}authority_schema={FileTransferAuthoritySchema.Current}; authority_id={FormatProtocolLogValue(context.CurrentFallbackFrontierRepairContract?.Authority.AuthorityId.ToString() ?? "(none)")}; direction=inbound; transfer_id={context.TransferId}; session_id={context.SessionId}; transport_epoch={batch.TransportEpoch}; repair_request_id={FormatProtocolLogValue(repairRequestId)}; decision_reason={FormatProtocolLogValue(fallbackProofRejectionReason)}");
                 }
 
                 return;

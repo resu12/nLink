@@ -4,9 +4,11 @@ public sealed partial class SessionFileTransferService
 {
     private readonly FrontierAppLifetime? frontierAppLifetime;
     private readonly FrontierProducerRegistry.ServiceScope? frontierProducerScope;
+    private readonly SessionFileTransferService? nativeDestinationServiceOriginal;
 
     private SessionFileTransferService(FrontierAppLifetime? lifetime) : this()
     {
+        nativeDestinationServiceOriginal = this;
         frontierAppLifetime = lifetime;
         frontierProducerScope = lifetime?.RegisterService();
     }

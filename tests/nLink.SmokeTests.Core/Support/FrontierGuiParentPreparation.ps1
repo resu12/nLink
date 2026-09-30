@@ -34,7 +34,7 @@ try {
     if($preparationCase -ceq 'mutable-result') {$result.Writers=@(); $result.SemanticSha256='foreign'; $result.SourceLineVisitCount=999}
     if($preparationCase -ceq 'budget') {
         $elapsed=@($work.GetType().GetFields($flags) | Where-Object {$_.Name -match '^_?elapsed$'})[0]
-        $elapsed.SetValue($work,[long]([Diagnostics.Stopwatch]::Frequency*6))
+        $elapsed.SetValue($work,[long]([Diagnostics.Stopwatch]::Frequency*11))
     }
     $elapsedBefore=$work.ElapsedTicks
     $preparation=$binding.TryPrepareParentFiles()

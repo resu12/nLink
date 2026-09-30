@@ -31,17 +31,20 @@ public sealed partial class NknAccelerationTransportTests
     public Task JoinedBootstrapCorrelation_HeaderStopPublishesFallbackAfterTransportReceipts(int stopMode)
         => RunJoinedBootstrapCorrelationAsync(runExchange: true, stopMode, stopReason: "header_switch_off");
 
-    private async Task RunJoinedBootstrapCorrelationAsync(bool runExchange, int stopMode = 0, string stopReason = "runtime_disabled")
+    private async Task RunJoinedBootstrapCorrelationAsync(bool runExchange, int stopMode = 0, string stopReason = "runtime_disabled",
+        JoinedFallbackFiles? files = null, RetainedRuntimeReadProbe? runtimeReads = null)
     {
         FakeNknClient.ResetNetwork();
-        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(40));
+        // The full-size file case is a correctness check, not a throughput gate.
+        // Existing small route tests retain their forty-second deadline.
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(files?.ByteCount > 64 * 1024 ? 180 : 40));
         var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var releaseReads = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var opened = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var logStart = GetOperationalLogLength();
         var streamOpens = 0;
         var priorBarrier = SessionFileTransferService.OutboundSparseBootstrapBarrierForTests;
-        const string transferId = "joined-bootstrap-correlation";
+        var transferId = runtimeReads?.NativeDescriptor?.TransferId ?? "joined-bootstrap-correlation";
         SessionFileTransferService.OutboundSparseBootstrapBarrierForTests = (id, _, stage) =>
         {
             if (id != transferId || stage != "session_open_completion") { return Task.CompletedTask; }
@@ -70,20 +73,23 @@ public sealed partial class NknAccelerationTransportTests
                 InviteCapabilities.Chat | InviteCapabilities.FileTransfer, suppressAutomaticAccelerationNegotiation: true);
             Assert.True(((IFileTransferRouteTransitionBridge)host).SupportsFallbackBootstrapCorrelation);
             Assert.True(((IFileTransferRouteTransitionBridge)helper).SupportsFallbackBootstrapCorrelation);
-            using var sender = new SessionFileTransferService();
+            using var sender = runtimeReads is null ? new SessionFileTransferService() : SessionFileTransferService.CreateForApp();
             using var receiver = new SessionFileTransferService();
             sender.AttachTransport(host);
             receiver.AttachTransport(helper);
-            await sender.TryStartSendAsync(new("joined-bootstrap.bin", 64 * 1024, transferId),
-                _ => Task.FromResult<Stream>(runExchange && Interlocked.Increment(ref streamOpens) > 1
-                    ? new JoinedBootstrapReadGate(new byte[64 * 1024], releaseReads.Task)
-                    : new MemoryStream(new byte[64 * 1024], writable: false)), timeout.Token);
+            await sender.TryStartSendAsync(runtimeReads?.NativeDescriptor ?? new("joined-bootstrap.bin", runtimeReads is not null ? 268435456 : files?.ByteCount ?? 64 * 1024, transferId),
+                _ => runtimeReads is not null ? runtimeReads.OpenAsync(releaseReads.Task) : Task.FromResult<Stream>(files is not null
+                    ? files.OpenSource(releaseReads.Task)
+                    : runExchange && Interlocked.Increment(ref streamOpens) > 1
+                        ? new JoinedBootstrapReadGate(new byte[64 * 1024], releaseReads.Task)
+                        : new MemoryStream(new byte[64 * 1024], writable: false)), timeout.Token);
+            runtimeReads?.Bind(sender);
             await WaitUntilAsync(() => receiver.Snapshot.Inbound?.State == FileTransferTransferState.PendingDecision,
                 TimeSpan.FromSeconds(3));
             var outbound = GetPrivateField(sender, "outboundTransfer")!;
             var inbound = GetPrivateField(receiver, "inboundTransfer")!;
             await receiver.AcceptIncomingTransferAsync(transferId,
-                (_, _) => Task.FromResult<Stream>(new MemoryStream()), timeout.Token);
+                (_, _) => Task.FromResult<Stream>(files?.OpenDestination() ?? new MemoryStream()), timeout.Token);
             await opened.Task.WaitAsync(timeout.Token);
             await WaitUntilAsync(() => SessionFileTransferV4SenderTests.CaptureJoinedNknStateForTest(receiver, inbound)
                 .PersistentState.FileTransferRouteTransition.BootstrapAgreement?.IsEnabled == true, TimeSpan.FromSeconds(3));
@@ -112,15 +118,45 @@ public sealed partial class NknAccelerationTransportTests
                 }
                 if (stopMode != 1) { await host.StopAccelerationAsync(stopReason, timeout.Token); }
                 if (stopMode != 0) { await helper.StopAccelerationAsync(stopReason, timeout.Token); }
+                if (runtimeReads?.ExpectRejection == true)
+                {
+                    await runtimeReads.Rejected.Task.WaitAsync(timeout.Token);
+                    // The factory rejects before Core finishes delivering its
+                    // failure. Join that real terminal boundary before the app
+                    // seals its writer; disposal is not a delivery receipt.
+                    await WaitFor("retained source failure delivered", () => sender.Snapshot.Outbound?.State == FileTransferTransferState.Failed &&
+                        receiver.Snapshot.Inbound?.State == FileTransferTransferState.Failed);
+                    Assert.Equal("read_failed", sender.Snapshot.Outbound!.ErrorCode);
+                    Assert.Equal("read_failed", receiver.Snapshot.Inbound!.ErrorCode);
+                    SessionFileTransferV4SenderTests.CancelJoinedNknContextForTest(outbound);
+                    SessionFileTransferV4SenderTests.CancelJoinedNknContextForTest(inbound);
+                    return;
+                }
                 // Local-stop correlation uses its control pumps, not ordinary data traffic.
                 // Keep the source read held so synchronous mock send failures cannot starve peer receive.
                 await WaitFor("correlated fallback publication", () => Published(sender, outbound, FileTransferRoute.PostTunaFallbackV6) &&
                     Published(receiver, inbound, FileTransferRoute.PostTunaFallbackV6));
                 AssertJoinedBootstrapFallbackPublished(sender, outbound, receiver, inbound);
                 releaseReads.TrySetResult();
+                if (runtimeReads is not null)
+                {
+                    await runtimeReads.ReadObserved.Task.WaitAsync(timeout.Token);
+                    await WaitFor("held source fallback receive", () => receiver.Snapshot.Inbound?.BytesTransferred > 0);
+                    runtimeReads.VerifyBeforeRetirement(sender.Snapshot.Outbound!, receiver.Snapshot.Inbound!,
+                        Assert.IsType<MemoryStream>(ContextValue(inbound, "WriteStream")));
+                }
+                if (files is not null)
+                {
+                    // Route-edge waits stay at eight seconds. File completion
+                    // uses only this fixture's overall cancellation deadline.
+                    while (sender.Snapshot.Outbound?.IsTerminal != true || receiver.Snapshot.Inbound?.IsTerminal != true)
+                        await Task.Delay(10, timeout.Token);
+                    await files.VerifyAsync(sender.Snapshot.Outbound!, receiver.Snapshot.Inbound!, sessionId, transferId, timeout.Token);
+                }
             }
             SessionFileTransferV4SenderTests.CancelJoinedNknContextForTest(outbound);
             SessionFileTransferV4SenderTests.CancelJoinedNknContextForTest(inbound);
+            runtimeReads?.VerifyRetired();
 
             async Task WaitFor(string edge, Func<bool> predicate)
             {

@@ -1,11 +1,26 @@
-param([string]$RepoRoot,[string]$Directory,[string]$Case)
+param([string]$RepoRoot,[string]$Directory,[string]$Case,[string]$ExePath='',[int]$TimeoutSeconds=0)
 $ErrorActionPreference='Stop'; Set-StrictMode -Version Latest
-. (Join-Path $RepoRoot 'tools/FileTransferOps/LocalGuiWriterRequest.ps1')
-$private:owner=[NLink.Tools.LocalGuiWriterRequest]::TryAttachFrontierLauncherReady($env:NLINK_GUI_WRITER_REQUEST,
-    [guid]$env:NLINK_GUI_WRITER_REQUEST_ID,'scenario-launch-run','scenario-launch-scope',$Directory)
-if($null -eq $owner) {throw 'Original scenario owner missing'}
-$private:origin=$owner.TryCreateLedgerOrigin()
-if($null -eq $origin) {throw 'Original scenario origin missing'}
+$attemptMode=$env:NLINK_TEST_ATTEMPT_DISPATCH -ceq '1'
+$canonicalRolesMode=-not [string]::IsNullOrEmpty($env:NLINK_TEST_CANONICAL_ROLES_CASE)
+if($canonicalRolesMode) {
+    . (Join-Path $RepoRoot 'tools/FileTransferOps/LocalGuiWriterRequest.ps1')
+    . (Join-Path $RepoRoot 'tests/nLink.SmokeTests.Core/Support/FrontierAttemptDispatchGui.ps1') -Stage Entry
+} elseif($attemptMode) {
+    . (Join-Path $RepoRoot 'tests/nLink.SmokeTests.Core/Support/FrontierAttemptDispatchLoader.ps1') $RepoRoot
+    . (Join-Path $RepoRoot 'tests/nLink.SmokeTests.Core/Support/FrontierAttemptDispatchGui.ps1') -Stage Entry
+    if($env:NLINK_TEST_PAYLOAD_WRAPPER_CASE -like 'listener-*') {
+        . (Join-Path $RepoRoot 'tests/nLink.SmokeTests.Core/Support/FrontierPayloadListenerProbe.ps1') -Stage Gui
+        if($env:NLINK_TEST_PAYLOAD_WRAPPER_CASE -ceq 'listener-gui-nonzero') {exit 7}
+        exit 0
+    }
+} else {
+    . (Join-Path $RepoRoot 'tools/FileTransferOps/LocalGuiWriterRequest.ps1')
+    $private:owner=[NLink.Tools.LocalGuiWriterRequest]::TryAttachFrontierLauncherReady($env:NLINK_GUI_WRITER_REQUEST,
+        [guid]$env:NLINK_GUI_WRITER_REQUEST_ID,'scenario-launch-run','scenario-launch-scope',$Directory)
+    if($null -eq $owner) {throw 'Original scenario owner missing'}
+    $private:origin=$owner.TryCreateLedgerOrigin()
+    if($null -eq $origin) {throw 'Original scenario origin missing'}
+}
 # Test-only handles for assertions in mocked UI boundaries. Production context,
 # formatters and environment must never carry these objects.
 $script:testOwner=$owner; $script:testOrigin=$origin
@@ -14,7 +29,7 @@ $tokens=$null; $errors=$null
 $ast=[Management.Automation.Language.Parser]::ParseFile((Join-Path $RepoRoot 'tools/GuiSmoke-Windows.ps1'),[ref]$tokens,[ref]$errors)
 if($errors.Count) {throw 'Original scenario script parse failed'}
 foreach($name in @('Run-ScenarioFileTransferTunaHandoffFallback','Start-HelpeeFlow','Start-HelperFlow','Start-AppInstance',
-    'New-ScenarioContext','New-GuiSmokeProcessOutputCapture','Get-GuiSmokeProcessOutputRoot','Wait-GuiSmokeProcessOutputCaptureDrain',
+    'Set-GuiPreparationProcessIdentity','New-ScenarioContext','New-GuiSmokeProcessOutputCapture','Get-GuiSmokeProcessOutputRoot','Wait-GuiSmokeProcessOutputCaptureDrain',
     'New-TunaGuiFileTransferFailureClassificationResult','New-TunaGuiFailureClassificationEnrichmentReceipt')) {
     $definition=@($ast.FindAll({param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -ceq $name},$true))
     if($definition.Count -ne 1) {throw 'Original scenario function ambiguous'}
@@ -42,11 +57,14 @@ if(-not $script:drainBlock.Contains('-FrontierReports $FrontierReports') -or
     -not $writer.Extent.Text.Contains('Set-Variable -Name FrontierReports -Option Private')) {throw 'Original finalizer lost private report forwarding'}
 $liveCalls=@($ast.FindAll({param($n) $n -is [Management.Automation.Language.CommandAst] -and
     $n.GetCommandName() -ceq 'Run-ScenarioFileTransferTunaHandoffFallback'},$true))
-if($liveCalls.Count -ne 1 -or $liveCalls[0].Extent.Text.Contains('-FrontierOwner')) {throw 'Live scenario opt-in changed'}
+if($liveCalls.Count -ne 1 -or $liveCalls[0].Extent.Text -cne
+    'Run-ScenarioFileTransferTunaHandoffFallback -Context $ctx -FrontierOwner $private:scenarioFrontierOwner -CanonicalAttempt $CanonicalAttempt') {throw 'Guarded GUI scenario call changed'}
 
 function Assert-PrivateScenarioInputs {
     foreach($name in @('owner','origin','FrontierOwner','frontierHelpeeRequest','frontierHelperRequest',
-        'frontierHelpeeReports','frontierHelperReports','FrontierRequest','FrontierReports','createReports')) {
+        'frontierHelpeeReports','frontierHelperReports','FrontierRequest','FrontierReports','createReports',
+        'attemptTicket','projection','guiFrontierOwner','guiFrontierOrigin','ownerCopy','ticketCopy','CanonicalAttempt',
+        'scenarioFrontierOwner','guiCanonicalAttempt')) {
         if($null -ne (Get-Variable $name -ErrorAction SilentlyContinue)) {throw "Scenario capability leaked: $name"}
     }
 }
@@ -121,7 +139,7 @@ function Write-FileTransferGuiLogLedgerEvidence {
     $script:drained=$true
 }
 function Test-GuiSmokeEnvEnabled {param($Name) return $Name -ceq 'NLINK_RUN_TUNA_GUI_FILETRANSFER'}
-function Get-IsNknTransport {return $true} # no transport is created by this fixture
+function Get-IsNknTransport {return $true} # no NKN transport is created by this fixture
 function Get-FileTransferSoakArtifactDir {return $Directory}
 function Resolve-TunaGuiWalletPath {return (Join-Path $Directory 'unused-wallet')}
 function Resolve-TunaGuiSidecarPath {return (Join-Path $Directory 'unused-sidecar')}
@@ -140,7 +158,7 @@ function Write-GuiSmokeAtomicJson {param($Path,$Value)}
 function Invoke-TunaGuiDataPathDiagnosticCompanion {throw 'No diagnostic network work in fixture'}
 
 $env:NLINK_FILETRANSFER_SOAK_ARTIFACT_DIR=$Directory
-$env:NLINK_FILETRANSFER_SOAK_PAYLOAD_SIZES=''
+if(-not $attemptMode -and -not $canonicalRolesMode) {$env:NLINK_FILETRANSFER_SOAK_PAYLOAD_SIZES=''}
 $env:NLINK_TUNA_TEST_WALLET_PASSWORD='unused-headless-fixture'
 $script:GuiSmokeProcessOutputRoot=$null
 $script:GuiSmokeProcessOutputFiles=[Collections.Generic.List[string]]::new()
@@ -153,7 +171,8 @@ foreach($role in @('helpee','helper')) {
         $script:signals[$role+'.'+$part]=[Threading.EventWaitHandle]::new($false,[Threading.EventResetMode]::ManualReset,$env:NLINK_GUI_WRITER_REQUEST+'.'+$role+'.'+$part)
     }
 }
-$ctx=New-ScenarioContext -ExePath (Get-Process -Id $PID).Path
+$appExe=if($attemptMode -and $env:NLINK_TEST_ATTEMPT_CASE.StartsWith('writer-')) {$ExePath} else {(Get-Process -Id $PID).Path}
+$ctx=New-ScenarioContext -ExePath $appExe
 $private:selected=$owner
 if($Case -ceq 'default') {$selected=$null}
 if($Case -ceq 'cancel-before') {$owner.Dispose()}
@@ -161,7 +180,11 @@ if($Case -ceq 'copied-owner') {$selected=[object].GetMethod('MemberwiseClone',$f
 if($Case -ceq 'request-overflow') {$null=$owner.TryCreateAppRequest(); $null=$owner.TryCreateAppRequest()}
 $failure=''
 try {
-    try {Run-ScenarioFileTransferTunaHandoffFallback -Context $ctx -FrontierOwner $selected} catch {$failure=$_.Exception.Message}
+    try {
+        if($canonicalRolesMode) {. (Join-Path $RepoRoot 'tests/nLink.SmokeTests.Core/Support/FrontierCanonicalRolesGui.ps1')}
+        elseif($attemptMode) {. (Join-Path $RepoRoot 'tests/nLink.SmokeTests.Core/Support/FrontierAttemptDispatchGui.ps1') -Stage Dispatch}
+        else {Run-ScenarioFileTransferTunaHandoffFallback -Context $ctx -FrontierOwner $selected}
+    } catch {$failure=$_.Exception.Message}
     $setupFailure=$Case.EndsWith('-window-failure') -or $Case.EndsWith('-report-failure')
     if($setupFailure) {
         $expectedFailure=$Case.Split('-')[0]+$(if($Case.EndsWith('-report-failure')) {' original report setup failure'} else {' original window failure'})
@@ -181,13 +204,16 @@ try {
     foreach($path in $script:GuiSmokeProcessOutputFiles) {
         if([IO.File]::ReadAllText($path) -notmatch '(ordinary|error)-(helpee|helper)') {throw 'Ordinary report missing'}
     }
-    if($Case -cin @('default','copied-owner') -and -not $owner.IsCurrent) {throw 'Default/copied branch retired original owner'}
+    if(-not $attemptMode -and $Case -cin @('default','copied-owner') -and -not $owner.IsCurrent) {throw 'Default/copied branch retired original owner'}
     if(@($ctx.PSObject.Properties.Name | Where-Object {$_ -match 'Frontier'}).Count) {throw 'Scenario context exported native capabilities'}
     'scenario-launch-gui-ok'
+    if($attemptMode) {'attempt-dispatch-gui-ok'}
 } finally {
+    if(($attemptMode -or $canonicalRolesMode) -and $null -ne $attemptTicket) {$attemptTicket.Dispose()}
     $owner.Dispose()
     foreach($event in $script:signals.Values) {[void]$event.Set()}
     foreach($process in $ctx.Processes) {try {if(-not $process.HasExited) {$process.Kill(); [void]$process.WaitForExit(5000)}} finally {$process.Dispose()}}
     foreach($process in $script:allStarted) {try {if(-not $process.HasExited) {$process.Kill(); [void]$process.WaitForExit(5000)}} finally {$process.Dispose()}}
     foreach($event in $script:signals.Values) {$event.Dispose()}
 }
+if($attemptMode -and ($env:NLINK_TEST_ATTEMPT_CASE -ceq 'gui-nonzero' -or $env:NLINK_TEST_PAYLOAD_WRAPPER_CASE -ceq 'gui-nonzero')) {exit 7}

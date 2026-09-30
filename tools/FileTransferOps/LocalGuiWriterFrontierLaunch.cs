@@ -189,6 +189,7 @@ namespace NLink.Tools
                     if (frontierLaunchOwner != null && !Object.ReferenceEquals(frontierLaunchOwner, this)) return;
                     if (disposed) return;
                     disposed = true;
+                    if (attemptDispatch != null) attemptDispatch.RetireNativeOwnership();
                     if (parentRegistration != null) parentRegistration.Dispose();
                     if (ledgerOrigin != null) ledgerOrigin.Close();
                     if (fileChannels != null) foreach (var channel in fileChannels) if (channel != null) channel.Dispose();

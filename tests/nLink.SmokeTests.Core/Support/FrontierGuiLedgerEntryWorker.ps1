@@ -85,7 +85,7 @@ try {
     if($Case -ceq 'budget') {
         $watch=$guiFrontierOwner.GetType().GetField('frontierWork',$flags).GetValue($guiFrontierOwner)
         $elapsed=@($watch.GetType().GetFields($flags) | Where-Object {$_.Name -match '^_?elapsed$'})[0]
-        $elapsed.SetValue($watch,[long]([Diagnostics.Stopwatch]::Frequency*6))
+        $elapsed.SetValue($watch,[long]([Diagnostics.Stopwatch]::Frequency*11))
     }
     if($Case -ceq 'wrong-path') {
         $created=$true

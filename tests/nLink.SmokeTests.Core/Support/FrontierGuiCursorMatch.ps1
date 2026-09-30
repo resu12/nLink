@@ -43,7 +43,7 @@ try {
         if($mode -ceq 'budget') {
             $work=$owner.GetType().GetField('frontierWork',$flags).GetValue($owner)
             $elapsed=@($work.GetType().GetFields($flags) | Where-Object {$_.Name -match '^_?elapsed$'})[0]
-            $elapsed.SetValue($work,[long]([Diagnostics.Stopwatch]::Frequency*6))
+            $elapsed.SetValue($work,[long]([Diagnostics.Stopwatch]::Frequency*11))
         }
         if($mode -ceq 'copied-result') {
             if($null -ne $binding.TryMatchProcessedCursor($clone.Invoke($result,$null)) -or -not $binding.IsCurrent) { throw 'Copied result consumed cursor join' }

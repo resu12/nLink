@@ -11,7 +11,7 @@ function Marker([string]$event='deferred',[int]$generation=1,[string]$writer='wr
     "event=operational_log_write_$event; acceptance_run_id=run; scenario_run_id=scenario; log_writer_id=$writer; batch_generation=$generation; first_sequence=2; last_sequence=3; line_count=2; payload_sha256=$hash; attempt_utc_ticks=4; attempt_count=1; failure_code=none"
 }
 function Scan([byte[]]$bytes) {
-    $scan=$type.GetConstructors($flags)[0].Invoke([object[]]@($check))
+    $scan=$type.GetConstructor($flags,$null,[type[]]@([Action]),$null).Invoke([object[]]@($check))
     $stream=[IO.MemoryStream]::new($bytes,$false)
     try { [void]$type.GetMethod('Read',$flags).Invoke($scan,[object[]]@($stream,0,'run','scenario')) }
     finally { $stream.Dispose() }
@@ -28,6 +28,10 @@ function Unpaired([string]$name,[string]$text) {
     if(Paired $scan) { throw "Accepted unmatched tuple: $name" }
 }
 $d=Marker; $r=Marker 'recovered'
+[MarkerTestCheck]::Calls=0
+[void](TextScan "ordinary`n$d`n$r`n")
+# Entry/final + two read passes * three full checks + 3 line entries + 2 marker exits.
+if([MarkerTestCheck]::Calls -ne 13) { throw 'Generic per-line full checks changed' }
 $scan=TextScan "$d`n$r"
 if(-not (Paired $scan)) { throw 'Valid marker pair rejected' }
 $records=$type.GetField('Markers',$flags).GetValue($scan)

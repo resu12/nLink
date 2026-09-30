@@ -3834,7 +3834,7 @@ public sealed partial class SessionFileTransferService
                 DataSessionIdentity = EvidenceToken(boundary.DataSessionIdentity),
             };
 
-        private static string EvidenceToken(string? value)
+        internal static string EvidenceToken(string? value)
         {
             var normalized = string.IsNullOrWhiteSpace(value)
                 ? "(none)"

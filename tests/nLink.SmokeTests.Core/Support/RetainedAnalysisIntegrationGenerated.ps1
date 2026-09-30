@@ -74,14 +74,20 @@ if($receipt.status -cne 'completed' -or $receipt.owner -cne 'RouteAcceptance' -o
     $receipt.acceptanceRunId -cne $RunId -or $receipt.scenarioRunId -cne $ScenarioId) { throw 'Real terminal receipt changed' }
 $report=[IO.File]::ReadAllText((Join-Path $output 'filetransfer-operator-verdict.txt'))
 if($report -notmatch '(?m)^first_proof_chain_failure_class=\(none\)\r?$') { throw 'Normal fixture unexpectedly selected a failure witness' }
-if($report -notmatch '(?m)^verdict=INCONCLUSIVE\r?$' -or $report -notmatch '(?m)^gate_status=fail\r?$') {
-    throw 'Completed report was promoted into route acceptance'
+$summary=Get-Content -LiteralPath (Join-Path $output 'filetransfer-retained-compact-summary.json') -Raw | ConvertFrom-Json
+# The actual terminals establish completion, not a file hash/size observation.
+# This source-only fixture must retain the independent integrity failure.
+if($summary.gui_completed -ne 1 -or $summary.gui_integrity_ok -ne 0 -or
+    $report -notmatch '(?m)^verdict=FAIL_PROTOCOL_OR_INTEGRITY\r?$' -or
+    $report -notmatch '(?m)^acceptance_failure_class=protocol_or_integrity\r?$' -or
+    $report -notmatch '(?m)^gate_status=fail\r?$') {
+    throw 'Source-only completion lost its independent integrity failure'
 }
 $stages=[IO.File]::ReadAllText((Join-Path $output 'filetransfer-retained-analysis-stage-diagnostics.json')) | ConvertFrom-Json
 if($stages.synthetic_event_count -ne 0 -or $stages.compact_mode -ne 1) { throw 'Primary input was augmented or changed mode' }
 if($script:receiptWrites -ne 1 -or $script:sourceHashes -ne 2 -or $script:sourceCounts -ne 2) { throw 'Original receipt/source traversal counts changed' }
 $result=[ordered]@{RelayAccepted=$true;RealReports=$true;AdoptionAttempted=$true;Adopted=$false;Status=$receipt.status
-    FirstFailure='(none)';PrimaryGate='INCONCLUSIVE';ReceiptWrites=1;SourceHashes=2;SourceCounts=2;ProductionWatchdogSeconds=1800
+    FirstFailure='(none)';PrimaryGate='FAIL_PROTOCOL_OR_INTEGRITY';ReceiptWrites=1;SourceHashes=2;SourceCounts=2;ProductionWatchdogSeconds=1800
     SyntheticEvents=0;LiveRun=$false;WholeWrapperMain=$false}
 [IO.File]::WriteAllText((Join-Path $output 'integration-result.json'),($result | ConvertTo-Json))
 'retained-analysis-integration='+($result | ConvertTo-Json -Compress)

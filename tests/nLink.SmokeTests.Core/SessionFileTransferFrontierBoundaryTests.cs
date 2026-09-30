@@ -65,7 +65,7 @@ public sealed partial class SessionFileTransferV4SenderTests
         string path, string variant, bool enabled, int priorStateSends = 0, int episodeStateSends = 0, int laterStateSends = 0,
         Action<object>? afterCaptureClosed = null, object? suppliedObserver = null, Action<object>? beforeCapture = null,
         bool originalPrimaryFailure = false, int additionalWitnessWrites = 0, bool appOwnedObservation = false,
-        bool resetAfterCapture = false, bool waitForLogEvidence = true)
+        bool resetAfterCapture = false, bool waitForLogEvidence = true, bool redactedSession = false, bool redactedTransfer = false)
     {
         var type = typeof(SessionFileTransferService);
         var observer = appOwnedObservation ? null! : suppliedObserver ?? Activator.CreateInstance(type.GetNestedType("FrontierBoundaryObservation", BindingFlags.NonPublic)!)!;
@@ -90,13 +90,35 @@ public sealed partial class SessionFileTransferV4SenderTests
             for (var i = 0; i < episodeStateSends; i++) { await ExtraState("inside-boundary-episode"); }
             if (episodeStateSends > 0) { SetPrivateProperty(context, "V6LastReceiverStateSentUtc", DateTimeOffset.UtcNow.AddMinutes(1)); }
             object? raceTip = null;
-            if (variant is "before_recheck" or "write_before_recheck")
+            if (variant is "before_recheck" or "write_before_recheck" or "watchdog_successor")
             {
                 SetPrivateProperty(observer, "AfterStallForTesting", (Action)(() =>
                 {
-                    Write(variant == "before_recheck" ? 200 : 101).GetAwaiter().GetResult();
+                    Write(variant == "write_before_recheck" ? 101 : 200).GetAwaiter().GetResult();
                     raceTip = GetPrivatePropertyValue(context, "CurrentV6FrontierStallGraceWake");
                 }));
+            }
+            if (variant.StartsWith("watchdog", StringComparison.Ordinal))
+            {
+                if (variant == "watchdog_rearm") { await Write(181); }
+                // Own the test context's gate before the due callback can run.
+                // Use real time and the existing service path, not rewritten logs.
+                lock (GetServiceGate(service))
+                {
+                    Assert.Null(GetPrivatePropertyValue(context, "CurrentV6FrontierStallGraceWake"));
+                    var recent = GetPrivatePropertyValue(context, "CurrentV6FrontierRecentProgressGraceWake")!;
+                    Assert.NotNull(recent);
+                    var due = GetPrivateProperty<DateTimeOffset>(recent, "DueUtc");
+                    Assert.InRange((due - DateTimeOffset.UtcNow).TotalMilliseconds, 0, 1000);
+                    var wait = System.Diagnostics.Stopwatch.StartNew();
+                    while (DateTimeOffset.UtcNow < due && wait.Elapsed < TimeSpan.FromSeconds(2)) { Thread.Sleep(1); }
+                    Assert.True(DateTimeOffset.UtcNow >= due);
+                    var arm = Assert.IsAssignableFrom<Task<bool>>(type.GetMethod("SendInboundV6FrontierRequestAsync", BindingFlags.Instance | BindingFlags.NonPublic)!
+                        .Invoke(service, [context, "frontier_stall_repair_due", true]));
+                    Assert.True(arm.IsCompleted, "Watchdog deferral unexpectedly required asynchronous work under the fixture gate.");
+                    Assert.False(arm.GetAwaiter().GetResult());
+                    Assert.Equal("StallCaptured", GetPrivateProperty<string>(observer, "Status"));
+                }
             }
             await CoreSmokeTestsBase.WaitUntilAsync(() =>
             {
@@ -280,7 +302,8 @@ public sealed partial class SessionFileTransferV4SenderTests
         {
             if (enabled && !appOwnedObservation) { SetPrivateProperty(context, "FrontierBoundaryObservation", observer); }
             beforeCapture?.Invoke(context);
-        }, initialHighest: 150, appOwnedService: appOwnedObservation, waitForLogEvidence: waitForLogEvidence);
+        }, initialHighest: 150, appOwnedService: appOwnedObservation, waitForLogEvidence: waitForLogEvidence,
+            redactedSession: redactedSession, redactedTransfer: redactedTransfer);
         return (lines, calls, observer);
     }
 

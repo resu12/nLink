@@ -3,6 +3,10 @@ $ErrorActionPreference='Stop'
 Set-StrictMode -Version Latest
 $settings=[IO.File]::ReadAllText($env:NLINK_GUI_WRITER_TEST_SETTINGS) | ConvertFrom-Json
 $RepoRoot=[string]$settings.RepoRoot; $Directory=[string]$settings.Directory; $mode=[string]$settings.Mode
+$nativeCollector=$settings.PSObject.Properties.Name -contains 'NativeCollector' -and $settings.NativeCollector
+$collectorFinalizer=$settings.PSObject.Properties.Name -contains 'CollectorFinalizer' -and $settings.CollectorFinalizer
+$collectorOutputs=$settings.PSObject.Properties.Name -contains 'CollectorOutputs' -and $settings.CollectorOutputs
+if($nativeCollector) {& (Join-Path $PSScriptRoot 'TerminalRequestFileBinding.ps1') $RepoRoot}
 . (Join-Path $RepoRoot 'tools/FileTransferOps/LocalGuiWriterRequest.ps1')
 $nativeLaunch=$null
 if($settings.PSObject.Properties.Name -contains 'FrontierLaunch' -and $settings.FrontierLaunch) {
@@ -17,7 +21,9 @@ $ast=[Management.Automation.Language.Parser]::ParseFile((Join-Path $RepoRoot 'to
 if($errors.Count) { throw 'Actual finalizer parse failed' }
 $definition=@($ast.FindAll({param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -ceq 'Write-FileTransferGuiLogLedgerEvidence'},$true))
 if($definition.Count -ne 1) { throw 'Actual finalizer ambiguous' }
-Invoke-Expression $definition[0].Extent.Text
+$finalizerDefinition=$definition[0].Extent.Text
+if($collectorFinalizer) {$finalizerDefinition=& (Join-Path $PSScriptRoot 'TerminalCollectorFinalizer.ps1') $finalizerDefinition -RetainOutputs:$collectorOutputs}
+Invoke-Expression $finalizerDefinition
 function Sync-GuiSmokeAppLogLedger { }
 function Get-FileTransferCoordinatorSnapshotEvaluation { throw 'No authority evaluation allowed' }
 function Update-FileTransferGuiEvidenceFinalizationStage {
@@ -43,8 +49,31 @@ for($i=1;$i -le 3;$i++) {
     $event=if($i -eq 1) { 'operational_log_writer_started' } elseif($i -eq 3 -and $mode -cne 'no-drain') { 'operational_log_writer_drained' } else { 'filetransfer_data_path_send_result' }
     $lines.Add("event=$event; acceptance_run_id=$env:NLINK_FILETRANSFER_ACCEPTANCE_RUN_ID; scenario_run_id=$env:NLINK_FILETRANSFER_SCENARIO_RUN_ID; log_writer_id=writer-a; log_writer_sequence=$i; log_writer_batch_generation=$i; log_writer_batch_first_sequence=$i; log_writer_batch_last_sequence=$i; log_writer_attempt_utc_ticks=$i")
 }
-[IO.File]::WriteAllLines($source,$lines.ToArray(),[Text.UTF8Encoding]::new($false))
-if($settings.PSObject.Properties.Name -contains 'GeneratedSource' -and $settings.GeneratedSource) {
+$collectorRead=$null
+if($nativeCollector) {
+    try {
+        $collectorRead=[NLink.Tools.LocalGuiWriterRequest]::CopyTerminalCollectorLogForTest($env:NLINK_GUI_WRITER_REQUEST,
+            [guid]$env:NLINK_GUI_WRITER_REQUEST_ID,$env:NLINK_FILETRANSFER_ACCEPTANCE_RUN_ID,$env:NLINK_FILETRANSFER_SCENARIO_RUN_ID,
+            $Directory,[string]$settings.GeneratedSource,$source,[bool]$collectorFinalizer)
+        $repeatedRejected=$false
+        try {[void][NLink.Tools.LocalGuiWriterRequest]::CopyTerminalCollectorLogForTest('unused',[guid]::Empty,'unused','unused','unused','unused','unused')}
+        catch {if($_.Exception.ToString().Contains('native_collector_already_read')) {$repeatedRejected=$true} else {throw}}
+        if(-not $repeatedRejected) {throw 'Repeated collector read admitted'}
+    } catch {
+        [IO.File]::WriteAllText((Join-Path $Directory 'native-collector-error.txt'),$_.Exception.ToString())
+        throw
+    }
+} else {[IO.File]::WriteAllLines($source,$lines.ToArray(),[Text.UTF8Encoding]::new($false))}
+if($collectorFinalizer) {
+    if(-not $collectorRead.OutputIsCurrent) {throw 'Collector output was not retained'}
+    $blocked=0
+    try {$write=[IO.File]::Open($source,[IO.FileMode]::Open,[IO.FileAccess]::Write,[IO.FileShare]'ReadWrite,Delete'); $write.Dispose()}
+    catch [IO.IOException] {if(($_.Exception.HResult -band 0xffff) -ne 32) {throw}; $blocked++}
+    try {[IO.File]::Move($source,$source+'.denied-replacement')}
+    catch [IO.IOException] {if(($_.Exception.HResult -band 0xffff) -ne 32) {throw}; $blocked++}
+    if($blocked -ne 2) {throw 'Collector output lost continuous write/replacement protection'}
+}
+if(-not $nativeCollector -and $settings.PSObject.Properties.Name -contains 'GeneratedSource' -and $settings.GeneratedSource) {
     [IO.File]::WriteAllLines($source,[IO.File]::ReadAllLines($settings.GeneratedSource),[Text.UTF8Encoding]::new($false))
 }
 Sync-GuiSmokeLogLedger -State $script:GuiSmokeAppLogLedger -Paths @($source)
@@ -63,8 +92,25 @@ if($mode -cin @('worker-start','parent-start','wrong-worker')) {
     } finally { $view.Dispose(); $map.Dispose() }
 }
 $capture=$null; $failure=''
-try { Write-FileTransferGuiLogLedgerEvidence -ArtifactDir $Directory -Bookmark 0 -InitialSnapshot $initial -LocalNativeWriterCapture ([ref]$capture) }
+$collectorArgs=@{}
+if($collectorFinalizer) {$collectorArgs.TerminalCollector=$collectorRead; $script:collectorFinalizerEvidence=@{}}
+try { Write-FileTransferGuiLogLedgerEvidence -ArtifactDir $Directory -Bookmark 0 -InitialSnapshot $initial -LocalNativeWriterCapture ([ref]$capture) @collectorArgs }
 catch { $failure=$_.Exception.Message }
+finally {if($collectorFinalizer) {$collectorRead.Dispose()}}
+if($mode -ceq 'capture-expired') {
+    if($failure -cne 'filetransfer_gui_evidence_capture_not_persisted' -or $null -ne $capture -or
+        -not $script:collectorFinalizerEvidence.ClosedAfterOriginalFinalization -or
+        -not $script:collectorFinalizerEvidence.ExpiredReadRetryRejected -or $collectorRead.OutputIsCurrent) {throw 'Capture expiry boundary changed'}
+    # Check while this child is alive: OS exit cleanup is not the proof.
+    foreach($name in @('append.log','filetransfer-gui-log-ledger-slice.log',
+        'filetransfer-gui-log-writer-evidence-slice.log','filetransfer-gui-semantic-evidence-slice.log')) {
+        $write=[IO.File]::Open((Join-Path $Directory $name),[IO.FileMode]::Open,[IO.FileAccess]::Write,[IO.FileShare]'ReadWrite,Delete'); $write.Dispose()
+    }
+    if([IO.File]::Exists((Join-Path $Directory 'filetransfer-retained-log-slice.log'))) {throw 'Expired capture created semantic copy'}
+    [IO.File]::WriteAllText((Join-Path $Directory 'collector-expiry-cleanup.json'),
+        '{"OriginalFinalizerCleanupObserved":true,"ExpiredReadRetryRejected":true,"CollectorReleasedInChild":true,"ThreeOutputsReleasedInChild":true,"NativeCapturePublished":false,"SemanticCopyCreated":false,"AcceptanceChanged":false}')
+    throw $failure
+}
 if($mode -ceq 'final-stage-fails') { if($failure -cne 'injected primary stage failure') { throw 'Primary failure changed' } }
 elseif($failure) { throw $failure }
 # Native provenance alone exposes neither the issuer nor a completion factory.
@@ -79,6 +125,36 @@ if($null -ne $nativeLaunch) {
     $nativeLaunch.Dispose()
 }
 $result=@{NativeCapture=$null -ne $capture; Stages=$script:stages.ToArray(); PrimaryFailure=$failure; PrivateIssuerNotExposed=$true}
+if($collectorFinalizer) {
+    if($null -eq $capture -or $collectorRead.OutputIsCurrent -or
+        -not $script:collectorFinalizerEvidence.ClosedAfterOriginalFinalization) {throw 'Collector finalizer lifetime unproven'}
+    $write=[IO.File]::Open($source,[IO.FileMode]::Open,[IO.FileAccess]::Write,[IO.FileShare]'ReadWrite,Delete'); $write.Dispose()
+    $result.NativeCollectorFinalizer=$script:collectorFinalizerEvidence
+    $result.NativeCollectorFinalizer.WriteAndReplacementBlocked=$true
+    $result.NativeCollectorFinalizer.ReleasedAfterFinalization=$true
+    $result.NativeCollectorFinalizer.WriterCopyProvenanceProven=$false
+    $result.NativeCollectorFinalizer.PrimaryProvenanceHandoffProven=$false
+    $result.NativeCollectorFinalizer.AcceptanceChanged=$false
+    if($collectorOutputs) {
+        if(-not $script:collectorFinalizerEvidence.ParentRetainedOutputsBeforeCompletion) {throw 'Owned output offer missing'}
+        $blocked=0
+        foreach($name in @('filetransfer-gui-log-ledger-slice.log','filetransfer-gui-log-writer-evidence-slice.log',
+            'filetransfer-gui-semantic-evidence-slice.log','filetransfer-retained-log-slice.log')) {
+            $path=Join-Path $Directory $name
+            try {$write=[IO.File]::Open($path,[IO.FileMode]::Open,[IO.FileAccess]::Write,[IO.FileShare]'ReadWrite,Delete'); $write.Dispose()}
+            catch [IO.IOException] {if(($_.Exception.HResult -band 0xffff) -ne 32) {throw}; $blocked++}
+            try {[IO.File]::Move($path,$path+'.denied-replacement')}
+            catch [IO.IOException] {if(($_.Exception.HResult -band 0xffff) -ne 32) {throw}; $blocked++}
+        }
+        if($blocked -ne 8) {throw 'Parent did not retain four outputs after original finalizer cleanup'}
+        $result.NativeCollectorFinalizer.OutputProtectionAfterChildCleanup=$blocked
+    }
+}
+if($null -ne $collectorRead) {
+    $result.NativeCollectorRead=@{Status='verified_offline_native_collector_read_only';SourceIdentity=$collectorRead.SourceIdentity;
+        CopiedBytes=$collectorRead.CopiedBytes;RequestId=$env:NLINK_GUI_WRITER_REQUEST_ID;RepeatedReadRejected=$true;
+        WriterCopyProvenanceProven=$false;WriterMembershipVerified=$false;AcceptanceChanged=$false}
+}
 [IO.File]::WriteAllText((Join-Path $Directory 'worker-result.json'),($result | ConvertTo-Json -Depth 4))
 if($mode -ceq 'nonzero') { exit 7 }
 if($mode -ceq 'timeout') { [Threading.Thread]::Sleep(30000) }

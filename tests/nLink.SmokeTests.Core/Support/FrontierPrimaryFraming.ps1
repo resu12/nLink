@@ -4,14 +4,14 @@ Set-StrictMode -Version Latest
 . (Join-Path $RepoRoot 'tools/FileTransferOps/LocalInputReadLease.ps1')
 $type=[NLink.Tools.LocalInputReadLease].Assembly.GetType('NLink.Tools.FrontierLedger.GuiSmokeLedgerLfRead')
 $flags=[Reflection.BindingFlags]'Instance,NonPublic'
-$ctor=$type.GetConstructor($flags,$null,[type[]]@([IO.Stream],[Action],[bool]),$null)
+$ctor=$type.GetConstructor($flags,$null,[type[]]@([IO.Stream],[Action],[bool],[Action]),$null)
 $read=$type.GetMethod('ReadLine',$flags)
 $utf8=[Text.UTF8Encoding]::new($false,$true)
 $script:cases=0
 function Check-Frame([byte[]]$Bytes,[bool]$AllowFinal,[bool]$ExpectedSuccess,[string[]]$Expected) {
     $stream=[IO.MemoryStream]::new($Bytes,$false); $lines=[Collections.Generic.List[string]]::new(); $success=$true
     try {
-        $reader=$ctor.Invoke(@($stream,[Action]{},$AllowFinal))
+        $reader=$ctor.Invoke(@($stream,[Action]{},$AllowFinal,$null))
         try {while($null -ne ($line=$read.Invoke($reader,$null))) {$lines.Add($line)}} catch {$success=$false}
         if($success -ne $ExpectedSuccess) {throw 'Framing success mismatch'}
         if($success) {

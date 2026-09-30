@@ -16,7 +16,7 @@ if($outputMode -ceq 'copied-capabilities') {
 if($outputMode -ceq 'worker-budget') {
     $owned=$worker.FrontierInputs; $watch=$owned.GetType().GetField('work',$flags).GetValue($owned)
     $elapsed=@($watch.GetType().GetFields($flags) | Where-Object {$_.Name -match '^_?elapsed$'})[0]
-    $elapsed.SetValue($watch,[long]([Diagnostics.Stopwatch]::Frequency*21))
+    $elapsed.SetValue($watch,[long]([Diagnostics.Stopwatch]::Frequency*([NLink.Tools.LocalPublicationInputLimits]::EvaluationMilliseconds+1000)/1000))
 }
 $offered=$outputMode -cne 'no-offer' -and $preparation.TryOfferOutput()
 if($offered -eq ($outputMode -cin @('missing-receiver','worker-budget','repeat-prepare','no-offer'))) {throw ('Output offer mismatch: '+$outputMode)}

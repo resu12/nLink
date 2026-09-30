@@ -14,7 +14,9 @@ public sealed partial class FileTransferCoordinatorTests
         bool initializeDataSession = false,
         Action<FileTransferFallbackTailYieldFrameV6>? captureFallbackYield = null,
         Action<FileTransferCoordinatorState>? captureFallbackState = null,
-        Action<FileTransferCoordinatorState>? captureSecondTunaState = null)
+        Action<FileTransferCoordinatorState>? captureSecondTunaState = null,
+        bool stopBeforeFallbackYield = false, string? coordinatorInstanceId = null,
+        string? dataSessionIdentity = null)
     {
         var regular = FileTransferRouteResolver.Resolve(FileTransferRoute.RegularNknV4Fast);
         var initialState = EmptyState(regular, direction) with { SessionId = sessionId, TransferId = transferId };
@@ -24,7 +26,7 @@ public sealed partial class FileTransferCoordinatorTests
             // any Snapshot boundary, rather than repairing emitted history.
             initialState = initialState with
             {
-                CurrentDataSessionIdentity = "initial-responder-fallback-fixture-data-session",
+                CurrentDataSessionIdentity = dataSessionIdentity ?? "initial-responder-fallback-fixture-data-session",
                 CurrentDataSessionGeneration = 17,
             };
         }
@@ -32,7 +34,7 @@ public sealed partial class FileTransferCoordinatorTests
         {
             initialState = initialState with
             {
-                PersistentState = new FileTransferCoordinatorPersistentState { CoordinatorInstanceId = Guid.NewGuid().ToString("N") },
+                PersistentState = new FileTransferCoordinatorPersistentState { CoordinatorInstanceId = coordinatorInstanceId ?? Guid.NewGuid().ToString("N") },
             };
         }
         var started = FileTransferCoordinator.Apply(
@@ -67,6 +69,13 @@ public sealed partial class FileTransferCoordinatorTests
 
         state = EnterCheckpointResponderFallback(state, 1, envelope => capture?.Invoke(envelope));
         publications.Add(state.CurrentRoutePublicationToken!.Value);
+        if (stopBeforeFallbackYield)
+        {
+            Assert.NotNull(captureFallbackState);
+            Assert.Null(state.PersistentState.FallbackTailYield.CurrentOperation);
+            captureFallbackState(state);
+            return publications;
+        }
         if (captureFallbackYield is not null)
         {
             Assert.Equal(FileTransferDirection.Outbound, direction);
@@ -132,17 +141,21 @@ public sealed partial class FileTransferCoordinatorTests
     [MethodImpl(MethodImplOptions.NoInlining)]
     internal static RoutePublicationToken CompleteIngressSecondTunaFromPeerYield(FileTransferCoordinatorState state,
         FileTransferFallbackTailYieldFrameV6 peerFrame, Action<FileTransferCoordinatorTransitionEnvelope> capture,
-        Action<FileTransferCoordinatorState>? captureCommitted = null)
+        Action<FileTransferCoordinatorState>? captureCommitted = null, bool peerAlreadyApplied = false)
     {
-        var paired = ApplyPairedProofFrame(state, peerFrame);
-        capture(paired.SnapshotEnvelope!);
-        var release = paired.PairedRelease!.Value;
+        if (!peerAlreadyApplied)
+        {
+            var paired = ApplyPairedProofFrame(state, peerFrame);
+            capture(paired.SnapshotEnvelope!);
+            state = paired.State;
+        }
+        var release = state.PersistentState.FallbackTailYield.CurrentOperation!.Value.PairedRelease!.Value;
         Assert.Equal(peerFrame.AuthorityId, release.PeerProof.Proof.AuthorityId.ToString());
         Assert.True(FileTransferCoordinator.TryCreateFallbackPairedTailYieldRuntimeUnlockRetryDispatchRequest(
-            paired.State, release, "runtime_unlock_offer_send_not_observed", "post_tuna_fallback_tail_unblocked",
+            state, release, "runtime_unlock_offer_send_not_observed", "post_tuna_fallback_tail_unblocked",
             out var request, out var reason), reason);
-        var yield = paired.State.PersistentState.FallbackTailYield.CurrentOperation!.Value.Decision;
-        var granted = FileTransferCoordinator.AuthorizeRuntimeUnlockRetryDispatch(paired.State, request,
+        var yield = state.PersistentState.FallbackTailYield.CurrentOperation!.Value.Decision;
+        var granted = FileTransferCoordinator.AuthorizeRuntimeUnlockRetryDispatch(state, request,
             RuntimeUnlockRetryReleaseKind.FallbackPairedTailYield, yield.AuthorityId, yield.YieldGeneration, yield.YieldKind.ToString());
         Assert.True(granted.Granted);
         capture(granted.SnapshotEnvelope!);

@@ -969,7 +969,7 @@ public sealed partial class SessionFileTransferService :
                     .ConfigureAwait(false);
                 LocalOperationalLog.Info(
                     "FileTransferService",
-                    $"event=filetransfer_terminalized_by_session_end; direction=outbound; transfer_id={outbound.TransferId}; session_id={outbound.SessionId}; reason={FormatProtocolLogValue(normalizedReason)}; terminal_state=canceled");
+                    $"event=filetransfer_terminalized_by_session_end; {FileTransferDiagnosticScopeEvidence.Format(outbound.SessionId, outbound.TransferId)}direction=outbound; transfer_id={outbound.TransferId}; session_id={outbound.SessionId}; reason={FormatProtocolLogValue(normalizedReason)}; terminal_state=canceled");
             }
             catch (Exception ex)
             {
@@ -996,7 +996,7 @@ public sealed partial class SessionFileTransferService :
                     .ConfigureAwait(false);
                 LocalOperationalLog.Info(
                     "FileTransferService",
-                    $"event=filetransfer_terminalized_by_session_end; direction=inbound; transfer_id={inbound.TransferId}; session_id={inbound.SessionId}; reason={FormatProtocolLogValue(normalizedReason)}; terminal_state=canceled");
+                    $"event=filetransfer_terminalized_by_session_end; {FileTransferDiagnosticScopeEvidence.Format(inbound.SessionId, inbound.TransferId)}direction=inbound; transfer_id={inbound.TransferId}; session_id={inbound.SessionId}; reason={FormatProtocolLogValue(normalizedReason)}; terminal_state=canceled");
             }
             catch (Exception ex)
             {
@@ -1306,6 +1306,10 @@ public sealed partial class SessionFileTransferService :
         ArgumentNullException.ThrowIfNull(descriptor);
         ArgumentNullException.ThrowIfNull(openReadStreamAsync);
 
+        var nativeSender = openReadStreamAsync.Target as NativeSenderSelection;
+        if (nativeSender is not null && (!ReferenceEquals(openReadStreamAsync, nativeSender.OpenReadStreamAsync) ||
+            !nativeSender.TryBindForSend(this, descriptor))) return null;
+
         var normalizedDescriptor = NormalizeSendDescriptor(descriptor, transferIdFactory);
         OutboundTransferContext context;
         IFileTransferSignalingTransport currentTransport;
@@ -1400,6 +1404,7 @@ public sealed partial class SessionFileTransferService :
                         !AdoptPreparationAdmissionLocked(preparation, CreateCoordinatorStateLocked(context), context.LifetimeCts.Token)) return null;
                     preparedPublication = publication;
                 }
+                if (nativeSender is not null && !nativeSender.BindContextLocked(this, context)) return null;
                 outboundTransfer = context;
                 uninstalled = null;
             }
@@ -2684,7 +2689,7 @@ public sealed partial class SessionFileTransferService :
         => RunHardPriorityInboundLifecycle("repair_proof", () => HandleIncomingRepairProofAsync(e.Message));
 
     private void OnFileTransferFallbackTailYieldProofReceived(object? sender, FileTransferFallbackTailYieldProofReceivedEventArgs e)
-        => RunHardPriorityInboundLifecycle("fallback_tail_yield_proof", () => HandleIncomingFallbackTailYieldProofAsync(e.Message));
+        => RunHardPriorityInboundLifecycle("fallback_tail_yield_proof", () => HandleIncomingFallbackTailYieldProofWithEvidenceAsync(e.Message, e.YieldEvidence));
 
     private void OnTransportRejected(object? sender, EventArgs e)
     {
@@ -5245,7 +5250,17 @@ public sealed partial class SessionFileTransferService :
     private Task FinalizeInboundTransferAsync(InboundTransferContext context, CancellationToken ct)
         => FinalizeInboundTransferWithWriteBindingAsync(context, ct, requiredWriteSource: null);
 
-    private async Task FinalizeInboundTransferWithWriteBindingAsync(InboundTransferContext context, CancellationToken ct,
+    internal Action<Task>? InboundFinalizationStartedForTests { get; set; }
+
+    private Task FinalizeInboundTransferWithWriteBindingAsync(InboundTransferContext context, CancellationToken ct,
+        InboundBootstrapWriteSource? requiredWriteSource)
+    {
+        var task = FinalizeInboundTransferCoreAsync(context, ct, requiredWriteSource);
+        InboundFinalizationStartedForTests?.Invoke(task);
+        return task;
+    }
+
+    private async Task FinalizeInboundTransferCoreAsync(InboundTransferContext context, CancellationToken ct,
         InboundBootstrapWriteSource? requiredWriteSource)
     {
         Stream? writeStream;
@@ -5258,6 +5273,7 @@ public sealed partial class SessionFileTransferService :
         bool sparseMode;
         int negotiatedDataProtocolVersion;
         FileTransferReceiveDestination? destination;
+        InboundFinalizationSource finalizationSource;
 
         lock (gate)
         {
@@ -5267,6 +5283,8 @@ public sealed partial class SessionFileTransferService :
                 return;
             }
 
+            if (CaptureInboundFinalizationSourceLocked(context, requiredWriteSource) is not { } captured) { return; }
+            finalizationSource = captured;
             writeStream = context.WriteStream;
             hash = context.Hash;
             bytesTransferred = context.BytesTransferred;
@@ -5289,7 +5307,7 @@ public sealed partial class SessionFileTransferService :
 
         if (writeStream is null || hash is null)
         {
-            await TransitionInboundToTerminalCoreAsync(
+            await TransitionInboundToTerminalWithFinalizationSourceAsync(
                 context,
                 FileTransferTransferState.Failed,
                 errorCode: StreamOpenFailedErrorCode,
@@ -5298,7 +5316,8 @@ public sealed partial class SessionFileTransferService :
                 errorMessage: "Destination stream became unavailable.",
                 cancelReason: null,
                 ct: CancellationToken.None,
-                requiredFeedbackOperation: null, requiredWriteSource: requiredWriteSource).ConfigureAwait(false);
+                requiredFeedbackOperation: null, requiredWriteSource: requiredWriteSource,
+                requiredFinalizationSource: finalizationSource).ConfigureAwait(false);
             return;
         }
 
@@ -5311,7 +5330,7 @@ public sealed partial class SessionFileTransferService :
                     $"event=filetransfer_v4_finalize_size_mismatch; transfer_id={transferId}; session_id={sessionId}; bytes_transferred={bytesTransferred}; file_size={fileSizeBytes}; delta_bytes={bytesTransferred - fileSizeBytes}");
             }
 
-            await TransitionInboundToTerminalCoreAsync(
+            await TransitionInboundToTerminalWithFinalizationSourceAsync(
                 context,
                 FileTransferTransferState.Failed,
                 errorCode: FileSizeMismatchErrorCode,
@@ -5320,7 +5339,8 @@ public sealed partial class SessionFileTransferService :
                 errorMessage: "Received bytes did not match the declared file size.",
                 cancelReason: null,
                 ct: CancellationToken.None,
-                requiredFeedbackOperation: null, requiredWriteSource: requiredWriteSource).ConfigureAwait(false);
+                requiredFeedbackOperation: null, requiredWriteSource: requiredWriteSource,
+                requiredFinalizationSource: finalizationSource).ConfigureAwait(false);
             return;
         }
 
@@ -5351,7 +5371,7 @@ public sealed partial class SessionFileTransferService :
         }
         catch (Exception ex)
         {
-            await TransitionInboundToTerminalCoreAsync(
+            await TransitionInboundToTerminalWithFinalizationSourceAsync(
                 context,
                 FileTransferTransferState.Failed,
                 errorCode: StreamWriteFailedErrorCode,
@@ -5360,7 +5380,8 @@ public sealed partial class SessionFileTransferService :
                 errorMessage: "Could not finalize the destination stream.",
                 cancelReason: null,
                 ct: CancellationToken.None,
-                requiredFeedbackOperation: null, requiredWriteSource: requiredWriteSource).ConfigureAwait(false);
+                requiredFeedbackOperation: null, requiredWriteSource: requiredWriteSource,
+                requiredFinalizationSource: finalizationSource).ConfigureAwait(false);
             return;
         }
 
@@ -5374,7 +5395,7 @@ public sealed partial class SessionFileTransferService :
                 errorCode: HashMismatchErrorCode,
                 fileName: context.FileName,
                 fileSizeBytes: context.FileSizeBytes);
-            await TransitionInboundToTerminalCoreAsync(
+            await TransitionInboundToTerminalWithFinalizationSourceAsync(
                 context,
                 FileTransferTransferState.Failed,
                 errorCode: HashMismatchErrorCode,
@@ -5383,7 +5404,8 @@ public sealed partial class SessionFileTransferService :
                 errorMessage: "File hash verification failed.",
                 cancelReason: null,
                 ct: CancellationToken.None,
-                requiredFeedbackOperation: null, requiredWriteSource: requiredWriteSource).ConfigureAwait(false);
+                requiredFeedbackOperation: null, requiredWriteSource: requiredWriteSource,
+                requiredFinalizationSource: finalizationSource).ConfigureAwait(false);
             return;
         }
 
@@ -5395,20 +5417,18 @@ public sealed partial class SessionFileTransferService :
             fileName: context.FileName,
             fileSizeBytes: context.FileSizeBytes);
 
+        await TryRequestAutomaticNativeDestinationAsync(context, finalizationSource).ConfigureAwait(false);
+
         try
         {
             if (destination is not null)
             {
                 Task finalizing;
-                if (requiredWriteSource is not null)
+                lock (gate)
                 {
-                    lock (gate)
-                    {
-                        if (!IsInboundBootstrapWriteSourceCurrentLocked(context, requiredWriteSource)) { return; }
-                        finalizing = destination.FinalizeAsync(ct);
-                    }
+                    if (!IsInboundFinalizationSourceCurrentLocked(context, finalizationSource)) { return; }
+                    finalizing = destination.FinalizeAsync(ct);
                 }
-                else { finalizing = destination.FinalizeAsync(ct); }
                 await finalizing.ConfigureAwait(false);
             }
             LogTransferInfo(
@@ -5432,7 +5452,7 @@ public sealed partial class SessionFileTransferService :
                 fileName: context.FileName,
                 fileSizeBytes: context.FileSizeBytes,
                 savedPath: destination?.FinalPath);
-            await TransitionInboundToTerminalCoreAsync(
+            await TransitionInboundToTerminalWithFinalizationSourceAsync(
                 context,
                 FileTransferTransferState.Failed,
                 errorCode: FinalizeFailedErrorCode,
@@ -5441,19 +5461,17 @@ public sealed partial class SessionFileTransferService :
                 errorMessage: "Could not finalize the received file.",
                 cancelReason: null,
                 ct: CancellationToken.None,
-                requiredFeedbackOperation: null, requiredWriteSource: requiredWriteSource).ConfigureAwait(false);
+                requiredFeedbackOperation: null, requiredWriteSource: requiredWriteSource,
+                requiredFinalizationSource: finalizationSource).ConfigureAwait(false);
             return;
         }
 
         lock (gate)
         {
-            if (requiredWriteSource is not null && !IsInboundBootstrapWriteSourceCurrentLocked(context, requiredWriteSource)) { return; }
-            if (ReferenceEquals(inboundTransfer, context) && !context.IsTerminal)
-            {
-                context.SavedFilePath = destination?.FinalPath;
-                context.SavedDirectoryPath = destination?.DirectoryPath;
-                context.SavedFileName = destination?.SafeFileName ?? context.FileName;
-            }
+            if (!IsInboundFinalizationSourceCurrentLocked(context, finalizationSource)) { return; }
+            context.SavedFilePath = destination?.FinalPath;
+            context.SavedDirectoryPath = destination?.DirectoryPath;
+            context.SavedFileName = destination?.SafeFileName ?? context.FileName;
         }
 
         try
@@ -5467,15 +5485,11 @@ public sealed partial class SessionFileTransferService :
                 FileSizeBytes = fileSizeBytes, Sha256Base64 = computedHash,
             };
             Task sendingCompletion;
-            if (requiredWriteSource is not null)
+            lock (gate)
             {
-                lock (gate)
-                {
-                    if (!IsInboundBootstrapWriteSourceCurrentLocked(context, requiredWriteSource)) { return; }
-                    sendingCompletion = currentTransport.SendFileTransferCompleteAsync(completion, linkedCompletionCts.Token);
-                }
+                if (!IsInboundFinalizationSourceCurrentLocked(context, finalizationSource)) { return; }
+                sendingCompletion = currentTransport.SendFileTransferCompleteAsync(completion, linkedCompletionCts.Token);
             }
-            else { sendingCompletion = currentTransport.SendFileTransferCompleteAsync(completion, linkedCompletionCts.Token); }
             await sendingCompletion.ConfigureAwait(false);
             LocalOperationalLog.Info(
                 "FileTransferService",
@@ -5484,18 +5498,31 @@ public sealed partial class SessionFileTransferService :
             if (requiredWriteSource is null && ShouldUseV6SparseCreditEnvelope(context))
             {
                 using var dataFrameTimeout = new CancellationTokenSource(TimeSpan.FromMilliseconds(LifecyclePrioritySendTimeoutMs));
-                await SendInboundV4CompleteAsync(
+                Task sendingEcho;
+                lock (gate)
+                {
+                    if (!IsInboundFinalizationSourceCurrentLocked(context, finalizationSource)) { return; }
+                    sendingEcho = SendInboundV4CompleteAsync(
                         context,
                         sessionId,
                         transferId,
                         context.FileSizeBytes,
                         computedHash,
                         dataFrameTimeout.Token,
-                        failOnSendFailure: false)
-                    .ConfigureAwait(false);
+                        failOnSendFailure: false);
+                }
+                await sendingEcho.ConfigureAwait(false);
             }
 
-            await TransitionInboundToTerminalCoreAsync(
+            if (sparseMode)
+            {
+                // Receipt is not success. Only publish this recovery signal after
+                // verification, destination finalization, and the lifecycle send.
+                await SendInboundV4TerminalReadyStateBestEffortAsync(context, requiredWriteSource,
+                    requiredFinalizationSource: finalizationSource).ConfigureAwait(false);
+            }
+
+            await TransitionInboundToTerminalWithFinalizationSourceAsync(
                 context,
                 FileTransferTransferState.Completed,
                 errorCode: null,
@@ -5504,11 +5531,12 @@ public sealed partial class SessionFileTransferService :
                 errorMessage: null,
                 cancelReason: null,
                 ct: CancellationToken.None,
-                requiredFeedbackOperation: null, requiredWriteSource: requiredWriteSource).ConfigureAwait(false);
+                requiredFeedbackOperation: null, requiredWriteSource: requiredWriteSource,
+                requiredFinalizationSource: finalizationSource).ConfigureAwait(false);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            await TransitionInboundToTerminalCoreAsync(
+            await TransitionInboundToTerminalWithFinalizationSourceAsync(
                 context,
                 FileTransferTransferState.Failed,
                 errorCode: InvalidStateErrorCode,
@@ -5517,7 +5545,8 @@ public sealed partial class SessionFileTransferService :
                 errorMessage: "Could not send the completion acknowledgment.",
                 cancelReason: null,
                 ct: CancellationToken.None,
-                requiredFeedbackOperation: null, requiredWriteSource: requiredWriteSource).ConfigureAwait(false);
+                requiredFeedbackOperation: null, requiredWriteSource: requiredWriteSource,
+                requiredFinalizationSource: finalizationSource).ConfigureAwait(false);
         }
     }
 
@@ -13453,7 +13482,7 @@ public sealed partial class SessionFileTransferService :
         var routeToken = FileTransferRouteResolver.Resolve(decision.CurrentRoute).TelemetryToken;
         LocalOperationalLog.Info(
             "FileTransferService",
-            $"event=filetransfer_fallback_frontier_repair_authority_granted; direction={direction.ToString().ToLowerInvariant()}; transfer_id={FormatProtocolLogValue(transferId)}; session_id={FormatProtocolLogValue(sessionId)}; source={FormatProtocolLogValue(source)}; stage={FormatProtocolLogValue(stage)}; repair_request_key={FormatProtocolLogValue(repairRequestKey)}; repair_replay_kind={FormatProtocolLogValue(decision.RepairKind.ToString())}; route={FormatProtocolLogValue(routeToken)}; protocol_version={decision.CurrentProtocolVersion}; live_route_epoch={decision.CurrentLiveRouteEpoch}; runtime_generation={decision.CurrentRuntimeGeneration}; terminal_generation={decision.CurrentTerminalGeneration}; leg_generation={decision.CurrentLegGeneration}; transport_epoch={decision.TransportEpoch}; bridge_recovery_generation={decision.BridgeRecoveryGeneration}; repair_replay_generation={decision.RepairGeneration}; attempted_leg_generation={leg?.Generation ?? 0}; attempted_transport_epoch={leg?.TransportEpochId ?? 0}; attempted_bridge_recovery_generation={leg?.BridgeRecoveryGeneration ?? 0}; range_count={rangeCount}; requested_chunk_count={requestedChunkCount}; scheduled_chunk_count={scheduledChunkCount}; decision_reason={FormatProtocolLogValue(decision.Reason)}");
+            $"event=filetransfer_fallback_frontier_repair_authority_granted; {FileTransferDiagnosticScopeEvidence.Format(sessionId, transferId)}direction={direction.ToString().ToLowerInvariant()}; transfer_id={FormatProtocolLogValue(transferId)}; session_id={FormatProtocolLogValue(sessionId)}; source={FormatProtocolLogValue(source)}; stage={FormatProtocolLogValue(stage)}; repair_request_key={FormatProtocolLogValue(repairRequestKey)}; repair_replay_kind={FormatProtocolLogValue(decision.RepairKind.ToString())}; route={FormatProtocolLogValue(routeToken)}; protocol_version={decision.CurrentProtocolVersion}; live_route_epoch={decision.CurrentLiveRouteEpoch}; runtime_generation={decision.CurrentRuntimeGeneration}; terminal_generation={decision.CurrentTerminalGeneration}; leg_generation={decision.CurrentLegGeneration}; transport_epoch={decision.TransportEpoch}; bridge_recovery_generation={decision.BridgeRecoveryGeneration}; repair_replay_generation={decision.RepairGeneration}; attempted_leg_generation={leg?.Generation ?? 0}; attempted_transport_epoch={leg?.TransportEpochId ?? 0}; attempted_bridge_recovery_generation={leg?.BridgeRecoveryGeneration ?? 0}; range_count={rangeCount}; requested_chunk_count={requestedChunkCount}; scheduled_chunk_count={scheduledChunkCount}; decision_reason={FormatProtocolLogValue(decision.Reason)}");
     }
 
     private static void LogFileTransferFallbackFrontierRepairAuthorityRejected(
@@ -13468,7 +13497,7 @@ public sealed partial class SessionFileTransferService :
         RepairReplayKind repairKind)
         => LocalOperationalLog.Warn(
             "FileTransferService",
-            $"event=filetransfer_fallback_frontier_repair_authority_rejected; direction={direction.ToString().ToLowerInvariant()}; transfer_id={FormatProtocolLogValue(transferId)}; session_id={FormatProtocolLogValue(sessionId)}; source={FormatProtocolLogValue(source)}; stage={FormatProtocolLogValue(stage)}; repair_request_key={FormatProtocolLogValue(repairRequestKey)}; repair_replay_kind={FormatProtocolLogValue(repairKind.ToString())}; route={FormatProtocolLogValue(leg?.RouteSelection.TelemetryToken ?? "(none)")}; protocol_version={leg?.ProtocolVersion ?? 0}; live_route_epoch={leg?.LiveRouteEpochId ?? 0}; leg_generation={leg?.Generation ?? 0}; transport_epoch={leg?.TransportEpochId ?? 0}; bridge_recovery_generation={leg?.BridgeRecoveryGeneration ?? 0}; rejection_reason={FormatProtocolLogValue(rejectionReason)}; decision_reason={FormatProtocolLogValue(rejectionReason)}");
+            $"event=filetransfer_fallback_frontier_repair_authority_rejected; {FileTransferDiagnosticScopeEvidence.Format(sessionId, transferId)}direction={direction.ToString().ToLowerInvariant()}; transfer_id={FormatProtocolLogValue(transferId)}; session_id={FormatProtocolLogValue(sessionId)}; source={FormatProtocolLogValue(source)}; stage={FormatProtocolLogValue(stage)}; repair_request_key={FormatProtocolLogValue(repairRequestKey)}; repair_replay_kind={FormatProtocolLogValue(repairKind.ToString())}; route={FormatProtocolLogValue(leg?.RouteSelection.TelemetryToken ?? "(none)")}; protocol_version={leg?.ProtocolVersion ?? 0}; live_route_epoch={leg?.LiveRouteEpochId ?? 0}; leg_generation={leg?.Generation ?? 0}; transport_epoch={leg?.TransportEpochId ?? 0}; bridge_recovery_generation={leg?.BridgeRecoveryGeneration ?? 0}; rejection_reason={FormatProtocolLogValue(rejectionReason)}; decision_reason={FormatProtocolLogValue(rejectionReason)}");
 
     private static void LogFileTransferFallbackFrontierRepairDispatched(
         FileTransferDirection direction,
@@ -13506,7 +13535,7 @@ public sealed partial class SessionFileTransferService :
         var repairReplayGeneration = decision?.RepairGeneration ?? 0;
         LocalOperationalLog.Info(
             "FileTransferService",
-            $"event=filetransfer_fallback_frontier_repair_dispatched; direction={direction.ToString().ToLowerInvariant()}; transfer_id={FormatProtocolLogValue(transferId)}; session_id={FormatProtocolLogValue(sessionId)}; stage={FormatProtocolLogValue(stage)}; repair_request_key={FormatProtocolLogValue(repairRequestKey)}; protocol_repair_request_id={FormatProtocolLogValue(protocolRepairRequestId)}; route={FormatProtocolLogValue(route)}; protocol_version={protocolVersion}; live_route_epoch={liveRouteEpoch}; runtime_generation={runtimeGeneration}; terminal_generation={terminalGeneration}; leg_generation={legGeneration}; transport_epoch={transportEpoch}; bridge_recovery_generation={bridgeRecoveryGeneration}; repair_replay_generation={repairReplayGeneration}; attempted_leg_generation={leg?.Generation ?? 0}; attempted_transport_epoch={leg?.TransportEpochId ?? 0}; attempted_bridge_recovery_generation={leg?.BridgeRecoveryGeneration ?? 0}; sent_chunk_count={sentChunkCount}; remote_next_expected_chunk_index={remoteNextExpectedChunkIndex}; chunks_accepted_for_transport={chunksAcceptedForTransport}");
+            $"event=filetransfer_fallback_frontier_repair_dispatched; {FileTransferDiagnosticScopeEvidence.Format(sessionId, transferId)}direction={direction.ToString().ToLowerInvariant()}; transfer_id={FormatProtocolLogValue(transferId)}; session_id={FormatProtocolLogValue(sessionId)}; stage={FormatProtocolLogValue(stage)}; repair_request_key={FormatProtocolLogValue(repairRequestKey)}; protocol_repair_request_id={FormatProtocolLogValue(protocolRepairRequestId)}; route={FormatProtocolLogValue(route)}; protocol_version={protocolVersion}; live_route_epoch={liveRouteEpoch}; runtime_generation={runtimeGeneration}; terminal_generation={terminalGeneration}; leg_generation={legGeneration}; transport_epoch={transportEpoch}; bridge_recovery_generation={bridgeRecoveryGeneration}; repair_replay_generation={repairReplayGeneration}; attempted_leg_generation={leg?.Generation ?? 0}; attempted_transport_epoch={leg?.TransportEpochId ?? 0}; attempted_bridge_recovery_generation={leg?.BridgeRecoveryGeneration ?? 0}; sent_chunk_count={sentChunkCount}; remote_next_expected_chunk_index={remoteNextExpectedChunkIndex}; chunks_accepted_for_transport={chunksAcceptedForTransport}");
     }
 
     private static void LogFileTransferFallbackFrontierRepairProgressObserved(
@@ -13520,7 +13549,7 @@ public sealed partial class SessionFileTransferService :
         int requestedChunkCount)
         => LocalOperationalLog.Info(
             "FileTransferService",
-            $"event=filetransfer_fallback_frontier_repair_progress_observed; direction={direction.ToString().ToLowerInvariant()}; transfer_id={FormatProtocolLogValue(transferId)}; session_id={FormatProtocolLogValue(sessionId)}; repair_request_key={FormatProtocolLogValue(repairRequestKey)}; reason={FormatProtocolLogValue(reason)}; committed_frontier_before={committedFrontierBefore}; committed_frontier_after={committedFrontierAfter}; requested_chunk_count={requestedChunkCount}");
+            $"event=filetransfer_fallback_frontier_repair_progress_observed; {FileTransferDiagnosticScopeEvidence.Format(sessionId, transferId)}direction={direction.ToString().ToLowerInvariant()}; transfer_id={FormatProtocolLogValue(transferId)}; session_id={FormatProtocolLogValue(sessionId)}; repair_request_key={FormatProtocolLogValue(repairRequestKey)}; reason={FormatProtocolLogValue(reason)}; committed_frontier_before={committedFrontierBefore}; committed_frontier_after={committedFrontierAfter}; requested_chunk_count={requestedChunkCount}");
 
     private static void LogFileTransferFallbackFrontierRepairStalled(
         FileTransferDirection direction,
@@ -13536,7 +13565,7 @@ public sealed partial class SessionFileTransferService :
         long frontierStallAgeMs)
         => LocalOperationalLog.Warn(
             "FileTransferService",
-            $"event=filetransfer_fallback_frontier_repair_stalled; direction={direction.ToString().ToLowerInvariant()}; transfer_id={FormatProtocolLogValue(transferId)}; session_id={FormatProtocolLogValue(sessionId)}; repair_request_key={FormatProtocolLogValue(repairRequestKey)}; route={FormatProtocolLogValue(leg?.RouteSelection.TelemetryToken ?? "(none)")}; protocol_version={leg?.ProtocolVersion ?? 0}; live_route_epoch={leg?.LiveRouteEpochId ?? 0}; leg_generation={leg?.Generation ?? 0}; transport_epoch={leg?.TransportEpochId ?? 0}; bridge_recovery_generation={leg?.BridgeRecoveryGeneration ?? 0}; reason={FormatProtocolLogValue(reason)}; frontier_chunk_index={frontierChunkIndex}; durable_received_highest_chunk_index={durableReceivedHighestChunkIndex}; requested_chunk_count={requestedChunkCount}; attempt_count={attemptCount}; frontier_stall_age_ms={frontierStallAgeMs}");
+            $"event=filetransfer_fallback_frontier_repair_stalled; {FileTransferDiagnosticScopeEvidence.Format(sessionId, transferId)}direction={direction.ToString().ToLowerInvariant()}; transfer_id={FormatProtocolLogValue(transferId)}; session_id={FormatProtocolLogValue(sessionId)}; repair_request_key={FormatProtocolLogValue(repairRequestKey)}; route={FormatProtocolLogValue(leg?.RouteSelection.TelemetryToken ?? "(none)")}; protocol_version={leg?.ProtocolVersion ?? 0}; live_route_epoch={leg?.LiveRouteEpochId ?? 0}; leg_generation={leg?.Generation ?? 0}; transport_epoch={leg?.TransportEpochId ?? 0}; bridge_recovery_generation={leg?.BridgeRecoveryGeneration ?? 0}; reason={FormatProtocolLogValue(reason)}; frontier_chunk_index={frontierChunkIndex}; durable_received_highest_chunk_index={durableReceivedHighestChunkIndex}; requested_chunk_count={requestedChunkCount}; attempt_count={attemptCount}; frontier_stall_age_ms={frontierStallAgeMs}");
 
     private static void LogFileTransferRegularV4FrontierRepairAuthorityGranted(
         FileTransferDirection direction,
@@ -15144,7 +15173,7 @@ public sealed partial class SessionFileTransferService :
         };
     }
 
-    private static string CreateFallbackTailYieldFrameFingerprint(
+    internal static string CreateFallbackTailYieldFrameFingerprint(
         FileTransferFallbackTailYieldFrameV6 frame)
     {
         var canonical = string.Join(
@@ -15171,7 +15200,7 @@ public sealed partial class SessionFileTransferService :
         return Convert.ToHexString(hash).ToLowerInvariant();
     }
 
-    private static string CreateFallbackTailYieldProofIdentity(
+    internal static string CreateFallbackTailYieldProofIdentity(
         FileTransferFallbackTailYieldFrameV6 frame)
         => string.Join(
             ":",
@@ -16192,6 +16221,10 @@ public sealed partial class SessionFileTransferService :
                     yieldFrame,
                     out _))
             {
+                if (request.Frame is FileTransferFallbackTailYieldFrameV6 staleFrame)
+                {
+                    LogYieldReceiptAssociation(staleFrame, result?.YieldEvidence, null, false, "local_proof");
+                }
                 LogFileTransferFallbackTailYieldProofStaleIgnored(
                     FileTransferDirection.Outbound,
                     context.TransferId,
@@ -16213,10 +16246,11 @@ public sealed partial class SessionFileTransferService :
                 result,
                 reason);
             if (result?.PeerVisibleAny == true &&
-                ApplyFallbackTailLocalProofReceiptLocked(
+                ApplyFallbackTailLocalProofReceiptWithEvidenceLocked(
                     context,
                     yieldFrame,
-                    "fallback_tail_yield_proof_delivered"))
+                    "fallback_tail_yield_proof_delivered",
+                    result.YieldEvidence))
             {
                 HandleOutboundFallbackTailPairedReleaseLocked(
                     context,
@@ -16358,6 +16392,10 @@ public sealed partial class SessionFileTransferService :
                     yieldFrame,
                     out _))
             {
+                if (request.Frame is FileTransferFallbackTailYieldFrameV6 staleFrame)
+                {
+                    LogYieldReceiptAssociation(staleFrame, result?.YieldEvidence, null, false, "local_proof");
+                }
                 LogFileTransferFallbackTailYieldProofStaleIgnored(
                     FileTransferDirection.Inbound,
                     context.TransferId,
@@ -16379,10 +16417,11 @@ public sealed partial class SessionFileTransferService :
                 result,
                 reason);
             if (result?.PeerVisibleAny == true &&
-                ApplyFallbackTailLocalProofReceiptLocked(
+                ApplyFallbackTailLocalProofReceiptWithEvidenceLocked(
                     context,
                     yieldFrame,
-                    "fallback_tail_yield_proof_delivered"))
+                    "fallback_tail_yield_proof_delivered",
+                    result.YieldEvidence))
             {
                 HandleInboundFallbackTailPairedReleaseLocked(
                     context,
@@ -16395,12 +16434,20 @@ public sealed partial class SessionFileTransferService :
         OutboundTransferContext context,
         FileTransferFallbackTailYieldFrameV6 frame,
         string reason)
+        => ApplyFallbackTailLocalProofReceiptWithEvidenceLocked(context, frame, reason, null);
+
+    private static bool ApplyFallbackTailLocalProofReceiptWithEvidenceLocked(
+        OutboundTransferContext context,
+        FileTransferFallbackTailYieldFrameV6 frame,
+        string reason,
+        FileTransferFallbackTailYieldEvidence? evidence)
     {
         if (GetCurrentFallbackTailYieldOperation(context) is not
             {
                 Decision: var decision,
             })
         {
+            LogYieldReceiptAssociation(frame, evidence, null, false, "local_proof");
             return false;
         }
 
@@ -16423,6 +16470,7 @@ public sealed partial class SessionFileTransferService :
             applied.Reason,
             localProof: receipt);
         var adoptedState = AdoptCoordinatorStateLocked(context, applied);
+        LogYieldReceiptAssociation(frame, evidence, applied.SnapshotEnvelope, applied.StateChanged, "local_proof", applied.Status.ToString());
         if (applied.StateChanged)
         {
             LogFallbackTailYieldAggregateTransitions(
@@ -16451,12 +16499,20 @@ public sealed partial class SessionFileTransferService :
         InboundTransferContext context,
         FileTransferFallbackTailYieldFrameV6 frame,
         string reason)
+        => ApplyFallbackTailLocalProofReceiptWithEvidenceLocked(context, frame, reason, null);
+
+    private static bool ApplyFallbackTailLocalProofReceiptWithEvidenceLocked(
+        InboundTransferContext context,
+        FileTransferFallbackTailYieldFrameV6 frame,
+        string reason,
+        FileTransferFallbackTailYieldEvidence? evidence)
     {
         if (GetCurrentFallbackTailYieldOperation(context) is not
             {
                 Decision: var decision,
             })
         {
+            LogYieldReceiptAssociation(frame, evidence, null, false, "local_proof");
             return false;
         }
 
@@ -16479,6 +16535,7 @@ public sealed partial class SessionFileTransferService :
             applied.Reason,
             localProof: receipt);
         var adoptedState = AdoptCoordinatorStateLocked(context, applied);
+        LogYieldReceiptAssociation(frame, evidence, applied.SnapshotEnvelope, applied.StateChanged, "local_proof", applied.Status.ToString());
         if (applied.StateChanged)
         {
             LogFallbackTailYieldAggregateTransitions(
@@ -16506,13 +16563,20 @@ public sealed partial class SessionFileTransferService :
     private void ApplyOutboundFallbackTailYieldProof(
         OutboundTransferContext context,
         FileTransferFallbackTailYieldFrameV6 frame)
+        => ApplyOutboundFallbackTailYieldProofWithEvidence(context, frame, null);
+
+    private void ApplyOutboundFallbackTailYieldProofWithEvidence(
+        OutboundTransferContext context,
+        FileTransferFallbackTailYieldFrameV6 frame,
+        FileTransferFallbackTailYieldEvidence? evidence)
         => ApplyOutboundFallbackTailYieldProofFromReceive(
             context,
             frame,
             receiveInstall: null,
             receiveRuntimeOwner: null,
             receiveDataSession: null,
-            receiveDataSessionGeneration: 0);
+            receiveDataSessionGeneration: 0,
+            evidence);
 
     private void ApplyOutboundFallbackTailYieldProofFromReceive(
         OutboundTransferContext context,
@@ -16520,7 +16584,8 @@ public sealed partial class SessionFileTransferService :
         OutboundSparsePumpInstall? receiveInstall,
         RuntimeOwnerToken? receiveRuntimeOwner,
         IFileTransferDataSession? receiveDataSession,
-        long receiveDataSessionGeneration)
+        long receiveDataSessionGeneration,
+        FileTransferFallbackTailYieldEvidence? evidence = null)
     {
         lock (gate)
         {
@@ -16535,6 +16600,7 @@ public sealed partial class SessionFileTransferService :
                      receiveDataSessionGeneration,
                      out _)))
             {
+                LogYieldReceiptAssociation(frame, evidence, null, false, "peer_proof");
                 return;
             }
 
@@ -16547,7 +16613,8 @@ public sealed partial class SessionFileTransferService :
                     context,
                     frame,
                     out var duplicate,
-                    out reason))
+                    out reason,
+                    evidence))
             {
                 LogFileTransferFallbackTailYieldProofStaleIgnored(
                     FileTransferDirection.Outbound,
@@ -16586,11 +16653,16 @@ public sealed partial class SessionFileTransferService :
     }
 
     private void ApplyInboundFallbackTailYieldProof(InboundTransferContext context, FileTransferFallbackTailYieldFrameV6 frame)
+        => ApplyInboundFallbackTailYieldProofWithEvidence(context, frame, null);
+
+    private void ApplyInboundFallbackTailYieldProofWithEvidence(InboundTransferContext context,
+        FileTransferFallbackTailYieldFrameV6 frame, FileTransferFallbackTailYieldEvidence? evidence)
     {
         lock (gate)
         {
             if (!ReferenceEquals(inboundTransfer, context) || context.IsTerminal)
             {
+                LogYieldReceiptAssociation(frame, evidence, null, false, "peer_proof");
                 return;
             }
 
@@ -16603,7 +16675,8 @@ public sealed partial class SessionFileTransferService :
                     context,
                     frame,
                     out var duplicate,
-                    out reason))
+                    out reason,
+                    evidence))
             {
                 LogFileTransferFallbackTailYieldProofStaleIgnored(
                     FileTransferDirection.Inbound,
@@ -16693,7 +16766,8 @@ public sealed partial class SessionFileTransferService :
         OutboundTransferContext context,
         FileTransferFallbackTailYieldFrameV6 frame,
         out bool duplicate,
-        out string reason)
+        out string reason,
+        FileTransferFallbackTailYieldEvidence? evidence = null)
     {
         var state = CreateCoordinatorStateLocked(context);
         var previous =
@@ -16708,6 +16782,9 @@ public sealed partial class SessionFileTransferService :
         {
             _ = AdoptCoordinatorStateLocked(context, applied);
         }
+        LogYieldReceiptAssociation(frame, evidence, applied.SnapshotEnvelope,
+            applied.Reason is not null && applied.StateChanged, "peer_proof",
+            applied.Reason is null ? null : applied.Status.ToString());
         if (applied.StateChanged)
         {
             LogFallbackTailYieldAggregateTransitions(
@@ -16723,7 +16800,8 @@ public sealed partial class SessionFileTransferService :
         InboundTransferContext context,
         FileTransferFallbackTailYieldFrameV6 frame,
         out bool duplicate,
-        out string reason)
+        out string reason,
+        FileTransferFallbackTailYieldEvidence? evidence = null)
     {
         var state = CreateCoordinatorStateLocked(context);
         var previous =
@@ -16738,6 +16816,9 @@ public sealed partial class SessionFileTransferService :
         {
             _ = AdoptCoordinatorStateLocked(context, applied);
         }
+        LogYieldReceiptAssociation(frame, evidence, applied.SnapshotEnvelope,
+            applied.Reason is not null && applied.StateChanged, "peer_proof",
+            applied.Reason is null ? null : applied.Status.ToString());
         if (applied.StateChanged)
         {
             LogFallbackTailYieldAggregateTransitions(
@@ -17555,6 +17636,28 @@ public sealed partial class SessionFileTransferService :
         if (!string.IsNullOrWhiteSpace(currentLeg.CheckpointRequestId))
         {
             LogBlocked("fallback_tail_local_checkpoint_pending");
+            return false;
+        }
+
+        var committed = Math.Clamp(context.NextChunkIndex, 0, Math.Max(0, context.ChunkCount));
+        var highestObserved = Math.Max(-1, context.PullHighestReceivedChunkIndex);
+        if (IsInboundPostFallbackFrontierGapMissingLocked(context) ||
+            IsFallbackFrontierObligationBlockingTailYield(
+                context.CurrentFallbackFrontierRepairContract,
+                currentLeg.StartCommittedChunkIndex,
+                committed,
+                highestObserved,
+                frontierGapObserved: highestObserved >= committed))
+        {
+            LogFallbackTailYieldBlockedByFrontierObligation(
+                FileTransferDirection.Inbound,
+                context.TransferId,
+                context.SessionId,
+                currentLeg,
+                context.CurrentFallbackFrontierRepairContract,
+                committed,
+                highestObserved,
+                reason);
             return false;
         }
 
@@ -19710,10 +19813,15 @@ public sealed partial class SessionFileTransferService :
         bool diagnosticOnly = false,
         CheckpointRepairContinuityStamp? checkpointContinuityStamp = null)
     {
+        if (request.Frame is FileTransferFallbackTailYieldFrameV6 yield &&
+            (diagnosticOnly || !result.PeerVisibleAny))
+        {
+            LogYieldReceiptAssociation(yield, result.YieldEvidence, null, false, "local_proof");
+        }
         var frameCorrelation = FormatControlPlaneFrameCorrelationSuffix(request.Frame);
         LocalOperationalLog.Info(
             "FileTransferService",
-            $"event=filetransfer_control_plane_delivery_observed; {FormatCheckpointRepairContinuity(checkpointContinuityStamp)}direction={FormatFileTransferDirection(request.Direction)}; kind={FormatFileTransferControlPlaneKind(request.Kind)}; transfer_id={request.Frame.TransferId}; session_id={request.Frame.SessionId}; authority_id={request.AuthorityId}; authority_schema={request.AuthoritySchema}; control_plane_generation={request.ControlPlaneGeneration}; route={FormatProtocolLogValue(request.RouteToken ?? "(none)")}; protocol_version={request.ProtocolVersion}; live_route_epoch={request.LiveRouteEpoch}; leg_generation={request.TransferLegGeneration}; bridge_recovery_generation={request.BridgeRecoveryGeneration}; transport_epoch={request.TransportEpoch}; checkpoint_request_id={FormatProtocolLogValue(request.CheckpointRequestId ?? "(none)")}; reason={FormatProtocolLogValue(request.Reason)}; frame_type={FormatProtocolLogValue(request.Frame.Type)}{frameCorrelation}; control_queue={(result.ControlQueue ? 1 : 0)}; control_copy={(result.ControlCopy ? 1 : 0)}; bulk_copy={(result.BulkCopy ? 1 : 0)}; peer_visible_any={(result.PeerVisibleAny ? 1 : 0)}; accepted_any={(result.AcceptedAny ? 1 : 0)}; local_only_rejected={(result.ControlQueue && !result.PeerVisibleAny && request.PeerVisibleRequired ? 1 : 0)}");
+            $"event=filetransfer_control_plane_delivery_observed; {FileTransferDiagnosticScopeEvidence.Format(request.Frame.SessionId, request.Frame.TransferId)}{FormatCheckpointRepairContinuity(checkpointContinuityStamp)}direction={FormatFileTransferDirection(request.Direction)}; kind={FormatFileTransferControlPlaneKind(request.Kind)}; transfer_id={request.Frame.TransferId}; session_id={request.Frame.SessionId}; authority_id={request.AuthorityId}; authority_schema={request.AuthoritySchema}; control_plane_generation={request.ControlPlaneGeneration}; route={FormatProtocolLogValue(request.RouteToken ?? "(none)")}; protocol_version={request.ProtocolVersion}; live_route_epoch={request.LiveRouteEpoch}; leg_generation={request.TransferLegGeneration}; bridge_recovery_generation={request.BridgeRecoveryGeneration}; transport_epoch={request.TransportEpoch}; checkpoint_request_id={FormatProtocolLogValue(request.CheckpointRequestId ?? "(none)")}; reason={FormatProtocolLogValue(request.Reason)}; frame_type={FormatProtocolLogValue(request.Frame.Type)}{frameCorrelation}; control_queue={(result.ControlQueue ? 1 : 0)}; control_copy={(result.ControlCopy ? 1 : 0)}; bulk_copy={(result.BulkCopy ? 1 : 0)}; peer_visible_any={(result.PeerVisibleAny ? 1 : 0)}; accepted_any={(result.AcceptedAny ? 1 : 0)}; local_only_rejected={(result.ControlQueue && !result.PeerVisibleAny && request.PeerVisibleRequired ? 1 : 0)}");
         if (!result.AcceptedAny)
         {
             LocalOperationalLog.Warn(
@@ -22591,6 +22699,11 @@ public sealed partial class SessionFileTransferService :
             return false;
         }
 
+        if (context.V6StartupCheckpointOwner == context.CurrentRuntimeOwner)
+        {
+            context.V6StartupCheckpointOwner = null;
+        }
+
         RememberRetiredFallbackCheckpointRequest(context.RetiredFallbackCheckpointRequestKeys, acceptedTransportEpoch, acceptedCheckpointRequestId);
         ClearOutboundFallbackCheckpointRetryStateLocked(context, acceptedCheckpointRequestId, "checkpoint_accepted");
         ClearOutboundFallbackCheckpointDeliveryRecoveryPendingLocked(context, "checkpoint_accepted");
@@ -22705,6 +22818,11 @@ public sealed partial class SessionFileTransferService :
         FileTransferReceiverStateFrameV6 state,
         string source)
     {
+        if (context.V6StartupCheckpointOwner is { } startupOwner && context.CurrentRuntimeOwner == startupOwner)
+        {
+            return false;
+        }
+
         if (!FileTransferCoordinator.IsCurrentPostTunaFallbackLegAwaitingCheckpoint(leg) ||
             !context.RouteRuntime.UsesPostTunaFallbackV6Runtime ||
             context.RouteSelection.Route != FileTransferRoute.PostTunaFallbackV6 ||
@@ -23550,7 +23668,7 @@ public sealed partial class SessionFileTransferService :
         epoch.State = "terminal";
         LocalOperationalLog.Info(
             "FileTransferService",
-            $"event=filetransfer_live_route_epoch_terminal; direction={direction.ToString().ToLowerInvariant()}; transfer_id={transferId}; session_id={FormatProtocolLogValue(sessionId)}; live_route_epoch={epoch.EpochId}; route={epoch.RouteSelection.TelemetryToken}; protocol_version={epoch.RouteSelection.ProtocolVersion}; runtime_profile={FormatFileTransferRouteRuntimeProfile(epoch.RouteSelection.RuntimeProfile)}; frame_family={FormatFileTransferFrameFamily(epoch.RouteSelection.FrameFamily)}; handoff_kind={FormatFileTransferTransportHandoffKind(epoch.HandoffKind)}; target_transport={FormatFileTransferTransportKind(epoch.TargetTransport)}; terminal_state={terminalState.ToString().ToLowerInvariant()}; reason={FormatProtocolLogValue(reason)}");
+            $"event=filetransfer_live_route_epoch_terminal; {FileTransferDiagnosticScopeEvidence.Format(sessionId, transferId)}direction={direction.ToString().ToLowerInvariant()}; transfer_id={transferId}; session_id={FormatProtocolLogValue(sessionId)}; live_route_epoch={epoch.EpochId}; route={epoch.RouteSelection.TelemetryToken}; protocol_version={epoch.RouteSelection.ProtocolVersion}; runtime_profile={FormatFileTransferRouteRuntimeProfile(epoch.RouteSelection.RuntimeProfile)}; frame_family={FormatFileTransferFrameFamily(epoch.RouteSelection.FrameFamily)}; handoff_kind={FormatFileTransferTransportHandoffKind(epoch.HandoffKind)}; target_transport={FormatFileTransferTransportKind(epoch.TargetTransport)}; terminal_state={terminalState.ToString().ToLowerInvariant()}; reason={FormatProtocolLogValue(reason)}");
     }
 
     private static void LogLiveRouteEpochRecoveredBeforeTerminalIfCompleted(
@@ -24008,9 +24126,13 @@ public sealed partial class SessionFileTransferService :
         var routeFields = routeSelection is { } selection
             ? $"; route={selection.TelemetryToken}; protocol_version={selection.ProtocolVersion}; runtime_profile={FormatFileTransferRouteRuntimeProfile(selection.RuntimeProfile)}; frame_family={FormatFileTransferFrameFamily(selection.FrameFamily)}; handoff_kind={FormatFileTransferTransportHandoffKind(selection.HandoffKind)}; bridge_recovery_policy={FormatFileTransferRouteBridgeRecoveryPolicy(selection.BridgeRecoveryPolicy)}; liveness_terminal_policy={FormatFileTransferRouteLivenessTerminalPolicy(selection.LivenessTerminalPolicy)}; selection_reason={FormatProtocolLogValue(selection.SelectionReason)}"
             : string.Empty;
+        // Diagnostic correlation only. Raw identities retain normal redaction.
+        var terminalFields = eventName == "transfer_terminal"
+            ? $"; terminal_session_id={CoordinatorSnapshotStreamEmitter.EvidenceToken(sessionId)}; terminal_transfer_id={CoordinatorSnapshotStreamEmitter.EvidenceToken(transferId)}"
+            : string.Empty;
         LocalOperationalLog.Info(
             "FileTransferService",
-            $"event={eventName}; direction={direction.ToString().ToLowerInvariant()}; transfer_id={transferId}; session_id={sessionId ?? "(none)"}; file_name_len={(string.IsNullOrWhiteSpace(fileName) ? 0 : fileName.Trim().Length)}; file_size_bytes={(fileSizeBytes?.ToString() ?? "(none)")}; bytes_transferred={(bytesTransferred?.ToString() ?? "(none)")}; chunks_transferred={(chunksTransferred?.ToString() ?? "(none)")}; chunk_count={(chunkCount?.ToString() ?? "(none)")}; error_code={errorCode ?? "(none)"}; reason={reason ?? "(none)"}; saved_path={savedPath ?? "(none)"}{routeFields}");
+            $"event={eventName}; direction={direction.ToString().ToLowerInvariant()}; transfer_id={transferId}; session_id={sessionId ?? "(none)"}; file_name_len={(string.IsNullOrWhiteSpace(fileName) ? 0 : fileName.Trim().Length)}; file_size_bytes={(fileSizeBytes?.ToString() ?? "(none)")}; bytes_transferred={(bytesTransferred?.ToString() ?? "(none)")}; chunks_transferred={(chunksTransferred?.ToString() ?? "(none)")}; chunk_count={(chunkCount?.ToString() ?? "(none)")}; error_code={errorCode ?? "(none)"}; reason={reason ?? "(none)"}; saved_path={savedPath ?? "(none)"}{routeFields}{terminalFields}");
     }
 
     private static void LogTransportPaused(FileTransferDirection direction, string transferId, string sessionId, string reason)
@@ -24699,6 +24821,9 @@ public sealed partial class SessionFileTransferService :
         public int LastFallbackControlPlaneTokenGeneration { get; set; }
 
         public FallbackCheckpointLease? CurrentFallbackCheckpointLease { get; set; }
+
+        // Restricts initial V6 recovery to a matching response for this coordinator-issued owner.
+        public RuntimeOwnerToken? V6StartupCheckpointOwner { get; set; }
 
         public int LastFallbackCheckpointLeaseGeneration { get; set; }
 
@@ -25900,6 +26025,8 @@ public sealed partial class SessionFileTransferService :
 
         public FileTransferReceiveDestination? WriteDestination { get; set; }
 
+        public NativeDestinationEvidence? NativeDestinationEvidence { get; set; }
+
         public Stream? WriteStream { get; set; }
 
         public SemaphoreSlim ReceiverSparseWriteGate { get; } = new(1, 1);
@@ -26661,6 +26788,8 @@ public sealed partial class SessionFileTransferService :
         {
             FrontierPublicationObservation?.EndObservation();
             FrontierBoundaryObservation?.Close("EvidenceIncomplete");
+            NativeDestinationEvidence?.Dispose();
+            NativeDestinationEvidence = null;
             try
             {
                 DataSession?.Dispose();

@@ -75,13 +75,15 @@ public sealed record FileTransferWritePlan(
     long FileSizeBytes,
     int MaxChunkSizeBytes);
 
-public sealed class FileTransferWriteHandle : IDisposable, IAsyncDisposable
+public sealed partial class FileTransferWriteHandle : IDisposable, IAsyncDisposable
 {
+    private readonly FileTransferWriteHandle original;
     private bool finalized;
     private bool preserveTempArtifact;
 
     public FileTransferWriteHandle(FileTransferWritePlan plan, FileStream stream)
     {
+        original = this;
         Plan = plan ?? throw new ArgumentNullException(nameof(plan));
         Stream = stream ?? throw new ArgumentNullException(nameof(stream));
     }
@@ -92,6 +94,12 @@ public sealed class FileTransferWriteHandle : IDisposable, IAsyncDisposable
 
     public async Task FinalizeAsync(CancellationToken ct)
     {
+        if (windowsLifetime is not null)
+        {
+            await FinalizeWindowsAsync(ct).ConfigureAwait(false);
+            return;
+        }
+
         if (finalized)
         {
             return;
@@ -119,6 +127,12 @@ public sealed class FileTransferWriteHandle : IDisposable, IAsyncDisposable
 
     public void Dispose()
     {
+        if (windowsLifetime is not null)
+        {
+            DisposeWindows();
+            return;
+        }
+
         try
         {
             Stream.Dispose();
@@ -131,6 +145,12 @@ public sealed class FileTransferWriteHandle : IDisposable, IAsyncDisposable
 
     public async ValueTask DisposeAsync()
     {
+        if (windowsLifetime is not null)
+        {
+            await DisposeWindowsAsync().ConfigureAwait(false);
+            return;
+        }
+
         try
         {
             await Stream.DisposeAsync().ConfigureAwait(false);
@@ -356,11 +376,13 @@ public sealed class SessionFileTransferGuard
                 Options = FileOptions.Asynchronous | FileOptions.RandomAccess,
                 BufferSize = Math.Clamp(storagePolicy.MaxChunkSizeBytes, 4096, 64 * 1024),
             };
-            var stream = new FileStream(plan.TempPath, options);
+            var handle = OperatingSystem.IsWindows()
+                ? FileTransferWriteHandle.CreateWindows(plan, options.BufferSize)
+                : new FileTransferWriteHandle(plan, new FileStream(plan.TempPath, options));
             return new FileTransferWriteOpenResult(
                 FileTransferAccessResult.Allowed(),
                 plan,
-                new FileTransferWriteHandle(plan, stream));
+                handle);
         }
         catch (IOException) when (!storagePolicy.AllowOverwrite && (File.Exists(plan.FinalPath) || Directory.Exists(plan.FinalPath)))
         {

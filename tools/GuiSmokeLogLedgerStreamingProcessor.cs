@@ -260,6 +260,9 @@ namespace NLink.Tools
                             throw new IOException("stream_output_duplicate_failed");
                         files[i] = new FileStream(handle, FileAccess.Read); handle = null;
                         metadata[i] = descriptions[i];
+#if NLINK_TEST_BUFFERED_LEDGER
+                        NLink.Tests.BufferedLedgerProbe.Boundary("output-duplicate-" + i, files[i]);
+#endif
                         if (!metadata[i].Matches(files[i])) throw new InvalidDataException("stream_output_identity_mismatch");
                     }
                     finally { if (handle != null) handle.Dispose(); }
@@ -300,7 +303,7 @@ namespace NLink.Tools
                 {
                     if (!IsCurrent || semanticCopyAttempted || !Object.ReferenceEquals(expected, metadata[2]) || current == null) return null;
                     semanticCopyAttempted = true;
-                    if (expected.LineCount != originCount || originCount < 0 || originCount > GuiSmokeLedgerStreamRead.MaximumOriginEntries ||
+                    if (expected.LineCount != originCount || originCount < 0 || originCount > GuiSmokeLedgerStreamRead.MaximumLines ||
                         expected.ByteCount < 0 || expected.ByteCount > GuiSmokeLedgerStreamRead.MaximumSourceBytes +
                             (long)GuiSmokeLedgerStreamRead.MaximumLines * Environment.NewLine.Length || !current()) return null;
                     var input = files[2]; input.Position = 0;
@@ -358,13 +361,16 @@ namespace NLink.Tools
 
     internal sealed class GuiSmokeLedgerStreamRead : TextReader
     {
-        internal const int MaximumLines = 262144, MaximumLineCodeUnits = 262144, MaximumOriginEntries = 262144;
+        internal const int MaximumLines = 262144, MaximumLineCodeUnits = 262144, MaximumOriginEntries = 3 * MaximumLines;
         internal const long MaximumSourceBytes = 268435456;
         internal readonly Stream Source;
         internal readonly long SourceBytes;
         internal readonly List<int>[] Origins = { new List<int>(), new List<int>(), new List<int>() };
         private readonly StreamReader reader;
         private readonly GuiSmokeLedgerLfRead cursorReader;
+#if NLINK_FRONTIER_LEDGER
+        private readonly LocalGuiWriterRequest.FrontierSourceRead ownedSource;
+#endif
         internal ReadOnlyCollection<long> CursorLineStarts { get { return cursorReader == null ? null : cursorReader.LineStarts.AsReadOnly(); } }
         internal ReadOnlyCollection<GuiSmokeLedgerPrefixWriter> InitialWriters;
         private readonly Stopwatch clock = Stopwatch.StartNew();
@@ -376,7 +382,11 @@ namespace NLink.Tools
             Source = source; SourceBytes = source.Length;
             if (!source.CanRead || source.CanWrite || source.Position != 0 || SourceBytes < 1 || SourceBytes > MaximumSourceBytes)
                 throw new InvalidDataException("stream_source_not_original_start");
-            if (cursorMode) cursorReader = new GuiSmokeLedgerLfRead(source, CheckCurrent);
+#if NLINK_FRONTIER_LEDGER
+            ownedSource = source as LocalGuiWriterRequest.FrontierSourceRead;
+            if (ownedSource != null) CheckBufferedWork();
+#endif
+            if (cursorMode) cursorReader = new GuiSmokeLedgerLfRead(source, CheckBufferedWork, false, CheckReadBoundary);
             else reader = new StreamReader(source, new UTF8Encoding(false, true), true, 32768, true);
         }
         internal void CaptureInitialWriters(ICollection<GuiSmokeLedgerWriterResult> writers)
@@ -389,22 +399,70 @@ namespace NLink.Tools
             InitialWriters = prefix.AsReadOnly();
         }
         internal void CheckCurrent()
-        { if (clock.ElapsedMilliseconds > 5000 || !Source.CanRead) throw new InvalidDataException("stream_source_not_current"); }
+        {
+#if NLINK_TEST_BUFFERED_LEDGER
+            NLink.Tests.BufferedLedgerProbe.Boundary("full");
+#endif
+#if NLINK_FRONTIER_LEDGER
+            if (ownedSource != null && !ownedSource.BufferedProcessingWorkCurrent) RejectCurrent();
+#endif
+            if (clock.ElapsedMilliseconds > 5000 || !Source.CanRead) RejectCurrent();
+        }
+        private void CheckBufferedWork()
+        {
+#if NLINK_FRONTIER_LEDGER
+            if (ownedSource != null)
+            {
+                if (clock.ElapsedMilliseconds > 5000 || !ownedSource.BufferedProcessingWorkCurrent) RejectCurrent();
+                return;
+            }
+#endif
+            CheckCurrent();
+        }
+        private void RejectCurrent()
+        { RetireOwnedSource(); throw new InvalidDataException("stream_source_not_current"); }
+        private void CheckBufferedCompletion()
+        {
+#if NLINK_FRONTIER_LEDGER
+            if (ownedSource != null) CheckBufferedWork();
+#endif
+        }
+        internal void RetireOwnedSource()
+        {
+#if NLINK_FRONTIER_LEDGER
+            if (ownedSource != null) ownedSource.Dispose();
+#endif
+        }
+        private void CheckReadBoundary() { CheckOwnedBoundary("refill"); }
+        internal void CheckOwnedBoundary(string name, GuiSmokeLedgerStreamCapture capture = null)
+        {
+#if NLINK_FRONTIER_LEDGER
+            if (ownedSource != null)
+            {
+#if NLINK_TEST_BUFFERED_LEDGER
+                NLink.Tests.BufferedLedgerProbe.Boundary(name);
+#endif
+                CheckCurrent();
+                if (capture != null && !capture.IsCurrent) RejectCurrent();
+            }
+#endif
+        }
         internal void AddOrigin(int role, long line)
         {
-            CheckCurrent();
-            if (originCount == MaximumOriginEntries) throw new InvalidDataException("stream_source_origin_limit");
+            CheckBufferedWork();
+            if (Origins[role].Count >= MaximumLines || originCount >= MaximumOriginEntries) throw new InvalidDataException("stream_source_origin_limit");
             Origins[role].Add(checked((int)line)); originCount++;
         }
         private bool Fill()
         {
-            CheckCurrent();
+            CheckBufferedWork();
             if (offset != count) return true;
+            CheckReadBoundary();
             count = reader.Read(buffer, 0, buffer.Length); offset = 0; CheckCurrent(); return count != 0;
         }
         public override string ReadLine()
         {
-            CheckCurrent();
+            CheckBufferedWork();
             if (cursorReader != null) return cursorReader.ReadLine();
             if (skipLf) { if (Fill() && buffer[offset] == '\n') offset++; skipLf = false; }
             StringBuilder line = null;
@@ -417,8 +475,9 @@ namespace NLink.Tools
                     throw new InvalidDataException("stream_source_line_limit");
                 if (line == null) line = new StringBuilder(length);
                 line.Append(buffer, start, length);
-                if (offset < count) { skipLf = buffer[offset++] == '\r'; return line.ToString(); }
+                if (offset < count) { skipLf = buffer[offset++] == '\r'; CheckBufferedCompletion(); return line.ToString(); }
             }
+            CheckBufferedCompletion();
             return line == null ? null : line.ToString();
         }
         protected override void Dispose(bool disposing) { if (disposing && reader != null) reader.Dispose(); base.Dispose(disposing); }
@@ -432,13 +491,14 @@ namespace NLink.Tools
         internal readonly List<long> LineStarts = new List<long>();
         private readonly Stream source;
         private readonly Action current;
+        private readonly Action readBoundary;
         private readonly byte[] buffer = new byte[32768];
         private readonly UTF8Encoding utf8 = new UTF8Encoding(false, true);
         private readonly bool allowFinalLine;
         private int offset, count;
         private long position, lineStart;
-        internal GuiSmokeLedgerLfRead(Stream source, Action current, bool allowFinalLine = false)
-        { this.source = source; this.current = current; this.allowFinalLine = allowFinalLine; }
+        internal GuiSmokeLedgerLfRead(Stream source, Action current, bool allowFinalLine = false, Action readBoundary = null)
+        { this.source = source; this.current = current; this.allowFinalLine = allowFinalLine; this.readBoundary = readBoundary; }
         internal string ReadLine()
         {
             using (var bytes = new MemoryStream())
@@ -448,7 +508,9 @@ namespace NLink.Tools
                     current();
                     if (offset == count)
                     {
+                        if (readBoundary != null) readBoundary();
                         count = source.Read(buffer, 0, buffer.Length); offset = 0;
+                        if (readBoundary != null) readBoundary();
                         if (count == 0)
                         {
                             if (bytes.Length != 0)
@@ -1087,6 +1149,7 @@ namespace NLink.Tools
                 if (streamRead != null && bookmark == frozenLineCount) streamRead.CaptureInitialWriters(writers.Values);
                 if (streamRead != null && streamRead.ReadLine() != null)
                     throw new InvalidDataException("stream_source_unconsumed_lines");
+                if (streamRead != null) streamRead.CheckOwnedBoundary("parse-complete");
                 foreach (BatchState batch in currentBatches.Values)
                     FoldBatch(batch, result, previousTicks);
                 FinalizeHash(retainedHash);
@@ -1119,7 +1182,11 @@ namespace NLink.Tools
                     catch { captureClock = null; } // Optional provenance cannot change primary writes.
                 }
                 if (outputLease != null)
+                {
+                    if (streamRead != null) streamRead.CheckOwnedBoundary("before-output-seal");
                     outputLease.Seal(retained, writer, (FileStream)semantic, retainedCapture, writerCapture, semanticCapture);
+                    if (streamRead != null) streamRead.CheckOwnedBoundary("after-output-seal");
+                }
             }
 
             var writerResults = new List<GuiSmokeLedgerWriterResult>(writers.Values);
@@ -1154,8 +1221,12 @@ namespace NLink.Tools
                     throw new InvalidDataException("stream_source_capture_incomplete");
                 result.CaptureStream(streamRead, expectedAcceptanceRunId, expectedScenarioRunId, frozenLineCount, bookmark,
                     retainedCapture, writerCapture, semanticCapture, outputLease);
+                streamRead.CheckOwnedBoundary("capture-created");
                 streamRead.CheckCurrent();
                 if (!result.StreamCapture.IsCurrent) throw new InvalidDataException("stream_output_capture_not_current");
+#if NLINK_TEST_TERMINAL_REQUEST && NLINK_FRONTIER_LEDGER
+                result.StreamCapture.BindTerminalCaptureClockForTest(result, captureClock);
+#endif
             }
             else if (captureNativeOutputs && (!writeSemantic || semanticCapture != null))
             {
@@ -1163,10 +1234,18 @@ namespace NLink.Tools
                     retainedCapture, writerCapture, semanticCapture, captureClock); }
                 catch { } // No partial capture or substitute expected digest.
             }
+            if (streamRead != null) streamRead.CheckOwnedBoundary("before-return", result.StreamCapture);
             outputsTransferred = true;
             return result;
             }
-            finally { if (!outputsTransferred && outputLease != null) outputLease.Dispose(); }
+            finally
+            {
+                if (!outputsTransferred)
+                {
+                    if (outputLease != null) outputLease.Dispose();
+                    if (streamRead != null) streamRead.RetireOwnedSource();
+                }
+            }
         }
 
         private static FileStream NewOutput(string path, bool retain = false)

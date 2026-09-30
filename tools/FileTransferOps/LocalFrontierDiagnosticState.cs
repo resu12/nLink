@@ -10,6 +10,8 @@ namespace NLink.Tools
     {
         private readonly List<Field> fields = new List<Field>();
         private readonly List<Sequence> sequences = new List<Sequence>();
+        private System.Array eventItems;
+        private EventRow[] eventRows;
         private int cells;
         private long units;
         private readonly Action visit;
@@ -27,9 +29,7 @@ namespace NLink.Tools
             result.Values(proof, "UnresolvedCount", "RecoveredCount");
             foreach (object record in result.Array(result.Reference(proof, "UnresolvedCandidateRecords"), 8192, true))
             { result.Reference(record, "Event"); result.Values(record, "Reason", "Variant", "Recovered"); }
-            var events = result.Array(result.Reference(index, "AllEvents"), LocalPublicationInputLimits.InputRecords, true);
-            if (events.Length != fullCount) throw new InvalidOperationException("frontier_diagnostic_index");
-            foreach (object item in events) { result.Reference(item, "RawLine"); result.Values(item, "FilePath"); }
+            result.CaptureEvents(result.Reference(index, "AllEvents"), fullCount);
             result.Array(result.Reference(index, "LogFiles"), 1, false);
             foreach (object view in new[] { fullView, compactView })
             {
@@ -71,6 +71,32 @@ namespace NLink.Tools
         }
         private object Reference(object owner, string name) { return Add(owner, name, true); }
         private void Values(object owner, params string[] names) { foreach (string name in names) Add(owner, name, false); }
+        // Input-sized identity storage is bounded separately from metadata.
+        // Each row retains all three original checks and their visit charges.
+        private void CaptureEvents(object value, int fullCount)
+        {
+            var items = Unwrap(value) as System.Array;
+            if (items == null || items.Rank != 1 || items.GetLowerBound(0) != 0 || items.Length > LocalPublicationInputLimits.InputRecords)
+                throw new InvalidOperationException("frontier_diagnostic_collection");
+            if (items.Length != fullCount) throw new InvalidOperationException("frontier_diagnostic_index");
+            eventItems = items; eventRows = new EventRow[items.Length];
+            for (int i = 0; i < eventRows.Length; i++)
+            {
+                visit(); object item = items.GetValue(i);
+                if (item == null) throw new InvalidOperationException("frontier_diagnostic_owner");
+                var owner = PSObject.AsPSObject(item);
+                var raw = EventProperty(owner, "RawLine"); object text = raw.Value;
+                var path = EventProperty(owner, "FilePath");
+                eventRows[i] = new EventRow(item, owner, raw, path, text, Scalar(path.Value));
+            }
+        }
+        private PSNoteProperty EventProperty(PSObject owner, string name)
+        {
+            visit(); var property = owner.Properties[name] as PSNoteProperty;
+            if (property == null || property.GetType() != typeof(PSNoteProperty))
+                throw new InvalidOperationException("frontier_diagnostic_note:" + name);
+            return property;
+        }
         private object[] Array(object value, long maximum, bool references)
         {
             var list = Unwrap(value) as System.Array;
@@ -99,6 +125,16 @@ namespace NLink.Tools
                     if (sequence.References ? !Object.ReferenceEquals(value, sequence.Values[i]) : !SameScalar(value, sequence.Values[i])) return false;
                 }
             }
+            visit(); if (eventItems.Length != eventRows.Length) return false;
+            for (int i = 0; i < eventRows.Length; i++)
+            {
+                var row = eventRows[i];
+                visit(); if (!Object.ReferenceEquals(eventItems.GetValue(i), row.Item)) return false;
+                visit(); if (!Object.ReferenceEquals(row.Owner.Properties["RawLine"], row.RawProperty) ||
+                    !Object.ReferenceEquals(row.RawProperty.Value, row.RawValue)) return false;
+                visit(); if (!Object.ReferenceEquals(row.Owner.Properties["FilePath"], row.PathProperty) ||
+                    !SameScalar(row.PathProperty.Value, row.PathValue)) return false;
+            }
             return true;
         }
         private static bool SameScalar(object value, object expected)
@@ -106,6 +142,14 @@ namespace NLink.Tools
             value = Unwrap(value);
             // Do not dispatch Equals on a replacement caller-defined object.
             return value != null && value.GetType() == expected.GetType() && Object.Equals(value, expected);
+        }
+        private struct EventRow
+        {
+            internal readonly object Item, RawValue, PathValue;
+            internal readonly PSObject Owner;
+            internal readonly PSNoteProperty RawProperty, PathProperty;
+            internal EventRow(object item, PSObject owner, PSNoteProperty raw, PSNoteProperty path, object text, object filePath)
+            { Item = item; Owner = owner; RawProperty = raw; PathProperty = path; RawValue = text; PathValue = filePath; }
         }
         private sealed class Field
         {

@@ -160,6 +160,9 @@ namespace NLink.Tools
             }
             private bool FileChannelsCurrent()
             {
+#if NLINK_TEST_BUFFERED_LEDGER
+                NLink.Tests.ProcessingCustodyProbe.Boundary("scope");
+#endif
                 if (fileChannels == null) return true;
                 for (int i = 0; i < 2; i++)
                 {

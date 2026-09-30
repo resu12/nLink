@@ -387,7 +387,14 @@ public sealed partial class SessionFileTransferService
         => TransitionInboundToTerminalCoreAsync(context, terminalState, errorCode, statusMessage,
             sendError, errorMessage, cancelReason, ct, requiredFeedbackOperation: null);
 
-    private async Task TransitionInboundToTerminalCoreAsync(
+    private Task TransitionInboundToTerminalCoreAsync(
+        InboundTransferContext context, FileTransferTransferState terminalState, string? errorCode, string statusMessage,
+        bool sendError, string? errorMessage, string? cancelReason, CancellationToken ct,
+        InboundBootstrapFeedbackOperation? requiredFeedbackOperation, InboundBootstrapWriteSource? requiredWriteSource = null)
+        => TransitionInboundToTerminalWithFinalizationSourceAsync(context, terminalState, errorCode, statusMessage,
+            sendError, errorMessage, cancelReason, ct, requiredFeedbackOperation, requiredWriteSource, null);
+
+    private async Task TransitionInboundToTerminalWithFinalizationSourceAsync(
         InboundTransferContext context,
         FileTransferTransferState terminalState,
         string? errorCode,
@@ -397,8 +404,10 @@ public sealed partial class SessionFileTransferService
         string? cancelReason,
         CancellationToken ct,
         InboundBootstrapFeedbackOperation? requiredFeedbackOperation,
-        InboundBootstrapWriteSource? requiredWriteSource = null)
+        InboundBootstrapWriteSource? requiredWriteSource = null,
+        InboundFinalizationSource? requiredFinalizationSource = null)
     {
+        NativeDestinationEvidence? completedNativeDestination = null;
         SessionFileTransferSnapshot? snapshot = null;
         bool shouldSendError;
         string sessionId;
@@ -418,6 +427,7 @@ public sealed partial class SessionFileTransferService
 
         lock (gate)
         {
+            if (requiredFinalizationSource is not null && !IsInboundFinalizationSourceCurrentLocked(context, requiredFinalizationSource)) { return; }
             if (requiredWriteSource is not null && !IsInboundBootstrapWriteSourceCurrentLocked(context, requiredWriteSource)) { return; }
             if (requiredFeedbackOperation is not null && !IsInboundBootstrapFeedbackCurrentLocked(context, requiredFeedbackOperation))
             {
@@ -486,6 +496,10 @@ public sealed partial class SessionFileTransferService
                 return;
             }
 
+            // Only the already-validated exact finalization continuation can
+            // hand off storage custody. This grants no route/completion authority.
+            var nativeDestinationSourceCurrent = terminalState == FileTransferTransferState.Completed &&
+                requiredFinalizationSource is not null && IsInboundFinalizationSourceCurrentLocked(context, requiredFinalizationSource);
             context.CancelLifetime();
             SettleAndClearFallbackFrontierRepairContractLocked(
                 context,
@@ -562,7 +576,22 @@ public sealed partial class SessionFileTransferService
             dataSessionToDispose = context.DetachDataSession();
             routeCompletionObserver = transport as IFileTransferRouteCompletionObserver;
             terminalObserver = transport as IFileTransferTerminalObserver;
+            if (nativeDestinationSourceCurrent && ReferenceEquals(inboundTransfer, context) &&
+                ReferenceEquals(context.WriteDestination, requiredFinalizationSource!.Destination) &&
+                context.NativeDestinationEvidence is { } destinationEvidence &&
+                destinationEvidence.TryComplete(this, context.WriteDestination!))
+            {
+                context.NativeDestinationEvidence = null; // Explicit app owner now releases the read-only hold.
+                completedNativeDestination = destinationEvidence;
+            }
+            // Completed is observable as soon as this gate opens. Ordinary
+            // downloads must be accessible then, not only after event callbacks.
+            // An explicitly moved evidence hold is no longer owned by the guard.
+            if (terminalState == FileTransferTransferState.Completed)
+                context.WriteDestination?.ReleaseFinalizedNativeRead();
         }
+
+        frontierAppLifetime?.TryStartNativeDestinationHandoff(completedNativeDestination);
 
         if (bridgeRecoveryExecutionBridge is not null &&
             bridgeRecoveryExecutionCommand is { IsDefault: false } inboundExecutionCommand)

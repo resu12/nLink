@@ -2911,7 +2911,11 @@ public sealed record FileTransferControlPlaneDeliveryResult(
     string ControlQueueErrorName,
     string ControlAckErrorName,
     string ControlCopyErrorName,
-    string BulkCopyErrorName);
+    string BulkCopyErrorName)
+{
+    // Process-local diagnostics only; never serialized or used as authority.
+    internal FileTransferFallbackTailYieldEvidence? YieldEvidence { get; init; }
+}
 
 public interface IFileTransferControlPlaneDeliveryTransport
 {
@@ -2924,7 +2928,10 @@ public sealed record FileTransferReceivedDataFrame(
     FileTransferDataFrame Frame,
     FileTransferTransportKind TransportKind,
     string Lane,
-    DateTimeOffset ReceivedUtc);
+    DateTimeOffset ReceivedUtc)
+{
+    internal FileTransferFallbackTailYieldEvidence? YieldEvidence { get; init; }
+}
 
 public interface IFileTransferDataSession : IDisposable
 {
@@ -3223,6 +3230,8 @@ public sealed class FileTransferRepairProofReceivedEventArgs : EventArgs
 
 public sealed class FileTransferFallbackTailYieldProofReceivedEventArgs : EventArgs
 {
+    internal FileTransferFallbackTailYieldEvidence? YieldEvidence { get; init; }
+
     public FileTransferFallbackTailYieldProofReceivedEventArgs(FileTransferFallbackTailYieldFrameV6 message, string? peerId)
     {
         Message = message ?? throw new ArgumentNullException(nameof(message));

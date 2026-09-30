@@ -50,7 +50,7 @@ public sealed partial class FrontierFileAdoptionTests
         if (fault == "cancel") { current = false; }
         var flags = BindingFlags.NonPublic | BindingFlags.Instance;
         var work = (Stopwatch)typeof(LocalFrontierFileAdoption).GetField("work", flags)!.GetValue(owner)!;
-        if (fault == "budget") { typeof(Stopwatch).GetField("_elapsed", flags)!.SetValue(work, Stopwatch.Frequency * 6); }
+        if (fault == "budget") { typeof(Stopwatch).GetField("_elapsed", flags)!.SetValue(work, Stopwatch.Frequency * 11); }
         if (fault == "foreign-reader") { Assert.False(owner.TryMatchWriters(new object(), writers, sequences)); Assert.True(owner.IsSourceVerified); }
         if (fault == "copy")
         {

@@ -35,6 +35,7 @@ namespace NLink.Tools
                 try { if (!process.Start()) throw new InvalidOperationException("frontier_gui_start_failed"); }
                 catch { if (frontierGuiStart != null) frontierGuiStart.Fail(); throw; }
                 var reports = new FrontierGuiReports(process);
+                RememberPayloadReports(reports);
                 try
                 {
                     reports.WorkerBound = BindWorker(process);

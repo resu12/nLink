@@ -386,6 +386,11 @@ public sealed partial class NknAccelerationTransportTests
         public bool IsLocalPaidListenerActive => Request?.LocalIsPayer == true && IsAvailable;
         public event EventHandler<NknIncomingMessage>? MessageReceived;
         public PreparationHandshakeLane? FilePeer;
+        public Func<NknBridgeChannel, byte[], CancellationToken, Task<bool>>? ForwardBytesForTests;
+        public void ReceivePeerBytesForTests(NknBridgeChannel lane, byte[] bytes)
+            => MessageReceived?.Invoke(this, new NknIncomingMessage(string.Empty, bytes.AsSpan().ToArray(),
+                isTopic: false, topic: null, channel: lane,
+                bridgeIngressObservedUtcMs: DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()));
         public event EventHandler<AccelerationStateChangedEventArgs>? StateChanged;
         public void Emit(bool available, string identity) => StateChanged?.Invoke(this,
             new(available, "remote_closed", sessionPreparationExecutionIdentity: identity));
@@ -394,6 +399,7 @@ public sealed partial class NknAccelerationTransportTests
         {
             if (!IsAvailable || FilePeer is not { IsAvailable: true } peer) { return false; }
             ct.ThrowIfCancellationRequested();
+            if (ForwardBytesForTests is { } forward) { return await forward(lane, bytes, ct); }
             await Task.Yield();
             peer.MessageReceived?.Invoke(peer, new NknIncomingMessage(string.Empty, bytes.AsSpan().ToArray(),
                 isTopic: false, topic: null, channel: lane,

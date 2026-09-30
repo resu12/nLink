@@ -12,6 +12,7 @@
   <ItemGroup>
     <!-- One wire implementation for the PowerShell parent and managed app role. -->
     <Compile Include="..\..\tools\FileTransferOps\LocalFrontierAppRequest.cs" Link="Diagnostics\LocalFrontierAppRequest.cs" />
+    <Compile Include="..\..\tools\FileTransferOps\LocalCanonicalSenderSource.cs" Link="Diagnostics\LocalCanonicalSenderSource.cs" />
     <Compile Include="..\..\tools\FileTransferOps\LocalFrontierAppStart.cs" Link="Diagnostics\LocalFrontierAppStart.cs" />
     <Compile Include="..\..\tools\FileTransferOps\LocalFrontierFileManifest.cs" Link="Diagnostics\LocalFrontierFileManifest.cs" />
     <Compile Include="..\..\tools\FileTransferOps\LocalFrontierFileAdoption.cs" Link="Diagnostics\LocalFrontierFileAdoption.cs" />

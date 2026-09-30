@@ -5,7 +5,7 @@ public sealed class FrontierRelayTransferTests : FileTransferOpsScriptsTestBase
 {
     public static IEnumerable<object[]> Cases =>
         from host in new[] { "powershell", "pwsh" }
-        from scenario in new[] { "valid", "guards", "wrapper-nonzero", "no-take", "handoff-cancel", "request-dispose", "registration-dispose", "body-mismatch", "analysis", "analysis-changed", "map-collision", "event-collision", "transfer-tamper", "pull-budget" }
+        from scenario in new[] { "valid", "guards", "forward-before-post-pull", "wrapper-nonzero", "no-take", "handoff-cancel", "request-dispose", "registration-dispose", "body-mismatch", "analysis", "analysis-changed", "map-collision", "event-collision", "transfer-tamper", "pull-budget" }
         select new object[] { host, scenario };
 
     [Theory]
@@ -21,5 +21,10 @@ public sealed class FrontierRelayTransferTests : FileTransferOpsScriptsTestBase
         await File.WriteAllTextAsync(Path.Combine(directory, "result.txt"), result.Stdout + Environment.NewLine + result.Stderr);
         Assert.True(result.ExitCode == 0, result.Stdout + Environment.NewLine + result.Stderr);
         Assert.Contains("frontier-relay-transfer=" + scenario, result.Stdout);
+        if (scenario == "forward-before-post-pull")
+        {
+            Assert.Contains("native-pull-order; wrapper_alive=True; legacy_state=2;", result.Stdout);
+            Assert.Contains("; retirement=open", result.Stdout);
+        }
     }
 }

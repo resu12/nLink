@@ -631,7 +631,7 @@ public sealed partial class SessionFileTransferService
 
         LocalOperationalLog.Info(
             "FileTransferService",
-            $"event=filetransfer_fallback_frontier_repair_dispatch_duplicate_ignored; {FormatFallbackFrontierRepairAuthorityTuple(contract.Authority)}; decision_reason=dispatch_already_observed_or_settled");
+            $"event=filetransfer_fallback_frontier_repair_dispatch_duplicate_ignored; {FileTransferDiagnosticScopeEvidence.Format(contract.Authority.SessionId, contract.Authority.TransferId)}{FormatFallbackFrontierRepairAuthorityTuple(contract.Authority)}; decision_reason=dispatch_already_observed_or_settled");
         return false;
     }
 
@@ -651,13 +651,13 @@ public sealed partial class SessionFileTransferService
         {
             LocalOperationalLog.Info(
                 "FileTransferService",
-                $"event=filetransfer_fallback_frontier_repair_settlement_duplicate_ignored; {FormatFallbackFrontierRepairAuthorityTuple(authority)}; successor_authority_id={FormatProtocolLogValue(successorAuthorityId?.ToString() ?? "(none)")}; attempted_outcome={FormatProtocolLogValue(outcome.ToString())}; settled_outcome={FormatProtocolLogValue(contract.Lifecycle.SettlementOutcome?.ToString() ?? "(none)")}; decision_reason={FormatProtocolLogValue(decisionReason)}");
+                $"event=filetransfer_fallback_frontier_repair_settlement_duplicate_ignored; {FileTransferDiagnosticScopeEvidence.Format(authority.SessionId, authority.TransferId)}{FormatFallbackFrontierRepairAuthorityTuple(authority)}; successor_authority_id={FormatProtocolLogValue(successorAuthorityId?.ToString() ?? "(none)")}; attempted_outcome={FormatProtocolLogValue(outcome.ToString())}; settled_outcome={FormatProtocolLogValue(contract.Lifecycle.SettlementOutcome?.ToString() ?? "(none)")}; decision_reason={FormatProtocolLogValue(decisionReason)}");
             return false;
         }
 
         LocalOperationalLog.Info(
             "FileTransferService",
-            $"event=filetransfer_fallback_frontier_repair_contract_settled; {FormatRepairOwnerEvidence(contract.RepairOwnerEvidence)}{FormatCheckpointRepairContinuity(contract.CheckpointContinuityStamp)}{FormatFallbackFrontierRepairAuthorityTuple(authority)}; successor_authority_id={FormatProtocolLogValue(successorAuthorityId?.ToString() ?? "(none)")}; protocol_repair_request_id={FormatProtocolLogValue(authority.ProtocolRepairRequestId)}; request_correlation_id={FormatProtocolLogValue(authority.RequestCorrelationId)}; alias_count={contract.Aliases.Count}; alias_overflow_count={contract.AliasOverflowCount}; settlement_outcome={FormatProtocolLogValue(outcome.ToString())}; dispatch_observed={(contract.Lifecycle.DispatchObserved ? 1 : 0)}; decision_reason={FormatProtocolLogValue(decisionReason)}");
+            $"event=filetransfer_fallback_frontier_repair_contract_settled; {FileTransferDiagnosticScopeEvidence.Format(authority.SessionId, authority.TransferId)}{FormatRepairOwnerEvidence(contract.RepairOwnerEvidence)}{FormatCheckpointRepairContinuity(contract.CheckpointContinuityStamp)}{FormatFallbackFrontierRepairAuthorityTuple(authority)}; successor_authority_id={FormatProtocolLogValue(successorAuthorityId?.ToString() ?? "(none)")}; protocol_repair_request_id={FormatProtocolLogValue(authority.ProtocolRepairRequestId)}; request_correlation_id={FormatProtocolLogValue(authority.RequestCorrelationId)}; alias_count={contract.Aliases.Count}; alias_overflow_count={contract.AliasOverflowCount}; settlement_outcome={FormatProtocolLogValue(outcome.ToString())}; dispatch_observed={(contract.Lifecycle.DispatchObserved ? 1 : 0)}; decision_reason={FormatProtocolLogValue(decisionReason)}");
         return true;
     }
 
@@ -852,7 +852,7 @@ public sealed partial class SessionFileTransferService
         var authority = contract.Authority;
         LocalOperationalLog.Info(
             "FileTransferService",
-            $"event=filetransfer_fallback_frontier_repair_authority_granted; {FormatRepairOwnerEvidence(contract.RepairOwnerEvidence)}{FormatCheckpointRepairContinuity(contract.CheckpointContinuityStamp)}{FormatFallbackFrontierRepairAuthorityTuple(authority)}; protocol_repair_request_id={FormatProtocolLogValue(authority.ProtocolRepairRequestId)}; request_correlation_id={FormatProtocolLogValue(authority.RequestCorrelationId)}; stage={FormatProtocolLogValue(stage)}; decision_reason={FormatProtocolLogValue(authority.DecisionReason)}");
+            $"event=filetransfer_fallback_frontier_repair_authority_granted; {FileTransferDiagnosticScopeEvidence.Format(authority.SessionId, authority.TransferId)}{FormatRepairOwnerEvidence(contract.RepairOwnerEvidence)}{FormatCheckpointRepairContinuity(contract.CheckpointContinuityStamp)}{FormatFallbackFrontierRepairAuthorityTuple(authority)}; protocol_repair_request_id={FormatProtocolLogValue(authority.ProtocolRepairRequestId)}; request_correlation_id={FormatProtocolLogValue(authority.RequestCorrelationId)}; stage={FormatProtocolLogValue(stage)}; decision_reason={FormatProtocolLogValue(authority.DecisionReason)}");
     }
 
     private async Task<bool> SendInboundAuthorizedFallbackFrontierRequestAsync(
@@ -1043,7 +1043,7 @@ public sealed partial class SessionFileTransferService
                     RestoreRescueState();
                     LocalOperationalLog.Info(
                         "FileTransferService",
-                        $"event=filetransfer_v6_frontier_request_receive_dispatch_coalesced; {FormatFallbackFrontierRepairAuthorityTuple(contract.Authority)}; request_correlation_id={FormatProtocolLogValue(correlationId)}; repair_request_id={FormatProtocolLogValue(repairRequestId)}; decision_reason=alias_limit_reached");
+                        $"event=filetransfer_v6_frontier_request_receive_dispatch_coalesced; {FileTransferDiagnosticScopeEvidence.Format(contract.Authority.SessionId, contract.Authority.TransferId)}{FormatFallbackFrontierRepairAuthorityTuple(contract.Authority)}; request_correlation_id={FormatProtocolLogValue(correlationId)}; repair_request_id={FormatProtocolLogValue(repairRequestId)}; decision_reason=alias_limit_reached");
                     return false;
                 }
             }
@@ -1067,7 +1067,7 @@ public sealed partial class SessionFileTransferService
                     RestoreRescueState();
                     LocalOperationalLog.Info(
                         "FileTransferService",
-                        $"event=filetransfer_fallback_frontier_repair_authority_rejected; direction=inbound; transfer_id={context.TransferId}; session_id={context.SessionId}; repair_request_key={FormatProtocolLogValue(identity.CanonicalRepairKey)}; request_correlation_id=(none); repair_request_id={FormatProtocolLogValue(repairRequestId)}; decision_reason={FormatProtocolLogValue(rejectionReason)}");
+                        $"event=filetransfer_fallback_frontier_repair_authority_rejected; {FileTransferDiagnosticScopeEvidence.Format(context.SessionId, context.TransferId)}direction=inbound; transfer_id={context.TransferId}; session_id={context.SessionId}; repair_request_key={FormatProtocolLogValue(identity.CanonicalRepairKey)}; request_correlation_id=(none); repair_request_id={FormatProtocolLogValue(repairRequestId)}; decision_reason={FormatProtocolLogValue(rejectionReason)}");
                     return false;
                 }
 
@@ -1177,12 +1177,12 @@ public sealed partial class SessionFileTransferService
             {
                 LocalOperationalLog.Info(
                     "FileTransferService",
-                    $"event=filetransfer_v6_frontier_request_receive_dispatch_coalesced; {FormatFallbackFrontierRepairAuthorityTuple(contract.Authority)}; repair_request_id={FormatProtocolLogValue(request.RepairRequestId)}; request_correlation_id={FormatProtocolLogValue(request.RequestCorrelationId)}; decision_reason=same_authorized_repair_window");
+                    $"event=filetransfer_v6_frontier_request_receive_dispatch_coalesced; {FileTransferDiagnosticScopeEvidence.Format(contract.Authority.SessionId, contract.Authority.TransferId)}{FormatFallbackFrontierRepairAuthorityTuple(contract.Authority)}; repair_request_id={FormatProtocolLogValue(request.RepairRequestId)}; request_correlation_id={FormatProtocolLogValue(request.RequestCorrelationId)}; decision_reason=same_authorized_repair_window");
             }
 
             LocalOperationalLog.Info(
                 "FileTransferService",
-                $"event=filetransfer_v6_post_tuna_fallback_frontier_rescue_requested; {FormatFallbackFrontierRepairAuthorityTuple(contract.Authority)}; reason={FormatProtocolLogValue(reason)}; observed_frontier_chunk_index={frontierChunkIndex}; rescue_step={rescueStep}; rescue_request_count={rescueRequestCount}; repair_request_id={FormatProtocolLogValue(request.RepairRequestId)}; request_correlation_id={FormatProtocolLogValue(request.RequestCorrelationId)}; request_alias_chunk_count={request.MissingRanges[0].ChunkCount}; total_requested_chunk_count={totalRequestedChunks}");
+                $"event=filetransfer_v6_post_tuna_fallback_frontier_rescue_requested; {FileTransferDiagnosticScopeEvidence.Format(contract.Authority.SessionId, contract.Authority.TransferId)}{FormatFallbackFrontierRepairAuthorityTuple(contract.Authority)}; reason={FormatProtocolLogValue(reason)}; observed_frontier_chunk_index={frontierChunkIndex}; rescue_step={rescueStep}; rescue_request_count={rescueRequestCount}; repair_request_id={FormatProtocolLogValue(request.RepairRequestId)}; request_correlation_id={FormatProtocolLogValue(request.RequestCorrelationId)}; request_alias_chunk_count={request.MissingRanges[0].ChunkCount}; total_requested_chunk_count={totalRequestedChunks}");
 
             return true;
         }
@@ -1212,7 +1212,7 @@ public sealed partial class SessionFileTransferService
 
             LocalOperationalLog.Warn(
                 "FileTransferService",
-                $"event=filetransfer_v6_frontier_request_failed; {FormatFallbackFrontierRepairAuthorityTuple(contract.Authority)}; repair_request_id={FormatProtocolLogValue(request.RepairRequestId)}; request_correlation_id={FormatProtocolLogValue(request.RequestCorrelationId)}; reason={FormatProtocolLogValue(reason)}; error={FormatProtocolLogValue(ex.Message)}");
+                $"event=filetransfer_v6_frontier_request_failed; {FileTransferDiagnosticScopeEvidence.Format(contract.Authority.SessionId, contract.Authority.TransferId)}{FormatFallbackFrontierRepairAuthorityTuple(contract.Authority)}; repair_request_id={FormatProtocolLogValue(request.RepairRequestId)}; request_correlation_id={FormatProtocolLogValue(request.RequestCorrelationId)}; reason={FormatProtocolLogValue(reason)}; error={FormatProtocolLogValue(ex.Message)}");
             return false;
         }
     }
@@ -1265,7 +1265,7 @@ public sealed partial class SessionFileTransferService
 
         LocalOperationalLog.Info(
             "FileTransferService",
-            $"event=filetransfer_v6_frontier_request_sent; {FormatCheckpointRepairContinuity(GetCheckpointRepairContinuityStamp(contract, request.RepairRequestId, request.RequestCorrelationId))}{FormatFallbackFrontierRepairAuthorityTuple(contract.Authority)}; repair_request_id={FormatProtocolLogValue(request.RepairRequestId)}; protocol_repair_request_id={FormatProtocolLogValue(request.RepairRequestId)}; request_correlation_id={FormatProtocolLogValue(request.RequestCorrelationId)}; start_chunk_index={request.MissingRanges[0].StartChunkIndex}; request_alias_chunk_count={request.MissingRanges[0].ChunkCount}; total_requested_chunk_count={totalRequestedChunks}; post_tuna_fallback_survival=1; reason={FormatProtocolLogValue(reason)}");
+            $"event=filetransfer_v6_frontier_request_sent; {FileTransferDiagnosticScopeEvidence.Format(contract.Authority.SessionId, contract.Authority.TransferId)}{FormatCheckpointRepairContinuity(GetCheckpointRepairContinuityStamp(contract, request.RepairRequestId, request.RequestCorrelationId))}{FormatFallbackFrontierRepairAuthorityTuple(contract.Authority)}; repair_request_id={FormatProtocolLogValue(request.RepairRequestId)}; protocol_repair_request_id={FormatProtocolLogValue(request.RepairRequestId)}; request_correlation_id={FormatProtocolLogValue(request.RequestCorrelationId)}; start_chunk_index={request.MissingRanges[0].StartChunkIndex}; request_alias_chunk_count={request.MissingRanges[0].ChunkCount}; total_requested_chunk_count={totalRequestedChunks}; post_tuna_fallback_survival=1; reason={FormatProtocolLogValue(reason)}");
         return true;
     }
 
@@ -1374,7 +1374,7 @@ public sealed partial class SessionFileTransferService
         var authority = expectedContract.Authority;
         LocalOperationalLog.Info(
             "FileTransferService",
-            $"event=filetransfer_fallback_frontier_repair_progress_observed; {FormatCheckpointRepairContinuity(GetCheckpointRepairContinuityStamp(expectedContract, normalizedProtocolRepairRequestId, alias.RequestCorrelationId))}{FormatFallbackFrontierRepairAuthorityTuple(authority)}; request_correlation_id={FormatProtocolLogValue(authority.RequestCorrelationId)}; reason={FormatProtocolLogValue(reason)}; previous_frontier_chunk_index={previousFrontierChunkIndex}; current_frontier_chunk_index={currentFrontierChunkIndex}");
+            $"event=filetransfer_fallback_frontier_repair_progress_observed; {FileTransferDiagnosticScopeEvidence.Format(authority.SessionId, authority.TransferId)}{FormatCheckpointRepairContinuity(GetCheckpointRepairContinuityStamp(expectedContract, normalizedProtocolRepairRequestId, alias.RequestCorrelationId))}{FormatFallbackFrontierRepairAuthorityTuple(authority)}; request_correlation_id={FormatProtocolLogValue(authority.RequestCorrelationId)}; reason={FormatProtocolLogValue(reason)}; previous_frontier_chunk_index={previousFrontierChunkIndex}; current_frontier_chunk_index={currentFrontierChunkIndex}");
 
         var receipt = new InboundFallbackFrontierProgressReceipt(
             expectedContract,
@@ -2007,7 +2007,7 @@ public sealed partial class SessionFileTransferService
                 var authority = contract.Authority;
                 LocalOperationalLog.Info(
                     "FileTransferService",
-                    $"event=filetransfer_v6_frontier_request_advanced_remote_frontier; {FormatFallbackFrontierRepairAuthorityTuple(authority)}; repair_request_id={FormatProtocolLogValue(request.RepairRequestId)}; request_correlation_id={FormatProtocolLogValue(request.RequestCorrelationId)}; previous_remote_frontier_chunk_index={previousRemoteFrontier}; inferred_remote_frontier_chunk_index={context.RemoteNextExpectedChunkIndex}");
+                    $"event=filetransfer_v6_frontier_request_advanced_remote_frontier; {FileTransferDiagnosticScopeEvidence.Format(authority.SessionId, authority.TransferId)}{FormatFallbackFrontierRepairAuthorityTuple(authority)}; repair_request_id={FormatProtocolLogValue(request.RepairRequestId)}; request_correlation_id={FormatProtocolLogValue(request.RequestCorrelationId)}; previous_remote_frontier_chunk_index={previousRemoteFrontier}; inferred_remote_frontier_chunk_index={context.RemoteNextExpectedChunkIndex}");
             }
 
             var forceRegularNknBulk =
@@ -2087,7 +2087,7 @@ public sealed partial class SessionFileTransferService
         var first = request.MissingRanges.Count > 0 ? request.MissingRanges[0] : null;
         LocalOperationalLog.Info(
             "FileTransferService",
-            $"event=filetransfer_v6_frontier_request_receive_dispatch_rejected; authority_schema={FileTransferAuthoritySchema.Current}; authority_id=(none); direction=outbound; transfer_id={context.TransferId}; session_id={context.SessionId}; route={context.RouteSelection.TelemetryToken}; protocol_version={context.NegotiatedDataProtocolVersion}; live_route_epoch={context.CurrentLiveRouteEpoch?.EpochId ?? 0}; runtime_generation={context.CurrentRuntimeOwner?.RuntimeGeneration ?? 0}; terminal_generation={context.CurrentRuntimeOwner?.TerminalGeneration ?? 0}; leg_generation={context.CurrentTransferLeg?.Generation ?? 0}; transport_epoch={request.TransportEpoch}; current_transport_epoch={context.CurrentTransferLeg?.TransportEpochId ?? 0}; bridge_recovery_generation={context.CurrentTransferLeg?.BridgeRecoveryGeneration ?? 0}; checkpoint_request_id={FormatProtocolLogValue(context.CurrentTransferLeg?.CheckpointRequestId ?? "(none)")}; repair_request_id={FormatProtocolLogValue(request.RepairRequestId ?? "(none)")}; request_correlation_id={FormatProtocolLogValue(request.RequestCorrelationId ?? "(none)")}; first_start_chunk_index={first?.StartChunkIndex ?? -1}; first_chunk_count={first?.ChunkCount ?? 0}; range_count={request.MissingRanges.Count}; received_transport={FormatFileTransferTransportKind(receivedTransportKind)}; decision_reason={FormatProtocolLogValue(reason)}");
+            $"event=filetransfer_v6_frontier_request_receive_dispatch_rejected; {FileTransferDiagnosticScopeEvidence.Format(context.SessionId, context.TransferId)}authority_schema={FileTransferAuthoritySchema.Current}; authority_id=(none); direction=outbound; transfer_id={context.TransferId}; session_id={context.SessionId}; route={context.RouteSelection.TelemetryToken}; protocol_version={context.NegotiatedDataProtocolVersion}; live_route_epoch={context.CurrentLiveRouteEpoch?.EpochId ?? 0}; runtime_generation={context.CurrentRuntimeOwner?.RuntimeGeneration ?? 0}; terminal_generation={context.CurrentRuntimeOwner?.TerminalGeneration ?? 0}; leg_generation={context.CurrentTransferLeg?.Generation ?? 0}; transport_epoch={request.TransportEpoch}; current_transport_epoch={context.CurrentTransferLeg?.TransportEpochId ?? 0}; bridge_recovery_generation={context.CurrentTransferLeg?.BridgeRecoveryGeneration ?? 0}; checkpoint_request_id={FormatProtocolLogValue(context.CurrentTransferLeg?.CheckpointRequestId ?? "(none)")}; repair_request_id={FormatProtocolLogValue(request.RepairRequestId ?? "(none)")}; request_correlation_id={FormatProtocolLogValue(request.RequestCorrelationId ?? "(none)")}; first_start_chunk_index={first?.StartChunkIndex ?? -1}; first_chunk_count={first?.ChunkCount ?? 0}; range_count={request.MissingRanges.Count}; received_transport={FormatFileTransferTransportKind(receivedTransportKind)}; decision_reason={FormatProtocolLogValue(reason)}");
     }
 
     private static void LogAuthorizedFallbackFrontierReceiveCoalesced(
@@ -2100,7 +2100,7 @@ public sealed partial class SessionFileTransferService
         var authority = contract.Authority;
         LocalOperationalLog.Info(
             "FileTransferService",
-            $"event=filetransfer_v6_frontier_request_receive_dispatch_coalesced; {FormatFallbackFrontierRepairAuthorityTuple(authority)}; repair_request_id={FormatProtocolLogValue(request.RepairRequestId ?? "(none)")}; request_correlation_id={FormatProtocolLogValue(request.RequestCorrelationId ?? "(none)")}; alias_count={contract.Aliases.Count}; received_transport={FormatFileTransferTransportKind(receivedTransportKind)}; decision_reason={FormatProtocolLogValue(reason)}");
+            $"event=filetransfer_v6_frontier_request_receive_dispatch_coalesced; {FileTransferDiagnosticScopeEvidence.Format(authority.SessionId, authority.TransferId)}{FormatFallbackFrontierRepairAuthorityTuple(authority)}; repair_request_id={FormatProtocolLogValue(request.RepairRequestId ?? "(none)")}; request_correlation_id={FormatProtocolLogValue(request.RequestCorrelationId ?? "(none)")}; alias_count={contract.Aliases.Count}; received_transport={FormatFileTransferTransportKind(receivedTransportKind)}; decision_reason={FormatProtocolLogValue(reason)}");
     }
 
     private static void LogAuthorizedFallbackFrontierReceiveQueued(
@@ -2112,7 +2112,7 @@ public sealed partial class SessionFileTransferService
         var authority = contract.Authority;
         LocalOperationalLog.Info(
             "FileTransferService",
-            $"event=filetransfer_v6_frontier_request_receive_dispatched; {FormatFallbackFrontierRepairAuthorityTuple(authority)}; repair_request_id={FormatProtocolLogValue(request.RepairRequestId)}; request_correlation_id={FormatProtocolLogValue(request.RequestCorrelationId)}; first_start_chunk_index={authority.FrontierChunkIndex}; first_chunk_count={contract.Identity.Ranges[0].ChunkCount}; received_transport={FormatFileTransferTransportKind(receivedTransportKind)}; decision_reason=queued_for_authorized_sender_repair");
+            $"event=filetransfer_v6_frontier_request_receive_dispatched; {FileTransferDiagnosticScopeEvidence.Format(authority.SessionId, authority.TransferId)}{FormatFallbackFrontierRepairAuthorityTuple(authority)}; repair_request_id={FormatProtocolLogValue(request.RepairRequestId)}; request_correlation_id={FormatProtocolLogValue(request.RequestCorrelationId)}; first_start_chunk_index={authority.FrontierChunkIndex}; first_chunk_count={contract.Identity.Ranges[0].ChunkCount}; received_transport={FormatFileTransferTransportKind(receivedTransportKind)}; decision_reason=queued_for_authorized_sender_repair");
     }
 
     private static bool TryValidateOutboundFallbackFrontierDispatchLocked(
@@ -2184,7 +2184,7 @@ public sealed partial class SessionFileTransferService
         var authority = contract.Authority;
         LocalOperationalLog.Info(
             "FileTransferService",
-            $"event=filetransfer_fallback_frontier_repair_progress_observed; {FormatFallbackFrontierRepairAuthorityTuple(authority)}; request_correlation_id={FormatProtocolLogValue(authority.RequestCorrelationId)}; reason={FormatProtocolLogValue(reason)}; previous_frontier_chunk_index={previousFrontierChunkIndex}; current_frontier_chunk_index={currentFrontierChunkIndex}");
+            $"event=filetransfer_fallback_frontier_repair_progress_observed; {FileTransferDiagnosticScopeEvidence.Format(authority.SessionId, authority.TransferId)}{FormatFallbackFrontierRepairAuthorityTuple(authority)}; request_correlation_id={FormatProtocolLogValue(authority.RequestCorrelationId)}; reason={FormatProtocolLogValue(reason)}; previous_frontier_chunk_index={previousFrontierChunkIndex}; current_frontier_chunk_index={currentFrontierChunkIndex}");
     }
 
     private bool TryAcceptOutboundFallbackFrontierRepairLocked(
@@ -2473,7 +2473,7 @@ public sealed partial class SessionFileTransferService
         var authority = contract.Authority;
         LocalOperationalLog.Info(
             "FileTransferService",
-            $"event=filetransfer_fallback_frontier_repair_dispatched; {FormatCheckpointRepairContinuity(GetCheckpointRepairContinuityStamp(contract, protocolRepairRequestId, contract.Authority.RequestCorrelationId))}{FormatFallbackFrontierRepairAuthorityTuple(authority)}; protocol_repair_request_id={FormatProtocolLogValue(protocolRepairRequestId)}; request_correlation_id={FormatProtocolLogValue(authority.RequestCorrelationId)}; stage={FormatProtocolLogValue(stage)}; dispatched_chunk_count={dispatchedChunkCount}; remote_frontier_chunk_index={remoteFrontierChunkIndex}; chunks_accepted_for_transport={acceptedUntilChunkIndex}; dispatch_observed={(contract.Lifecycle.DispatchObserved ? 1 : 0)}; decision_reason=authorized_repair_send_completed");
+            $"event=filetransfer_fallback_frontier_repair_dispatched; {FileTransferDiagnosticScopeEvidence.Format(authority.SessionId, authority.TransferId)}{FormatCheckpointRepairContinuity(GetCheckpointRepairContinuityStamp(contract, protocolRepairRequestId, contract.Authority.RequestCorrelationId))}{FormatFallbackFrontierRepairAuthorityTuple(authority)}; protocol_repair_request_id={FormatProtocolLogValue(protocolRepairRequestId)}; request_correlation_id={FormatProtocolLogValue(authority.RequestCorrelationId)}; stage={FormatProtocolLogValue(stage)}; dispatched_chunk_count={dispatchedChunkCount}; remote_frontier_chunk_index={remoteFrontierChunkIndex}; chunks_accepted_for_transport={acceptedUntilChunkIndex}; dispatch_observed={(contract.Lifecycle.DispatchObserved ? 1 : 0)}; decision_reason=authorized_repair_send_completed");
     }
 
     private static void LogFallbackFrontierRepairRetryDispatched(
@@ -2487,7 +2487,7 @@ public sealed partial class SessionFileTransferService
         var authority = contract.Authority;
         LocalOperationalLog.Info(
             "FileTransferService",
-            $"event=filetransfer_fallback_frontier_repair_retry_dispatched; {FormatFallbackFrontierRepairAuthorityTuple(authority)}; protocol_repair_request_id={FormatProtocolLogValue(protocolRepairRequestId)}; request_correlation_id={FormatProtocolLogValue(authority.RequestCorrelationId)}; stage={FormatProtocolLogValue(stage)}; dispatched_chunk_count={dispatchedChunkCount}; remote_frontier_chunk_index={remoteFrontierChunkIndex}; chunks_accepted_for_transport={acceptedUntilChunkIndex}; dispatch_observed=1; decision_reason=authorized_repair_retry_send_completed");
+            $"event=filetransfer_fallback_frontier_repair_retry_dispatched; {FileTransferDiagnosticScopeEvidence.Format(authority.SessionId, authority.TransferId)}{FormatFallbackFrontierRepairAuthorityTuple(authority)}; protocol_repair_request_id={FormatProtocolLogValue(protocolRepairRequestId)}; request_correlation_id={FormatProtocolLogValue(authority.RequestCorrelationId)}; stage={FormatProtocolLogValue(stage)}; dispatched_chunk_count={dispatchedChunkCount}; remote_frontier_chunk_index={remoteFrontierChunkIndex}; chunks_accepted_for_transport={acceptedUntilChunkIndex}; dispatch_observed=1; decision_reason=authorized_repair_retry_send_completed");
     }
 
     private static void LogFallbackFrontierRepairStalled(
@@ -2502,7 +2502,7 @@ public sealed partial class SessionFileTransferService
         var authority = contract.Authority;
         LocalOperationalLog.Info(
             "FileTransferService",
-            $"event=filetransfer_fallback_frontier_repair_stalled; {FormatFallbackFrontierRepairAuthorityTuple(authority)}; request_correlation_id={FormatProtocolLogValue(authority.RequestCorrelationId)}; reason={FormatProtocolLogValue(reason)}; observed_frontier_chunk_index={frontierChunkIndex}; observed_durable_received_highest_chunk_index={durableReceivedHighestChunkIndex}; observed_requested_chunk_count={requestedChunkCount}; attempt_count={attemptCount}; frontier_stall_age_ms={frontierStallAgeMs}; decision_reason=authorized_fallback_frontier_repair_stalled");
+            $"event=filetransfer_fallback_frontier_repair_stalled; {FileTransferDiagnosticScopeEvidence.Format(authority.SessionId, authority.TransferId)}{FormatFallbackFrontierRepairAuthorityTuple(authority)}; request_correlation_id={FormatProtocolLogValue(authority.RequestCorrelationId)}; reason={FormatProtocolLogValue(reason)}; observed_frontier_chunk_index={frontierChunkIndex}; observed_durable_received_highest_chunk_index={durableReceivedHighestChunkIndex}; observed_requested_chunk_count={requestedChunkCount}; attempt_count={attemptCount}; frontier_stall_age_ms={frontierStallAgeMs}; decision_reason=authorized_fallback_frontier_repair_stalled");
     }
 
     private bool TryIssueOutboundFallbackFrontierRetrySuccessorLocked(

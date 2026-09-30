@@ -26,7 +26,7 @@ if ($RequireFrontierIsolation) { Test-RelayNativeIsolation -Request $private:rel
 if ($script:mode -ceq 'early-take') { if ($null -ne $private:relayRequest.TakeRelayAfterExit()) { throw 'Running Wrapper adopted' } }
 if ($script:mode -ceq 'cancelled') { $private:relayRequest.Dispose() }
 '@)
-$take='$private:relayedWriter = $private:relayRequest.TakeRelayAfterExit()'
+$take='$private:relayedWriter = $private:relayRequest.TakeRelayAfterExitWithPayloads($private:relayReports)'
 $text=$text.Replace($take,@'
 if ($script:mode -ceq 'repeat-take') { $null=$private:relayRequest.TakeRelayAfterExit() }
 if ($script:mode -ceq 'wrong-api') { if ($null -ne $private:relayRequest.TakeAfterExit()) { throw 'Relay interpreted as GUI finalizer completion' } }
@@ -43,7 +43,7 @@ if ($script:mode -cin @('bad-magic','partial','truncated','oversize','wrong-pid'
         }
     } finally { $private:view.Dispose(); $private:map.Dispose() }
 }
-$private:relayedWriter = $private:relayRequest.TakeRelayAfterExit()
+$private:relayedWriter = $private:relayRequest.TakeRelayAfterExitWithPayloads($private:relayReports)
 '@)
 $text=$text.Replace('$private:relayOutputCaptured = $true',"if (`$script:mode -ceq 'output-fails') { throw 'injected_output_capture_failure' }; `$private:relayOutputCaptured = `$true")
 Invoke-Expression $text

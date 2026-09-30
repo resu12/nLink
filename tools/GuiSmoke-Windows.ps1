@@ -1763,6 +1763,17 @@ function Get-GuiSmokeFrontierLaunchOwner {
     catch { return $null } # Omit optional ownership, not ordinary GUI startup.
 }
 
+function Open-GuiSmokeCanonicalAttempt {
+    param([AllowNull()]$FrontierOwner, [string]$ExePath, [int]$TimeoutSeconds)
+    Set-Variable -Name FrontierOwner -Option Private
+    try {
+        $private:ownerType = 'NLink.Tools.LocalGuiWriterRequest+FrontierLaunchOwner' -as [type]
+        if ($null -eq $private:ownerType -or -not $private:ownerType.IsInstanceOfType($FrontierOwner)) { return $null }
+        return $FrontierOwner.TryConsumeCanonicalAttempt($ExePath, $TimeoutSeconds)
+    }
+    catch { return $null } # Optional scope never changes ordinary scenario dispatch.
+}
+
 function Clear-AppLogsIfPresent {
     param([AllowNull()]$FrontierOwner = $null, [AllowNull()]$FrontierOrigin = $null)
     Set-Variable -Name FrontierOwner,FrontierOrigin -Option Private
@@ -2556,6 +2567,28 @@ function Get-FileSha256Hex {
         if ($stream) { $stream.Dispose() }
         $sha.Dispose()
     }
+}
+
+function Get-FileTransferTunaSourceHash {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [AllowNull()]$CanonicalAttempt = $null,
+        [AllowNull()]$SenderRequest = $null
+    )
+    Set-Variable -Name CanonicalAttempt,SenderRequest -Option Private
+    $private:source = $null
+    if ($null -ne $CanonicalAttempt) {
+        $source = $CanonicalAttempt.TryHoldSource($SenderRequest, $Path)
+        if ($null -ne $source) {
+            $hash = $source.Sha256
+            if (-not [string]::IsNullOrWhiteSpace($hash)) {
+                [void]$source.TrySendToHelpee($SenderRequest)
+                return $hash
+            }
+        }
+    }
+    # Optional custody omission keeps the original hash and scenario behavior.
+    return Get-FileSha256Hex -Path $Path
 }
 
 function Get-GuiSmokeStringHashPrefix {
@@ -3470,11 +3503,13 @@ function Write-FileTransferGuiLogLedgerEvidence {
         [AllowNull()]$TestMetrics = $null,
         [AllowNull()]$LocalNativeWriterCapture = $null,
         [AllowEmptyCollection()][object[]]$FrontierReports = @(),
-        [AllowNull()]$FrontierOwner = $null
+        [AllowNull()]$FrontierOwner = $null,
+        [AllowNull()]$CanonicalAttempt = $null
     )
 
     Set-Variable -Name FrontierReports -Option Private
     Set-Variable -Name FrontierOwner -Option Private
+    Set-Variable -Name CanonicalAttempt -Option Private
     $finalizationErrors = New-Object System.Collections.Generic.List[string]
     $captureNativeWriterInputs = $LocalNativeWriterCapture -is [ref] -and $null -eq $LocalNativeWriterCapture.Value
     # This issuer stays private to the actual finalizer, never in formatter
@@ -4730,6 +4765,12 @@ function Write-FileTransferGuiLogLedgerEvidence {
                         $nativeCapture.Semantic.ByteCount -eq $analyzerInput.ByteCount -and
                         $nativeCapture.Semantic.LineCount -eq $analyzerInput.LineCount) {
                         $private:frontierHandoffPrepared = $false
+                        try {
+                            if ($null -ne $CanonicalAttempt -and $null -ne $localFrontierBinding) {
+                                [void]$CanonicalAttempt.TryOfferClosedPayloadsToWrapper($localFrontierBinding)
+                            }
+                        }
+                        catch { } # Optional payload omission must not skip original completion.
                         try {
                             if ($null -ne $localFrontierBinding -and $localFrontierBinding.IsCurrent) {
                                 $frontierHandoffPrepared = $localFrontierBinding.TryPrepareParentHandoffWhenReady()
@@ -36753,8 +36794,12 @@ function Invoke-FileTransferTunaHandoffFallbackCycle {
         [Parameter(Mandatory = $true)][string]$PayerMode,
         [Parameter(Mandatory = $true)][string]$FaultMode,
         [Parameter(Mandatory = $true)][string]$RouteMode,
-        [Parameter(Mandatory = $true)][string]$WalletPassword
+        [Parameter(Mandatory = $true)][string]$WalletPassword,
+        [AllowNull()]$CanonicalAttempt = $null,
+        [AllowNull()]$SenderRequest = $null,
+        [AllowNull()]$ReceiverRequest = $null
     )
+    Set-Variable -Name CanonicalAttempt,SenderRequest,ReceiverRequest -Option Private
 
     $setupTimingWatch = [System.Diagnostics.Stopwatch]::StartNew()
     $timingSelectedRouteLine = ''
@@ -36857,7 +36902,10 @@ function Invoke-FileTransferTunaHandoffFallbackCycle {
     }
 
     Write-DeterministicFileTransferPayload -Path $AutopickPath -SizeBytes $PayloadSizeBytes -Seed $Seed -CycleIndex 0
-    $expectedHash = Get-FileSha256Hex -Path $AutopickPath
+    $expectedHash = Get-FileTransferTunaSourceHash -Path $AutopickPath -CanonicalAttempt $CanonicalAttempt -SenderRequest $SenderRequest
+    if ($null -ne $CanonicalAttempt) {
+        [void]$CanonicalAttempt.TryStartDestinationAdoption($ReceiverRequest, (Get-GuiSmokeScenarioRemainingTimeoutMs -DefaultTimeoutMs $TimeoutMs))
+    }
     $cycleStartedUtc = [datetime]::UtcNow
     $bookmark = Get-AppLogBookmark
     $terminalExpectedInboundRole = if ($Direction -eq 'helper-to-helpee') { 'helpee' } else { 'helper' }
@@ -38286,14 +38334,17 @@ function Wait-FileTransferTerminalOrProgressBeforeAction {
 }
 
 function Run-ScenarioFileTransferTunaHandoffFallback {
-    param([Parameter(Mandatory = $true)]$Context, [AllowNull()]$FrontierOwner = $null)
-    Set-Variable -Name FrontierOwner -Option Private
+    param([Parameter(Mandatory = $true)]$Context, [AllowNull()]$FrontierOwner = $null, [AllowNull()]$CanonicalAttempt = $null)
+    Set-Variable -Name FrontierOwner,CanonicalAttempt -Option Private
     $private:frontierHelpeeRequest = $null
     $private:frontierHelperRequest = $null
     $private:frontierHelpeeReports = $null
     $private:frontierHelperReports = $null
     if ($null -ne $FrontierOwner -and $FrontierOwner -isnot [NLink.Tools.LocalGuiWriterRequest+FrontierLaunchOwner]) {
         throw 'gui_smoke_frontier_scenario_owner_invalid'
+    }
+    if ($null -ne $CanonicalAttempt -and $CanonicalAttempt -isnot [NLink.Tools.LocalGuiWriterRequest+CanonicalAttemptDispatch]) {
+        throw 'gui_smoke_canonical_attempt_invalid'
     }
 
     if (-not (Test-GuiSmokeEnvEnabled -Name 'NLINK_RUN_TUNA_GUI_FILETRANSFER')) {
@@ -38447,15 +38498,21 @@ function Run-ScenarioFileTransferTunaHandoffFallback {
         # The live entry does not pass an owner until finalizer/parent custody
         # is integrated. This explicit branch owns requests and shutdown adoption.
         if ($null -ne $FrontierOwner) {
-            $frontierHelpeeRequest = $FrontierOwner.TryCreateAppRequest()
-            $frontierHelperRequest = $FrontierOwner.TryCreateAppRequest()
+            if ($null -ne $CanonicalAttempt) {
+                $frontierHelpeeRequest = $CanonicalAttempt.TryCreateRoleRequest('helpee', $FrontierOwner)
+                $frontierHelperRequest = $CanonicalAttempt.TryCreateRoleRequest('helper', $FrontierOwner)
+            }
+            else {
+                $frontierHelpeeRequest = $FrontierOwner.TryCreateAppRequest()
+                $frontierHelperRequest = $FrontierOwner.TryCreateAppRequest()
+            }
             if ($null -eq $frontierHelpeeRequest -or $null -eq $frontierHelperRequest) {
                 $FrontierOwner.Dispose()
                 $frontierHelpeeRequest = $null
                 $frontierHelperRequest = $null
             }
         }
-        Start-HelpeeFlow -Context $Context -FrontierRequest $frontierHelpeeRequest -FrontierReports ([ref]$frontierHelpeeReports)
+        Start-HelpeeFlow -Context $Context -FrontierRequest $frontierHelpeeRequest -FrontierReports ([ref]$frontierHelpeeReports) -CanonicalAttempt $CanonicalAttempt
         $runBookmark = Get-AppLogBookmark
         $initialLogLedgerSnapshot = Get-GuiSmokeLogLedgerSnapshot `
             -State $script:GuiSmokeAppLogLedger `
@@ -38470,7 +38527,7 @@ function Run-ScenarioFileTransferTunaHandoffFallback {
         if ($null -ne $FrontierOwner -and $null -eq $FrontierOwner.TryCaptureInitialLedgerObservation()) {
             $FrontierOwner.Dispose()
         }
-        Start-HelperFlow -Context $Context -FrontierRequest $frontierHelperRequest -FrontierReports ([ref]$frontierHelperReports)
+        Start-HelperFlow -Context $Context -FrontierRequest $frontierHelperRequest -FrontierReports ([ref]$frontierHelperReports) -CanonicalAttempt $CanonicalAttempt
         if ($null -ne $FrontierOwner -and
             (-not $FrontierOwner.SealLaunches() -or -not $FrontierOwner.TryEnableFileHandoff())) { $FrontierOwner.Dispose() }
         [void](Connect-HelperAndHelpee -Context $Context)
@@ -38491,7 +38548,10 @@ function Run-ScenarioFileTransferTunaHandoffFallback {
             -PayerMode $payerMode `
             -FaultMode $faultMode `
             -RouteMode $routeMode `
-            -WalletPassword $walletPassword
+            -WalletPassword $walletPassword `
+            -CanonicalAttempt $CanonicalAttempt `
+            -SenderRequest $frontierHelpeeRequest `
+            -ReceiverRequest $frontierHelperRequest
     }
     catch {
         $scenarioFailure = $_
@@ -38545,6 +38605,9 @@ function Run-ScenarioFileTransferTunaHandoffFallback {
         catch {}
     }
     finally {
+        if ($null -ne $CanonicalAttempt) {
+            [void]$CanonicalAttempt.TryCompleteDestinationAdoption($null -ne $scenarioFailure)
+        }
         if ($null -ne $mixedShareButton) {
             try {
                 Click-Element $mixedShareButton
@@ -38562,6 +38625,7 @@ function Run-ScenarioFileTransferTunaHandoffFallback {
                 -InitialSnapshot $initialLogLedgerSnapshot `
                 -FrontierReports @($frontierHelpeeReports, $frontierHelperReports) `
                 -FrontierOwner $FrontierOwner `
+                -CanonicalAttempt $CanonicalAttempt `
                 -ProcessOutputDrainAction {
                     param([AllowNull()]$FrontierOwner = $null)
                     Set-Variable -Name FrontierOwner -Option Private
@@ -38912,9 +38976,10 @@ function Start-AppInstance {
         [Parameter(Mandatory = $true)][string]$RoleName,
         [AllowNull()]$FrontierRequest = $null,
         [AllowNull()]$FrontierReports = $null,
+        [AllowNull()]$CanonicalAttempt = $null,
         [AllowNull()][System.Collections.IList]$StartedProcesses = $null
     )
-    Set-Variable -Name FrontierRequest,FrontierReports -Option Private
+    Set-Variable -Name FrontierRequest,FrontierReports,CanonicalAttempt -Option Private
     Write-Host "[GUI Smoke] Starting $RoleName instance..." -ForegroundColor Cyan
 
     $launchEnvironment = Get-AppLaunchEnvironmentOverrides -RoleName $RoleName
@@ -38950,7 +39015,12 @@ function Start-AppInstance {
             $capture = New-GuiSmokeProcessOutputCapture -RoleName $RoleName -ProcessId $ProcessId
             return [string[]]@($capture.StdoutPath, $capture.StderrPath)
         }
-        $FrontierReports.Value = $FrontierRequest.StartAppWithReports($process, $createReports)
+        if ($null -ne $CanonicalAttempt) {
+            $FrontierReports.Value = $CanonicalAttempt.StartRoleApp($RoleName, $FrontierRequest, $process, $createReports)
+        }
+        else {
+            $FrontierReports.Value = $FrontierRequest.StartAppWithReports($process, $createReports)
+        }
         Set-GuiPreparationProcessIdentity -Process $process -EnvironmentOverrides $launchEnvironment
         return $process
     }
@@ -41296,8 +41366,10 @@ function Invoke-Scenario {
     param(
         [Parameter(Mandatory = $true)][string]$Name,
         [Parameter(Mandatory = $true)][int]$TimeoutSec,
-        [Parameter(Mandatory = $true)][scriptblock]$Action
+        [Parameter(Mandatory = $true)][scriptblock]$Action,
+        [AllowNull()]$CanonicalAttempt = $null
     )
+    Set-Variable -Name CanonicalAttempt -Option Private
     $previousDeadlineUtc = $script:GuiSmokeScenarioDeadlineUtc
     $previousDeadlineName = $script:GuiSmokeScenarioDeadlineName
     $previousTerminalPhaseGeneration = $script:GuiSmokeTerminalPhaseGeneration
@@ -41307,7 +41379,8 @@ function Invoke-Scenario {
     $script:GuiSmokeTerminalPhaseGeneration = 0L
     try {
         Write-Host "[GUI Smoke][$Name] START" -ForegroundColor Cyan
-        & $Action
+        if ($null -ne $CanonicalAttempt) { & $Action -CanonicalAttempt $CanonicalAttempt }
+        else { & $Action }
         Assert-GuiSmokeScenarioDeadline
         Write-Host "[GUI Smoke][$Name] PASS ($([math]::Round($sw.Elapsed.TotalSeconds,1))s)" -ForegroundColor Green
     }
@@ -41492,10 +41565,10 @@ function Reset-ScenarioContext {
 }
 
 function Start-HelpeeFlow {
-    param([Parameter(Mandatory = $true)]$Context, [AllowNull()]$FrontierRequest = $null, [AllowNull()]$FrontierReports = $null)
-    Set-Variable -Name FrontierRequest,FrontierReports -Option Private
+    param([Parameter(Mandatory = $true)]$Context, [AllowNull()]$FrontierRequest = $null, [AllowNull()]$FrontierReports = $null, [AllowNull()]$CanonicalAttempt = $null)
+    Set-Variable -Name FrontierRequest,FrontierReports,CanonicalAttempt -Option Private
     $Context.HelpeeLaunchGeneration = [int]$Context.HelpeeLaunchGeneration + 1
-    $Context.HelpeeProc = Start-AppInstance -ExePath $Context.ExePath -RoleName 'helpee' -FrontierRequest $FrontierRequest -FrontierReports $FrontierReports -StartedProcesses $Context.Processes
+    $Context.HelpeeProc = Start-AppInstance -ExePath $Context.ExePath -RoleName 'helpee' -FrontierRequest $FrontierRequest -FrontierReports $FrontierReports -StartedProcesses $Context.Processes -CanonicalAttempt $CanonicalAttempt
     if ($null -eq $FrontierRequest) { [void]$Context.Processes.Add($Context.HelpeeProc) }
     Set-ScenarioRoleWindowIdentity -Context $Context -RoleName 'helpee' -Window (Wait-Window -Process $Context.HelpeeProc -RoleName 'helpee' -TimeoutMs (Get-StartupWindowTimeoutMs))
     Click-HomeButton -Window $Context.HelpeeWindow -Text 'I need help'
@@ -41505,14 +41578,14 @@ function Start-HelpeeFlow {
 }
 
 function Start-HelperFlow {
-    param([Parameter(Mandatory = $true)]$Context, [AllowNull()]$FrontierRequest = $null, [AllowNull()]$FrontierReports = $null)
-    Set-Variable -Name FrontierRequest,FrontierReports -Option Private
+    param([Parameter(Mandatory = $true)]$Context, [AllowNull()]$FrontierRequest = $null, [AllowNull()]$FrontierReports = $null, [AllowNull()]$CanonicalAttempt = $null)
+    Set-Variable -Name FrontierRequest,FrontierReports,CanonicalAttempt -Option Private
     $Context.HelperLaunchGeneration = [int]$Context.HelperLaunchGeneration + 1
     $Context.HelperLogBookmark = Get-AppLogBookmark
     $Context.HelperRunId = ''
     $Context.HelperListenerGeneration = -1
     Clear-HelperIdentityArtifact
-    $Context.HelperProc = Start-AppInstance -ExePath $Context.ExePath -RoleName 'helper' -FrontierRequest $FrontierRequest -FrontierReports $FrontierReports -StartedProcesses $Context.Processes
+    $Context.HelperProc = Start-AppInstance -ExePath $Context.ExePath -RoleName 'helper' -FrontierRequest $FrontierRequest -FrontierReports $FrontierReports -StartedProcesses $Context.Processes -CanonicalAttempt $CanonicalAttempt
     try {
         $Context.HelperStartedUtcMs = [DateTimeOffset]::new($Context.HelperProc.StartTime.ToUniversalTime()).ToUnixTimeMilliseconds()
     }
@@ -42932,6 +43005,7 @@ $exitCode = 1
 $decoderDebugSnapshotBefore = @()
 $private:guiFrontierOwner = $null
 $private:guiFrontierOrigin = $null
+$private:guiCanonicalAttempt = $null
 
 try {
     # GUI smoke intentionally drives release-affecting test overrides such as
@@ -42951,6 +43025,10 @@ try {
         $guiFrontierOwner = $null
     }
     $decoderDebugSnapshotBefore = Get-DecoderDebugSnapshot
+
+    if ($scenarioList.Count -eq 1 -and $scenarioList[0] -ceq 'FILETRANSFER_TUNA_HANDOFF_FALLBACK') {
+        $guiCanonicalAttempt = Open-GuiSmokeCanonicalAttempt -FrontierOwner $guiFrontierOwner -ExePath $ctx.ExePath -TimeoutSeconds $TimeoutSeconds
+    }
 
     foreach ($scenario in @($scenarioList)) {
         switch ($scenario) {
@@ -42978,7 +43056,18 @@ try {
             'SCREENSHARE_STOP_PENDING_APPROVAL' { Invoke-Scenario -Name 'screenshare_stop_pending_approval' -TimeoutSec ([Math]::Min($TimeoutSeconds, 90)) -Action { Run-ScenarioScreenShareStopWhileControlApprovalPending -Context $ctx } }
             'FILETRANSFER_NKN_SOAK' { Invoke-Scenario -Name 'filetransfer_nkn_soak' -TimeoutSec $TimeoutSeconds -Action { Run-ScenarioFileTransferNknSoak -Context $ctx } }
             'FILETRANSFER_NKN_MIXED_SOAK' { Invoke-Scenario -Name 'filetransfer_nkn_mixed_soak' -TimeoutSec $TimeoutSeconds -Action { Run-ScenarioFileTransferNknMixedSoak -Context $ctx } }
-            'FILETRANSFER_TUNA_HANDOFF_FALLBACK' { Invoke-Scenario -Name 'filetransfer_tuna_handoff_fallback' -TimeoutSec $TimeoutSeconds -Action { Run-ScenarioFileTransferTunaHandoffFallback -Context $ctx } }
+            'FILETRANSFER_TUNA_HANDOFF_FALLBACK' {
+                Invoke-Scenario -Name 'filetransfer_tuna_handoff_fallback' -TimeoutSec $TimeoutSeconds -CanonicalAttempt $guiCanonicalAttempt -Action {
+                    param([AllowNull()]$CanonicalAttempt = $null)
+                    Set-Variable -Name CanonicalAttempt -Option Private
+                    $private:scenarioFrontierOwner = $null
+                    if ($null -ne $CanonicalAttempt -and $CanonicalAttempt -is [NLink.Tools.LocalGuiWriterRequest+CanonicalAttemptDispatch]) {
+                        $scenarioFrontierOwner = $CanonicalAttempt.TryTakeScenarioOwner()
+                    }
+                    if ($null -eq $scenarioFrontierOwner) { $CanonicalAttempt = $null }
+                    Run-ScenarioFileTransferTunaHandoffFallback -Context $ctx -FrontierOwner $private:scenarioFrontierOwner -CanonicalAttempt $CanonicalAttempt
+                }
+            }
             'STATUS_TEXT_GUARDRAILS' { Invoke-Scenario -Name 'status_text_guardrails' -TimeoutSec ([Math]::Min($TimeoutSeconds, 90)) -Action { Run-ScenarioStatusTextGuardrails -Context $ctx } }
             default { throw "Unknown GUI smoke scenario '$scenario'. Use A,B,C,D,E,F,G,H,I,J,K,L,M,NKN_DIRECT_CONNECT,HEADER_CHAT_COHERENCE,END_SESSION_DISABLES_CHAT,SCREENSHARE_BUTTON_VISIBILITY,SCREENSHARE_VIEWER_TOGGLE,SCREENSHARE_RECOVERY_RECEIPT_DEVLOCAL,SCREENSHARE_NKN_SOAK,SCREENSHARE_CHAT_COEXISTENCE,FILETRANSFER_NKN_SOAK,FILETRANSFER_NKN_MIXED_SOAK,FILETRANSFER_TUNA_HANDOFF_FALLBACK,STATUS_TEXT_GUARDRAILS." }
         }
@@ -43007,7 +43096,10 @@ catch {
 }
 finally {
     try { Reset-ScenarioContext -Context $ctx }
-    finally { if ($null -ne $guiFrontierOwner) { $guiFrontierOwner.Dispose() } }
+    finally {
+        if ($null -ne $guiCanonicalAttempt) { $guiCanonicalAttempt.Dispose() }
+        if ($null -ne $guiFrontierOwner) { $guiFrontierOwner.Dispose() }
+    }
 
     if ($null -eq $oldTransport) {
         Remove-Item Env:NLINK_TRANSPORT -ErrorAction SilentlyContinue

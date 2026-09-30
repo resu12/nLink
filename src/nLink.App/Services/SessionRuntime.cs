@@ -1493,13 +1493,7 @@ public sealed partial class SessionRuntime : IDisposable, ISessionRuntimeScreenS
             $"event=file_transfer_destination_opened; role={role}; session_id={offer.SessionId}; transfer_id={offer.TransferId}; file_name_len={offer.FileName.Length}; final_path={plan.FinalPath}; temp_path={plan.TempPath}");
 
         return Task.FromResult(
-            new FileTransferReceiveDestination(
-                handle.Stream,
-                finalizeAsync: finalizeCt => handle.FinalizeAsync(finalizeCt),
-                dispose: handle.Dispose,
-                disposeAsync: () => handle.DisposeAsync(),
-                finalPath: plan.FinalPath,
-                safeFileName: plan.SafeFileName));
+            FileTransferReceiveDestination.FromGuardOwnedHandle(handle));
     }
 
     internal void LogRuntimeFileTransferSnapshotCore(SessionFileTransferSnapshot snapshot)
@@ -1519,7 +1513,7 @@ public sealed partial class SessionRuntime : IDisposable, ISessionRuntimeScreenS
             {
                 LocalOperationalLog.Info(
                     "Session",
-                    $"event=file_transfer_inbound_terminal; role={role}; session_id={inbound.SessionId}; transfer_id={inbound.TransferId}; state={inbound.State}; error_code={inbound.ErrorCode ?? "(none)"}; saved_path={inbound.SavedFilePath ?? "(none)"}");
+                    $"event=file_transfer_inbound_terminal; {FileTransferDiagnosticScopeEvidence.Format(inbound.SessionId, inbound.TransferId)}role={role}; session_id={inbound.SessionId}; transfer_id={inbound.TransferId}; state={inbound.State}; error_code={inbound.ErrorCode ?? "(none)"}; saved_path={inbound.SavedFilePath ?? "(none)"}");
             }
         }
 

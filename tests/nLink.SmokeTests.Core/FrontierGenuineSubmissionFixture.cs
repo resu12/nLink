@@ -136,6 +136,10 @@ public sealed partial class SessionFileTransferV4SenderTests
         var writerOnly = ordinal == 1 && variant != "both_positive";
         if (writerOnly)
         {
+            if (variant == "primary_data_session")
+            {
+                LocalOperationalLog.Info("GenuineFixture", "event=writer_only_contribution; data_session_identity=[redacted]:1; data_session_identity=(none)");
+            }
             if (deferFinalization)
             {
                 LocalOperationalLog.Info("GenuineFixture", "event=writer_only_contribution");
@@ -155,7 +159,7 @@ public sealed partial class SessionFileTransferV4SenderTests
         {
             for (var i = 0; i < 65; i++) { LocalOperationalLog.Info("GenuineFixture", $"event=frontier_witness_fixture; ordinal={i}"); }
         }
-        var count = variant is "two_payloads" or "payload_fault" ? 2 : 1;
+        var count = variant is "two_payloads" or "payload_fault" or "primary_scope_two_transfers" ? 2 : 1;
         for (var i = 0; i < count; i++)
         {
             string reason = "";
@@ -168,7 +172,9 @@ public sealed partial class SessionFileTransferV4SenderTests
             object? emitter = null;
             CancellationTokenSource? fixtureLifetime = null;
             await RunFrontierBoundaryAsync(ordinal == 0 ? "v6" : "v4",
-                serviceAdmission && serviceVariant != "reset" ? serviceVariant : "before_recheck", true,
+                variant == "primary_data_session" ? "watchdog" :
+                variant.StartsWith("primary_watchdog", StringComparison.Ordinal) ? variant["primary_".Length..] :
+                    serviceAdmission && serviceVariant != "reset" ? serviceVariant : "before_recheck", true,
                 suppliedObserver: observation, beforeCapture: context =>
                 {
                     fixtureLifetime = GetPrivateProperty<CancellationTokenSource>(context, "LifetimeCts");
@@ -194,9 +200,11 @@ public sealed partial class SessionFileTransferV4SenderTests
                     // process writer drained; do not let synthetic callbacks
                     // become post-drain writes during the other app's work.
                     fixtureLifetime!.Cancel();
-                }, originalPrimaryFailure: variant is "primary_failure" or "primary_overflow",
+                }, originalPrimaryFailure: variant is "primary_failure" or "primary_overflow" or "primary_scope_session" or "primary_data_session" ||
+                    (variant == "primary_scope_two_transfers" && i == 1) || variant.StartsWith("primary_watchdog", StringComparison.Ordinal),
                 additionalWitnessWrites: variant == "primary_overflow" ? 42 : 0, appOwnedObservation: serviceAdmission,
-                resetAfterCapture: serviceAdmission && serviceVariant == "reset", waitForLogEvidence: !productionShutdown);
+                resetAfterCapture: serviceAdmission && serviceVariant == "reset", waitForLogEvidence: !productionShutdown,
+                redactedSession: variant is "primary_scope_session" or "primary_data_session", redactedTransfer: variant == "primary_data_session");
         }
         // The app-lifetime fixture leaves preparation, markers and the only
         // final drain to the original production owner under test.

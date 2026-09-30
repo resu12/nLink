@@ -26,7 +26,7 @@ try {
         if($mode -ceq 'source-started' -and $reader.ReadByte() -lt 0) { throw 'Cursor early source read control failed' }
         if($mode -ceq 'budget-final') {
             $elapsed=@($work.GetType().GetFields($flags) | Where-Object {$_.Name -match '^_?elapsed$'})[0]
-            $elapsed.SetValue($work,[long]([Diagnostics.Stopwatch]::Frequency*6))
+            $elapsed.SetValue($work,[long]([Diagnostics.Stopwatch]::Frequency*11))
         }
         if($mode -ceq 'after-finish') {
             $buffer=[byte[]]::new(32768)

@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.IO.Pipes;
 using System.Security.Cryptography;
 using System.Text;
@@ -84,7 +85,7 @@ public sealed class DevLocalTransport : ISignalingTransport, IAddressTargetSigna
     private readonly SessionReplayWindow inboundScreenShareReplayWindow = new();
     private readonly SessionReplayWindow inboundFileTransferReplayWindow = new();
     private readonly Dictionary<string, FileTransferTransportState> fileTransferStates = new(StringComparer.Ordinal);
-    private readonly Dictionary<string, TransportFileTransferDataSession> fileTransferDataSessions = new(StringComparer.Ordinal);
+    private readonly ConcurrentDictionary<string, TransportFileTransferDataSession> fileTransferDataSessions = new(StringComparer.Ordinal);
     private readonly object regularV4RepairPressureGate = new();
     private readonly Dictionary<string, DevLocalRegularV4RepairPressureShadow> regularV4RepairPressures = new(StringComparer.Ordinal);
     private readonly object fileTransferRouteTransitionGate = new();
@@ -1525,16 +1526,13 @@ public sealed class DevLocalTransport : ISignalingTransport, IAddressTargetSigna
             : sessionId.Trim();
         var normalizedTransferId = NormalizeRequiredFileTransferId(transferId);
 
-        if (!fileTransferDataSessions.TryGetValue(normalizedTransferId, out var session))
-        {
-            session = new TransportFileTransferDataSession(
+        var session = fileTransferDataSessions.GetOrAdd(normalizedTransferId,
+            id => new TransportFileTransferDataSession(
                 this,
                 normalizedSessionId,
-                normalizedTransferId,
-                Interlocked.Increment(ref nextFileTransferDataSessionGeneration));
-            fileTransferDataSessions[normalizedTransferId] = session;
-        }
-        else if (!string.Equals(session.SessionId, normalizedSessionId, StringComparison.Ordinal))
+                id,
+                Interlocked.Increment(ref nextFileTransferDataSessionGeneration)));
+        if (!string.Equals(session.SessionId, normalizedSessionId, StringComparison.Ordinal))
         {
             throw new InvalidOperationException("File-transfer data session id mismatch for existing transfer.");
         }
@@ -4696,16 +4694,13 @@ public sealed class DevLocalTransport : ISignalingTransport, IAddressTargetSigna
 
     private void DeliverFileTransferDataFrame(FileTransferDataFrame frame)
     {
-        if (!fileTransferDataSessions.TryGetValue(frame.TransferId, out var session))
-        {
-            session = new TransportFileTransferDataSession(
+        var session = fileTransferDataSessions.GetOrAdd(frame.TransferId,
+            id => new TransportFileTransferDataSession(
                 this,
                 frame.SessionId,
-                frame.TransferId,
-                Interlocked.Increment(ref nextFileTransferDataSessionGeneration));
-            fileTransferDataSessions[frame.TransferId] = session;
-        }
-        else if (!string.Equals(session.SessionId, frame.SessionId, StringComparison.Ordinal))
+                id,
+                Interlocked.Increment(ref nextFileTransferDataSessionGeneration)));
+        if (!string.Equals(session.SessionId, frame.SessionId, StringComparison.Ordinal))
         {
             LocalOperationalLog.Warn(
                 "SessionSecurity",

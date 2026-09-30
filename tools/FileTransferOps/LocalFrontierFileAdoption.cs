@@ -18,6 +18,7 @@ namespace NLink.Tools
 #endif
     internal sealed partial class LocalFrontierFileAdoption : IDisposable
     {
+        internal const int MaximumActiveMilliseconds = 10000;
         private readonly LocalFrontierFileAdoption original;
         private readonly object sync = new object();
         private readonly Guid gui;
@@ -56,11 +57,7 @@ namespace NLink.Tools
                     try
                     {
                         if (!Current()) { Dispose(); return false; }
-                        foreach (var item in adopted)
-                            for (int i = 0; i < item.Files.Count; i++)
-                                if (!Matches(item.Files[i].SafeFileHandle, i == 0 ? item.Manifest.Source : item.Manifest.Payloads[i - 1].File, i == 0))
-                                { Dispose(); return false; }
-                        if (sourceVerified && !SealedSourceMatches()) { Dispose(); return false; }
+                        if (!RetainedFilesCurrent()) { Dispose(); return false; }
                         if (Current()) return true;
                         Dispose(); return false;
                     }
@@ -68,6 +65,14 @@ namespace NLink.Tools
                     finally { if (!measuring) work.Stop(); }
                 }
             }
+        }
+
+        private bool RetainedFilesCurrent()
+        {
+            foreach (var item in adopted)
+                for (int i = 0; i < item.Files.Count; i++)
+                    if (!Matches(item.Files[i].SafeFileHandle, i == 0 ? item.Manifest.Source : item.Manifest.Payloads[i - 1].File, i == 0)) return false;
+            return !sourceVerified || SealedSourceMatches();
         }
 
         // One attempt for each fixed slot; failure retires BOTH contributions.
@@ -149,8 +154,8 @@ namespace NLink.Tools
             foreach (var payload in manifest.Payloads) { yield return payload.Completion; yield return payload.Marker; }
         }
         private bool Current()
-        { return !disposed && work.ElapsedMilliseconds <= 5000 && current() &&
-            (sealScope == null || sealScope()) && !disposed && work.ElapsedMilliseconds <= 5000; }
+        { return !disposed && work.ElapsedMilliseconds <= MaximumActiveMilliseconds && current() &&
+            (sealScope == null || sealScope()) && !disposed && work.ElapsedMilliseconds <= MaximumActiveMilliseconds; }
         private bool Verify(FileStream file, long length, byte[] expected)
         {
             using (var hash = SHA256.Create())

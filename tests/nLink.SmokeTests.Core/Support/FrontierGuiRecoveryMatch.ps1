@@ -19,9 +19,16 @@ $reader=$null; $capture=$null; $markers=$null; $match=$null; $outputFiles=@()
 function Expire-MarkerWork {
     $work=$adopter.GetType().GetField('work',$flags).GetValue($adopter)
     $elapsed=@($work.GetType().GetFields($flags) | Where-Object {$_.Name -match '^_?elapsed$'})[0]
-    $elapsed.SetValue($work,[long]([Diagnostics.Stopwatch]::Frequency*6))
+    $elapsed.SetValue($work,[long]([Diagnostics.Stopwatch]::Frequency*11))
 }
 try {
+    if($mode.StartsWith('buffered-',[StringComparison]::Ordinal)) {
+        [NLink.Tests.RecoveryBufferProbe]::Run($binding,$adopter,$Name,$mode.Substring('buffered-'.Length))
+        if($binding.IsCurrent -or $proof.IsCurrent -or @($nativeFiles | Where-Object {$_.CanRead}).Count) {throw 'Buffered recovery retained native handles'}
+        if(@([IO.Directory]::GetFiles($Directory,'frontier-payload-*')).Count) {throw 'Buffered recovery retained payloads'}
+        [IO.File]::AppendAllText($source,'recovery-buffer-released')
+        return
+    }
     foreach($type in @([NLink.Tools.FrontierRecoveryMarker],[NLink.Tools.LocalGuiWriterRequest+FrontierRecoveryMarkers],[NLink.Tools.LocalGuiWriterRequest+FrontierRecoveryMatch])) {
         if($type.GetConstructors().Length -or @($type.GetProperties() | Where-Object {$null -ne $_.GetSetMethod()}).Count) { throw 'Public recovery proof fabrication exposed' }
     }

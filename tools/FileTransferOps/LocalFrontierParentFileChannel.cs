@@ -89,7 +89,9 @@ namespace NLink.Tools
                     if (Volatile.Read(ref disposed) != 0 || !ready.WaitOne(0) || cancelled.WaitOne(0)) return false;
                     int state = State; if (state < Volatile.Read(ref lastState) || state > 2 || state < 1) return false;
                     if (state == 2) Interlocked.Exchange(ref lastState, 2);
-                    for (int i = 0; i < Bytes; i++) if ((i < 8 || i >= 12) && view.ReadByte(i) != snapshot[i]) return false;
+                    var current = new byte[Bytes];
+                    if (view.ReadArray(0, current, 0, current.Length) != current.Length) return false;
+                    for (int i = 0; i < Bytes; i++) if ((i < 8 || i >= 12) && current[i] != snapshot[i]) return false;
                     return Facts == null || Facts.IsCurrent;
                 }
                 catch { return false; }

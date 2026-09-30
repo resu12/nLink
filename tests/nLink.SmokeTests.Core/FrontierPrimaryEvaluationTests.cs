@@ -8,7 +8,8 @@ public sealed class FrontierPrimaryEvaluationTests : FileTransferOpsScriptsTestB
         from scenario in new[] { "valid", "actual-evaluations", "pre-eof", "wrong-ordinal", "equal-line", "compact-not-full", "origin-order",
             "record-cap", "null-context", "mutated-full", "mutated-compact", "wrong-array", "record-order", "repeat-full", "missing-view",
             "budget", "record-budget", "repeat-begin", "early-take", "wrong-context", "wrong-view", "repeat-take", "post-mutation",
-            "source-close", "custody-dispose", "post-scope", "post-facts", "parent-cancel" }
+            "source-close", "custody-dispose", "post-scope", "post-facts", "parent-cancel",
+            "producer-budget", "evaluation-extended", "evaluation-source-origin", "evaluation-source-complete", "evaluation-replay" }
         select new object[] { host, scenario };
 
     [Theory]

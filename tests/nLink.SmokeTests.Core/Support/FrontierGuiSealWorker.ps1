@@ -2,6 +2,7 @@ param([string]$RepoRoot,[string]$Name,[guid]$RequestId,[string]$Directory,[strin
     [string]$CoreAssembly,[string]$FixtureAssembly,[switch]$App,[string]$SignalName,[int]$Ordinal=0,[string]$SecondaryName='')
 $ErrorActionPreference='Stop'
 Set-StrictMode -Version Latest
+$custodyLedger=$Case.StartsWith('buffered-custody-',[StringComparison]::Ordinal) -and $Case.EndsWith('-ledger',[StringComparison]::Ordinal)
 if($App) {
     $events=@{}
     foreach($part in @('begin','prepared','ack','done','exit','held-ready')) { $events[$part]=[Threading.EventWaitHandle]::OpenExisting($SignalName+'.'+$part) }
@@ -9,7 +10,7 @@ if($App) {
     try {
         if(-not $events.begin.WaitOne(20000)) { throw 'Seal app begin deadline' }
         $env:NLINK_FILETRANSFER_ACCEPTANCE_LOG_PATH=Join-Path $Directory 'shared.log'
-        if(($Case.StartsWith('ledger-',[StringComparison]::Ordinal) -and $Case -cnotin @('ledger-wrong-source','ledger-after-launch')) -or $Case.StartsWith('cursor-',[StringComparison]::Ordinal)) {
+        if($custodyLedger -or ($Case.StartsWith('ledger-',[StringComparison]::Ordinal) -and $Case -cnotin @('ledger-wrong-source','ledger-after-launch')) -or $Case.StartsWith('cursor-',[StringComparison]::Ordinal)) {
             $env:NLINK_FILETRANSFER_ACCEPTANCE_LOG_PATH=Join-Path $Directory 'live-operational-log/nlink.log'
         }
         $env:NLINK_FILETRANSFER_SOAK_ARTIFACT_DIR=$Directory
@@ -44,10 +45,23 @@ if($App) {
                 'cursor-parent-files-facts-ack-commit-primary-prepare-Wrapper-start-auto-terminal',
                 'cursor-parent-files-facts-ack-commit-primary-prepare-RouteAcceptance-start-auto-terminal')) {$variant='primary_failure'}
         if($Case -ceq 'cursor-parent-files-facts-ack-commit-primary-worker-join-witness-overflow') {$variant='primary_overflow'}
+        if($Case.StartsWith('cursor-parent-files-facts-ack-commit-primary-worker-join-watchdog-',[StringComparison]::Ordinal)) {$variant='primary_watchdog'}
+        if($Case -ceq 'cursor-parent-files-facts-ack-commit-primary-worker-join-watchdog-rearm') {$variant='primary_watchdog_rearm'}
+        if($Case -ceq 'cursor-parent-files-facts-ack-commit-primary-worker-join-watchdog-successor') {$variant='primary_watchdog_successor'}
+        if($Case -ceq 'cursor-parent-files-facts-ack-commit-primary-worker-join-scope-session-redacted') {$variant='primary_scope_session'}
+        if($Case -cin @('cursor-parent-files-facts-ack-commit-primary-worker-join-scope-two-transfers','cursor-parent-files-facts-ack-commit-primary-worker-join-scope-duplicate-receipt')) {$variant='primary_scope_two_transfers'}
+        if($Case.StartsWith('cursor-parent-files-facts-ack-commit-primary-worker-join-scope-fault-',[StringComparison]::Ordinal)) {$variant='primary_watchdog'}
+        if($Case.StartsWith('cursor-parent-files-facts-ack-commit-primary-worker-join-data-session-',[StringComparison]::Ordinal)) {$variant='primary_data_session'}
         $fixture=[NLink.SmokeTests.FrontierGenuineSubmissionFixture]::Create($lease,$variant,$Ordinal)
         [void]$fixture.PrepareAsync().GetAwaiter().GetResult()
         if(-not $fixture.Submit()) { throw 'Seal genuine submission failed' }
-        if($Case.StartsWith('markers-',[StringComparison]::Ordinal)) { $fixture.WriteRecoveryMarkers($Case.Substring('markers-'.Length)) }
+        if($Case.StartsWith('markers-',[StringComparison]::Ordinal)) {
+            $markerMode=$Case.Substring('markers-'.Length)
+            if($markerMode.StartsWith('buffered-',[StringComparison]::Ordinal)) {
+                $markerMode=if($markerMode -ceq 'buffered-no-markers') {'no-markers'} else {'valid'}
+            }
+            $fixture.WriteRecoveryMarkers($markerMode)
+        }
         if($Case -ceq 'cursor-parent-files-facts-markers') {$fixture.WriteRecoveryMarkers('valid')}
         [void]$events.prepared.Set()
         if(-not $events.ack.WaitOne(15000) -or -not $fixture.TakeAck()) { throw 'Seal app acknowledgment failed' }
@@ -91,7 +105,9 @@ if($App) {
     }
     exit 0
 }
-. (Join-Path $RepoRoot 'tools/FileTransferOps/LocalGuiWriterRequest.ps1')
+if($Case.StartsWith('buffered-',[StringComparison]::Ordinal) -or $Case.StartsWith('markers-buffered-',[StringComparison]::Ordinal)) {
+    . (Join-Path $RepoRoot 'tests/nLink.SmokeTests.Core/Support/BufferedLedgerLoader.ps1') -RepoRoot $RepoRoot
+} else {. (Join-Path $RepoRoot 'tools/FileTransferOps/LocalGuiWriterRequest.ps1')}
 $begin=[Threading.EventWaitHandle]::OpenExisting($Name+'.test.begin')
 $attached=[Threading.EventWaitHandle]::OpenExisting($Name+'.test.attached')
 $release=[Threading.EventWaitHandle]::OpenExisting($Name+'.test.release')
@@ -115,7 +131,7 @@ try {
     $owner=[NLink.Tools.LocalGuiWriterRequest]::TryAttachFrontierLauncher($Name,$RequestId,'frontier-gui-run','frontier-gui-scenario',$Directory)
     if($null -eq $owner) { throw 'Seal original GUI unavailable' }
     $ledgerOrigin=$null
-    if(($Case.StartsWith('ledger-',[StringComparison]::Ordinal) -and $Case -cne 'ledger-after-launch') -or $Case.StartsWith('cursor-',[StringComparison]::Ordinal)) {
+    if($custodyLedger -or ($Case.StartsWith('ledger-',[StringComparison]::Ordinal) -and $Case -cne 'ledger-after-launch') -or $Case.StartsWith('cursor-',[StringComparison]::Ordinal)) {
         $ledgerOrigin=$owner.TryCreateLedgerOrigin()
         if($null -eq $ledgerOrigin -or -not $ledgerOrigin.IsCurrent) { throw 'Early original ledger creation missing' }
         if($Case -ceq 'ledger-shared-budget') {
@@ -191,7 +207,7 @@ try {
         } else { Wait-SealCheck {$outTask.IsCompleted -and $errTask.IsCompleted} 'Seal original output did not finish' }
     }
     $source=Join-Path $Directory 'shared.log'
-    if(($Case.StartsWith('ledger-',[StringComparison]::Ordinal) -and $Case -cnotin @('ledger-wrong-source','ledger-after-launch')) -or $Case.StartsWith('cursor-',[StringComparison]::Ordinal)) { $source=$ledgerOrigin.SourcePath }
+    if($custodyLedger -or ($Case.StartsWith('ledger-',[StringComparison]::Ordinal) -and $Case -cnotin @('ledger-wrong-source','ledger-after-launch')) -or $Case.StartsWith('cursor-',[StringComparison]::Ordinal)) { $source=$ledgerOrigin.SourcePath }
     $adopter=$owner.GetType().GetField('fileAdoption',$flags).GetValue($owner)
     if($Case -ceq 'mutated') {
         $items=$adopter.GetType().GetField('adopted',$flags).GetValue($adopter)
@@ -205,7 +221,7 @@ try {
     if($Case -ceq 'budget') {
         $work=$adopter.GetType().GetField('work',$flags).GetValue($adopter)
         $elapsed=@($work.GetType().GetFields($flags) | Where-Object {$_.Name -match '^_?elapsed$'})[0]
-        $elapsed.SetValue($work,[long]([Diagnostics.Stopwatch]::Frequency*6))
+        $elapsed.SetValue($work,[long]([Diagnostics.Stopwatch]::Frequency*11))
     }
     if($Case -ceq 'copied') {
         $ownerCopy=[object].GetMethod('MemberwiseClone',$flags).Invoke($owner,$null)
@@ -259,6 +275,16 @@ try {
     if($Case.StartsWith('recovery-',[StringComparison]::Ordinal)) {
         . (Join-Path $RepoRoot 'tests/nLink.SmokeTests.Core/Support/FrontierGuiRecoveryRead.ps1')
         'frontier-gui-worker=original-recovery-inputs-verified'
+        return
+    }
+    if($Case.StartsWith('buffered-',[StringComparison]::Ordinal)) {
+        $proof=$owner.TrySealFiles()
+        if($null -eq $proof) {throw 'Buffered source seal missing'}
+        $finalizer=[NLink.Tools.LocalGuiWriterRequest]::TryAttach($Name,$RequestId,'frontier-gui-run','frontier-gui-scenario',$Directory)
+        $binding=$finalizer.TryTakeFrontierBinding()
+        try {[NLink.Tests.BufferedLedgerProbe]::Run($binding,$adopter,$Name,$Directory,$source,$Case.Substring(9))}
+        finally {if($null -ne $binding){$binding.Dispose()}}
+        'frontier-gui-worker=buffered-ledger-verified'
         return
     }
     if($Case.StartsWith('processing-',[StringComparison]::Ordinal)) {

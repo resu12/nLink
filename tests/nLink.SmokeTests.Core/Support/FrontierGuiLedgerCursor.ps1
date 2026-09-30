@@ -73,7 +73,7 @@ try {
         elseif($Case -ceq 'budget') {
             $work=$owner.GetType().GetField('frontierWork',$flags).GetValue($owner)
             $elapsed=@($work.GetType().GetFields($flags) | Where-Object {$_.Name -match '^_?elapsed$'})[0]
-            $elapsed.SetValue($work,[long]([Diagnostics.Stopwatch]::Frequency*6))
+            $elapsed.SetValue($work,[long]([Diagnostics.Stopwatch]::Frequency*11))
             if($origin.TrySynchronize()) { throw 'Expired cursor accepted' }
         } elseif($Case -ceq 'cancel') {
             $cancel=[Threading.EventWaitHandle]::OpenExisting($Name+'.closed')

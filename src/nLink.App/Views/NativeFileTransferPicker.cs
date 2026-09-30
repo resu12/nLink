@@ -51,9 +51,11 @@ internal static class NativeFileTransferPicker
     {
         ct.ThrowIfCancellationRequested();
 
+        var nativeRequested = Environment.GetEnvironmentVariable("NLINK_APP_CANONICAL_SOURCE_V1") == "1";
         var path = ReleaseOverridePolicy.ReadUnsafeEnvironmentVariable("NLINK_FILETRANSFER_SOAK_AUTOPICK_FILE", category: "filetransfer_test_harness");
         if (string.IsNullOrWhiteSpace(path))
         {
+            if (nativeRequested) throw new IOException("native_sender_source_unavailable");
             return null;
         }
 
@@ -62,13 +64,14 @@ internal static class NativeFileTransferPicker
         {
             fullPath = Path.GetFullPath(path.Trim());
         }
-        catch
+        catch when (!nativeRequested)
         {
             return null;
         }
 
         if (!File.Exists(fullPath))
         {
+            if (nativeRequested) throw new IOException("native_sender_source_unavailable");
             return null;
         }
 
@@ -79,11 +82,21 @@ internal static class NativeFileTransferPicker
         }
 
         var fileName = string.IsNullOrWhiteSpace(fileInfo.Name) ? "file" : fileInfo.Name.Trim();
+        SessionFileTransferService.NativeSenderSelection? native = null;
+        if (nativeRequested)
+        {
+            // The marker requests strict selection, never grants custody. A
+            // missing/stale native packet must not fall back to reopening a path.
+            native = SessionFileTransferService.FrontierAppLifetime.Current?
+                .TrySelectNativeSender(fileName, fileInfo.Length, ct)
+                ?? throw new IOException("native_sender_source_unavailable");
+        }
         LocalOperationalLog.Info(
             "FileTransferPicker",
             $"event=filetransfer_live_soak_autopick_used; file_size_bytes={fileInfo.Length.ToString(CultureInfo.InvariantCulture)}; path_sha256={ComputePathSha256Hex(fullPath)}");
 
         await Task.CompletedTask.ConfigureAwait(false);
+        if (native is not null) return new FileTransferPickerSelection(native.Descriptor, native.OpenReadStreamAsync);
         return new FileTransferPickerSelection(
             new FileTransferSendDescriptor(fileName, fileInfo.Length),
             _ => Task.FromResult<Stream>(File.OpenRead(fullPath)));

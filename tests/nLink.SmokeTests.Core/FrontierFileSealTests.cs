@@ -91,7 +91,7 @@ public sealed partial class FrontierFileAdoptionTests
         if (fault != "missing-second") { Assert.True(owner.TryAdopt(1, b.Handle, ExactRawRanges(b.Bytes, directory.Log))); }
         a.Exit(); b.Exit();
         var work = (Stopwatch)typeof(LocalFrontierFileAdoption).GetField("work", BindingFlags.NonPublic | BindingFlags.Instance)!.GetValue(owner)!;
-        void Expire() => typeof(Stopwatch).GetField("_elapsed", BindingFlags.NonPublic | BindingFlags.Instance)!.SetValue(work, Stopwatch.Frequency * 6);
+        void Expire() => typeof(Stopwatch).GetField("_elapsed", BindingFlags.NonPublic | BindingFlags.Instance)!.SetValue(work, Stopwatch.Frequency * 11);
         if (fault == "budget-before") { Expire(); }
         if (fault is "completion" or "marker" or "drain" or "truncated" or "oversized")
         {

@@ -7,7 +7,7 @@ if($null -eq $owner -or $null -eq $owner.TryCreateLedgerOrigin()) {throw 'Origin
 $tokens=$null; $errors=$null
 $ast=[Management.Automation.Language.Parser]::ParseFile((Join-Path $RepoRoot 'tools/GuiSmoke-Windows.ps1'),[ref]$tokens,[ref]$errors)
 if($errors.Count) {throw 'Original app harness parse failed'}
-foreach($name in @('Start-AppInstance','New-GuiSmokeProcessOutputCapture','Get-GuiSmokeProcessOutputRoot','Wait-GuiSmokeProcessOutputCaptureDrain')) {
+foreach($name in @('Start-AppInstance','Set-GuiPreparationProcessIdentity','New-GuiSmokeProcessOutputCapture','Get-GuiSmokeProcessOutputRoot','Wait-GuiSmokeProcessOutputCaptureDrain')) {
     $definition=@($ast.FindAll({param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -ceq $name},$true))
     if($definition.Count -ne 1) {throw 'Original app function ambiguous'}
     $source=$definition[0].Extent.Text
@@ -72,7 +72,7 @@ try {
         if($Case -ceq 'budget-before') {
             $work=$owner.GetType().GetField('frontierWork',$flags).GetValue($owner)
             $elapsed=@($work.GetType().GetFields($flags) | Where-Object {$_.Name -match '^_?elapsed$'})[0]
-            $elapsed.SetValue($work,[long]([Diagnostics.Stopwatch]::Frequency*6))
+            $elapsed.SetValue($work,[long]([Diagnostics.Stopwatch]::Frequency*11))
         }
         if($Case -ceq 'owner-disposed') {$owner.Dispose()}
         if($Case -ceq 'bind-failure') {$request.GetType().GetField('native',$flags).GetValue($request).GetType().GetField('gate',$flags).GetValue($request.GetType().GetField('native',$flags).GetValue($request)).Dispose()}

@@ -15,6 +15,18 @@ public sealed class FrontierDiagnosticPreparationTests : FileTransferOpsScriptsT
         Assert.Contains("frontier-diagnostic-state=verified", result.Stdout);
     }
 
+    [Theory]
+    [InlineData("powershell")]
+    [InlineData("pwsh")]
+    public async Task DiagnosticState_SeparatesEventCapacityAndPreservesCumulativeLimits(string host)
+    {
+        var root = FindRepoRoot();
+        var script = await File.ReadAllTextAsync(Path.Combine(root, "tests", "nLink.SmokeTests.Core", "Support", "FrontierDiagnosticStateCapacity.ps1"));
+        var result = await RunPowerShellScriptTextAsync(script, [root], host);
+        Assert.True(result.ExitCode == 0, result.Stdout + Environment.NewLine + result.Stderr);
+        Assert.Contains("frontier-diagnostic-split-capacity=verified", result.Stdout);
+    }
+
     public static IEnumerable<object[]> Cases =>
         from host in new[] { "powershell", "pwsh" }
         from scenario in new[] { "valid", "copied-batch", "copied-preparation", "descriptor-copy", "pre-failure", "pre-view",

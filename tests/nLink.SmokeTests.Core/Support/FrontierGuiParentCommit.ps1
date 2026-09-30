@@ -12,7 +12,7 @@ try {
     }
     if($commitCase -ceq 'gui-budget') {
         $elapsed=@($work.GetType().GetFields($flags) | Where-Object {$_.Name -match '^_?elapsed$'})[0]
-        $elapsed.SetValue($work,[long]([Diagnostics.Stopwatch]::Frequency*6))
+        $elapsed.SetValue($work,[long]([Diagnostics.Stopwatch]::Frequency*11))
     }
     if($commitCase -ceq 'cancel-before') {$adopter.Dispose()}
     if($commitCase -ceq 'missing-commit') {$binding.Dispose(); $completed=$false}

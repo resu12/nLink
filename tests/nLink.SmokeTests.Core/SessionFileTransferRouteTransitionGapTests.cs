@@ -3454,7 +3454,8 @@ public sealed partial class SessionFileTransferV4SenderTests
         string ExpectedCheckpointRequestId, FileTransferRouteTransitionDecision Draining,
         FileTransferRouteTransitionAuthority Authority, FileTransferRouteTransitionPhysicalDrainCommand DrainCommand,
         long[] EmptyIds, string EmptyFingerprint, IFileTransferDataSession DataSession, Func<object> CreateExecution)
-        CreateFallbackCheckpointDispatchFixture(object context, LoopbackFileTransferTransport transport)
+        CreateFallbackCheckpointDispatchFixture(object context, LoopbackFileTransferTransport transport,
+            FileTransferDataFrame? retainedProofFrame = null)
     {
         var sourceState = CreateCoordinatorStateForTest(context);
         var sourceOwner = Assert.IsType<RuntimeOwnerToken>(
@@ -3474,7 +3475,7 @@ public sealed partial class SessionFileTransferV4SenderTests
                 .LastTransitionGeneration + 1);
         var expectedCheckpointRequestId =
             $"v6-regular-nkn-state-refresh:route-transition:{expectedTransitionGeneration}:{targetTransportEpoch}";
-        var retainedReceiverState = new FileTransferReceiverStateFrameV6
+        FileTransferDataFrame retainedReceiverState = retainedProofFrame ?? new FileTransferReceiverStateFrameV6
         {
             SessionId = sourceState.SessionId,
             TransferId = sourceState.TransferId,
@@ -3513,10 +3514,10 @@ public sealed partial class SessionFileTransferV4SenderTests
             sourceLeg.TransportEpochId,
             sourceLeg.BridgeRecoveryGeneration,
             sourceState.CurrentDataSessionGeneration,
-            StateEpoch: 0,
+            StateEpoch: Math.Max(0, GetPrivateProperty<int>(context, "V4LastStateEpoch")),
             ContiguousCommittedChunkIndex: 0,
             DurableHighestChunkIndex: -1,
-            ChunkCount: 256,
+            ChunkCount: GetPrivateProperty<int>(context, "ChunkCount"),
             CheckpointGeneration: 1);
         var prepared =
             FileTransferCoordinator.PrepareFileTransferRouteTransition(
@@ -3538,9 +3539,8 @@ public sealed partial class SessionFileTransferV4SenderTests
                     FileTransferTransportHandoffKind.TunaToNormalFallback,
                     PredecessorTransitionAuthorityId: null,
                     "test_committed_fallback_pause"));
-        Assert.Equal(
-            FileTransferRouteTransitionDecisionStatus.Prepared,
-            prepared.Status);
+        Assert.True(prepared.Status == FileTransferRouteTransitionDecisionStatus.Prepared,
+            prepared.Reason);
         var authority = Assert.IsType<FileTransferRouteTransitionAuthority>(
             prepared.Authority);
         Assert.Equal(

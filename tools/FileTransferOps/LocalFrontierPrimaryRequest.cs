@@ -200,6 +200,7 @@ namespace NLink.Tools
                 lock (sync)
                 {
                     if (closed) return; closed = true;
+                    CloseTransferPair();
                     foreach (var watch in watches) watch.Unregister(null);
                     foreach (var reader in readers) if (reader != null) reader.Close();
                     if (workerChannel != null) workerChannel.Dispose();

@@ -34,19 +34,56 @@ namespace NLink.Tools
             {
                 try
                 {
-                    if (!FileHandoffScopeCurrent() || fileChannels == null || fileRequests == null ||
-                        fileRequests.Length != 2 || apps.Count != 2) return false;
-                    for (int i = 0; i < 2; i++)
-                    {
-                        var request = fileRequests[i]; var launch = request.launch; int code;
-                        if (!appRequests.Contains(request) || !apps.Contains(launch) ||
-                            fileChannels[i].State != LocalFrontierFileChannel.Acknowledged || !request.native.GuiAttachmentCompleted ||
-                            !launch.Exit.WaitOne(0) || !GetExitCodeProcess(launch.Exit.SafeWaitHandle, out code) || code != 0 ||
-                            launch.Output == null || !launch.Output.Drained) return false;
-                    }
-                    return FileHandoffScopeCurrent();
+                    return FileHandoffScopeCurrent() && FinalSealAppsCurrent() && FileHandoffScopeCurrent();
                 }
                 catch { return false; }
+            }
+            private bool FinalSealAppsCurrent()
+            {
+                if (fileChannels == null || fileRequests == null || fileRequests.Length != 2 || apps.Count != 2) return false;
+                for (int i = 0; i < 2; i++)
+                {
+                    var request = fileRequests[i]; var launch = request.launch; int code;
+                    if (!appRequests.Contains(request) || !apps.Contains(launch) ||
+                        fileChannels[i].State != LocalFrontierFileChannel.Acknowledged || !request.native.GuiAttachmentCompleted ||
+                        !launch.Exit.WaitOne(0) || !GetExitCodeProcess(launch.Exit.SafeWaitHandle, out code) || code != 0 ||
+                        launch.Output == null || !launch.Output.Drained) return false;
+                }
+                return true;
+            }
+            // Null selects the unchanged non-processing path. Once selected,
+            // failure is final; never retry through recursive currentness.
+            internal bool? CheckProcessingFiles(Finalizer finalizer, FrontierFinalizerBinding binding, FrontierSealedFiles value)
+            {
+                lock (sync)
+                {
+                    try
+                    {
+                        var reader = binding.ProcessingReaderFor(finalizer, value);
+                        var adoption = fileAdoption;
+                        if (reader == null || adoption == null || !adoption.ProcessingRunning) return null;
+#if NLINK_TEST_BUFFERED_LEDGER
+                        NLink.Tests.ProcessingCustodyProbe.Boundary("processing-open");
+#endif
+                        if (!Object.ReferenceEquals(sealedFiles, value) || parentRegistration != null ||
+                            !finalizer.ProcessingScopeCurrent(this, binding, value, reader) || !adoption.BufferedWorkCurrent(reader) ||
+                            !FileHandoffScopeCurrent() || !FinalSealAppsCurrent()) return false;
+#if NLINK_TEST_BUFFERED_LEDGER
+                        NLink.Tests.ProcessingCustodyProbe.Boundary("processing-files");
+#endif
+                        if (!adoption.ProcessingFilesCurrent(reader)) return false;
+#if NLINK_TEST_BUFFERED_LEDGER
+                        NLink.Tests.ProcessingCustodyProbe.Boundary("processing-close");
+#endif
+                        if (!FileHandoffScopeCurrent() || !FinalSealAppsCurrent()) return false;
+#if NLINK_TEST_BUFFERED_LEDGER
+                        NLink.Tests.ProcessingCustodyProbe.Boundary("processing-return");
+#endif
+                        return Object.ReferenceEquals(sealedFiles, value) && Object.ReferenceEquals(fileAdoption, adoption) && parentRegistration == null &&
+                            adoption.BufferedWorkCurrent(reader) && finalizer.ProcessingScopeCurrent(this, binding, value, reader);
+                    }
+                    catch { return false; }
+                }
             }
             internal bool OwnsSealedFiles(FrontierSealedFiles value)
             {

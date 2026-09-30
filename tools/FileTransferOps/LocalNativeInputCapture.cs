@@ -14,6 +14,9 @@ namespace NLink.Tools
         public const long InputCodeUnits = 268435456;
         public const int LineCodeUnits = 262144;
         public const long ProducerRecords = 2097152;
+        // Cumulative evaluation inspections, separate from producer admission.
+        public const long EvaluationVisits = 1073741824;
+        public const int EvaluationMilliseconds = 60000;
         public const long ProducerCodeUnits = 1073741824;
         public const int ProducerMilliseconds = 20000;
         public const int NativeMilliseconds = 2000;

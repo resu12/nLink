@@ -1,5 +1,6 @@
 using System;
 using System.IO.MemoryMappedFiles;
+using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Threading;
 
@@ -85,19 +86,60 @@ namespace NLink.Tools
                     // parsed or retained as facts. Revalidating unused capacity
                     // at every nested ownership check would spend the work
                     // budget on bytes outside the immutable packet.
-                    check(); var buffer = new byte[32768];
-                    int length = includePadding ? LocalFrontierParentFacts.MaximumBytes : body.Length;
-                    for (int i = 0; i < length; i += buffer.Length)
+                    check();
+                    if (!includePadding)
                     {
-                        if (i != 0 && i % 262144 == 0) check(); int count = Math.Min(buffer.Length, length - i);
-                        view.ReadArray(HeaderBytes + i, buffer, 0, count);
-                        for (int j = 0; j < count; j++) if (buffer[j] != (i + j < body.Length ? body[i + j] : 0)) return false;
+                        if (!MatchesCurrentBody(check)) return false;
+                        check(); return !cancelled.WaitOne(0) && (Acknowledgment == null || Acknowledgment.IsCurrent);
+                    }
+                    var buffer = new long[4096]; var expected = new long[4096];
+                    int length = LocalFrontierParentFacts.MaximumBytes;
+                    for (int i = 0; i < length; i += 32768)
+                    {
+                        if (i != 0 && i % 262144 == 0) check(); int count = Math.Min(32768, length - i);
+                        int words = count / 8, copied = Math.Min(words * 8, Math.Max(0, body.Length - i));
+                        if (copied < words * 8) Array.Clear(expected, 0, words);
+                        if (copied != 0) Buffer.BlockCopy(body, i, expected, 0, copied);
+                        view.ReadArray(HeaderBytes + i, buffer, 0, words);
+                        // Same complete byte comparison, grouped into words;
+                        // no sampling, cached verdict, or skipped tail bytes.
+                        for (int j = 0; j < words; j++) if (buffer[j] != expected[j]) return false;
+                        for (int j = words * 8; j < count; j++)
+                            if (view.ReadByte(HeaderBytes + i + j) != (i + j < body.Length ? body[i + j] : 0)) return false;
                     }
                     check(); return !cancelled.WaitOne(0) && (Acknowledgment == null || Acknowledgment.IsCurrent);
                 }
                 catch { return false; }
             }
         }
+        private bool MatchesCurrentBody(Action check)
+        {
+            // Compare the entire live mapping on every call. Pin both lifetimes
+            // for this bounded comparison; never cache a successful verdict.
+            var handle = view.SafeMemoryMappedViewHandle;
+            var retainedBody = body;
+            bool held = false; GCHandle retained = default(GCHandle);
+            try
+            {
+                handle.DangerousAddRef(ref held);
+                long start = checked(view.PointerOffset + HeaderBytes);
+                if (!held || handle.IsClosed || handle.IsInvalid || !view.CanRead || retainedBody.Length > LocalFrontierParentFacts.MaximumBytes ||
+                    retainedBody.Length > view.Capacity - HeaderBytes || start < 0 ||
+                    (ulong)start + (ulong)retainedBody.Length > handle.ByteLength) return false;
+                retained = GCHandle.Alloc(retainedBody, GCHandleType.Pinned);
+                var source = IntPtr.Add(handle.DangerousGetHandle(), checked((int)start));
+                var expected = retained.AddrOfPinnedObject();
+                for (int i = 0; i < retainedBody.Length; i += 262144)
+                {
+                    if (i != 0) check(); int count = Math.Min(262144, retainedBody.Length - i);
+                    if (memcmp(IntPtr.Add(source, i), IntPtr.Add(expected, i), new UIntPtr((uint)count)) != 0) return false;
+                }
+                return Object.ReferenceEquals(body, retainedBody) && !handle.IsClosed && view.CanRead;
+            }
+            finally { if (retained.IsAllocated) retained.Free(); if (held) handle.DangerousRelease(); }
+        }
+        [DllImport("msvcrt.dll", CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
+        private static extern int memcmp(IntPtr first, IntPtr second, UIntPtr length);
         internal bool MarkReceived() { lock (sync) { if (!IsCurrent || State != 1) return false; view.Write(8, 2); lastState = 2; return IsCurrent; } }
         private void Close()
         {

@@ -41,12 +41,12 @@ namespace NLink.Tools
                     {
                         if (ledgerOriginAttempted || apps.Count != 0 || appRequests.Count != 0 || sealedLaunches) return null;
                         ledgerOriginAttempted = true;
-                        if (frontierWork.ElapsedMilliseconds > 5000) return null;
+                        if (frontierWork.ElapsedMilliseconds > LocalFrontierFileAdoption.MaximumActiveMilliseconds) return null;
                         string directory = Path.Combine(artifactRoot, "live-operational-log");
                         Directory.CreateDirectory(directory);
                         if ((File.GetAttributes(directory) & FileAttributes.ReparsePoint) != 0) return null;
                         ledgerOrigin = new FrontierLedgerOrigin(this, Path.Combine(directory, "nlink.log"), out sourceCreated);
-                        success = IsCurrent && frontierWork.ElapsedMilliseconds <= 5000;
+                        success = IsCurrent && frontierWork.ElapsedMilliseconds <= LocalFrontierFileAdoption.MaximumActiveMilliseconds;
                         return success ? ledgerOrigin : null;
                     }
                     catch { return null; }
@@ -56,7 +56,7 @@ namespace NLink.Tools
             // Resource checks never call back into this owner: adopter callbacks
             // may already hold their own lock. No ledger -> owner lock inversion.
             private bool LedgerOriginCurrent()
-            { return frontierWork.ElapsedMilliseconds <= 5000 && (ledgerOrigin == null || ledgerOrigin.ResourceCurrent); }
+            { return frontierWork.ElapsedMilliseconds <= LocalFrontierFileAdoption.MaximumActiveMilliseconds && (ledgerOrigin == null || ledgerOrigin.ResourceCurrent); }
             internal bool OwnsLedgerOrigin(FrontierLedgerOrigin value)
             { lock (sync) { return value != null && Object.ReferenceEquals(ledgerOrigin, value) && IsCurrent; } }
             internal void DisposeLedgerOrigin(FrontierLedgerOrigin value)

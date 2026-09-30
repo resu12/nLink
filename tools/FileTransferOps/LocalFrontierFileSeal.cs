@@ -102,6 +102,28 @@ namespace NLink.Tools
         }
         internal bool ProcessingWorkActive(object reader)
         { lock (sync) { return Object.ReferenceEquals(original, this) && reader != null && Object.ReferenceEquals(sealedReader, reader) && processingRunning && IsSourceVerified; } }
+        // Rejection-only guard for already-buffered CPU work. This does not
+        // validate native custody and must never authorize a read or capture.
+        internal bool BufferedWorkCurrent(object reader)
+        {
+            lock (sync)
+            {
+                return Object.ReferenceEquals(original, this) && !disposed && reader != null &&
+                    Object.ReferenceEquals(sealedReader, reader) && sourceVerified && processingAttempted && processingRunning &&
+                    work.IsRunning && work.ElapsedMilliseconds <= MaximumActiveMilliseconds && !processingLifetime.IsCancellationRequested;
+            }
+        }
+        // Phase selection and resource validation only. Neither replaces the
+        // original finalizer/GUI scope checks or exports a custody receipt.
+        internal bool ProcessingRunning { get { lock (sync) { return processingRunning; } } }
+        internal bool ProcessingFilesCurrent(object reader)
+        {
+            lock (sync)
+            {
+                return BufferedWorkCurrent(reader) && adopted.Count == 2 &&
+                    RetainedFilesCurrent() && BufferedWorkCurrent(reader);
+            }
+        }
         internal CancellationToken FinalizationLifetime(object reader)
         {
             lock (sync)

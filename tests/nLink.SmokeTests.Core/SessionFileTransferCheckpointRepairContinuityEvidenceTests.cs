@@ -27,12 +27,13 @@ public sealed partial class SessionFileTransferV4SenderTests
         FileTransferCoordinator.FrontierPublicationObservation? publicationObservation = null,
         Func<SessionFileTransferService, object, PeerVisibleControlPlaneLoopbackTransport, Task>? afterProgress = null,
         int priorStateSends = 0, Action<object>? beforeRepairWrite = null, int initialHighest = 255, bool appOwnedService = false,
-        Action<SessionFileTransferService, object>? beforeServiceRepairWrite = null, bool waitForLogEvidence = true)
+        Action<SessionFileTransferService, object>? beforeServiceRepairWrite = null, bool waitForLogEvidence = true,
+        bool redactedSession = false, bool redactedTransfer = false)
     {
-        // Keep synthetic identities below secret-token redaction thresholds so
-        // persisted diagnostics retain the exact data-session projection.
-        var transferId = "continuity_" + Guid.NewGuid().ToString("N")[..16];
-        var sessionId = "session_" + transferId;
+        // Default fixtures retain readable raw IDs; the diagnostic identity
+        // regression deliberately exercises normal long-ID redaction.
+        var transferId = "continuity_" + (redactedTransfer ? Guid.NewGuid().ToString("N") + "1" : Guid.NewGuid().ToString("N")[..16]);
+        var sessionId = redactedSession ? "session_" + Guid.NewGuid().ToString("N") + "1" : "session_" + transferId;
         var serviceType = typeof(SessionFileTransferService);
         using PeerVisibleControlPlaneLoopbackTransport delivery = afterProgress is null
             ? new PeerVisibleControlPlaneLoopbackTransport(sessionId, deliverFrames: false)
@@ -212,14 +213,16 @@ public sealed partial class SessionFileTransferV4SenderTests
             line.Contains("; log_writer_sequence=", StringComparison.Ordinal) &&
             line.Contains("; log_writer_attempt_utc_ticks=", StringComparison.Ordinal),
             $"Fixture requires persisted operational log capture, not the unstamped recent ring: {LocalOperationalLog.LogFilePath}"));
+        var loggedTransferId = redactedTransfer ? "[redacted]" : transferId;
         var holdLine = Assert.Single(lines, line => line.Contains("event=filetransfer_v6_frontier_request_deferred;", StringComparison.Ordinal) &&
-            GetDelimitedLogField(line, "transfer_id") == transferId &&
+            GetDelimitedLogField(line, "transfer_id") == loggedTransferId &&
             (!delayedDisposition || GetDelimitedLogField(line, "frontier_chunk_index") == "100"));
-        Assert.Equal(sessionId, GetDelimitedLogField(holdLine, "session_id"));
-        Assert.Equal(transferId, GetDelimitedLogField(holdLine, "transfer_id"));
-        Assert.Equal(transferId + ":1", GetDelimitedLogField(holdLine, "data_session_identity"));
+        Assert.Equal(redactedSession ? "[redacted]" : sessionId, GetDelimitedLogField(holdLine, "session_id"));
+        Assert.Equal(loggedTransferId, GetDelimitedLogField(holdLine, "transfer_id"));
+        Assert.Equal(loggedTransferId + ":1", GetDelimitedLogField(holdLine, "data_session_identity"));
+        Assert.Contains(FileTransferDiagnosticScopeEvidence.FormatDataSession(transferId + ":1"), holdLine, StringComparison.Ordinal);
         var staleLine = Assert.Single(lines, line => line.Contains("event=filetransfer_v6_frontier_stall_grace_recheck_decided;", StringComparison.Ordinal) &&
-            GetDelimitedLogField(line, "transfer_id") == transferId &&
+            GetDelimitedLogField(line, "transfer_id") == loggedTransferId &&
             (afterProgress is null || GetDelimitedLogField(line, "frontier_chunk_index") == "100"));
         Assert.Contains("authority_effect=none;", staleLine, StringComparison.Ordinal);
         Assert.Contains("decision_status=stale;", staleLine, StringComparison.Ordinal);
@@ -357,7 +360,7 @@ public sealed partial class SessionFileTransferV4SenderTests
         await CoreSmokeTestsBase.WaitUntilAsync(() => ReadOperationalLogTail(logStart)
             .Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries).Any(line =>
                 line.Contains("event=filetransfer_v6_frontier_stall_grace_recheck_decided;", StringComparison.Ordinal) &&
-                line.Contains($"transfer_id={GetPrivateProperty<string>(context, "TransferId")};", StringComparison.Ordinal) &&
+                line.Contains(SensitiveDataRedactor.Redact($"transfer_id={GetPrivateProperty<string>(context, "TransferId")};"), StringComparison.Ordinal) &&
                 line.Contains("decision_status=stale;", StringComparison.Ordinal)), TimeSpan.FromSeconds(3));
         var afterWake = CreateCoordinatorStateForTest(context);
         Assert.Equal(beforeWake.PersistentState, afterWake.PersistentState);

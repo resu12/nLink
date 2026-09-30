@@ -7857,7 +7857,9 @@ function Invoke-RouteAcceptanceChildScriptNoThrow {
         [AllowNull()]$LocalWriterRelay = $null,
         [string]$LocalWriterArtifactDir = '',
         [AllowNull()]$FrontierRelayCustody = $null,
-        [AllowNull()]$FailedGuiCapture = $null
+        [AllowNull()]$FailedGuiCapture = $null,
+        [int]$CanonicalAttemptIndex = 0,
+        [string]$CanonicalAttemptProofMode = 'None'
     )
 
     Set-Variable -Name LocalWriterRelay -Option Private -Value $LocalWriterRelay
@@ -7867,6 +7869,7 @@ function Invoke-RouteAcceptanceChildScriptNoThrow {
     $private:relayProcess = $null
     $private:relayOutputCaptured = $false
     $private:relayReports = $null
+    $private:canonicalPayloadParent = $null
     $private:pendingRelayCustody = $null
     $previousErrorActionPreference = $ErrorActionPreference
     $oldRetainedAnalysisCompact = $env:NLINK_FILETRANSFER_RETAINED_ANALYSIS_COMPACT
@@ -7908,12 +7911,27 @@ function Invoke-RouteAcceptanceChildScriptNoThrow {
             $private:relayStartInfo.EnvironmentVariables['NLINK_GUI_WRITER_RELAY'] = $private:relayRequest.Name
             $private:relayStartInfo.EnvironmentVariables['NLINK_GUI_WRITER_RELAY_ID'] = $private:relayRequest.RequestId.ToString('D')
             $private:relayStartInfo.EnvironmentVariables.Remove('NLINK_GUI_FRONTIER_RELAY_START_V1')
+            if ($CanonicalAttemptIndex -eq 1 -and $FrontierRelayCustody -is [ref] -and $null -eq $FrontierRelayCustody.Value) {
+                try {
+                    # Bind the exact launch argv and resolved child host before the
+                    # existing request binds its worker. Omission changes no launch.
+                    $private:canonicalHost = (Get-Command $private:relayStartInfo.FileName -CommandType Application -ErrorAction Stop).Source
+                    if ($private:relayRequest.TryBindCanonicalAttempt($CanonicalAttemptIndex, $Arguments, $CanonicalAttemptProofMode, $private:canonicalHost)) {
+                        $private:relayStartInfo.FileName = $private:canonicalHost
+                    }
+                }
+                catch { } # Optional scope cannot replace the original child outcome.
+            }
             $private:relayProcess = [Diagnostics.Process]::new()
             $private:relayProcess.StartInfo = $private:relayStartInfo
             if ($FrontierRelayCustody -is [ref] -and $null -eq $FrontierRelayCustody.Value) {
                 $private:relayReports = $private:relayRequest.StartFrontierRelayWorkerWithReports($private:relayProcess)
                 $private:relayStdout = $private:relayReports.Stdout
                 $private:relayStderr = $private:relayReports.Stderr
+                try {
+                    $private:canonicalPayloadParent = $private:relayRequest.TryStartPayloadParent($private:relayReports)
+                }
+                catch { } # Optional payload owner cannot replace the original launch.
             }
             else {
                 if (-not $private:relayProcess.Start()) { throw 'Failed to start the owned Tuna GUI wrapper.' }
@@ -7925,6 +7943,9 @@ function Invoke-RouteAcceptanceChildScriptNoThrow {
             # the Wrapper still owns all existing GUI deadlines and cleanup.
             if ($null -ne $private:relayReports -and $null -ne $private:relayReports.Registration) {
                 while (-not $private:relayProcess.WaitForExit(50)) {
+                    if ($null -ne $private:canonicalPayloadParent) {
+                        try { $null = $private:canonicalPayloadParent.TryPullIfOffered() } catch { }
+                    }
                     try { $null = $private:relayReports.Registration.TryPullIfOffered() } catch { }
                 }
             }
@@ -7962,7 +7983,7 @@ function Invoke-RouteAcceptanceChildScriptNoThrow {
         }
         if ($null -ne $private:relayRequest -and $private:relayOutputCaptured -and $exitCode -eq 0) {
             try {
-                $private:relayedWriter = $private:relayRequest.TakeRelayAfterExit()
+                $private:relayedWriter = $private:relayRequest.TakeRelayAfterExitWithPayloads($private:relayReports)
                 if ($LocalWriterRelay -is [ref] -and $null -eq $LocalWriterRelay.Value) { $LocalWriterRelay.Value = $private:relayedWriter }
                 if ($null -ne $private:relayedWriter -and $LocalWriterRelay -is [ref] -and
                     [object]::ReferenceEquals($LocalWriterRelay.Value, $private:relayedWriter) -and
@@ -7970,7 +7991,13 @@ function Invoke-RouteAcceptanceChildScriptNoThrow {
                     $private:pendingRelayCustody = $private:relayedWriter.TryTakeFrontierCustody()
                     if ($null -ne $private:pendingRelayCustody) {
                         $FrontierRelayCustody.Value = $private:pendingRelayCustody
-                        if ([object]::ReferenceEquals($FrontierRelayCustody.Value, $private:pendingRelayCustody)) { $private:pendingRelayCustody = $null }
+                        if ([object]::ReferenceEquals($FrontierRelayCustody.Value, $private:pendingRelayCustody)) {
+                            $private:pendingRelayCustody = $null
+                            if ($null -ne $private:canonicalPayloadParent -and $private:canonicalPayloadParent.IsCurrent) {
+                                # The original exported native custody now owns this lifetime.
+                                $private:canonicalPayloadParent = $null
+                            }
+                        }
                         else { $FrontierRelayCustody.Value = $null }
                     }
                 }
@@ -7993,6 +8020,7 @@ function Invoke-RouteAcceptanceChildScriptNoThrow {
     }
     finally {
         if ($null -ne $private:pendingRelayCustody) { $private:pendingRelayCustody.Dispose() }
+        if ($null -ne $private:canonicalPayloadParent) { $private:canonicalPayloadParent.Dispose() }
         if ($null -ne $private:relayProcess) { $private:relayProcess.Dispose() }
         if ($null -ne $private:relayRequest) { $private:relayRequest.Dispose() }
     }
@@ -9237,7 +9265,8 @@ function Invoke-TunaRouteAcceptanceRun {
         [string]$LiveToggleSequence = '',
         [string]$LiveProofMode = 'None',
         [AllowNull()]$LocalPublication = $null,
-        [switch]$CaptureLocalPublicationDiagnostics
+        [switch]$CaptureLocalPublicationDiagnostics,
+        [int]$AttemptIndex = 1
     )
 
     Set-Variable -Name LocalPublication -Option Private -Value $LocalPublication
@@ -9368,6 +9397,10 @@ function Invoke-TunaRouteAcceptanceRun {
         $private:localRelayArguments = @{LocalWriterRelay=[ref]$private:localRelayedWriter;LocalWriterArtifactDir=$ArtifactDir}
         if ($CaptureLocalPublicationDiagnostics -and $RouteMode -eq 'live-regular-activation-cycle' -and $LiveProofMode -eq 'RegularActivationCycle') {
             $private:localRelayArguments.FrontierRelayCustody = [ref]$private:localFrontierRelayCustody
+            if ($AttemptIndex -eq 1) {
+                $private:localRelayArguments.CanonicalAttemptIndex = $AttemptIndex
+                $private:localRelayArguments.CanonicalAttemptProofMode = $LiveProofMode
+            }
         }
     }
     $failedDiagnosticScope = $Fault -ceq 'switch-off' -and $PayerMode -ceq 'helpee' -and (
@@ -10796,6 +10829,7 @@ function Invoke-Phase4RouteAcceptanceScenario {
                         -PayloadSize $payloadSize `
                         -LiveToggleSequence ([string]$Scenario.LiveToggleSequence) `
                         -LiveProofMode ([string]$Scenario.LiveProofMode) `
+                        -AttemptIndex 1 `
                         -CaptureLocalPublicationDiagnostics:($CaptureLocalPublicationDiagnostics -and $AcceptancePhase -eq 'phase5')
                 }
             }
@@ -10976,6 +11010,7 @@ function Invoke-Phase4RouteAcceptanceScenario {
                                 -PayloadSize $payloadSize `
                                 -LiveToggleSequence ([string]$Scenario.LiveToggleSequence) `
                                 -LiveProofMode ([string]$Scenario.LiveProofMode) `
+                                -AttemptIndex ($rerun + 1) `
                                 -CaptureLocalPublicationDiagnostics:($CaptureLocalPublicationDiagnostics -and $AcceptancePhase -eq 'phase5')
                         }
                     }

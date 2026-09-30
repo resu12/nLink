@@ -1,6 +1,7 @@
-param([string]$RepoRoot,[string]$Name,[guid]$RequestId,[string]$SourcePath,[string]$Case)
+param([string]$RepoRoot,[string]$Name,[guid]$RequestId,[string]$SourcePath,[string]$Case,[switch]$SourceDiagnostics)
 $ErrorActionPreference='Stop'
 Set-StrictMode -Version Latest
+if($SourceDiagnostics) {. (Join-Path $RepoRoot 'tests/nLink.SmokeTests.Core/Support/FrontierAttemptDispatchLoader.ps1') $RepoRoot}
 . (Join-Path $RepoRoot 'tools/FileTransferOps/LocalInputReadLease.ps1')
 Add-Type -TypeDefinition @'
 using System;
@@ -59,6 +60,7 @@ try {
             if($null -ne $worker.TryOpenSource()) {throw 'Native source opened twice'}
             Require-ReadFailure $cursor
         } elseif($mode -ceq 'read-budget') {
+            if($SourceDiagnostics -and -not $cursor.MoveNext()) {throw 'Diagnostic source did not reach its first line'}
             Expire-SourceWork; Require-ReadFailure $cursor
         } else {
             if(-not $cursor.MoveNext()) {throw 'Native source has no lines'}
@@ -125,6 +127,58 @@ try {
         if($worker.IsCurrent -or $owned.IsCurrent -or ($null -ne $reader -and $reader.InputReadComplete)) {throw 'Retired source stayed current'}
         if($null -ne $file -and $file.CanRead) {throw 'Retired source stream leaked'}
     } elseif(-not $worker.IsCurrent -or -not $reader.InputReadComplete) {throw 'Current native source retired unexpectedly'}
+    if($SourceDiagnostics) {
+        $rejection=$owned.GetType().GetField('PrimarySourceRejectionForTest',$flags).GetValue($owned)
+        $snapshot=$owned.GetType().GetField('PrimarySourceSnapshotForTest',$flags).GetValue($owned)
+        $close=$owned.GetType().GetField('PrimarySourceCloseForTest',$flags).GetValue($owned)
+        $closeSnapshot=$owned.GetType().GetField('PrimarySourceCloseSnapshotForTest',$flags).GetValue($owned)
+        $expected=switch($mode) {'valid' {'none'} 'origin-substitution' {'none'} 'origin-index' {'none'} 'copied-reader' {'none'} 'origin-budget' {'resource:budget'} 'read-budget' {'read:budget'} 'post-scope' {'read:scope'} 'post-facts' {'resource:files'} 'pin-close' {'resource:pins'} 'parent-cancel' {'read:closed'} default {throw 'Unknown diagnostic control'}}
+        if($rejection -cne $expected) {throw "First source rejection changed: $mode / $rejection / $snapshot / $close"}
+        if(-not $retired) {if($close -cne 'open') {throw 'Valid diagnostic source closed early'}}
+        else {
+            if($closeSnapshot -notmatch '; lines=[1-9][0-9]*;' -or $close -ceq 'open') {throw "Source diagnostic lost pre-close progress: $rejection / $close / $closeSnapshot"}
+            if($mode -ceq 'parent-cancel' -and ($close -notmatch '^watch:' -or $snapshot -notmatch '; lines=0;')) {throw 'Cancellation diagnostic invented retained lines'}
+            if($mode -ceq 'read-budget' -and $snapshot -notmatch '^work_ms=2[1-9][0-9]{3}; lines=1;') {throw 'Source budget observation changed'}
+        }
+        $worker.Dispose(); $owned.Dispose()
+        if($owned.GetType().GetField('PrimarySourceRejectionForTest',$flags).GetValue($owned) -cne $rejection -or
+            $owned.GetType().GetField('PrimarySourceSnapshotForTest',$flags).GetValue($owned) -cne $snapshot -or
+            ($retired -and $owned.GetType().GetField('PrimarySourceCloseSnapshotForTest',$flags).GetValue($owned) -cne $closeSnapshot) -or
+            ($retired -and $owned.GetType().GetField('PrimarySourceCloseForTest',$flags).GetValue($owned) -cne $close)) {throw 'Cleanup replaced the first source diagnostic'}
+        'primary-source-diagnostic; case='+$mode+'; rejected='+$rejection+'; close='+$close+'; '+$snapshot
+        'primary-source-close-diagnostic; '+$closeSnapshot
+        $calls=$owned.GetType().GetField('PrimaryCheckCallsForTest',$flags).GetValue($owned)
+        $ticks=$owned.GetType().GetField('PrimaryCheckTicksForTest',$flags).GetValue($owned)
+        $readCalls=$owned.GetType().GetField('PrimaryReadCallsForTest',$flags).GetValue($owned)
+        $readTicks=$owned.GetType().GetField('PrimaryReadWorkTicksForTest',$flags).GetValue($owned)
+        $work=$owned.GetType().GetField('work',$flags).GetValue($owned)
+        if($calls.Length -ne 12 -or $ticks.Length -ne 12 -or $readCalls -ne $reader.LinesRead+1 -or $readTicks -le 0 -or $work.IsRunning) {throw 'Source work profile lost original read/clock bounds'}
+        for($stage=0;$stage -lt 3;$stage++) {
+            $i=$stage*4
+            if($calls[$i] -lt $calls[$i+1] -or $calls[$i+1] -lt $calls[$i+2] -or $calls[$i+2] -lt $calls[$i+3]) {throw 'Profiler repeated a short-circuited predicate'}
+        }
+        if(@($ticks | Where-Object {$_ -lt 0}).Count -or $calls[4] -le 0 -or $calls[7] -le 0 -or $calls[11] -le 0) {throw 'Profiler lost active/inactive native checks'}
+        $originCalls=$owned.GetType().GetField('PrimaryOriginCallsForTest',$flags).GetValue($owned)
+        $originAccepted=$owned.GetType().GetField('PrimaryOriginAcceptedForTest',$flags).GetValue($owned)
+        $originTicks=$owned.GetType().GetField('PrimaryOriginWorkTicksForTest',$flags).GetValue($owned)
+        $originChecks=$owned.GetType().GetField('PrimaryOriginCheckCallsForTest',$flags).GetValue($owned)
+        $originCheckTicks=$owned.GetType().GetField('PrimaryOriginCheckTicksForTest',$flags).GetValue($owned)
+        $expectedOrigins=if($mode -ceq 'read-budget') {1} elseif($post) {2} elseif($mode -cin @('origin-budget','origin-substitution')) {6} elseif($mode -ceq 'origin-index') {7} else {5}
+        $expectedAccepted=if($post -or $mode -ceq 'read-budget') {0} else {3}
+        if($originCalls -ne $expectedOrigins -or $originAccepted -ne $expectedAccepted -or $originTicks -le 0 -or
+            @($originCheckTicks | Where-Object {$_ -lt 0}).Count -or $originChecks[0] -gt $originCalls) {throw 'Origin phase counts changed original evaluations'}
+        for($j=0;$j -lt 4;$j++) {if($originChecks[$j] -gt $calls[$j] -or ($j -gt 0 -and $originChecks[$j] -gt $originChecks[$j-1])) {throw 'Origin phase repeated or moved checks'}}
+        if($mode -ceq 'origin-budget' -and ($close -cne 'SourceOrigin' -or $snapshot -notmatch '; ended=True$')) {throw 'Origin budget diagnostic lost completed source'}
+        $before=($calls -join ',')+' / '+($ticks -join ',')+' / '+$work.ElapsedTicks
+        $originBefore=($originChecks -join ',')+' / '+($originCheckTicks -join ',')+' / '+$originCalls+' / '+$originAccepted+' / '+$originTicks
+        $profile=$owned.GetType().GetMethod('GetPrimaryWorkProfileForTest',$flags).Invoke($owned,$null)
+        if($before -cne (($calls -join ',')+' / '+($ticks -join ',')+' / '+$work.ElapsedTicks)) {throw 'Profile formatting evaluated authority or changed clocks'}
+        if($originBefore -cne (($originChecks -join ',')+' / '+($originCheckTicks -join ',')+' / '+
+            $owned.GetType().GetField('PrimaryOriginCallsForTest',$flags).GetValue($owned)+' / '+
+            $owned.GetType().GetField('PrimaryOriginAcceptedForTest',$flags).GetValue($owned)+' / '+
+            $owned.GetType().GetField('PrimaryOriginWorkTicksForTest',$flags).GetValue($owned))) {throw 'Origin formatting changed work counters'}
+        $profile
+    }
     $worker.Dispose()
     if(($null -ne $file -and $file.CanRead) -or $owned.IsCurrent) {throw 'Worker disposal leaked native source'}
     'frontier-primary-worker='+$Case

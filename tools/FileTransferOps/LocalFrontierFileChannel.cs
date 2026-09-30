@@ -89,13 +89,19 @@ namespace NLink.Tools
                 try
                 {
                     if (Volatile.Read(ref disposed) != 0 || cancelled.WaitOne(0)) return false;
-                    for (int i = 0; i < registration.Length; i++) if ((i < 8 || i >= 12) && View.ReadByte(i) != registration[i]) return false;
+                    // Fresh bounded snapshots only: retain every comparison,
+                    // without acquiring the mapped view separately per byte.
+                    var header = new byte[registration.Length];
+                    if (View.ReadArray(0, header, 0, header.Length) != header.Length) return false;
+                    for (int i = 0; i < header.Length; i++) if ((i < 8 || i >= 12) && header[i] != registration[i]) return false;
                     int state = State;
                     if (state < Ready || state > Acknowledged || View.ReadInt32(92) != 0) return false;
                     int previous;
                     do { previous = Volatile.Read(ref lastState); if (state < previous) return false; }
                     while (Interlocked.CompareExchange(ref lastState, state, previous) != previous);
-                    for (int i = 160; i < HeaderBytes; i++) if (View.ReadByte(i) != 0) return false;
+                    var reserved = new byte[HeaderBytes - 160];
+                    if (View.ReadArray(160, reserved, 0, reserved.Length) != reserved.Length) return false;
+                    for (int i = 0; i < reserved.Length; i++) if (reserved[i] != 0) return false;
                     return body == null || MatchesSubmission();
                 }
                 catch { return false; }
@@ -128,10 +134,19 @@ namespace NLink.Tools
         private bool MatchesSubmission()
         {
             if (View.ReadInt32(88) != body.Length || ReadId(128) != submission) return false;
-            for (int i = 0; i < digest.Length; i++) if (View.ReadByte(96 + i) != digest[i]) return false;
-            for (int i = 0; i < body.Length; i++) if (View.ReadByte(HeaderBytes + i) != body[i]) return false;
+            if (!MatchesBytes(96, digest) || !MatchesBytes(HeaderBytes, body)) return false;
             int state = State;
             return state >= Submitted && (state < Adopted ? ReadId(144) == Guid.Empty : ReadId(144) == submission);
+        }
+        private bool MatchesBytes(int offset, byte[] expected)
+        {
+            var actual = new long[expected.Length / 8];
+            if (View.ReadArray(offset, actual, 0, actual.Length) != actual.Length) return false;
+            // Compare every byte against the retained packet on every call.
+            // Group complete words without caching approval or skipping tails.
+            for (int i = 0; i < actual.Length; i++) if (actual[i] != BitConverter.ToInt64(expected, i * 8)) return false;
+            for (int i = actual.Length * 8; i < expected.Length; i++) if (View.ReadByte(offset + i) != expected[i]) return false;
+            return true;
         }
         // The original callers signal peers only after releasing the mutex.
         internal void PublishAdopted() { WriteId(144, submission); View.Write(8, Adopted); }

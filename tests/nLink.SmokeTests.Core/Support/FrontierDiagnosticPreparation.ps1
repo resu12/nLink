@@ -9,11 +9,11 @@ if($prepareMode -ceq 'copied-batch') {
 switch($prepareMode) {
     'pre-failure' {$failure.Reason='changed-after-join'}
     'pre-view' {$compactView.CatalogHash='0'*64}
-    'record-budget' {$worker.FrontierInputs.GetType().GetField('evaluationVisits',$flags).SetValue($worker.FrontierInputs,2097152L)}
+    'record-budget' {$worker.FrontierInputs.GetType().GetField('evaluationVisits',$flags).SetValue($worker.FrontierInputs,[long][NLink.Tools.LocalPublicationInputLimits]::EvaluationVisits)}
     'budget' {
         $owned=$worker.FrontierInputs; $watch=$owned.GetType().GetField('work',$flags).GetValue($owned)
         $elapsed=@($watch.GetType().GetFields($flags) | Where-Object {$_.Name -match '^_?elapsed$'})[0]
-        $elapsed.SetValue($watch,[long]([Diagnostics.Stopwatch]::Frequency*21))
+        $elapsed.SetValue($watch,[long]([Diagnostics.Stopwatch]::Frequency*([NLink.Tools.LocalPublicationInputLimits]::EvaluationMilliseconds+1000)/1000))
     }
 }
 $preparation=$batch.TryPrepareDiagnostic()

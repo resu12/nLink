@@ -13,6 +13,8 @@ namespace NLink.Tools
                 private bool witnessesAttempted;
                 private NativeWitnessBatch witnessBatch;
                 private bool resolutionAttempted;
+                // Unimplemented outside the test profile: calls and arguments are erased.
+                partial void ObserveWitnessResolutionForTest(string stage, Exception error, bool rejected);
 
                 // Run the trusted primary's diagnostic selection inside the
                 // same native lifetime and cumulative work/record budget.
@@ -24,36 +26,53 @@ namespace NLink.Tools
                 {
                     lock (inputs.owner.frontierWorkerSync) lock (inputs.sync)
                     {
+                        ObserveWitnessResolutionForTest("ownership", null, false);
                         if (!Original || state != 3 || pair == null || !Object.ReferenceEquals(issued, pair) ||
                             !Matches(candidateContext, candidateFull, candidateCompact, candidateFullView, candidateCompactView) ||
-                            payloads == null || !OriginalPayloads(payloads)) return null;
+                            payloads == null || !OriginalPayloads(payloads))
+                        { ObserveWitnessResolutionForTest(null, null, true); return null; }
                         bool accepted = false, resolving = false; inputs.work.Start();
                         try
                         {
+                            ObserveWitnessResolutionForTest("availability", null, false);
                             if (resolutionAttempted || witnessesAttempted || resolve == null || !Current()) return null;
                             resolutionAttempted = true; resolving = true;
+                            ObserveWitnessResolutionForTest("state-capture", null, false);
                             var originalState = LocalFrontierDiagnosticState.Capture(failure, candidates, proof, index,
                                 fullView, compactView, full.Length, inputs.VisitEvaluation);
+                            ObserveWitnessResolutionForTest("selection-callback", null, false);
                             var selected = resolve(delegate
                             {
                                 if (!resolving) throw new InvalidOperationException("frontier_resolution_ended");
                                 inputs.VisitEvaluation();
                             });
                             resolving = false;
+                            ObserveWitnessResolutionForTest("selection-validation", null, false);
                             if (selected == null || !payloads.Contains(selected.Payload) || String.IsNullOrEmpty(selected.Snapshot) ||
                                 selected.Snapshot.Length > 16384 || !originalState.IsCurrent() || !Current()) return null;
+                            ObserveWitnessResolutionForTest("witness-capture", null, false);
                             var result = TryCaptureWitnesses(pair, candidateContext, candidateFull, candidateCompact,
                                 candidateFullView, candidateCompactView, payloads, selected.Payload, selected.Indices);
                             inputs.work.Start();
                             if (result != null)
                             {
+                                ObserveWitnessResolutionForTest("final-currentness", null, false);
                                 if (!originalState.IsCurrent() || !Current()) return null;
                                 result.BindSnapshot(selected.Snapshot, originalState);
                             }
+                            if (result != null) ObserveWitnessResolutionForTest("accepted", null, false);
                             accepted = result != null; return result;
                         }
+#if NLINK_TEST_ATTEMPT_DISPATCH
+                        catch (Exception error) { ObserveWitnessResolutionForTest(null, error, true); return null; }
+#else
                         catch { return null; }
-                        finally { resolving = false; inputs.work.Stop(); if (!accepted) inputs.Close(); }
+#endif
+                        finally
+                        {
+                            resolving = false; inputs.work.Stop();
+                            if (!accepted) { ObserveWitnessResolutionForTest(null, null, true); inputs.Close(); }
+                        }
                     }
                 }
 

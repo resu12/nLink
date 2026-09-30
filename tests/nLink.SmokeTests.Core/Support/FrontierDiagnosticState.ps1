@@ -15,7 +15,7 @@ function Fixture {
     $view=[pscustomobject]@{Mode='mode';ContractVersion=1;CatalogVersion='version';CatalogHash='hash';BoundaryHash='hash';ArtifactEvidenceVerdict='pass';StreamComplete=$true;AuthoritativeFamilies=[string[]]@('family');Boundaries=[object[]]@($boundary)}
     return @{Failure=$failure;Candidates=[object[]]@($failure);Proof=$proof;Index=$index;Full=$view;Compact=$view.PSObject.Copy()}
 }
-function Capture($x) { $capture.Invoke($null,[object[]]@($x.Failure,$x.Candidates,$x.Proof,$x.Index,$x.Full,$x.Compact,1,$visit)) }
+function Capture($x,[int]$FullCount=1) { $capture.Invoke($null,[object[]]@($x.Failure,$x.Candidates,$x.Proof,$x.Index,$x.Full,$x.Compact,$FullCount,$visit)) }
 foreach($case in @('valid','hostile-equals','scalar-type','script-property','array-cap','field-cap','array-rank')) {
     $x=Fixture; $reason=$null; $script:getters=0
     switch($case) {
@@ -37,4 +37,35 @@ foreach($case in @('valid','hostile-equals','scalar-type','script-property','arr
     if([bool]$current.Invoke($guard,$null) -ne ($case -ceq 'valid')) {throw ('Guard mutation mismatch: '+$case)}
     if([DiagnosticHostileEquals]::Calls -ne 0) {throw 'Guard invoked replacement Equals'}
 }
+# The approved event-record capacity is separate from metadata cells. Every
+# original event and property must still be captured and checked.
+foreach($count in @(21825,21826,65536,73885)) {
+    $x=Fixture; $x.Index.AllEvents=[object[]](@($x.Failure.Event)*$count)
+    $guard=$null; $reason=''
+    try {$guard=Capture $x $count} catch {
+        $caught=$_.Exception; while($null -ne $caught.InnerException) {$caught=$caught.InnerException}; $reason=$caught.Message
+    }
+    if($null -eq $guard -or -not $current.Invoke($guard,$null)) {throw ('Input-sized event state rejected: '+$count+' '+$reason)}
+}
+foreach($fault in @('array-copy','event-copy','raw-copy','raw-property','path-value','path-property','order','path-type','raw-script','path-script')) {
+    $x=Fixture; $second=$x.Failure.Event.PSObject.Copy()
+    $x.Index.AllEvents=[object[]]@($x.Failure.Event,$second); $guard=Capture $x 2
+    $script:getters=0
+    if(-not $current.Invoke($guard,$null)) {throw 'Original event-state guard unavailable'}
+    switch($fault) {
+        'array-copy' {$x.Index.AllEvents=$x.Index.AllEvents.Clone()}
+        'event-copy' {$x.Index.AllEvents[1]=$second.PSObject.Copy()}
+        'raw-copy' {$second.RawLine=[string]::new($second.RawLine.ToCharArray())}
+        'raw-property' {$value=$second.RawLine; $second.PSObject.Properties.Remove('RawLine'); $second.PSObject.Properties.Add([Management.Automation.PSNoteProperty]::new('RawLine',$value))}
+        'path-value' {$second.FilePath='other'}
+        'path-property' {$value=$second.FilePath; $second.PSObject.Properties.Remove('FilePath'); $second.PSObject.Properties.Add([Management.Automation.PSNoteProperty]::new('FilePath',$value))}
+        'order' {$x.Index.AllEvents[0]=$second; $x.Index.AllEvents[1]=$x.Failure.Event}
+        'path-type' {$second.FilePath=[DiagnosticHostileEquals]::new()}
+        'raw-script' {$second.PSObject.Properties.Remove('RawLine'); $second | Add-Member ScriptProperty RawLine {$script:getters++;'original'}}
+        'path-script' {$second.PSObject.Properties.Remove('FilePath'); $second | Add-Member ScriptProperty FilePath {$script:getters++;'source'}}
+    }
+    if($current.Invoke($guard,$null)) {throw ('Event identity/property mutation accepted: '+$fault)}
+    if($script:getters -ne 0 -or [DiagnosticHostileEquals]::Calls -ne 0) {throw 'Event validation executed replacement code'}
+}
+'frontier-diagnostic-state-capacity=4; event-mutations=10'
 'frontier-diagnostic-state=verified'

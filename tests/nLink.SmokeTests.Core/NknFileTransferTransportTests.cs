@@ -3510,7 +3510,7 @@ public sealed partial class NknFileTransferTransportTests : CoreSmokeTestsBase
             "Deliver",
             BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
         Assert.NotNull(deliver);
-        deliver.Invoke(session, [frame, channel, FileTransferTransportKind.RegularNkn, "direct-test-peer"]);
+        deliver.Invoke(session, [frame, channel, FileTransferTransportKind.RegularNkn, "direct-test-peer", null]);
     }
 
     [Trait("Category", "Smoke")]

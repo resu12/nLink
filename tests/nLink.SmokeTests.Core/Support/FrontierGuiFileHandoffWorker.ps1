@@ -193,7 +193,7 @@ try {
             $adopter=$owner.GetType().GetField('fileAdoption',[Reflection.BindingFlags]'Instance,NonPublic').GetValue($owner)
             $work=$adopter.GetType().GetField('work',[Reflection.BindingFlags]'Instance,NonPublic').GetValue($adopter)
             $elapsed=@($work.GetType().GetFields([Reflection.BindingFlags]'Instance,NonPublic') | Where-Object {$_.Name -match '^_?elapsed$'})[0]
-            $elapsed.SetValue($work,[long]([Diagnostics.Stopwatch]::Frequency*6))
+            $elapsed.SetValue($work,[long]([Diagnostics.Stopwatch]::Frequency*11))
         }
     }
     if($positive -or $Case -cin @('body-after','ack-nonce','repeat-adopt','repeat-ack','state-replay','nonzero','complete-after-adopt','genuine_after_complete_write')) {

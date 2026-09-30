@@ -2822,6 +2822,12 @@ public sealed partial class SessionFileTransferService
             routeDecision,
             forwardRoutePublication: false,
             adoptCoordinatorState: false);
+        if (authority.Kind == FileTransferRouteTransitionKind.TunaV4ToPostTunaFallbackV6)
+        {
+            // V6 starts a new receiver-state stream. The source-owner guard above
+            // prevents a repeated commit from resetting the successor's floor.
+            context.V4LastStateEpoch = -1;
+        }
         ApplyOutboundFileTransferRouteTransitionTargetRuntimeLocked(
             context,
             authority,

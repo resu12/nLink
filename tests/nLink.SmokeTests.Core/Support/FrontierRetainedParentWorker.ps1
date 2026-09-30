@@ -20,7 +20,22 @@ function Read-FileTransferLogEvents {
     if($null -ne $OwnedSource) {$script:nativeReads++}
     if($Case.StartsWith('merged-')) {
         $events=@(& $realParser -LogFiles $LogFiles -TailMinutes $TailMinutes -OwnedSource $OwnedSource)
-        $origins=@($events | ForEach-Object {$OwnedSource.GetFrontierPhysicalOrigin($_.LineNumber,$_.RawLine)})
+        if($native) {
+            $origins=[Collections.Generic.List[int]]::new(); $batchCount=0
+            for($offset=0;$offset -lt $events.Count;$offset+=64) {
+                $count=[Math]::Min(64,$events.Count-$offset)
+                $ordinals=[int[]]::new($count); $references=[string[]]::new($count)
+                for($i=0;$i -lt $count;$i++) {$ordinals[$i]=$events[$offset+$i].LineNumber; $references[$i]=$events[$offset+$i].RawLine}
+                $batch=$OwnedSource.GetFrontierPhysicalOrigins($ordinals,$references)
+                if($null -eq $batch -or $batch.Length -ne $count) {throw 'Native physical-origin batch rejected'}
+                $origins.AddRange([int[]]$batch); $batchCount++
+            }
+            Write-Host ('frontier-primary-origin-batches; events='+$events.Count+'; origins='+$origins.Count+'; batches='+$batchCount)
+            $flags=[Reflection.BindingFlags]'Instance,NonPublic'
+            $inputs=$OwnedSource.GetType().GetField('frontier',$flags).GetValue($OwnedSource)
+            $profile=$inputs.GetType().GetMethod('GetPrimaryWorkProfileForTest',$flags)
+            if($null -ne $profile) {Write-Host $profile.Invoke($inputs,$null)}
+        } else {$origins=@($events | ForEach-Object {$OwnedSource.GetFrontierPhysicalOrigin($_.LineNumber,$_.RawLine)})}
         [IO.File]::WriteAllText((Join-Path $ArtifactDir 'analysis-observed-source.json'),(@{
             native=$native;lines=@($events | ForEach-Object {$_.RawLine});origins=$origins} | ConvertTo-Json -Depth 5))
         return $events
