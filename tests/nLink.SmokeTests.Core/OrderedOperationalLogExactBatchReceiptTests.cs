@@ -259,15 +259,23 @@ public sealed partial class OrderedOperationalLogExactBatchReceiptTests
         Assert.Equal(96, File.ReadAllLines(fixture.LogPath).Length);
     }
 
-    [Fact]
-    public void SubmissionAfterWriterCompletionHasAnExactFailedReceipt()
+    [Theory]
+    [InlineData("too-late", "(none)", "(none)")]
+    [InlineData("[2026-10-01 09:47:12Z] [ERROR] [SessionRuntime] event=background_task_failed; secret=private", "SessionRuntime", "background_task_failed")]
+    public void SubmissionAfterWriterCompletionHasAnExactFailedReceipt(string text, string source, string eventName)
     {
         using var fixture = new WriterFixture();
         Assert.True(fixture.Pump.CompleteAndFlush(CreateBatch(1, "drain", isDrain: true), TimeSpan.FromSeconds(5)));
-        Assert.False(fixture.Pump.SubmitWithReceipt(CreateBatch(2, "too-late"), out var receipt));
+        var batch = CreateBatch(2, text);
+        Assert.False(fixture.Pump.SubmitWithReceipt(batch, out var receipt));
         Assert.NotNull(receipt);
         Assert.Equal(ExactBatchPersistence.Failed, fixture.Pump.GetPersistence(receipt));
-        Assert.Contains(fixture.Markers, marker => marker.FailureCode == "writer_completed");
+        var marker = Assert.Single(fixture.Markers);
+        Assert.Equal("writer_completed", marker.FailureCode);
+        Assert.Equal(batch, marker.Batch);
+        Assert.EndsWith($"; failure_code=writer_completed; attempted_source={source}; attempted_event={eventName}",
+            LocalOperationalLog.FormatWriteMarker(marker));
+        Assert.Equal(ExactBatchPersistence.Failed, fixture.Pump.GetPersistence(receipt));
         Assert.Equal(["drain"], File.ReadAllLines(fixture.LogPath));
     }
 

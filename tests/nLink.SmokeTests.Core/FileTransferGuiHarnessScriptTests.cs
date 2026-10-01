@@ -4,6 +4,7 @@ using System.Text;
 using System.Text.RegularExpressions;
 using NLink.App.Views;
 using NLink.Core.Configuration;
+using NLink.Core.Logging;
 
 namespace NLink.SmokeTests;
 
@@ -2233,6 +2234,12 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
     public async Task GuiSmokeLogLedger_WriterFailureMarkersAreBoundAndScopedToCurrentArtifact()
     {
         var repoRoot = FindRepoRoot();
+        const string rejectedText = "[2026-10-01 09:47:12Z] [WARN] [SessionRuntime] event=background_task_failed;";
+        var rejectedBatch = new OperationalLogWriteBatch(
+            "run-current", "run-current:scenario:1", "writer-current", 4, 4, 4, 400,
+            Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(Encoding.UTF8.GetBytes(rejectedText))).ToLowerInvariant(),
+            rejectedText, Encoding.UTF8.GetByteCount(rejectedText), false);
+        var rejectedMarker = LocalOperationalLog.FormatWriteMarker(OperationalLogWriteMarker.Failed(rejectedBatch, "writer_completed", 0));
         var helperPath = Path.Combine(repoRoot, "tools", "GuiSmokeLogLedger.ps1")
             .Replace("'", "''", StringComparison.Ordinal);
         var guiText = File.ReadAllText(Path.Combine(repoRoot, "tools", "GuiSmoke-Windows.ps1"));
@@ -2312,7 +2319,7 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
                     -ProcessOutputDrainAction {
                         Start-Sleep -Milliseconds 100
                         [IO.File]::AppendAllText($script:testLogPath, '[app] event=after_drain_boundary; log_writer_id=writer-current; log_writer_sequence=3' + $nl, $utf8)
-                        [IO.File]::AppendAllText($currentError, 'event=operational_log_write_failed; log_writer_id=writer-current; log_writer_sequence=4; failure_code=mutex_timeout' + $nl, $utf8)
+                        [IO.File]::AppendAllText($currentError, '{{rejectedMarker}}' + $nl, $utf8)
                     }
                 $ledger = Get-Content -LiteralPath (Join-Path $artifactDir 'filetransfer-gui-log-ledger.json') -Raw | ConvertFrom-Json
                 if ($ledger.writerEvidenceVersion -ne 3 -or
@@ -2321,6 +2328,10 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
                     $ledger.cursorIntegrityVerdict -ne 'fail') {
                     throw 'writer failure did not fail cursor evidence'
                 }
+                if ($ledger.writerRecoveryReasons -notcontains 'operational_log_write_failure_observed' -or
+                    $ledger.writerRecoveryReasons -contains 'writer_marker_structured_field_duplicate') {
+                    throw 'post-drain diagnostic fields changed failure-marker interpretation'
+                }
                 if ($ledger.final.writers[0].lastSequence -ne 3 -or
                     (Get-Content -LiteralPath $ledger.retainedSlice.path -Raw) -notlike '*event=after_drain_boundary*') {
                     throw 'authoritative final sync did not include a write produced during process drain'
@@ -2328,6 +2339,9 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
                 $markers = @(Get-Content -LiteralPath $ledger.writerFailureMarkerFiles[0].path)
                 if ($markers.Count -ne 1 -or $markers[0] -notlike '*writer-current*' -or $markers[0] -like '*writer-old*') {
                     throw 'writer failure markers were not scoped to the current artifact'
+                }
+                if ($markers[0] -cne '{{rejectedMarker}}') {
+                    throw 'exact post-drain marker diagnostics were not retained'
                 }
 
                 $missingArtifactDir = Join-Path $tempRoot 'current-missing-output'

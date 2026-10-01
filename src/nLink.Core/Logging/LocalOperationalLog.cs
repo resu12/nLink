@@ -1,6 +1,7 @@
 using System.Reflection;
 using System.Security.Cryptography;
 using System.Text;
+using System.Text.RegularExpressions;
 using NLink.Core.SessionConnect;
 
 namespace NLink.Core.Logging;
@@ -204,8 +205,29 @@ public static partial class LocalOperationalLog
                $"; payload_sha256={batch.PayloadSha256}" +
                $"; attempt_utc_ticks={batch.AttemptUtcTicks}" +
                $"; attempt_count={marker.AttemptCount}" +
-               $"; failure_code={marker.FailureCode}";
+               $"; failure_code={marker.FailureCode}" +
+               (marker.Kind == OperationalLogWriteMarkerKind.Failed && marker.FailureCode == "writer_completed"
+                   ? FormatCompletedWriterDiagnostics(batch.PersistedText)
+                   : string.Empty);
     }
+
+    private static string FormatCompletedWriterDiagnostics(string? persistedText)
+    {
+        // Inspect only the ordinary entry header and first structured field, never
+        // a message body or later physical line. Missing values remain diagnostic-only.
+        var prefix = persistedText is null ? string.Empty : persistedText[..Math.Min(persistedText.Length, 256)];
+        var match = CompletedWriterEntryPrefixRegex().Match(prefix);
+        return $"; attempted_source={Identifier(match.Groups["source"].Value)}" +
+               $"; attempted_event={Identifier(match.Groups["event"].Value)}";
+
+        static string Identifier(string value)
+            // Redact the isolated identifier too: event= normally protects values
+            // from token redaction. Omit even plausible names if they look secret-like.
+            => value.Length > 0 && SensitiveDataRedactor.Redact(value) == value ? value : "(none)";
+    }
+
+    [GeneratedRegex(@"^\[[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2}Z\] \[(?:INFO|WARN|ERROR)\] \[(?<source>[A-Za-z][A-Za-z0-9_.-]{0,63})\] (?:event=(?<event>[A-Za-z][A-Za-z0-9_]{0,127});)?", RegexOptions.CultureInvariant)]
+    private static partial Regex CompletedWriterEntryPrefixRegex();
 
     internal static string WriterIdForTests => WriterId;
 
