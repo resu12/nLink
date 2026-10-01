@@ -1,4 +1,4 @@
-param([string]$RepoRoot,[string]$InputPath)
+param([string]$RepoRoot,[string]$InputPath,[switch]$ExpectDelayedReceiverSnapshots)
 $ErrorActionPreference='Stop'
 . (Join-Path $RepoRoot 'tools/FileTransferOps/CoordinatorSnapshotEvidence.ps1')
 . (Join-Path $RepoRoot 'tools/FileTransferSoak/LogParsing.ps1')
@@ -23,8 +23,8 @@ Invoke-Expression $definition[0].Extent.Text
 $lines=[IO.File]::ReadAllLines($InputPath)
 $snapshot=Get-FileTransferCoordinatorSnapshotEvaluation -Lines $lines
 Check ($snapshot.ArtifactEvidenceVerdict -ceq 'pass' -and $snapshot.StreamComplete) $snapshot.ArtifactEvidenceFailureReason
-Check ($snapshot.CatalogVersion -ceq $script:FileTransferCoordinatorInitialDataSessionCatalogVersion -and
-    $snapshot.CatalogHash -ceq (Get-FileTransferCoordinatorInitialDataSessionCatalog).Hash) 'Fresh producer must use the exact current catalog.'
+Check ($snapshot.CatalogVersion -ceq $script:FileTransferCoordinatorEarlyCheckpointProofCatalogVersion -and
+    $snapshot.CatalogHash -ceq (Get-FileTransferCoordinatorEarlyCheckpointProofCatalog).Hash) 'Fresh producer must use the exact current catalog.'
 $events=@(Parse $lines)
 $hold=@($events | Where-Object EventName -CEQ 'filetransfer_v6_frontier_request_deferred')[0]
 $index=New-FileTransferStallGraceCurrentSourceIndex -Events $events -SnapshotEvidence $snapshot
@@ -32,6 +32,17 @@ $reason='';$closure=Get-FileTransferStallGraceSupersessionClosure $index $hold (
 Check ($null -ne $closure) "actual join failed:$reason"
 Check ($closure.RepairOutcome -ceq 'SettledStalled' -and $closure.SuccessorOutcome -ceq 'StaleRejected') 'repair outcome rewritten'
 Check ($closure.LocalTarget.CoordinatorInstanceId -cne $closure.PeerTarget.CoordinatorInstanceId) 'same peer used twice'
+if ($ExpectDelayedReceiverSnapshots) {
+    $commit=@($snapshot.Boundaries | Where-Object boundaryId -CEQ $closure.LocalTarget.CommitBoundaryId)[0]
+    $disposition=@($snapshot.Boundaries | Where-Object boundaryId -CEQ $closure.LocalTarget.DispositionBoundaryId)[0]
+    $runtime=@($events | Where-Object { $_.EventName -ceq 'filetransfer_route_transition_committed' -and $_.Fields.direction -ceq 'inbound' })
+    $applied=@($events | Where-Object { $_.EventName -ceq 'filetransfer_route_transition_disposition_applied' -and
+        $_.Fields.direction -ceq 'inbound' -and $_.Fields['authority_schema'] -ceq '2' })
+    Check ($runtime.Count -eq 1 -and $applied.Count -eq 1 -and
+        [long]$commit.writerSequence -gt [long]$runtime[0].Fields.log_writer_sequence -and
+        [long]$disposition.writerSequence -gt [long]$applied[0].Fields.log_writer_sequence -and
+        $disposition.beforeStateGeneration -ge $commit.afterStateGeneration) 'receiver snapshots were not actually delayed'
+}
 foreach ($first in @($closure.LocalTarget.CoordinatorInstanceId,$closure.PeerTarget.CoordinatorInstanceId)) {
     $reordered=Copy-Value $snapshot
     $reordered.Boundaries=@($reordered.Boundaries | Sort-Object @{Expression={if ($_.coordinatorInstanceId -ceq $first) {0} else {1}}},afterStateGeneration)
@@ -131,7 +142,7 @@ foreach ($poison in @('pause','terminal','data-replacement')) {
 foreach ($case in @('legacy','incomplete','shadow','evidence-failed','catalog-unknown','catalog-hash','family',
     'peer-pair','peer-proof','retry-link','dispatch','responder-link',
     'local-commit','peer-commit','local-disposition','peer-disposition','local-publication','peer-publication',
-    'checkpoint','data','duplicate','source-aba','target-aba')) {
+    'checkpoint','data','duplicate','source-aba','target-aba','local-disposition-generation','local-disposition-step','local-snapshot-order')) {
     $copy=Copy-Value $snapshot
     $local=@($copy.Boundaries | Where-Object boundaryId -CEQ $closure.LocalTarget.CommitBoundaryId)[0]
     $peer=@($copy.Boundaries | Where-Object boundaryId -CEQ $closure.PeerTarget.CommitBoundaryId)[0]
@@ -159,6 +170,9 @@ foreach ($case in @('legacy','incomplete','shadow','evidence-failed','catalog-un
         'duplicate' { $copy.Boundaries+=Copy-Value $peer }
         'source-aba' { $b=@($copy.Boundaries | Where-Object boundaryId -CEQ $closure.PeerTarget.PreparedBoundaryId)[0]; $b.beforeBoundary.terminalGeneration++ }
         'target-aba' { $b=@($copy.Boundaries | Where-Object boundaryId -CEQ $closure.PeerTarget.DispositionBoundaryId)[0]; $b.beforeBoundary.dataSessionGeneration++ }
+        'local-disposition-generation' { $b=@($copy.Boundaries | Where-Object boundaryId -CEQ $closure.LocalTarget.DispositionBoundaryId)[0]; $b.beforeStateGeneration=$local.beforeStateGeneration }
+        'local-disposition-step' { $b=@($copy.Boundaries | Where-Object boundaryId -CEQ $closure.LocalTarget.DispositionBoundaryId)[0]; $b.afterStateGeneration++ }
+        'local-snapshot-order' { $b=@($copy.Boundaries | Where-Object boundaryId -CEQ $closure.LocalTarget.DispositionBoundaryId)[0]; $b.writerSequence=$local.writerSequence }
     }
     $candidateIndex=New-FileTransferStallGraceCurrentSourceIndex -Events $events -SnapshotEvidence $copy
     $why='';$rejected=Get-FileTransferStallGraceSupersessionClosure $candidateIndex $hold ([ref]$why)

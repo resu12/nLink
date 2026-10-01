@@ -20,6 +20,9 @@ function RepairOwnerSupersessionFixture {
         $boundary.afterBoundary=Clone $typed.targetBoundary
         $boundary.afterBoundary.dataSessionIdentity=$data
     }
+    # Disposition is authored after the commit, not at the same state generation.
+    $f.Snapshot.Boundaries[1].beforeStateGeneration=41
+    $f.Snapshot.Boundaries[1].afterStateGeneration=42
     foreach ($event in @($f.Events | Where-Object Stage -CIn @('commit','disposition'))) { $event.Fields.checkpoint_generation='1' }
     $source=Clone $f.Snapshot.Boundaries[0].beforeBoundary
     $publicationId=Id 'publication:3'

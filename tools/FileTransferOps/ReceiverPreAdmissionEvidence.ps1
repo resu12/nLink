@@ -31,7 +31,7 @@ function Test-FileTransferReceiverPreAdmissionClose {
     param($Payload,$Catalog)
     $p=Get-FileTransferCoordinatorSnapshotObjectProperty $Payload 'preAdmissionClose'
     if ($null -eq $p) { return $true }
-    if ($Catalog.Version -cnotin @($script:FileTransferCoordinatorReceiverPreAdmissionCatalogVersion, $script:FileTransferCoordinatorInitialDataSessionCatalogVersion) -or
+    if ($Catalog.Version -cnotin @($script:FileTransferCoordinatorReceiverPreAdmissionCatalogVersion, $script:FileTransferCoordinatorInitialDataSessionCatalogVersion, $script:FileTransferCoordinatorEarlyCheckpointProofCatalogVersion) -or
         -not (Test-FileTransferCheckpointRepairContinuityFields $p $script:FileTransferCoordinatorReceiverPreAdmissionCatalog.payloadFields) -or
         $p.mode -cne 'InitialResponderBeforeProbe' -or $Payload.admissionFingerprint -cne '(none)' -or
         $p.boundLaunchGeneration -ne 0 -or $p.failureLaunchGeneration -lt 0 -or

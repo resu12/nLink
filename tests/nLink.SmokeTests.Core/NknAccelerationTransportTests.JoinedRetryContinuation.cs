@@ -24,6 +24,11 @@ public sealed partial class NknAccelerationTransportTests
         => await RunJoinedFallbackRetryAsync(withStalledRepair: true);
 
     [Fact]
+    [Trait("OpsSuite", "SupersededSourceAccounting")]
+    public Task JoinedFallbackRetry_StalledRepairWithDelayedReceiverSnapshots()
+        => RunJoinedFallbackRetryAsync(withStalledRepair: true, delayReceiverSnapshots: true);
+
+    [Fact]
     [Trait("FileTransferRuntimeSuite", "RecentProgressSupersession")]
     public Task JoinedFallbackRetry_RecentProgressIsSupersededBeforeGraceDeadline()
         => RunJoinedFallbackRetryAsync(withStalledRepair: true, withRecentProgress: true);
@@ -62,7 +67,8 @@ public sealed partial class NknAccelerationTransportTests
         => RunJoinedFallbackRetryAsync(false, "listener_terminal_tuna_stream_eof", control);
 
     private async Task RunJoinedFallbackRetryAsync(bool withStalledRepair, string? sidecarFailureReason = null,
-        string? failureControl = null, bool continueAfterEof = false, bool withRecentProgress = false)
+        string? failureControl = null, bool continueAfterEof = false, bool withRecentProgress = false,
+        bool delayReceiverSnapshots = false)
     {
         // Initial fallback contexts are an explicit fixture baseline. There is
         // no file-I/O/live acceptance claim. After the baseline, all authority,
@@ -72,6 +78,7 @@ public sealed partial class NknAccelerationTransportTests
         using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(30));
         using var senderProbePumpLifetime = CancellationTokenSource.CreateLinkedTokenSource(timeout.Token);
         var releaseReceiverHandoff = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        Action? releaseReceiverSnapshots = null;
         var releasePayload = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var releaseOffer = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var releaseInitialData = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -393,7 +400,11 @@ public sealed partial class NknAccelerationTransportTests
                     sender, outbound, receiver, inbound, senderData, () => requests.ToArray(),
                     (frame, lane) => senderData.GetType().GetMethod("Deliver")!.Invoke(senderData,
                         [frame, lane, FileTransferTransportKind.RegularNkn,
-                            lane == NknBridgeChannel.Bulk ? helperClient.BulkAddress : helper.LocalPeerAddress]));
+                            lane == NknBridgeChannel.Bulk ? helperClient.BulkAddress : helper.LocalPeerAddress, null]));
+                if (delayReceiverSnapshots)
+                {
+                    releaseReceiverSnapshots = await SessionFileTransferV4SenderTests.HoldJoinedSnapshotDrainForTestAsync(receiver, inbound);
+                }
                 releaseReceiverHandoff.TrySetResult();
             }
             var lastRoutePredicate = "not observed";
@@ -454,6 +465,8 @@ public sealed partial class NknAccelerationTransportTests
             }
             if (repairLineage is not null)
             {
+                releaseReceiverSnapshots?.Invoke();
+                releaseReceiverSnapshots = null;
                 SessionFileTransferV4SenderTests.AssertJoinedRepairHandoffForTest(receiver, inbound, repairLineage,
                     ReadOperationalLogTail(logStart));
                 foreach (var initial in initialPublications)
@@ -550,6 +563,7 @@ public sealed partial class NknAccelerationTransportTests
         }
         finally
         {
+            releaseReceiverSnapshots?.Invoke();
             releaseOffer.TrySetResult();
             releaseReceiverHandoff.TrySetResult();
             if (outbound is not null) { SessionFileTransferV4SenderTests.CancelJoinedNknContextForTest(outbound); }
@@ -590,6 +604,25 @@ public sealed partial class NknAccelerationTransportTests
 
 public sealed partial class SessionFileTransferV4SenderTests
 {
+    internal static async Task<Action> HoldJoinedSnapshotDrainForTestAsync(SessionFileTransferService service, object context)
+    {
+        var emitter = GetPrivatePropertyValue(context, "CoordinatorSnapshotEmitter")!;
+        var flags = BindingFlags.Instance | BindingFlags.NonPublic;
+        var scheduled = emitter.GetType().GetField("drainScheduled", flags)!;
+        await WaitUntilAsync(() =>
+        {
+            lock (GetServiceGate(service))
+            {
+                if ((int)scheduled.GetValue(emitter)! != 0) { return false; }
+                // Hold only writer scheduling. Envelopes and effects still come
+                // from the real Coordinator and remain in their original queue.
+                scheduled.SetValue(emitter, 1);
+                return true;
+            }
+        }, timeoutMs: 3000);
+        return () => emitter.GetType().GetMethod("Drain", flags)!.Invoke(emitter, null);
+    }
+
     internal static async Task<object> CreateJoinedNknFallbackContextForTestAsync(SessionFileTransferService service,
         IFileTransferDataSession data, string sessionId, string transferId, FileTransferDirection direction,
         bool withStalledRepair = false, bool withRecentProgress = false)
@@ -689,7 +722,7 @@ public sealed partial class SessionFileTransferV4SenderTests
         {
             var start = typeof(SessionFileTransferService).GetMethod($"Start{direction}TransferLegLocked", BindingFlags.Instance | BindingFlags.NonPublic)!;
             object?[] startArgs = direction == FileTransferDirection.Outbound
-                ? [context, routeSelection, "joined_nkn_initial_source", FileTransferLegState.Active, true, false, 3L, 1, null, false, null, null]
+                ? [context, routeSelection, "joined_nkn_initial_source", FileTransferLegState.Active, true, false, 3L, 1, null, false, null, null, null, false]
                 : [context, routeSelection, "joined_nkn_initial_source", FileTransferLegState.Active, true, false, 3L, 1, null, null];
             var leg = Assert.IsType<FileTransferLeg>(start.Invoke(service, startArgs));
             var started = CreateCoordinatorStateForTest(context);

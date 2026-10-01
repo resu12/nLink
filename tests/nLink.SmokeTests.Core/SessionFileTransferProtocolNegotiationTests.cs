@@ -231,10 +231,7 @@ public sealed class SessionFileTransferProtocolNegotiationTests : SessionFileTra
             ShouldUseFileTransferV6ForAcceleration = false,
             TransportAccelerationStatusReason = "test_tuna_active",
         };
-        using var receiverTransport = new LoopbackFileTransferTransport("session_protocol_offer_file_tuna_v4_active_only")
-        {
-            IsFileTunaActiveForRouteSelection = true,
-        };
+        using var receiverTransport = new LoopbackFileTransferTransport("session_protocol_offer_file_tuna_v4_active_only");
         senderTransport.Connect(receiverTransport);
         using var sender = new SessionFileTransferService();
         using var receiver = new SessionFileTransferService();
@@ -246,10 +243,10 @@ public sealed class SessionFileTransferProtocolNegotiationTests : SessionFileTra
             _ => Task.FromResult<Stream>(new MemoryStream(payload, writable: false)),
             CancellationToken.None);
 
-        await WaitUntilAsync(() => receiver.Snapshot.Inbound?.State == FileTransferTransferState.PendingDecision);
         var offer = Assert.Single(senderTransport.SentOffers);
         Assert.Equal(FileTransferProtocol.ProtocolVersionV4, offer.PreferredDataProtocolVersion);
         Assert.Equal(FileTransferRouteResolver.RegularNknV4FastToken, offer.FileTransferRoute);
+        await WaitUntilAsync(() => receiver.Snapshot.Inbound?.State == FileTransferTransferState.PendingDecision);
     }
 
     [Fact]

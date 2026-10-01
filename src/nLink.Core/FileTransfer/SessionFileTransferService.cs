@@ -1369,12 +1369,6 @@ public sealed partial class SessionFileTransferService :
                     FallbackBootstrapCorrelationVersion = correlationSupported ? 1 : null,
                     FallbackBootstrapIssuerId = correlationSupported ? FileTransferCoordinator.CreateLocalFallbackBootstrapIssuer(agreementState) : null,
                 };
-                if (correlationSupported)
-                {
-                    var offerDecision = FileTransferCoordinator.PinFallbackBootstrapOffer(agreementState, offerMessage);
-                    AdoptBootstrapAgreementLocked(context, offerDecision);
-                    if (!offerDecision.Accepted) { return null; }
-                }
                 context.RoutePublicationAuthorityForwarder =
                     (token, publicationReason) => ForwardCoordinatorIssuedRoutePublicationAuthorityLocked(
                         context,
@@ -1391,11 +1385,20 @@ public sealed partial class SessionFileTransferService :
                         context,
                         "new_transfer",
                         initialTunaEvidence,
-                        ResolveFileTransferRouteForNewTransfer(routeInput)) is null)
+                        ResolveFileTransferRouteForNewTransfer(routeInput),
+                        offerMessage,
+                        correlationSupported) is null)
                 {
                     return null;
                 }
 
+                offerMessage = correlationSupported
+                    ? context.CoordinatorPersistentState.FileTransferRouteTransition.BootstrapAgreement!.Offer
+                    : offerMessage with
+                    {
+                        FileTransferRoute = context.RouteSelection.TelemetryToken,
+                        PreferredDataProtocolVersion = context.RouteSelection.ProtocolVersion,
+                    };
                 routeInput = CreateRouteInputForPublishedSelection(context.RouteSelection, routeInput.TransportProfileKind);
                 if (RequiresPreparationAdmissionLocked(preparation, context.RouteSelection))
                 {
@@ -6355,7 +6358,9 @@ public sealed partial class SessionFileTransferService :
         OutboundTransferContext context,
         string reason,
         FileTransferInitialTunaReadinessEvidence? initialTunaReadinessEvidence = null,
-        FileTransferRouteSelection? initialRouteFallbackSelection = null)
+        FileTransferRouteSelection? initialRouteFallbackSelection = null,
+        FileTransferOfferV2? initialOffer = null,
+        bool pinInitialOffer = false)
         => context.CurrentTransferLeg ?? StartOutboundTransferLegLocked(
             context,
             context.RouteSelection,
@@ -6365,7 +6370,9 @@ public sealed partial class SessionFileTransferService :
             freezeCurrent: false,
             initialTunaReadinessEvidence: initialTunaReadinessEvidence,
             allowInitialRouteFallback: initialRouteFallbackSelection.HasValue,
-            initialRouteFallbackSelection: initialRouteFallbackSelection);
+            initialRouteFallbackSelection: initialRouteFallbackSelection,
+            initialOffer: initialOffer,
+            pinInitialOffer: pinInitialOffer);
 
     private FileTransferLeg? EnsureInboundTransferLegLocked(
         InboundTransferContext context,
@@ -11118,6 +11125,11 @@ public sealed partial class SessionFileTransferService :
             return false;
         }
 
+        if (context.LastRuntimeStartedPublication == token)
+        {
+            return true;
+        }
+
         LogFileTransferRuntimeStarted(
             context.TransferId,
             context.SessionId,
@@ -11127,6 +11139,7 @@ public sealed partial class SessionFileTransferService :
             context.CurrentLiveRouteEpoch?.EpochId ?? 0,
             token,
             rejectionReason);
+        context.LastRuntimeStartedPublication = token;
         return true;
     }
 
@@ -11150,6 +11163,11 @@ public sealed partial class SessionFileTransferService :
             return false;
         }
 
+        if (context.LastRuntimeStartedPublication == token)
+        {
+            return true;
+        }
+
         LogFileTransferRuntimeStarted(
             context.TransferId,
             context.SessionId,
@@ -11159,6 +11177,7 @@ public sealed partial class SessionFileTransferService :
             context.CurrentLiveRouteEpoch?.EpochId ?? 0,
             token,
             rejectionReason);
+        context.LastRuntimeStartedPublication = token;
         return true;
     }
 
@@ -13929,7 +13948,9 @@ public sealed partial class SessionFileTransferService :
         bool allowInitialRouteFallback = false,
         FileTransferRouteSelection? initialRouteFallbackSelection = null,
         FallbackTailYieldTransportEpochReauthorizationRequest?
-            fallbackTailYieldTransportEpochReauthorizationRequest = null)
+            fallbackTailYieldTransportEpochReauthorizationRequest = null,
+        FileTransferOfferV2? initialOffer = null,
+        bool pinInitialOffer = false)
     {
         var retiredLeg = context.CurrentTransferLeg;
         var committedChunk = Math.Clamp(context.RemoteNextExpectedChunkIndex, 0, Math.Max(0, context.ChunkCount));
@@ -13958,9 +13979,18 @@ public sealed partial class SessionFileTransferService :
                 InitialRouteFallbackSelection: initialRouteFallbackSelection,
                 FallbackTailYieldTransportEpochReauthorizationRequest:
                     fallbackTailYieldTransportEpochReauthorizationRequest);
-        var decision = FileTransferCoordinator.Apply(
-            coordinatorEvent,
-            CreateCoordinatorStateLocked(context));
+        FileTransferCoordinatorDecision decision;
+        if (initialOffer is not null)
+        {
+            var initial = FileTransferCoordinator.ApplyInitialOutboundOffer(
+                coordinatorEvent, CreateCoordinatorStateLocked(context), initialOffer, pinInitialOffer);
+            if (initial.Offer is { } pinned) AdoptBootstrapAgreementLocked(context, pinned);
+            decision = initial.Start;
+        }
+        else
+        {
+            decision = FileTransferCoordinator.Apply(coordinatorEvent, CreateCoordinatorStateLocked(context));
+        }
         if (string.Equals(
                 decision.MutationRejectedReason,
                 "regular_v4_frontier_repair_pressure_retirement_required",
@@ -24562,6 +24592,9 @@ public sealed partial class SessionFileTransferService :
 
         public int LastRoutePublicationGeneration { get; set; }
 
+        // Diagnostic deduplication only; this does not authorize runtime work.
+        public RoutePublicationToken? LastRuntimeStartedPublication { get; set; }
+
         public Action<RoutePublicationToken, string>? RoutePublicationAuthorityForwarder { get; set; }
 
         public Action<
@@ -25862,6 +25895,11 @@ public sealed partial class SessionFileTransferService :
         }
 
         public int LastRoutePublicationGeneration { get; set; }
+
+        // Diagnostic evidence only; neither field authorizes runtime work.
+        public RoutePublicationToken? LastRuntimeStartedPublication { get; set; }
+
+        public InboundSparseReceiverRuntimeEvidence? SparseReceiverRuntimeEvidence { get; set; }
 
         public Action<RoutePublicationToken, string>? RoutePublicationAuthorityForwarder { get; set; }
 

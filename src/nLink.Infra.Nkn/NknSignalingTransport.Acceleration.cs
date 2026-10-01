@@ -783,6 +783,12 @@ public sealed partial class NknSignalingTransport
 
         public FileTransferRouteTransitionDispositionCommand? FileProjectionRetirement { get; set; }
 
+        public FileTransferTerminalFallbackProjectionRetirementCommand? FileTerminalProjectionRetirement { get; set; }
+
+        public long FileProjectionDataSessionGeneration { get; set; }
+
+        public bool IsFileProjectionRetired => FileProjectionRetirement is not null || FileTerminalProjectionRetirement is not null;
+
         public long ScreenFramesApplied { get; set; }
 
         public bool AccelerationUsedAfterFallback { get; set; }
@@ -2396,7 +2402,7 @@ public sealed partial class NknSignalingTransport
                     {
                         Current = new FileTransferRouteTransitionPauseBindingShadow(
                             command,
-                            receipt) { FallbackProjection = CaptureFileFallbackProjectionUnsafe(authority) },
+                            receipt) { FallbackProjection = CaptureFileFallbackProjectionUnsafe(authority), FallbackProofEpisode = CaptureFallbackProofEpisodeUnsafe(authority) },
                         RetainedPredecessor = predecessor,
                     };
                 }
@@ -2424,7 +2430,7 @@ public sealed partial class NknSignalingTransport
                             Current =
                                 new FileTransferRouteTransitionPauseBindingShadow(
                                     command,
-                                    receipt) { FallbackProjection = CaptureFileFallbackProjectionUnsafe(authority) },
+                                    receipt) { FallbackProjection = CaptureFileFallbackProjectionUnsafe(authority), FallbackProofEpisode = CaptureFallbackProofEpisodeUnsafe(authority) },
                         };
                     }
                     else
@@ -2477,7 +2483,7 @@ public sealed partial class NknSignalingTransport
                     {
                         Current = new FileTransferRouteTransitionPauseBindingShadow(
                             command,
-                            receipt) { FallbackProjection = CaptureFileFallbackProjectionUnsafe(authority) },
+                            receipt) { FallbackProjection = CaptureFileFallbackProjectionUnsafe(authority), FallbackProofEpisode = CaptureFallbackProofEpisodeUnsafe(authority) },
                     };
                 }
             }
@@ -2640,6 +2646,7 @@ public sealed partial class NknSignalingTransport
         FileTransferRouteTransitionDispositionReceipt receipt;
         var scheduleAvailability = false;
         var fallbackProjectionRetired = false;
+        FileTransferRouteTransitionPauseBindingShadow? fallbackCleanupBinding = null;
         RuntimeUnlockRetiredAnswerBarrier? completedAnswerBarrier = null;
         var wakeRetryAfterAnswerBarrier = false;
         lock (accelerationGate)
@@ -2691,6 +2698,7 @@ public sealed partial class NknSignalingTransport
                 {
                     fallbackProjectionRetired = ApplyFileFallbackProjectionDispositionUnsafe(
                         command, shadow.Current!.FallbackProjection);
+                    fallbackCleanupBinding = shadow.Current;
                 }
                 receipt = new FileTransferRouteTransitionDispositionReceipt(
                     command,
@@ -2812,7 +2820,7 @@ public sealed partial class NknSignalingTransport
         if (receipt.Status ==
             FileTransferRouteTransitionDispositionApplyStatus.Applied)
         {
-            CompleteCommittedPostTunaFallbackFileTransition(receipt.Command);
+            CompleteCommittedPostTunaFallbackFileTransition(receipt.Command, fallbackCleanupBinding);
         }
         if (scheduleAvailability)
         {
@@ -2825,18 +2833,11 @@ public sealed partial class NknSignalingTransport
     }
 
     private void CompleteCommittedPostTunaFallbackFileTransition(
-        FileTransferRouteTransitionDispositionCommand command)
+        FileTransferRouteTransitionDispositionCommand command,
+        FileTransferRouteTransitionPauseBindingShadow? binding)
     {
-        if (command.Kind !=
-                FileTransferRouteTransitionDispositionKind.Committed ||
-            command.Authority.TargetRoute !=
-                FileTransferRoute.PostTunaFallbackV6 ||
-            command.Authority.TargetProtocolVersion !=
-                FileTransferProtocol.ProtocolVersionV6 ||
-            command.Authority.TargetTransport !=
-                FileTransferTransportKind.RegularNkn ||
-            command.Authority.HandoffKind !=
-                FileTransferTransportHandoffKind.TunaToNormalFallback ||
+        if (binding?.FallbackProofEpisode is not { } episode ||
+            !FileTransferCoordinator.AuthorizesFallbackProofEpisodeCleanup(command, episode) ||
             command.Authority.ProofBoundary is not
                 FileTransferFallbackTransitionProofBoundary fallback)
         {
@@ -2845,43 +2846,45 @@ public sealed partial class NknSignalingTransport
 
         string reason;
         NknAccelerationLaneKind lanes;
-        lock (fileTransferFallbackProofGate)
+        bool laneChanged;
+        // Revalidate after acquiring both locks and retain the session-map lock
+        // through cleanup: a pre-lock observation cannot authorize a late effect.
+        lock (gate)
+        lock (accelerationGate)
         {
-            if (!fileTransferFallbackProofPending ||
-                (fileTransferFallbackProofLanes &
-                    NknAccelerationLaneKind.File) !=
-                    NknAccelerationLaneKind.File ||
-                !string.Equals(
-                    fileTransferFallbackProofSessionId,
-                    command.Authority.SessionId,
-                    StringComparison.Ordinal) ||
-                fileTransferFallbackProofGeneration !=
-                    fallback.PeerProofEvidence.ProofGeneration ||
-                (!string.IsNullOrWhiteSpace(
-                     fileTransferFallbackProofTransferId) &&
-                 !string.Equals(
-                     fileTransferFallbackProofTransferId,
-                     command.Authority.TransferId,
-                     StringComparison.Ordinal)) ||
-                (fileTransferFallbackProofDirection is { } direction &&
-                 direction != command.Authority.Direction) ||
-                (fileTransferFallbackProofTransportEpoch > 0 &&
-                 fileTransferFallbackProofTransportEpoch !=
-                    fallback.PeerProofEvidence.TransportEpoch))
+            var shadow = fileTransferRouteTransitionExecutionShadow;
+            if (!IsFileTransferRouteTransitionDataSessionCurrent(command.Authority) ||
+                shadow.Current is not null || shadow.RetainedPredecessor is not null ||
+                shadow.LastCurrentDisposition is not { Status: FileTransferRouteTransitionDispositionApplyStatus.Applied } applied ||
+                applied.Command != command ||
+                binding.FallbackProjection is not { } projection ||
+                !ReferenceEquals(projection, tunaFallbackProofState) || projection.Epoch != episode.FallbackEpoch ||
+                projection.IsFileProjectionRetired ||
+                projection.FileProjectionPublication != command.RoutePublicationToken ||
+                projection.FileV6TransportEpoch != fallback.TargetTransportEpoch)
             {
                 return;
             }
-
-            reason = fileTransferFallbackProofReason;
-            lanes = fileTransferFallbackProofLanes;
-            CompleteFileTransferFallbackProofUnsafe();
+            lock (fileTransferFallbackProofGate)
+            {
+                if (!IsPendingFallbackProofScopeCurrentUnsafe(command.Authority) ||
+                    fileTransferFallbackProofGeneration != episode.PendingGeneration)
+                {
+                    return;
+                }
+                reason = fileTransferFallbackProofReason;
+                lanes = fileTransferFallbackProofLanes;
+                CompleteFileTransferFallbackProofUnsafe();
+                laneChanged = projection.FileState != TunaFallbackLaneState.Recovered;
+                projection.FileState = TunaFallbackLaneState.Recovered;
+            }
         }
 
-        MarkTunaFallbackLaneState(
-            command.Authority.SessionId,
-            lane: NknAccelerationLaneKind.File,
-            state: TunaFallbackLaneState.Recovered,
-            reason: reason);
+        if (laneChanged)
+        {
+            LogMixedFallbackLaneState(binding.FallbackProjection!, "file_recovered");
+            NotifyTransportAccelerationStateChanged(reason);
+        }
         LocalOperationalLog.Info(
             "NKN.Tuna",
             $"event=tuna_disable_handoff_nkn_ready; session_id={SanitizeLogToken(command.Authority.SessionId)}; reason={SanitizeLogToken(reason)}; proof={SanitizeLogToken(fallback.PeerProofEvidence.ProofKind)}; lanes={FormatAccelerationLanesForLog(lanes)}; route_transition_authority_id={SanitizeLogToken(command.Authority.AuthorityId.ToString())}; transition_generation={command.Authority.TransitionGeneration}");
@@ -2890,7 +2893,7 @@ public sealed partial class NknSignalingTransport
             $"event=tuna_disable_handoff_completed; session_id={SanitizeLogToken(command.Authority.SessionId)}; reason={SanitizeLogToken(reason)}; proof={SanitizeLogToken(fallback.PeerProofEvidence.ProofKind)}; lanes={FormatAccelerationLanesForLog(lanes)}; route_transition_authority_id={SanitizeLogToken(command.Authority.AuthorityId.ToString())}; transition_generation={command.Authority.TransitionGeneration}; completion_source=coordinator_committed_route_transition");
         LocalOperationalLog.Info(
             "NKN.Tuna",
-            $"event=filetransfer_post_tuna_fallback_cleanup_completed; session_id={SanitizeLogToken(command.Authority.SessionId)}; transfer_id={SanitizeLogToken(command.Authority.TransferId)}; direction={FormatFileTransferDirection(command.Authority.Direction)}; reason={SanitizeLogToken(reason)}; proof={SanitizeLogToken(fallback.PeerProofEvidence.ProofKind)}; proof_generation={fallback.PeerProofEvidence.ProofGeneration}; proof_transport_epoch={fallback.PeerProofEvidence.TransportEpoch}; proof_frame_identity={SanitizeLogToken(fallback.RetainedFrameIdentity.Sha256)}; route_transition_authority_id={SanitizeLogToken(command.Authority.AuthorityId.ToString())}; transition_generation={command.Authority.TransitionGeneration}; lanes={FormatAccelerationLanesForLog(lanes)}");
+            $"event=filetransfer_post_tuna_fallback_cleanup_completed; session_id={SanitizeLogToken(command.Authority.SessionId)}; transfer_id={SanitizeLogToken(command.Authority.TransferId)}; direction={FormatFileTransferDirection(command.Authority.Direction)}; reason={SanitizeLogToken(reason)}; proof={SanitizeLogToken(fallback.PeerProofEvidence.ProofKind)}; proof_generation={fallback.PeerProofEvidence.ProofGeneration}; proof_transport_epoch={fallback.PeerProofEvidence.TransportEpoch}; proof_frame_identity={SanitizeLogToken(fallback.RetainedFrameIdentity.Sha256)}; route_transition_authority_id={SanitizeLogToken(command.Authority.AuthorityId.ToString())}; transition_generation={command.Authority.TransitionGeneration}; lanes={FormatAccelerationLanesForLog(lanes)}; pending_proof_generation={episode.PendingGeneration}; fallback_epoch={episode.FallbackEpoch}");
     }
 
     private bool IsFileTransferRouteTransitionDataSessionCurrent(
@@ -3104,6 +3107,8 @@ public sealed partial class NknSignalingTransport
         FileTransferRouteTransitionPauseBindReceipt Receipt)
     {
         public TunaFallbackProofState? FallbackProjection { get; init; }
+
+        public FileTransferFallbackProofEpisode? FallbackProofEpisode { get; init; }
     }
 
     private sealed record FileTransferRouteTransitionExecutionShadow(
@@ -12800,7 +12805,7 @@ public sealed partial class NknSignalingTransport
             }
 
             if ((lane & NknAccelerationLaneKind.File) == NknAccelerationLaneKind.File &&
-                current.FileProjectionRetirement is null &&
+                !current.IsFileProjectionRetired &&
                 current.FileState != state)
             {
                 current.FileState = state;
@@ -12830,7 +12835,7 @@ public sealed partial class NknSignalingTransport
         lock (accelerationGate)
         {
             if (!TryGetCurrentTunaFallbackProofStateUnsafe(sessionId, out var current) ||
-                current.FileProjectionRetirement is not null)
+                current.IsFileProjectionRetired)
             {
                 return;
             }
@@ -40518,7 +40523,7 @@ public sealed partial class NknSignalingTransport
         {
             if (!TryGetCurrentTunaFallbackProofStateUnsafe(currentSessionSecurityState.SessionId?.Value, out var state) ||
                 (state.Lanes & NknAccelerationLaneKind.File) != NknAccelerationLaneKind.File ||
-                state.FileProjectionRetirement is not null ||
+                state.IsFileProjectionRetired ||
                 state.FileState == TunaFallbackLaneState.None)
             {
                 return false;
@@ -41310,7 +41315,7 @@ public sealed partial class NknSignalingTransport
             return tunaFallbackProofState is { } state &&
                    string.Equals(state.SessionId, fallbackSessionId, StringComparison.Ordinal) &&
                    (state.Lanes & NknAccelerationLaneKind.File) == NknAccelerationLaneKind.File &&
-                   state.FileProjectionRetirement is null &&
+                   !state.IsFileProjectionRetired &&
                    state.FileState != TunaFallbackLaneState.None;
         }
     }

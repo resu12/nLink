@@ -1266,6 +1266,8 @@ function Get-FileTransferStallGraceDispatchedProgressClosure {
     $rechecks = @(Named 'filetransfer_v6_frontier_stall_grace_recheck_decided' | Where-Object {
         (Field $_ 'wake_generation') -ceq (Field $stall 'wake_generation')
     })
+    $rearms = @($rechecks | Where-Object { (Field $_ 'decision_status') -ceq 'rearmed' } | Sort-Object Sequence)
+    $rechecks = @($rechecks | Where-Object { (Field $_ 'decision_status') -cne 'rearmed' })
     if ($rechecks.Count -ne 1) { return $null }
     $recheck = $rechecks[0]
     if (-not (Equal $recheck $stall ($completeScope + $wake)) -or
@@ -1282,6 +1284,21 @@ function Get-FileTransferStallGraceDispatchedProgressClosure {
     })
     if ($grants.Count -ne 1) { return $null }
     $grant = $grants[0]
+    # An early timer may re-arm the same wake before its one real dispatch.
+    # These no-effect records do not supply grant, delivery or dispatch proof.
+    # Writer time can cross the deadline after the timer checked it, so bind
+    # their unchanged scope and order to the actual grant instead.
+    $previousRearmTicks = Number $stall 'log_writer_attempt_utc_ticks'
+    foreach ($rearm in $rearms) {
+        $rearmTicks = Number $rearm 'log_writer_attempt_utc_ticks'
+        if (-not (Equal $rearm $stall ($completeScope + $wake)) -or
+            (Field $rearm 'authority_effect') -cne 'none' -or
+            (Field $rearm 'decision_reason') -cne 'stall_grace_deadline_pending' -or
+            [long]$rearm.Sequence -ge [long]$grant.Sequence -or
+            $rearmTicks -lt $previousRearmTicks -or
+            $rearmTicks -gt (Number $grant 'log_writer_attempt_utc_ticks')) { return $null }
+        $previousRearmTicks = $rearmTicks
+    }
     foreach ($name in @('authority_id', 'repair_request_key', 'range_fingerprint',
             'primary_protocol_repair_request_id', 'primary_request_correlation_id')) {
         if ((Field $grant $name) -in @('', '(none)', 'none')) { return $null }
@@ -1738,7 +1755,7 @@ function Get-FileTransferStallGraceUnresolvedDiagnostic {
     $cache = $Index['__StallGraceDiagnosticRouteIndex']
     $exactRepairOwner = (P $cache.Snapshot 'CatalogVersion') -cin @($script:FileTransferCoordinatorRepairOwnerCatalogVersion,
         $script:FileTransferCoordinatorActivationRetryCatalogVersion, $script:FileTransferCoordinatorReceiverPreAdmissionCatalogVersion,
-        $script:FileTransferCoordinatorInitialDataSessionCatalogVersion)
+        $script:FileTransferCoordinatorInitialDataSessionCatalogVersion, $script:FileTransferCoordinatorEarlyCheckpointProofCatalogVersion)
     $sourcePublication = $null
     function BoundRepair($Event) {
         $binding = Resolve-FileTransferRepairOwnerEvidence $cache.Snapshot $Event
@@ -1841,8 +1858,14 @@ function Get-FileTransferStallGraceUnresolvedDiagnostic {
             $boundary.beforeBoundary.dataSessionGeneration -ne $boundary.afterBoundary.dataSessionGeneration -or
             $typed.durableCheckpointFingerprint -cne $applied.Operation.routeTransition.durableCheckpointFingerprint -or
             $typed.proofBoundaryFingerprint -cne $applied.Operation.routeTransition.proofBoundaryFingerprint -or
-            [long]$boundary.writerSequence -ge (N $commit 'log_writer_sequence') -or
+            (-not $exactRepairOwner -and [long]$boundary.writerSequence -ge (N $commit 'log_writer_sequence')) -or
             [long]$applied.Boundary.writerSequence -le [long]$boundary.writerSequence) { continue }
+        # Exact source/repair receipts bind this complete authored history.
+        # Its queued snapshots may drain after synchronous runtime diagnostics;
+        # use Coordinator generations, not cross-queue writer order, for causality.
+        if ($exactRepairOwner -and
+            ([long]$applied.Boundary.beforeStateGeneration -lt [long]$boundary.afterStateGeneration -or
+             [long]$applied.Boundary.afterStateGeneration -ne ([long]$applied.Boundary.beforeStateGeneration + 1))) { continue }
         $retirements = @($events | Where-Object { (F $_ 'event') -ceq 'filetransfer_fallback_frontier_repair_contract_settled' -and
             [long]$_.Sequence -gt [long]$settlement.Sequence -and [long]$_.Sequence -lt [long]$commit.Sequence -and
             (F $_ 'settlement_outcome') -ceq 'StaleRejected' -and
@@ -1879,7 +1902,7 @@ function Get-FileTransferStallGraceUnresolvedDiagnostic {
         if ($dispositions.Count -ne 1 -or $publications.Count -ne 1) { continue }
         $disposition = $dispositions[0]; $publication = $publications[0]
         if ([long]$disposition.Sequence -le [long]$commit.Sequence -or [long]$publication.Sequence -le [long]$disposition.Sequence -or
-            [long]$applied.Boundary.writerSequence -ge (N $disposition 'log_writer_sequence') -or
+            (-not $exactRepairOwner -and [long]$applied.Boundary.writerSequence -ge (N $disposition 'log_writer_sequence')) -or
             (F $disposition 'decision_status') -cne 'Applied' -or (F $disposition 'decision_reason') -cne 'filetransfer_route_transition_committed' -or
             -not (Equal $disposition $commit @('transition_generation', 'transition_kind', 'checkpoint_request_id', 'checkpoint_generation', 'data_session_identity')) -or
             (F $publication 'projection_source') -cne 'coordinator_route_transition' -or

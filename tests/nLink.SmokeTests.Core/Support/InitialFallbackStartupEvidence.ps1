@@ -8,9 +8,10 @@ $records = @(for ($i = 0; $i -lt $lines.Count; $i++) { [pscustomobject]@{ Line=$
 $compact = Get-FileTransferCoordinatorSnapshotEvaluation -SnapshotRecords $records
 $route = Get-FileTransferCoordinatorSnapshotRouteConsistency -Evaluation $full
 $compactRoute = Get-FileTransferCoordinatorSnapshotRouteConsistency -Evaluation $compact
-$catalog = Get-FileTransferCoordinatorInitialDataSessionCatalog
+$catalog = Get-FileTransferCoordinatorEarlyCheckpointProofCatalog
+$bindingCatalog = Get-FileTransferCoordinatorInitialDataSessionCatalog
 $parent = Get-FileTransferCoordinatorReceiverPreAdmissionCatalog
-if ($catalog.ParentCatalogHash -cne $parent.Hash -or
+if ($catalog.ParentCatalogHash -cne $bindingCatalog.Hash -or $bindingCatalog.ParentCatalogHash -cne $parent.Hash -or
     $parent.Hash -cne '17196929ff74bd92c4866ccb8da33de05eb5b22d5436f56488f3a7fd2f4d086b' -or
     $full.CatalogHash -cne $catalog.Hash) { throw 'Binding profile lost its pinned parent or emitted catalog.' }
 if ($full.ArtifactEvidenceVerdict -cne 'pass' -or -not $full.StreamComplete -or
@@ -47,11 +48,13 @@ foreach ($startup in $startups) {
     })
     if ($bindings.Count -ne 1) { throw 'Initial attachment witness is not unique.' }
     $binding = $bindings[0]
+    # This service capture has no writer sequences. Preserve its retained line
+    # order; sorting empty sequence values is unstable across PowerShell hosts.
     $interval = @($full.Boundaries | Where-Object {
         $_.coordinatorInstanceId -ceq $startup.coordinatorInstanceId -and
         $_.beforeStateGeneration -ge $publication.afterStateGeneration -and
         $_.beforeStateGeneration -lt $binding.beforeStateGeneration
-    } | Sort-Object { [long]$_.writerSequence })
+    } | Sort-Object { [long]$_.evidenceLineIndex })
     if ($Correlated -ceq 'True') {
         $accepts = @($interval | Where-Object decisionKind -CEQ 'ApplyFallbackBootstrapAccept')
         $opens = @($full.Boundaries | Where-Object {

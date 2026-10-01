@@ -9,7 +9,7 @@ function Get-FileTransferStallGraceSupersessionClosure {
         # Preserve the existing stall admission; the shared target proof
         # below cannot manufacture a settled repair for a recent-progress episode.
         if ($null -eq $snapshot -or $snapshot.CatalogVersion -cnotin @($script:FileTransferCoordinatorActivationRetryCatalogVersion,
-                $script:FileTransferCoordinatorReceiverPreAdmissionCatalogVersion, $script:FileTransferCoordinatorInitialDataSessionCatalogVersion)) {
+                $script:FileTransferCoordinatorReceiverPreAdmissionCatalogVersion, $script:FileTransferCoordinatorInitialDataSessionCatalogVersion, $script:FileTransferCoordinatorEarlyCheckpointProofCatalogVersion)) {
             if ($null -ne $FailureReason) { $FailureReason.Value='authoritative_profile_required' }
             return $null
         }
@@ -41,7 +41,7 @@ function Get-FileTransferCoordinatorTunaSupersessionProof {
         if ($null -eq $snapshot -or $snapshot.Mode -cne 'SnapshotV1Authoritative' -or
             $snapshot.ArtifactEvidenceVerdict -cne 'pass' -or -not $snapshot.StreamComplete -or
             $snapshot.CatalogVersion -cnotin @($script:FileTransferCoordinatorActivationRetryCatalogVersion,
-                $script:FileTransferCoordinatorReceiverPreAdmissionCatalogVersion, $script:FileTransferCoordinatorInitialDataSessionCatalogVersion) -or
+                $script:FileTransferCoordinatorReceiverPreAdmissionCatalogVersion, $script:FileTransferCoordinatorInitialDataSessionCatalogVersion, $script:FileTransferCoordinatorEarlyCheckpointProofCatalogVersion) -or
             $snapshot.CatalogHash -cne (Get-FileTransferCoordinatorEvidenceCatalog -ProfileVersion $snapshot.CatalogVersion).Hash) { throw 'authoritative_profile_required' }
         foreach ($family in @('route_runtime','route_transition','runtime_unlock_retry_lifecycle','fallback_tail_yield','responder_probe_handoff')) {
             if ($family -cnotin $snapshot.AuthoritativeFamilies) { throw 'authoritative_family_missing' }

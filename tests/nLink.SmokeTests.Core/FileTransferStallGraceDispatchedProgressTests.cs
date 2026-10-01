@@ -2,9 +2,11 @@ namespace NLink.SmokeTests;
 
 public sealed class FileTransferStallGraceDispatchedProgressTests : FileTransferOpsScriptsTestBase
 {
-    [Fact]
+    [Theory]
+    [InlineData("powershell")]
+    [InlineData("pwsh")]
     [Trait("RetainedFallbackSuite", "FallbackFrontierRepair")]
-    public async Task StallGrace_ExactDispatchThenIndependentCommit_RequiresCompleteUnpoisonedProof()
+    public async Task StallGrace_ExactDispatchThenIndependentCommit_RequiresCompleteUnpoisonedProof(string host)
     {
         if (!OperatingSystem.IsWindows()) { return; }
         var script = """
@@ -65,18 +67,63 @@ public sealed class FileTransferStallGraceDispatchedProgressTests : FileTransfer
             }
             $good=@(Fixture)
             if((Closure $good).Sequence -ne 2101){throw 'exact dispatched wake did not close on independently published commit'}
+            function WithEarlyWake([int]$Count) {
+                $events=@(Fixture)
+                for($i=0;$i -lt $Count;$i++){
+                    $fields=$events[1].Fields.Clone()
+                    $fields['decision_status']='rearmed';$fields['decision_reason']='stall_grace_deadline_pending'
+                    $events+=Event 'filetransfer_v6_frontier_stall_grace_recheck_decided' (1740+$i) $fields
+                    $events[-1].Fields['log_writer_sequence']=[string](1741+$i)
+                    $events[-1].Fields['log_writer_attempt_utc_ticks']=[string]$start.AddMilliseconds(1740+$i).UtcTicks
+                }
+                @($events | Sort-Object Sequence)
+            }
+            foreach($count in @(1,2)){
+                $events=@(WithEarlyWake $count)
+                if($null -eq (Closure $events)){throw "pending deadline rearm count $count hid the real dispatch"}
+                $stall=@($events | Where-Object EventName -CEQ 'filetransfer_v6_frontier_request_deferred')[0]
+                $dispatch=Get-FileTransferStallGraceDispatchedProgressClosure -Events $events -Episode ([pscustomobject]@{Event=$stall}) -DiagnosticDispatchEvidenceOnly
+                if($null -eq $dispatch -or $dispatch.Wake.Fields.decision_status -cne 'dispatched'){throw 'rearm supplied dispatch authority'}
+            }
+            # Writing the no-effect rearm can cross its deadline after the
+            # timer checked it. Only the real grant/dispatch proves execution.
+            $lateLog=@(WithEarlyWake 1)
+            $early=@($lateLog | Where-Object {$_.Fields['decision_status'] -ceq 'rearmed'})[0]
+            $early.Fields.log_writer_attempt_utc_ticks=[string]$start.AddMilliseconds(1755).UtcTicks
+            if($null -eq (Closure $lateLog)){throw 'delayed rearm logging hid the real dispatch'}
+            foreach($mutation in @(
+                @('decision_status','stale'),@('decision_reason','highest_received_advanced'),@('authority_effect','runtime'),
+                @('runtime_generation','6'),@('checkpoint_generation','2'),@('data_session_identity','foreign'),
+                @('highest_received_chunk_index','3195'),@('wake_deadline_utc','2026-09-06T04:32:09Z'),
+                @('log_writer_attempt_utc_ticks','0'))){
+                $events=@(WithEarlyWake 1)
+                $early=@($events | Where-Object {$_.Fields['decision_status'] -ceq 'rearmed'})[0]
+                $early.Fields[$mutation[0]]=$mutation[1]
+                if($null -ne (Closure $events)){throw "invalid rearm $mutation recovered"}
+            }
+            $events=@(WithEarlyWake 1)
+            $early=@($events | Where-Object {$_.Fields['decision_status'] -ceq 'rearmed'})[0]
+            $early.Sequence=1801;$early.Fields.log_writer_sequence='1801'
+            if($null -ne (Closure $events)){throw 'rearm after repair grant recovered'}
+            $events=@(WithEarlyWake 2 | Where-Object {$_.Fields['decision_status'] -cne 'dispatched'})
+            if($null -ne (Closure $events)){throw 'rearms without dispatch recovered'}
+            $events=@(WithEarlyWake 1)
+            $early=@($events | Where-Object {$_.Fields['decision_status'] -ceq 'rearmed'})[0]
+            $conflict=Event $early.EventName 1740 $early.Fields
+            $conflict.Fields.authority_effect='runtime'
+            if($null -ne (Closure (@($events)+@($conflict)))){throw 'conflicting rearm duplicate recovered'}
             $tokens=$null;$errors=$null
             $ast=[Management.Automation.Language.Parser]::ParseFile((Join-Path $RepoRoot 'tools/GuiSmoke-Windows.ps1'),[ref]$tokens,[ref]$errors)
             $definition=@($ast.FindAll({param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and
                 $n.Name -ceq 'Get-TunaGuiFallbackFrontierStallGraceRecheckFailure'},$true))[0]
             Invoke-Expression $definition.Extent.Text
-            foreach($missingSend in @($false,$true)){
-                $inputEvents=@($good | Where-Object {-not $missingSend -or $_.EventName -cne 'filetransfer_v6_frontier_request_sent'})
+            foreach($count in @(0,1,2)){ foreach($missingSend in @($false,$true)){
+                $inputEvents=@(WithEarlyWake $count | Where-Object {-not $missingSend -or $_.EventName -cne 'filetransfer_v6_frontier_request_sent'})
                 $lines=@($inputEvents | ForEach-Object {$row=$_; (($row.Fields.Keys | Sort-Object | ForEach-Object {"$_=$($row.Fields[$_])"}) -join '; ') + "; gui_evidence_sequence=$($row.Sequence)"})
                 $gui=Get-TunaGuiFallbackFrontierStallGraceRecheckFailure -Lines $lines -IncludeEpisodeAudit
                 $target=@($gui.EpisodeAudit | Where-Object {$_.Event.Fields.log_writer_sequence -ceq '1001'})
-                if($target.Count -ne 1 -or $target[0].Excluded -or $target[0].Recovered -eq $missingSend){throw 'actual GUI dispatched closure/admission differs'}
-            }
+                if($target.Count -ne 1 -or $target[0].Excluded -or $target[0].Recovered -eq $missingSend){throw "actual GUI dispatched closure/admission differs: rearms=$count missingSend=$missingSend target=$($target | ConvertTo-Json -Depth 2 -Compress)"}
+            } }
             $second=@(Fixture)
             foreach($event in $second){
                 if($event.Fields.ContainsKey('frontier_chunk_index')){$event.Fields.frontier_chunk_index='3378'}
@@ -124,14 +171,15 @@ public sealed class FileTransferStallGraceDispatchedProgressTests : FileTransfer
             if($null -ne (Closure $events)){throw 'retired request recovered'}
             # No repair_progress_observed exists. The new deferral is support for
             # the first candidate and a separately cancelled owned obligation.
-            foreach($width in @(1,8,16)){
+            foreach($count in @(0,1,2)){ foreach($width in @(1,8,16)){
                 $script:FileTransferFallbackFrontierGracePartitionWidth=$width
-                $index=New-FileTransferFallbackFrontierGraceCorrelationIndex -Events $good
-                $result=Get-FileTransferFallbackFrontierStallGraceRecheckCorrelation -Events $good -Index $index
+                $events=@(WithEarlyWake $count)
+                $index=New-FileTransferFallbackFrontierGraceCorrelationIndex -Events $events
+                $result=Get-FileTransferFallbackFrontierStallGraceRecheckCorrelation -Events $events -Index $index
                 if((@($result.RawCount,$result.DistinctCount,$result.RecoveredCount,$result.UnresolvedCount) -join '/') -cne '2/1/1/0'){
                     throw "width ${width}: $($result | ConvertTo-Json -Depth 3 -Compress)"
                 }
-            }
+            } }
             # Independently projected full/compact/GUI locations must not alter
             # the exact writer-bound recovery witness.
             foreach($prefix in @(0,17,53)){
@@ -148,7 +196,7 @@ public sealed class FileTransferStallGraceDispatchedProgressTests : FileTransfer
             }
             'dispatched-progress-ok'
             """;
-        var result = await RunPowerShellScriptTextAsync(script, [FindRepoRoot()]);
+        var result = await RunPowerShellScriptTextAsync(script, [FindRepoRoot()], host);
         Assert.True(result.ExitCode == 0, $"Dispatched progress failed.{Environment.NewLine}{result.Stdout}{Environment.NewLine}{result.Stderr}");
         Assert.Contains("dispatched-progress-ok", result.Stdout, StringComparison.Ordinal);
     }

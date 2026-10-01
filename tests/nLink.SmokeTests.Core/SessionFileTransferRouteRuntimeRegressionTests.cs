@@ -392,6 +392,13 @@ public sealed class SessionFileTransferRouteRuntimeRegressionTests : SessionFile
         using var receiverTransport = new LoopbackFileTransferTransport(sessionId);
         configureTransport(senderTransport);
         configureTransport(receiverTransport);
+        if (senderTransport.IsFileTunaActiveForRouteSelection)
+        {
+            // This loopback unit fixture supplies readiness evidence explicitly;
+            // transport flags alone must not authorize initial Tuna selection.
+            senderTransport.SeedInitialTunaReadinessEvidenceForTests(transferId, FileTransferDirection.Outbound);
+            receiverTransport.SeedInitialTunaReadinessEvidenceForTests(transferId, FileTransferDirection.Inbound);
+        }
         senderTransport.Connect(receiverTransport);
         using var sender = new SessionFileTransferService();
         using var receiver = new SessionFileTransferService();

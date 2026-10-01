@@ -503,6 +503,10 @@ internal interface IFileTransferRouteTransitionBridge
 {
     bool SupportsFallbackBootstrapCorrelation => false;
 
+    // Local-only application: no callbacks into the service while it publishes terminal state.
+    bool ApplyTerminalFallbackProjectionRetirement(FileTransferTerminalFallbackProjectionRetirementCommand command)
+        => false;
+
     // A Coordinator-pinned selection only suppresses legacy bootstrap side effects.
     void ObserveFallbackBootstrapAgreement(FileTransferBootstrapAgreement agreement) { }
 

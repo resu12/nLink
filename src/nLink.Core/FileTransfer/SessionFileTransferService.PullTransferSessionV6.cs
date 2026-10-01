@@ -128,6 +128,9 @@ public sealed partial class SessionFileTransferService
                 {
                     startupFallbackCheckpointRequired = true;
                     StartOutboundPostTunaRecoveryLocked(context, "post_tuna_fallback_v6_route");
+                    // Startup can publish a successor recovery leg. Keep its diagnostic
+                    // token, after validating the opening source above, not the old offer token.
+                    runtimePublicationToken = context.CurrentRoutePublicationToken;
                     startupFallbackOwner = context.CurrentRuntimeOwner;
                     startupFallbackLeg = context.CurrentTransferLeg;
                     startupFallbackTransportEpoch = startupFallbackLeg?.TransportEpochId ?? 0;
@@ -6234,6 +6237,22 @@ public sealed partial class SessionFileTransferService
             if (committedDelta >= V6ReceiverStateProgressMinCommittedChunks)
             {
                 return true;
+            }
+
+            if (committedDelta > 0 &&
+                context.NextChunkIndex > previousCommittedChunkIndex &&
+                IsInboundV6PostTunaFallbackSurvivalPathLocked(context))
+            {
+                var coordinatorState = CreateCoordinatorStateLocked(context);
+                if (FileTransferCoordinator.GetFallbackTailYieldSubstate(coordinatorState).CurrentOperation is
+                        { LocalProof: not null } yielded &&
+                    FileTransferCoordinator.IsFallbackTailYieldDecisionCurrent(
+                        coordinatorState, yielded.Decision, out _))
+                {
+                    // The retired recovery worker cannot flush coalesced progress.
+                    // Send it now through the existing coordinator-authorized control path.
+                    return true;
+                }
             }
 
             if (ShouldForceInboundV6PostTunaFallbackFrontierProgressStateLocked(

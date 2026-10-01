@@ -4,9 +4,11 @@ namespace NLink.SmokeTests;
 
 public sealed class FileTransferSupersededSourceAccountingTests : FileTransferOpsScriptsTestBase
 {
-    [Fact]
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
     [Trait("OpsSuite", "SupersededSourceAccounting")]
-    public async Task SupersededSource_ActualJoinedCaptureAndReportsHaveCrossHostParity()
+    public async Task SupersededSource_ActualJoinedCaptureAndReportsHaveCrossHostParity(bool delayedSnapshots)
     {
         if (!OperatingSystem.IsWindows()) { return; }
         var root = FindRepoRoot();
@@ -25,7 +27,9 @@ public sealed class FileTransferSupersededSourceAccountingTests : FileTransferOp
             };
             foreach (var argument in new[] { "test", "tests/nLink.SmokeTests.Core/nLink.SmokeTests.Core.csproj",
                 "--no-build", "--no-restore", "--filter",
-                "FullyQualifiedName=NLink.SmokeTests.NknAccelerationTransportTests.JoinedFallbackRetry_StalledRepairAndOldSourceReplayRemainUnresolvedAcrossPeerHandoff",
+                "FullyQualifiedName=NLink.SmokeTests.NknAccelerationTransportTests." + (delayedSnapshots
+                    ? "JoinedFallbackRetry_StalledRepairWithDelayedReceiverSnapshots"
+                    : "JoinedFallbackRetry_StalledRepairAndOldSourceReplayRemainUnresolvedAcrossPeerHandoff"),
                 "--verbosity", "quiet" }) { start.ArgumentList.Add(argument); }
             start.Environment["NLINK_FILETRANSFER_SOAK_ARTIFACT_DIR"] = directory;
             start.Environment["NLINK_FILETRANSFER_ACCEPTANCE_LOG_PATH"] = path;
@@ -40,21 +44,32 @@ public sealed class FileTransferSupersededSourceAccountingTests : FileTransferOp
             Assert.True(child.ExitCode == 0, $"Joined fixture: {await stdout}{Environment.NewLine}{await stderr}");
             Assert.True(File.Exists(path), "Actual joined capture was not emitted.");
             const string script = """
-                param([string]$RepoRoot,[string]$InputPath,[string]$OutputRoot)
+                param([string]$RepoRoot,[string]$InputPath,[string]$OutputRoot,[int]$DelayedSnapshots)
                 $ErrorActionPreference='Stop'
-                & (Join-Path $RepoRoot 'tests/nLink.SmokeTests.Core/TestData/SupersededSourceAccounting.ps1') -RepoRoot $RepoRoot -InputPath $InputPath
+                & (Join-Path $RepoRoot 'tests/nLink.SmokeTests.Core/TestData/SupersededSourceAccounting.ps1') -RepoRoot $RepoRoot -InputPath $InputPath -ExpectDelayedReceiverSnapshots:([bool]$DelayedSnapshots)
                 & (Join-Path $RepoRoot 'tests/nLink.SmokeTests.Core/TestData/StallGraceAccountingReports.ps1') -RepoRoot $RepoRoot -OutputRoot $OutputRoot
                 """;
             string? previous = null;
             foreach (var host in new[] { "powershell", "pwsh" })
             {
-                var result = await RunPowerShellScriptTextAsync(script, [root, path, Path.Combine(directory, host)], host);
+                var result = await RunPowerShellScriptTextAsync(script, [root, path, Path.Combine(directory, host), delayedSnapshots ? "1" : "0"], host);
                 Assert.True(result.ExitCode == 0, $"{host}: {result.Stdout}{Environment.NewLine}{result.Stderr}");
                 Assert.Contains("superseded-source-accounting-ok", result.Stdout, StringComparison.Ordinal);
                 Assert.Contains("stall-grace-accounting-reports-ok", result.Stdout, StringComparison.Ordinal);
                 if (previous is not null) { Assert.Equal(previous, result.Stdout.Trim()); }
                 previous = result.Stdout.Trim();
             }
+        }
+        catch
+        {
+            var capture = Path.Combine(directory, "joined.log");
+            if (File.Exists(capture))
+            {
+                var failures = Path.Combine(root, "artifacts", "early-yield-evidence-20260930", "superseded-source-failures");
+                Directory.CreateDirectory(failures);
+                File.Copy(capture, Path.Combine(failures, Guid.NewGuid().ToString("N") + ".log"));
+            }
+            throw;
         }
         finally { TryDeleteDirectory(directory); }
     }

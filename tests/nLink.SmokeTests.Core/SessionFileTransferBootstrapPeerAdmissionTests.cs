@@ -17,6 +17,8 @@ public sealed partial class SessionFileTransferV4SenderTests
     [InlineData(false, "missing-wake")] [InlineData(true, "missing-wake")]
     [InlineData(false, "other-bridge")] [InlineData(true, "other-bridge")]
     [InlineData(false, "wrong-session")] [InlineData(true, "wrong-session")]
+    [InlineData(false, "local-stop-stale-peer")] [InlineData(true, "local-stop-stale-peer")]
+    [InlineData(false, "stale-stop-stale-peer")] [InlineData(true, "stale-stop-stale-peer")]
     public async Task BootstrapPeerAdmission_ServiceRequiresExactStagedWakeBeforeHold(bool inbound, string variant)
     {
         const string transferId = "bootstrap_peer_admission";
@@ -80,18 +82,41 @@ public sealed partial class SessionFileTransferV4SenderTests
         if (variant == "provider") { session.Generation++; }
         if (variant == "session") { SetPrivateProperty(context, "DataSessionGeneration", state.CurrentDataSessionGeneration + 1); }
         if (variant == "checkpoint") { state.CurrentLeg!.CheckpointGeneration++; }
+        if (variant is "local-stop-stale-peer" or "stale-stop-stale-peer")
+        {
+            SetPrivateProperty(context, "PendingFallbackV6ProofBootstrapPeerFrameBinding",
+                binding with { DataSessionGeneration = binding.DataSessionGeneration + 1 });
+            evaluation = LocalStopEvaluationForTest(context, session);
+            if (variant == "stale-stop-stale-peer")
+            {
+                evaluation = evaluation with
+                {
+                    LocalStop = evaluation.LocalStop! with { ProviderGeneration = session.Generation + 1 },
+                };
+            }
+        }
         var before = CreateCoordinatorStateForTest(context);
         var paused = GetPrivatePropertyValue(context, "PullTransportPaused");
+        var retainedFrame = GetPrivatePropertyValue(context, "PendingFallbackV6ProofBootstrapPeerFrameEvidence");
+        var retainedBinding = GetPrivatePropertyValue(context, "PendingFallbackV6ProofBootstrapPeerFrameBinding");
         try
         {
             await ProcessInitialPeerFirstBootstrapEvaluationAsync(service, variant == "other-bridge" ? otherBridge : bridge, evaluation);
             var after = CreateCoordinatorStateForTest(context);
-            if (variant == "current")
+            if (variant is "current" or "local-stop-stale-peer")
             {
                 var execution = Assert.Single(bridge.Executions);
-                Assert.Equal(inbound ? FileTransferBootstrapPhase.Response : FileTransferBootstrapPhase.Solicit, execution.Command.Phase);
-                Assert.Equal("correlated_bootstrap_peer_frame", execution.Command.Bootstrap.Observation.Source);
-                Assert.Equal(frame, BootstrapPeerHoldForTest(after)!.Command.PeerWake);
+                Assert.Equal(inbound
+                    ? variant == "current" ? FileTransferBootstrapPhase.Response : FileTransferBootstrapPhase.Announce
+                    : FileTransferBootstrapPhase.Solicit, execution.Command.Phase);
+                Assert.Equal(variant == "current" ? "correlated_bootstrap_peer_frame" : "runtime_disabled",
+                    execution.Command.Bootstrap.Observation.Source);
+                Assert.Equal(variant == "current" ? frame : null, BootstrapPeerHoldForTest(after)!.Command.PeerWake);
+                if (variant == "local-stop-stale-peer")
+                {
+                    Assert.Null(GetPrivatePropertyValue(context, "PendingFallbackV6ProofBootstrapPeerFrameEvidence"));
+                    Assert.Null(GetPrivatePropertyValue(context, "PendingFallbackV6ProofBootstrapPeerFrameBinding"));
+                }
             }
             else
             {
@@ -100,6 +125,8 @@ public sealed partial class SessionFileTransferV4SenderTests
                 Assert.Null(GetPrivatePropertyValue(context, "BootstrapSourceHoldExecution"));
                 Assert.Equal(paused, GetPrivatePropertyValue(context, "PullTransportPaused"));
                 Assert.Empty(session.SentFrames);
+                Assert.Same(retainedFrame, GetPrivatePropertyValue(context, "PendingFallbackV6ProofBootstrapPeerFrameEvidence"));
+                Assert.Same(retainedBinding, GetPrivatePropertyValue(context, "PendingFallbackV6ProofBootstrapPeerFrameBinding"));
             }
             Assert.Equal(before.CurrentRoutePublicationToken, after.CurrentRoutePublicationToken);
             Assert.Equal(before.CurrentRuntimeOwner, after.CurrentRuntimeOwner);

@@ -20,7 +20,7 @@ public sealed partial class NknSignalingTransport
             return state;
         }
 
-        return state.FileProjectionRetirement is null &&
+        return !state.IsFileProjectionRetired &&
             authority.Kind == FileTransferRouteTransitionKind.PostTunaFallbackV6ToTunaV4 &&
             state.FileProjectionPublication == authority.SourceRoutePublication &&
             state.FileState == TunaFallbackLaneState.Recovered &&
@@ -44,20 +44,24 @@ public sealed partial class NknSignalingTransport
 
         if (command.Authority.TargetRoute == FileTransferRoute.PostTunaFallbackV6)
         {
-            if (captured.FileProjectionRetirement is { } retired)
+            if (captured.IsFileProjectionRetired)
             {
                 if (command.Authority.SourceRoute != FileTransferRoute.FileTunaV4 ||
                     command.Authority.SourceProtocolVersion != 4 ||
                     command.Authority.SourceTransport != FileTransferTransportKind.Tuna ||
                     command.Authority.ProofBoundary is not FileTransferFallbackTransitionProofBoundary fallback ||
-                    (command.Authority.TransferId == retired.Authority.TransferId &&
-                     command.Authority.SourceRoutePublication != retired.RoutePublicationToken))
+                    (captured.FileProjectionRetirement is { } retired &&
+                     command.Authority.TransferId == retired.Authority.TransferId &&
+                     command.Authority.SourceRoutePublication != retired.RoutePublicationToken) ||
+                    (captured.FileTerminalProjectionRetirement is { } terminal &&
+                     command.Authority.TransferId == terminal.Publication.TransferId))
                 {
                     return false;
                 }
                 // A new coordinator-owned fallback, not an epoch observation,
                 // can reuse this session projection. Screen state is untouched.
                 captured.FileProjectionRetirement = null;
+                captured.FileTerminalProjectionRetirement = null;
                 captured.FileV6TransportEpoch = fallback.TargetTransportEpoch;
                 captured.FileV6EpochState = V6TransportEpochState.Recovered;
             }
@@ -71,10 +75,11 @@ public sealed partial class NknSignalingTransport
                 captured.FileV6TransportEpoch = initialFallback.TargetTransportEpoch;
             }
             captured.FileProjectionPublication = publication;
+            captured.FileProjectionDataSessionGeneration = command.Authority.DataSessionGeneration;
             return false;
         }
 
-        if (captured.FileProjectionRetirement is not null ||
+        if (captured.IsFileProjectionRetired ||
             captured.FileProjectionPublication is not { } source ||
             !FileTransferCoordinator.AuthorizesFileFallbackProjectionRetirement(command, source) ||
             captured.FileState != TunaFallbackLaneState.Recovered ||

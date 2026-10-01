@@ -2935,6 +2935,18 @@ public sealed partial class SessionFileTransferV4SenderTests
         var service = harness.Service;
         var context = harness.Context;
         var serviceType = typeof(SessionFileTransferService);
+        var adoptRecovery = serviceType.GetMethods(BindingFlags.Static | BindingFlags.NonPublic)
+            .Single(method => method.Name == "AdoptCoordinatorStateLocked" &&
+                method.GetParameters().Length == 2 &&
+                method.GetParameters()[0].ParameterType == context.GetType() &&
+                method.GetParameters()[1].ParameterType == typeof(FileTransferReceiveRecoveryDecision));
+        void AdoptRecovery(FileTransferReceiveRecoveryDecision decision)
+        {
+            lock (GetServiceGate(service))
+            {
+                adoptRecovery.Invoke(null, [context, decision]);
+            }
+        }
         object? successorInstall = null;
         RecordingDataSession? dataSession = null;
         dataSession = new RecordingDataSession(
@@ -3000,6 +3012,7 @@ public sealed partial class SessionFileTransferV4SenderTests
             BridgeRecoveryKind.ReceiveRecoveryRequest,
             leg.CheckpointRequestId);
         Assert.True(issued.Accepted, issued.Reason);
+        AdoptRecovery(issued);
         var authority = Assert.IsType<FileTransferReceiveRecoveryOperationAuthority>(
             issued.Authority);
         var terminalReceipt = new FileTransferBridgeRecoveryExecutionReceipt(
@@ -3016,7 +3029,7 @@ public sealed partial class SessionFileTransferV4SenderTests
                 Task.FromResult(terminalReceipt)),
             observedUtcMs: 10);
         Assert.True(started.Accepted, started.Reason);
-        SetPrivateProperty(context, "CoordinatorPersistentState", started.State.PersistentState);
+        AdoptRecovery(started);
 
         var request = new FileTransferFrontierRequestFrameV6
         {
@@ -3053,11 +3066,13 @@ public sealed partial class SessionFileTransferV4SenderTests
                 "submission_barrier_closed"),
             observedUtcMs: 15);
         Assert.True(held.Accepted, held.Reason);
+        AdoptRecovery(held);
         var completed = FileTransferCoordinator.ObserveReceiveRecoveryExecutionReceipt(
             held.State,
             terminalReceipt,
             observedUtcMs: 20);
         Assert.True(completed.Accepted, completed.Reason);
+        AdoptRecovery(completed);
         var resumed = FileTransferCoordinator.ReserveReceiveRecoveryFallbackCheckpointDeliveryResume(
             completed.State,
             new FileTransferReceiveRecoveryFallbackCheckpointResumeEvidence(
@@ -3067,7 +3082,7 @@ public sealed partial class SessionFileTransferV4SenderTests
         Assert.True(resumed.Accepted, resumed.Reason);
         var reservation = Assert.IsType<FileTransferReceiveRecoveryFallbackCheckpointResumeReservation>(
             resumed.FallbackCheckpointResumeReservation);
-        SetPrivateProperty(context, "CoordinatorPersistentState", resumed.State.PersistentState);
+        AdoptRecovery(resumed);
 
         var stagedPredecessor = StageSparsePumpInstall(
             service,
@@ -3136,10 +3151,7 @@ public sealed partial class SessionFileTransferV4SenderTests
         var redeliveryCommand = Assert.IsType<
             FileTransferReceiveRecoveryFallbackCheckpointDeliveryCommand>(
                 redeliveryDecision.FallbackCheckpointDeliveryCommand);
-        SetPrivateProperty(
-            context,
-            "CoordinatorPersistentState",
-            redeliveryDecision.State.PersistentState);
+        AdoptRecovery(redeliveryDecision);
         var currentInstall =
             GetPrivatePropertyValue(context, "InstalledOutboundSparsePump");
         Assert.NotNull(currentInstall);

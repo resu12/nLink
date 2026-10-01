@@ -16030,15 +16030,17 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
                 Transfer = $candidate.Transfer; Frontier = $candidate.Frontier
                 DataSessionIdentity = $candidate.DataSessionIdentity; DataSessionGeneration = $candidate.DataSessionGeneration
             }
-            if (-not $recovered -and -not $matchingRecheckConflict -and $matchingRecheckDecisions.Count -eq 1) {
-                if ($matchingRecheckDecisions[0] -eq 'dispatched|exact_receiver_request_dispatched|none') {
-                    $recoveryEvent = Get-FileTransferStallGraceDispatchedProgressClosure -Events $handoffEvents -Episode $episode
-                }
-                elseif ($matchingRecheckDecisions[0] -eq 'stale|frontier_scope_changed|none') {
-                    $recoveryEvent = Get-FileTransferStallGraceStaleHighestProgressClosure -Events $handoffEvents -Episode $episode
-                    if ($null -eq $recoveryEvent) {
-                        $recoveryEvent = Get-FileTransferStallGraceStaleNaturalProgressClosure -Events $handoffEvents -Episode $episode
-                    }
+            if (-not $recovered -and 'dispatched|exact_receiver_request_dispatched|none' -cin $matchingRecheckDecisions) {
+                # The shared closure validates every same-wake rearm and still
+                # requires exactly one dispatch with its full physical proof.
+                $recoveryEvent = Get-FileTransferStallGraceDispatchedProgressClosure -Events $handoffEvents -Episode $episode
+                $recovered = $null -ne $recoveryEvent
+            }
+            if (-not $recovered -and -not $matchingRecheckConflict -and $matchingRecheckDecisions.Count -eq 1 -and
+                $matchingRecheckDecisions[0] -eq 'stale|frontier_scope_changed|none') {
+                $recoveryEvent = Get-FileTransferStallGraceStaleHighestProgressClosure -Events $handoffEvents -Episode $episode
+                if ($null -eq $recoveryEvent) {
+                    $recoveryEvent = Get-FileTransferStallGraceStaleNaturalProgressClosure -Events $handoffEvents -Episode $episode
                 }
                 $recovered = $null -ne $recoveryEvent
             }

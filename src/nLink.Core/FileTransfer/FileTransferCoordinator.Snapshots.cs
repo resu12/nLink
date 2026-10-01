@@ -4278,6 +4278,9 @@ internal static partial class FileTransferCoordinator
             "peer_proof_pending_initial",
             fallback.PendingPeerProofBeforeLocalYield);
         AddPeerProof(
+            "peer_proof_awaiting_checkpoint",
+            fallback.PendingPeerProofAwaitingCheckpoint);
+        AddPeerProof(
             "peer_proof_pending_reauthorization",
             fallback.PendingReauthorizationPeerProof);
         AddPeerProof(

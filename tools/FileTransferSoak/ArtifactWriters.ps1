@@ -59522,8 +59522,7 @@ function Get-FileTransferFallbackFrontierStallGraceRecheckCorrelation {
         }
 
         if ($naturalProgress.Count -eq 0 -and $null -eq $recoveryEvent -and
-            -not $matchingRecheckConflict -and $matchingRecheckDecisions.Count -eq 1 -and
-            $matchingRecheckDecisions[0] -eq 'dispatched|exact_receiver_request_dispatched|none') {
+            'dispatched|exact_receiver_request_dispatched|none' -cin $matchingRecheckDecisions) {
             $recoveryEvent = Get-FileTransferStallGraceDispatchedProgressClosure -Events $ordered -Episode $incident
         }
         if ($naturalProgress.Count -eq 0 -and $null -eq $recoveryEvent -and

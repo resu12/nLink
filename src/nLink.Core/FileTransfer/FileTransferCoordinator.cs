@@ -853,6 +853,8 @@ internal sealed record FileTransferFallbackTailYieldSubstate(
     FileTransferFallbackTailPeerProofReceipt?
         PendingPeerProofBeforeLocalYield = null,
     FileTransferFallbackTailPeerProofReceipt?
+        PendingPeerProofAwaitingCheckpoint = null,
+    FileTransferFallbackTailPeerProofReceipt?
         PendingRetryCycleSuccessorPeerProof = null,
     RuntimeUnlockRetryDispatchAuthorityRequest?
         PendingRetryRecheckRequest = null,
@@ -3215,6 +3217,7 @@ internal sealed record FileTransferCoordinatorDecision(
         ReceiveRecoveryFallbackCheckpointFrontierRequestRecheckCommand = null)
 {
     public FileTransferCoordinatorTransitionEnvelope? SnapshotEnvelope { get; init; }
+    public FileTransferTerminalFallbackProjectionRetirementCommand? TerminalFallbackProjectionRetirement { get; init; }
 }
 
 internal readonly record struct RuntimeOwnerToken(
@@ -8602,8 +8605,13 @@ internal static partial class FileTransferCoordinator
     public static FileTransferCoordinatorDecision Apply(
         FileTransferCoordinatorEvent coordinatorEvent,
         FileTransferCoordinatorState state)
+        => FinalizeApplySnapshot(coordinatorEvent, state, ApplyCore(coordinatorEvent, state));
+
+    private static FileTransferCoordinatorDecision FinalizeApplySnapshot(
+        FileTransferCoordinatorEvent coordinatorEvent,
+        FileTransferCoordinatorState state,
+        FileTransferCoordinatorDecision decision)
     {
-        var decision = ApplyCore(coordinatorEvent, state);
         if (string.IsNullOrWhiteSpace(
                 state.PersistentState.CoordinatorInstanceId))
         {
@@ -8661,7 +8669,8 @@ internal static partial class FileTransferCoordinator
 
     private static FileTransferCoordinatorDecision ApplyCore(
         FileTransferCoordinatorEvent coordinatorEvent,
-        FileTransferCoordinatorState state)
+        FileTransferCoordinatorState state,
+        InitialStartRouteSelection? initialSelection = null)
     {
         state = InvalidateFallbackTailYieldForDataSessionReplacement(state);
         state =
@@ -8697,7 +8706,7 @@ internal static partial class FileTransferCoordinator
         var decision = coordinatorEvent.Kind switch
         {
             FileTransferCoordinatorEventKind.StartTransfer =>
-                StartTransfer(coordinatorEvent, workingState, reason),
+                StartTransfer(coordinatorEvent, workingState, reason, initialSelection),
             FileTransferCoordinatorEventKind.TunaActivated or
             FileTransferCoordinatorEventKind.TunaLost =>
                 MutationRejected(
@@ -11791,6 +11800,11 @@ internal static partial class FileTransferCoordinator
                     pendingInitial.ObservationScope.RoutePublication == token
                         ? pendingInitial
                         : null,
+                PendingPeerProofAwaitingCheckpoint =
+                    fallbackTail.PendingPeerProofAwaitingCheckpoint is { } pendingCheckpoint &&
+                    pendingCheckpoint.ObservationScope.RoutePublication == token
+                        ? pendingCheckpoint
+                        : null,
                 PendingRetryCycleSuccessorPeerProof =
                     fallbackTail.PendingRetryCycleSuccessorPeerProof is
                         { } pendingRetryCycle &&
@@ -12423,9 +12437,8 @@ internal static partial class FileTransferCoordinator
                 receipt.Proof,
                 out var proofRejectionReason))
         {
-            return FallbackTailYieldTransitionRejected(
-                state,
-                proofRejectionReason);
+            return RetainFallbackTailPeerProofAwaitingCheckpoint(
+                state, substate, receipt, proofRejectionReason);
         }
 
         if (substate.PendingPeerProofBeforeLocalYield is { } existing)
@@ -12469,6 +12482,83 @@ internal static partial class FileTransferCoordinator
                 }),
             FileTransferFallbackTailYieldTransitionStatus.Accepted,
             "fallback_tail_initial_peer_proof_receipt_retained");
+    }
+
+    private static FileTransferFallbackTailYieldTransitionDecision
+        RetainFallbackTailPeerProofAwaitingCheckpoint(
+            FileTransferCoordinatorState state,
+            FileTransferFallbackTailYieldSubstate substate,
+            FileTransferFallbackTailPeerProofReceipt receipt,
+            string rejectionReason)
+    {
+        // Custody only: this slot is not a peer-first yield or retry authority.
+        // Only acceptance of the exact local checkpoint can promote the proof.
+        if (substate.PendingPeerProofBeforeLocalYield is not null ||
+            state.CurrentFallbackCheckpointLease is not { } lease ||
+            !IsFallbackCheckpointLeaseCurrent(state, lease, out _) ||
+            !TryCreateCurrentFallbackTailYieldScope(state, out var currentScope) ||
+            receipt.ObservationScope != currentScope ||
+            !string.Equals(receipt.Proof.CheckpointRequestIdSnapshot, "(none)", StringComparison.Ordinal) ||
+            !IsInitialFallbackTailPeerProofExactForScope(
+                ClearFallbackTailCheckpointScope(receipt.ObservationScope),
+                receipt.Proof,
+                out _))
+        {
+            return FallbackTailYieldTransitionRejected(state, rejectionReason);
+        }
+
+        if (substate.PendingPeerProofAwaitingCheckpoint is { } existing)
+        {
+            return IsSameFallbackTailPeerProofReceiptIdentity(existing, receipt)
+                ? FallbackTailYieldTransition(state,
+                    FileTransferFallbackTailYieldTransitionStatus.Idempotent,
+                    "fallback_tail_checkpoint_pending_peer_proof_idempotent")
+                : FallbackTailYieldTransitionRejected(state,
+                    "fallback_tail_checkpoint_pending_peer_proof_conflict");
+        }
+
+        return FallbackTailYieldTransition(
+            ApplyFallbackTailYieldSubstate(state, substate with
+            {
+                PendingPeerProofAwaitingCheckpoint = receipt,
+            }),
+            FileTransferFallbackTailYieldTransitionStatus.Accepted,
+            "fallback_tail_checkpoint_pending_peer_proof_retained");
+    }
+
+    private static FileTransferFallbackTailYieldScope ClearFallbackTailCheckpointScope(
+        FileTransferFallbackTailYieldScope scope)
+        => scope with
+        {
+            CheckpointRequestIdSnapshot = "(none)",
+            OwnerKey = BuildFallbackTailYieldOwnerKey(
+                scope.SessionId, scope.TransferId, scope.RouteToken, scope.ProtocolVersion,
+                scope.LiveRouteEpoch, scope.LegGeneration, scope.BridgeRecoveryGeneration,
+                scope.TransportEpoch, "(none)"),
+            PairKey = BuildFallbackTailYieldPairKey(
+                scope.SessionId, scope.TransferId, scope.RouteToken, scope.ProtocolVersion,
+                scope.LiveRouteEpoch, scope.TransportEpoch, "(none)"),
+        };
+
+    private static FileTransferCoordinatorState PromoteFallbackTailPeerProofAfterCheckpointAcceptance(
+        FileTransferCoordinatorState state,
+        FileTransferFallbackTailPeerProofReceipt? pending)
+    {
+        var substate = state.PersistentState.FallbackTailYield;
+        if (pending is not { } receipt ||
+            substate.CurrentOperation is not null ||
+            substate.PendingReauthorization is not null ||
+            substate.PendingPeerProofBeforeLocalYield is not null ||
+            !TryCreateCurrentFallbackTailYieldScope(state, out var currentScope) ||
+            ClearFallbackTailCheckpointScope(receipt.ObservationScope) != currentScope)
+        {
+            return state;
+        }
+
+        // Rebind only the local observation scope; retain the peer's exact wire
+        // proof, identity and original observation time in the snapshot chain.
+        return ApplyPendingFallbackTailInitialPeerProofReceipt(
+            state, substate, receipt with { ObservationScope = currentScope }).State;
     }
 
     private static bool IsSameFallbackTailPeerProofReceiptIdentity(
@@ -13240,6 +13330,7 @@ internal static partial class FileTransferCoordinator
             PendingReauthorization = null,
             PendingReauthorizationPeerProof = null,
             PendingPeerProofBeforeLocalYield = null,
+            PendingPeerProofAwaitingCheckpoint = null,
             PendingRetryRecheckRequest = null,
             CurrentRetryDispatchHold = null,
             PendingRetryDispatchRecheckCommand = null,
@@ -14118,6 +14209,7 @@ internal static partial class FileTransferCoordinator
                 PendingReauthorization = null,
                 PendingReauthorizationPeerProof = null,
                 PendingPeerProofBeforeLocalYield = null,
+                PendingPeerProofAwaitingCheckpoint = null,
                 PendingRetryCycleSuccessorPeerProof = null,
                 PendingRetryRecheckRequest = null,
                 CurrentRetryDispatchHold = null,
@@ -14202,9 +14294,17 @@ internal static partial class FileTransferCoordinator
                  StringComparison.Ordinal) ||
              pendingRetryCycle.ObservationScope.DataSessionGeneration !=
                  state.CurrentDataSessionGeneration);
+        var pendingCheckpointDataSessionChanged =
+            fallbackTail.PendingPeerProofAwaitingCheckpoint is { } pendingCheckpoint &&
+            (!string.Equals(
+                 pendingCheckpoint.ObservationScope.DataSessionIdentity,
+                 state.CurrentDataSessionIdentity,
+                 StringComparison.Ordinal) ||
+             pendingCheckpoint.ObservationScope.DataSessionGeneration != state.CurrentDataSessionGeneration);
         return operationDataSessionChanged ||
                pendingDataSessionChanged ||
                pendingInitialDataSessionChanged ||
+               pendingCheckpointDataSessionChanged ||
                pendingRetryCycleDataSessionChanged
             ? InvalidateFallbackTailYieldSubstate(
                 state,
@@ -14218,6 +14318,11 @@ internal static partial class FileTransferCoordinator
             string reason)
     {
         var substate = state.PersistentState.FallbackTailYield;
+        if (substate.PendingPeerProofAwaitingCheckpoint is not null)
+        {
+            substate = substate with { PendingPeerProofAwaitingCheckpoint = null };
+            state = ApplyFallbackTailYieldSubstate(state, substate);
+        }
         if (substate.CurrentOperation is not null)
         {
             return InvalidateFallbackTailYieldSubstate(
@@ -14299,6 +14404,7 @@ internal static partial class FileTransferCoordinator
                 PendingReauthorization = rebound,
                 PendingReauthorizationPeerProof = null,
                 PendingPeerProofBeforeLocalYield = null,
+                PendingPeerProofAwaitingCheckpoint = null,
                 RetainedPredecessor = rebound.PredecessorDecision,
                 LastReauthorizationGeneration =
                     reauthorizationGeneration,
@@ -14431,6 +14537,7 @@ internal static partial class FileTransferCoordinator
                 PendingReauthorization = null,
                 PendingReauthorizationPeerProof = null,
                 PendingPeerProofBeforeLocalYield = null,
+                PendingPeerProofAwaitingCheckpoint = null,
                 PendingRetryCycleSuccessorPeerProof = null,
                 CurrentReservation = null,
                 LastTerminalOperation = lastTerminal,
@@ -15413,6 +15520,7 @@ internal static partial class FileTransferCoordinator
                 PendingReauthorization = rebound,
                 PendingReauthorizationPeerProof = null,
                 PendingPeerProofBeforeLocalYield = null,
+                PendingPeerProofAwaitingCheckpoint = null,
                 RetainedPredecessor = rebound.PredecessorDecision,
                 LastReauthorizationGeneration = nextGeneration,
             });
@@ -24777,7 +24885,8 @@ internal static partial class FileTransferCoordinator
     private static FileTransferCoordinatorDecision StartTransfer(
         FileTransferCoordinatorEvent coordinatorEvent,
         FileTransferCoordinatorState state,
-        string reason)
+        string reason,
+        InitialStartRouteSelection? initialSelection = null)
     {
         if (state.PersistentState.FileTransferRouteTransition.CurrentOperation
             is not null)
@@ -24800,83 +24909,12 @@ internal static partial class FileTransferCoordinator
             return MutationRejected(state, reason, reauthorizationRejectionReason);
         }
 
-        var routeSelection = coordinatorEvent.RouteSelection;
-        InitialTunaRouteSelectionDecision? initialTunaDecision = null;
-        if (routeSelection.Route == FileTransferRoute.FileTunaV4)
-        {
-            if (!CanStartInitialFileTunaRoute(
-                    state,
-                    coordinatorEvent,
-                    routeSelection,
-                    out var initialTunaRejectionReason))
-            {
-                if (coordinatorEvent.AllowInitialRouteFallback &&
-                    coordinatorEvent.InitialRouteFallbackSelection is { } fallbackSelection)
-                {
-                    if (!IsValidInitialTunaFallbackSelection(fallbackSelection))
-                    {
-                        var fallbackRejected = new InitialTunaRouteSelectionDecision(
-                            Accepted: false,
-                            Reason: "initial_tuna_fallback_route_invalid",
-                            RequestedRoute: routeSelection.Route,
-                            RequestedProtocolVersion: routeSelection.ProtocolVersion,
-                            RequestedTransport: coordinatorEvent.TargetTransport,
-                            SelectedRoute: state.RouteSelection.Route,
-                            SelectedProtocolVersion: state.RouteSelection.ProtocolVersion,
-                            FallbackApplied: false,
-                            Evidence: coordinatorEvent.InitialTunaReadinessEvidence);
-                        return MutationRejected(
-                            state,
-                            reason,
-                            "initial_tuna_fallback_route_invalid",
-                            initialTunaRouteSelectionDecision: fallbackRejected);
-                    }
-
-                    initialTunaDecision = new InitialTunaRouteSelectionDecision(
-                        Accepted: false,
-                        Reason: initialTunaRejectionReason,
-                        RequestedRoute: routeSelection.Route,
-                        RequestedProtocolVersion: routeSelection.ProtocolVersion,
-                        RequestedTransport: coordinatorEvent.TargetTransport,
-                        SelectedRoute: fallbackSelection.Route,
-                        SelectedProtocolVersion: fallbackSelection.ProtocolVersion,
-                        FallbackApplied: true,
-                        Evidence: coordinatorEvent.InitialTunaReadinessEvidence);
-                    routeSelection = fallbackSelection;
-                }
-                else
-                {
-                    var rejected = new InitialTunaRouteSelectionDecision(
-                        Accepted: false,
-                        Reason: initialTunaRejectionReason,
-                        RequestedRoute: routeSelection.Route,
-                        RequestedProtocolVersion: routeSelection.ProtocolVersion,
-                        RequestedTransport: coordinatorEvent.TargetTransport,
-                        SelectedRoute: state.RouteSelection.Route,
-                        SelectedProtocolVersion: state.RouteSelection.ProtocolVersion,
-                        FallbackApplied: false,
-                        Evidence: coordinatorEvent.InitialTunaReadinessEvidence);
-                    return MutationRejected(
-                        state,
-                        reason,
-                        initialTunaRejectionReason,
-                        initialTunaRouteSelectionDecision: rejected);
-                }
-            }
-            else
-            {
-                initialTunaDecision = new InitialTunaRouteSelectionDecision(
-                    Accepted: true,
-                    Reason: "accepted",
-                    RequestedRoute: routeSelection.Route,
-                    RequestedProtocolVersion: routeSelection.ProtocolVersion,
-                    RequestedTransport: coordinatorEvent.TargetTransport,
-                    SelectedRoute: routeSelection.Route,
-                    SelectedProtocolVersion: routeSelection.ProtocolVersion,
-                    FallbackApplied: false,
-                    Evidence: coordinatorEvent.InitialTunaReadinessEvidence);
-            }
-        }
+        var selection = initialSelection ?? SelectInitialStartRoute(coordinatorEvent, state);
+        var routeSelection = selection.Route;
+        var initialTunaDecision = selection.Decision;
+        if (selection.RejectionReason is { } rejectionReason)
+            return MutationRejected(state, reason, rejectionReason,
+                initialTunaRouteSelectionDecision: initialTunaDecision);
 
         if (HasRegularV4FrontierRepairPressureBinding(state))
         {
@@ -24951,6 +24989,7 @@ internal static partial class FileTransferCoordinator
                     PendingReauthorization = pendingReauthorization,
                     PendingReauthorizationPeerProof = null,
                     PendingPeerProofBeforeLocalYield = null,
+                    PendingPeerProofAwaitingCheckpoint = null,
                     RetainedPredecessor =
                         pendingReauthorization.PredecessorDecision,
                     LastReauthorizationGeneration = Math.Max(
@@ -26409,6 +26448,12 @@ internal static partial class FileTransferCoordinator
         var previousCheckpointRequestId = leg.CheckpointRequestId;
         var previousCheckpointGeneration = leg.CheckpointGeneration;
         var checkpointContinuitySource = CreateCheckpointRepairContinuityScope(state);
+        var earlyPeerProof = state.PersistentState.FallbackTailYield.PendingPeerProofAwaitingCheckpoint;
+        if (earlyPeerProof is { } pendingPeerProof &&
+            !IsFallbackTailYieldScopeCurrent(state, pendingPeerProof.ObservationScope, out _))
+        {
+            earlyPeerProof = null;
+        }
         MarkFallbackCheckpointAccepted(
             leg,
             coordinatorEvent.TransportEpochId,
@@ -26462,6 +26507,7 @@ internal static partial class FileTransferCoordinator
             : null;
         nextState = RetainCheckpointRepairContinuityOrigin(
             nextState, checkpointContinuitySource, acceptedLease, coordinatorEvent);
+        nextState = PromoteFallbackTailPeerProofAfterCheckpointAcceptance(nextState, earlyPeerProof);
         return Decision(
             nextState,
             reason,
@@ -27452,8 +27498,9 @@ internal static partial class FileTransferCoordinator
         }
 
         var leg = state.CurrentLeg;
-        TerminalizeLeg(leg);
         var nextTerminalGeneration = Math.Max(1, state.TerminalGeneration + 1);
+        var projectionRetirement = CreateTerminalFallbackProjectionRetirement(state, nextTerminalGeneration);
+        TerminalizeLeg(leg);
         return Decision(
             InvalidateFallbackOwnership(state with
             {
@@ -27468,7 +27515,7 @@ internal static partial class FileTransferCoordinator
                 CurrentRuntimeUnlockPendingPreCommitProbe = null,
             }),
             reason,
-            mutatedLeg: leg);
+            mutatedLeg: leg) with { TerminalFallbackProjectionRetirement = projectionRetirement };
     }
 
     private static FileTransferCoordinatorDecision PassThrough(FileTransferCoordinatorState state, string reason)
@@ -27674,6 +27721,7 @@ internal static partial class FileTransferCoordinator
                         },
                         PendingReauthorizationPeerProof = null,
                         PendingPeerProofBeforeLocalYield = null,
+                        PendingPeerProofAwaitingCheckpoint = null,
                         LastReauthorizationGeneration =
                             reauthorizationGeneration,
                     });

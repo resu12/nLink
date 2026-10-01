@@ -113,21 +113,65 @@ public sealed partial class SessionFileTransferV4SenderTests
     private async Task AssertCallbackReceiveGapCannotInstallAsync(SessionFileTransferService service, object context,
         SourceFailureDataSession session, TaskCompletionSource release, Func<int> sourceOpens)
     {
-        lock (GetServiceGate(service)) { SetPrivateProperty(context, "DataSessionGeneration", 18L); }
         release.SetResult();
         await CoreSmokeTestsBase.WaitUntilAsync(() =>
             ((System.Collections.IDictionary)GetPrivatePropertyValue(context, "ActiveBootstrapSourceCallbacks")!).Count == 0,
             TimeSpan.FromSeconds(3));
-        var before = SourceFailureEffectsForTest(context);
-        var logStart = GetOperationalLogLength();
-        session.Receive(new FileTransferFrontierRequestFrameV6
-        { SessionId = session.SessionId, TransferId = session.TransferId, TransportEpoch = 1 });
-        await CoreSmokeTestsBase.WaitUntilAsync(() => ReadOperationalLogTail(logStart).Contains("frontier_receive_authority_gap", StringComparison.Ordinal),
-            TimeSpan.FromSeconds(3));
-        Assert.Equal(1, sourceOpens());
-        Assert.Equal(before, SourceFailureEffectsForTest(context));
-        Assert.False(GetPrivateProperty<bool>(context, "IsTerminal"));
-        Assert.DoesNotContain(session.SentFrames, frame => frame is FileTransferErrorFrameV4);
+        var received = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var dispatch = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var previous = SessionFileTransferService.OutboundSparseReceiveCompletionBarrierForTests;
+        SessionFileTransferService.OutboundSparseReceiveCompletionBarrierForTests = (id, _) =>
+        {
+            if (id != session.TransferId) return Task.CompletedTask;
+            received.TrySetResult();
+            return dispatch.Task;
+        };
+        try
+        {
+            // Issue under the current descriptor, then invalidate before dispatch.
+            // Delivering only after invalidation would require the forbidden
+            // unbound receive that the install-gap guard now prevents.
+            session.Receive(new FileTransferFrontierRequestFrameV6
+            { SessionId = session.SessionId, TransferId = session.TransferId, TransportEpoch = 1 });
+            await received.Task.WaitAsync(TimeSpan.FromSeconds(3));
+            lock (GetServiceGate(service))
+            {
+                var installed = GetPrivatePropertyValue(context, "InstalledOutboundSparsePump")!;
+                Assert.Equal(17L, GetPrivateProperty<long>(installed, "DataSessionGeneration"));
+                Assert.Equal(17L, GetPrivateProperty<long>(context, "DataSessionGeneration"));
+                Assert.NotNull(GetPrivatePropertyValue(context, "BootstrapCallbackAwaitingSuccessor"));
+                SetPrivateProperty(context, "DataSessionGeneration", 18L);
+            }
+            var before = SourceFailureEffectsForTest(context);
+            var coordinatorBefore = CreateCoordinatorStateForTest(context).PersistentState;
+            var frontierBefore = GetPrivateProperty<int>(context, "RemoteNextExpectedChunkIndex");
+            var acknowledgedBefore = GetPrivateProperty<long>(context, "BytesAcknowledgedByReceiver");
+            var logStart = GetOperationalLogLength();
+            dispatch.SetResult();
+            var log = string.Empty;
+            await CoreSmokeTestsBase.WaitUntilAsync(() =>
+            {
+                log = ReadOperationalLogTail(logStart);
+                return log.Contains("frontier_receive_authority_gap", StringComparison.Ordinal) &&
+                    log.Contains("reason=stale_outbound_sparse_receive_descriptor;", StringComparison.Ordinal);
+            }, TimeSpan.FromSeconds(3));
+            Assert.Contains(log.Split('\n'), line => line.Contains("stage=frontier_receive_authority_gap;", StringComparison.Ordinal) &&
+                line.Contains("decision_reason=bootstrap_source_callback_successor_required;", StringComparison.Ordinal));
+            Assert.Contains(log.Split('\n'), line => line.Contains("stage=receive_result;", StringComparison.Ordinal) &&
+                line.Contains("decision_reason=data_session_generation_mismatch;", StringComparison.Ordinal));
+            Assert.Equal(1, sourceOpens());
+            Assert.Equal(before, SourceFailureEffectsForTest(context));
+            Assert.Equal(coordinatorBefore, CreateCoordinatorStateForTest(context).PersistentState);
+            Assert.Equal(frontierBefore, GetPrivateProperty<int>(context, "RemoteNextExpectedChunkIndex"));
+            Assert.Equal(acknowledgedBefore, GetPrivateProperty<long>(context, "BytesAcknowledgedByReceiver"));
+            Assert.False(GetPrivateProperty<bool>(context, "IsTerminal"));
+            Assert.DoesNotContain(session.SentFrames, frame => frame is FileTransferErrorFrameV4);
+        }
+        finally
+        {
+            dispatch.TrySetResult();
+            SessionFileTransferService.OutboundSparseReceiveCompletionBarrierForTests = previous;
+        }
     }
 
     [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]

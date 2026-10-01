@@ -1411,6 +1411,10 @@ public sealed partial class SessionFileTransferService
 
             dataSession = context.DataSession;
             chunksAcceptedForTransport = context.ChunksAcceptedForTransport;
+            // A completed pump's native view cannot follow a new installation.
+            // Startup may already hold the view for this exact pending install.
+            reopenSource |= context.OpenReadStreamAsync.Target is NativeSenderSelection native &&
+                !native.IsReadBoundToPump(reusableStream, pending.InstallGeneration);
         }
 
         Stream? pumpStream = reusableStream;
@@ -2860,8 +2864,15 @@ public sealed partial class SessionFileTransferService
                         receiveInstallToStart = pendingReceive;
                     }
 
-                    receiveRuntimeOwnerToStart =
-                        receiveInstallToStart?.RuntimeOwner ?? context.CurrentRuntimeOwner;
+                    // Do not consume a future checkpoint response with an unbound
+                    // receive started between installations. Pending descriptors
+                    // still allow transport draining while source reopen waits.
+                    if (receiveInstallToStart is null)
+                    {
+                        return;
+                    }
+
+                    receiveRuntimeOwnerToStart = receiveInstallToStart.RuntimeOwner;
                 }
 
                 var receiveCancellationToStart = CancellationTokenSource.CreateLinkedTokenSource(
@@ -3470,8 +3481,8 @@ public sealed partial class SessionFileTransferService
                 {
                 }
                 // Keep transport draining while a sender descriptor/source reopen is pending.
-                // Only the session/supervisor generation authorizes receive issuance; frame
-                // dispatch below still requires the exact current pending-or-installed tuple.
+                // Capture a current pending-or-installed descriptor at issuance;
+                // frame dispatch below still revalidates the exact installed tuple.
                 StartSessionGenerationReceiveIfNeeded();
                 bool receiveResultCurrent;
                 string receiveResultRejection;
@@ -7412,10 +7423,7 @@ public sealed partial class SessionFileTransferService
 
         _ = AdoptCoordinatorStateLocked(
             context,
-            decision.State,
-            "ReceiveRecoveryFallbackCheckpointDeliveryReceiptApplied",
-            decision.Status.ToString(),
-            decision.Reason);
+            decision);
         LocalOperationalLog.Info(
             "FileTransferService",
             $"event=filetransfer_receive_recovery_fallback_checkpoint_delivery_receipt_applied; session_id={FormatProtocolLogValue(context.SessionId)}; transfer_id={FormatProtocolLogValue(context.TransferId)}; direction=outbound; recovery_operation_authority_id={FormatProtocolLogValue(command.Binding.ParentAuthority.AuthorityId.ToString())}; recovery_operation_generation={command.Binding.ParentAuthority.OperationGeneration}; root_checkpoint_request_id={FormatProtocolLogValue(command.Binding.ParentCheckpointRequestId ?? "(none)")}; effective_checkpoint_request_id={FormatProtocolLogValue(command.Binding.EffectiveCheckpointRequestId)}; checkpoint_binding_generation={command.Binding.BindingGeneration}; checkpoint_delivery_generation={command.DeliveryGeneration}; frame_fingerprint={FormatProtocolLogValue(command.Binding.FrameIdentity.Sha256)}; delivery_state={state.ToString().ToLowerInvariant()}; decision_status={decision.Status.ToString().ToLowerInvariant()}; decision_reason={FormatProtocolLogValue(decision.Reason)}");
@@ -10827,6 +10835,22 @@ public sealed partial class SessionFileTransferService
             context.LifetimeCts.Token,
             pumpCancellationToken);
         var pumpToken = pumpLifetime.Token;
+        lock (gate)
+        {
+            if (!pumpToken.IsCancellationRequested &&
+                pumpInstall is not null &&
+                context.InstalledOutboundSparsePump == pumpInstall &&
+                IsOutboundSparsePumpInstallCurrentLocked(context, pumpInstall, dataSession, out _))
+            {
+                TryPublishRuntimeStartedIfAuthorizedLocked(
+                    context,
+                    "sender",
+                    "sparse_sender_pump_start",
+                    "runtime_started",
+                    routePublicationToken: pumpInstall.RoutePublication);
+            }
+        }
+
         while (true)
         {
             pumpToken.ThrowIfCancellationRequested();
@@ -22655,6 +22679,35 @@ public sealed partial class SessionFileTransferService
         };
     }
 
+    // Execution evidence only; this binding never authorizes receive or route work.
+    private sealed record InboundSparseReceiverRuntimeEvidence(
+        IFileTransferDataSession DataSession,
+        long ServiceGeneration,
+        long? ProviderGeneration);
+
+    private bool TryPublishInboundSparseReceiverRuntimeStartedLocked(
+        InboundTransferContext context,
+        RoutePublicationToken? publication)
+    {
+        if (!ReferenceEquals(inboundTransfer, context) || context.IsTerminal ||
+            context.LifetimeCts.IsCancellationRequested ||
+            publication is not { IsDefault: false } ||
+            context.SparseReceiverRuntimeEvidence is not { } runtime ||
+            !ReferenceEquals(context.DataSession, runtime.DataSession) ||
+            context.DataSessionGeneration != runtime.ServiceGeneration ||
+            (runtime.DataSession as IFileTransferDataSessionGenerationProvider)?.Generation != runtime.ProviderGeneration)
+        {
+            return false;
+        }
+
+        return TryPublishRuntimeStartedIfAuthorizedLocked(
+            context,
+            "receiver",
+            "sparse_receiver_runtime_adoption",
+            "runtime_started",
+            routePublicationToken: publication);
+    }
+
     private async Task RunInboundSparseCreditReceiveLoopAsync(
         InboundTransferContext context,
         FileTransferSessionOpenV2 sessionOpen,
@@ -22671,19 +22724,7 @@ public sealed partial class SessionFileTransferService
         LocalOperationalLog.Info(
             "FileTransferService",
             $"event={(useV6Envelope ? "filetransfer_v6_receiver_started" : "filetransfer_v4_receiver_started")}; transfer_id={context.TransferId}; session_id={context.SessionId}; protocol_version={context.NegotiatedDataProtocolVersion}; route={context.RouteSelection.TelemetryToken}; runtime_profile={FormatFileTransferRouteRuntimeProfile(context.RouteSelection.RuntimeProfile)}; frame_family={FormatFileTransferFrameFamily(context.RouteSelection.FrameFamily)}; bridge_recovery_policy={FormatFileTransferRouteBridgeRecoveryPolicy(context.RouteSelection.BridgeRecoveryPolicy)}; session_open_chunk_size_bytes={sessionOpen.ChunkSizeBytes}; session_open_pipeline_depth={sessionOpen.InitialPipelineDepth}");
-        lock (gate)
-        {
-            if (ReferenceEquals(inboundTransfer, context) && !context.IsTerminal)
-            {
-                TryPublishRuntimeStartedIfAuthorizedLocked(
-                    context,
-                    "receiver",
-                    "v4_receiver_start",
-                    "runtime_started",
-                    routePublicationToken: context.CurrentRoutePublicationToken);
-            }
-        }
-
+        InboundSparseReceiverRuntimeEvidence? runtimeEvidence = null;
         try
         {
             IFileTransferDataSession? dataSession;
@@ -22694,6 +22735,13 @@ public sealed partial class SessionFileTransferService
                     ? context.DataSession
                     : null;
                 writeIngress = CaptureInboundBootstrapWriteIngress(context, dataSession);
+                if (dataSession is not null)
+                {
+                    runtimeEvidence = new(dataSession, context.DataSessionGeneration,
+                        (dataSession as IFileTransferDataSessionGenerationProvider)?.Generation);
+                    context.SparseReceiverRuntimeEvidence = runtimeEvidence;
+                    TryPublishInboundSparseReceiverRuntimeStartedLocked(context, context.CurrentRoutePublicationToken);
+                }
             }
 
             if (dataSession is null)
@@ -23077,6 +23125,16 @@ public sealed partial class SessionFileTransferService
                 InvalidStateErrorCode,
                 ex.Message,
                 isPrimaryRegularNknBulkV6 ? "Regular NKN bulk V6 receive loop failed." : "V4 receive loop failed.").ConfigureAwait(false);
+        }
+        finally
+        {
+            lock (gate)
+            {
+                if (ReferenceEquals(context.SparseReceiverRuntimeEvidence, runtimeEvidence))
+                {
+                    context.SparseReceiverRuntimeEvidence = null;
+                }
+            }
         }
     }
 

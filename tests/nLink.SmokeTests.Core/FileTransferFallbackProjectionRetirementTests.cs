@@ -63,6 +63,37 @@ public sealed partial class FileTransferRouteTransitionInfraTests
             "route-transition-session")!;
 
     [Theory]
+    [InlineData(FileTransferDirection.Outbound)]
+    [InlineData(FileTransferDirection.Inbound)]
+    [Trait("FileTransferInfraSuite", "FileTransferRouteTransition")]
+    public async Task FallbackProjection_CompletionObservationsCannotRetireCommittedProjection(FileTransferDirection direction)
+    {
+        using var fixture = await CreateFallbackProjectionFixtureAsync(direction);
+        var transport = fixture.Transport;
+        var projection = GetPrivateFieldValue(transport, "tunaFallbackProofState")!;
+        var publication = fixture.FallbackEntry.RoutePublicationToken!.Value;
+        var proofGeneration = GetPrivateFieldValue(transport, "fileTransferFallbackProofGeneration");
+        var proofPending = GetPrivateFieldValue(transport, "fileTransferFallbackProofPending");
+        foreach (var transferId in new[] { "wrong-transfer", publication.TransferId })
+        {
+            transport.ObserveFileTransferTerminal(new(publication.SessionId, transferId, direction,
+                publication.RouteToken, publication.ProtocolVersion, FileTransferTransferState.Completed, null, "completed"));
+            transport.ObserveFileTransferRouteCompleted(new(publication.SessionId, transferId,
+                publication.RouteToken, publication.ProtocolVersion));
+
+            Assert.True(IsFallbackProjectionActive(transport));
+            Assert.Same(projection, GetPrivateFieldValue(transport, "tunaFallbackProofState"));
+            Assert.Equal(publication, projection.GetType().GetProperty("FileProjectionPublication")!.GetValue(projection));
+            Assert.Null(projection.GetType().GetProperty("FileProjectionRetirement")!.GetValue(projection));
+            Assert.Equal(fixture.Reactivation.SourceTransportEpoch,
+                projection.GetType().GetProperty("FileV6TransportEpoch")!.GetValue(projection));
+            Assert.Equal(proofGeneration, GetPrivateFieldValue(transport, "fileTransferFallbackProofGeneration"));
+            Assert.Equal(proofPending, GetPrivateFieldValue(transport, "fileTransferFallbackProofPending"));
+            Assert.False(transport.IsFileTunaActiveForRouteSelection);
+        }
+    }
+
+    [Theory]
     [InlineData("newer_stop")]
     [InlineData("newer_transport_epoch")]
     [InlineData("terminal_first")]

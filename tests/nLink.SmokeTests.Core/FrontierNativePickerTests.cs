@@ -17,6 +17,7 @@ public sealed class FrontierNativePickerTests : FileTransferOpsScriptsTestBase
     [InlineData("pwsh", "cancel")]
     [InlineData("pwsh", "runtime-valid")]
     [InlineData("pwsh", "runtime-disposed")]
+    [InlineData("pwsh", "queued-pump")]
     public async Task OriginalPicker_UsesNativeCustodyAndCurrentRuntime(string host, string fault)
     {
         if (!OperatingSystem.IsWindows()) return;
@@ -93,7 +94,11 @@ public sealed class FrontierNativePickerTests : FileTransferOpsScriptsTestBase
         using var foreign = new SessionFileTransferService();
         Assert.False(copy.TryBindForSend(foreign, selection.Descriptor));
         await Assert.ThrowsAsync<IOException>(() => copy.OpenReadStreamAsync(CancellationToken.None));
-        if (fault.StartsWith("runtime-", StringComparison.Ordinal))
+        if (fault == "queued-pump")
+        {
+            await NknAccelerationTransportTests.RunNativeQueuedPumpAsync(native);
+        }
+        else if (fault.StartsWith("runtime-", StringComparison.Ordinal))
         {
             await NknAccelerationTransportTests.RunNativeRuntimeReadsAsync(native, fault);
         }

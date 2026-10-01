@@ -27,18 +27,15 @@ public sealed partial class SessionFileTransferService
         else { return true; }
         if (!UsesBootstrapCorrelation(state)) { return true; }
         if (!ReferenceEquals(transport, bridge) || !bridge.SupportsFallbackBootstrapCorrelation) { return false; }
-        if (frame is null && binding is null)
-        {
-            return evaluation.InitiationKind == FileTransferBootstrapInitiationKind.LocalRuntimeDisable &&
-                GetCurrentBootstrapLocalStopStateLocked(evaluation) is not null;
-        }
-        if (frame is not FileTransferFallbackBootstrapFrameV6 || binding is null || session is null ||
-            GetBootstrapCorrelationStateLocked(evaluation.Direction, session, frame, out var current) is null ||
-            binding.FrameIdentity != current.FrameIdentity || !MatchesFallbackV6ProofBootstrapPeerFrameBinding(binding, current)) { return false; }
+        // A current local stop has its own source authority. Let the issue path
+        // retire an older peer binding before it captures this source's hold.
         if (evaluation.InitiationKind == FileTransferBootstrapInitiationKind.LocalRuntimeDisable)
         {
             return GetCurrentBootstrapLocalStopStateLocked(evaluation) is not null;
         }
+        if (frame is not FileTransferFallbackBootstrapFrameV6 || binding is null || session is null ||
+            GetBootstrapCorrelationStateLocked(evaluation.Direction, session, frame, out var current) is null ||
+            binding.FrameIdentity != current.FrameIdentity || !MatchesFallbackV6ProofBootstrapPeerFrameBinding(binding, current)) { return false; }
         var observation = CreateFallbackV6ProofBootstrapObservation(evaluation, state.TransferId, current.DurableCheckpoint);
         return FileTransferCoordinator.IsFallbackBootstrapInitiationCurrent(state, observation) &&
             MatchesFallbackV6ProofBootstrapPeerFrameEvaluationTrigger(current, evaluation);

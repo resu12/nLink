@@ -8,6 +8,7 @@ Set-StrictMode -Version Latest
 . (Join-Path $PSScriptRoot 'ActivationRetryEvidence.ps1')
 . (Join-Path $PSScriptRoot 'ReceiverPreAdmissionEvidence.ps1')
 . (Join-Path $PSScriptRoot 'InitialDataSessionEvidence.ps1')
+. (Join-Path $PSScriptRoot 'EarlyCheckpointPeerProofEvidence.ps1')
 
 $script:FileTransferCoordinatorSnapshotContractVersion = 1
 $script:FileTransferCoordinatorSnapshotCatalogVersion = 'snapshot-authority-v1'
@@ -537,6 +538,9 @@ function Get-FileTransferCoordinatorEvidenceCatalog {
     [CmdletBinding()]
     param([string]$ProfileVersion = $script:FileTransferCoordinatorSnapshotCatalogVersion)
 
+    if ($ProfileVersion -ceq $script:FileTransferCoordinatorEarlyCheckpointProofCatalogVersion) {
+        return Get-FileTransferCoordinatorEarlyCheckpointProofCatalog
+    }
     if ($ProfileVersion -ceq $script:FileTransferCoordinatorInitialDataSessionCatalogVersion) {
         return Get-FileTransferCoordinatorInitialDataSessionCatalog
     }
@@ -4576,6 +4580,26 @@ function Test-FileTransferCoordinatorSnapshotCheckpointPeerProofSuccessor {
 function Test-FileTransferCoordinatorSnapshotFallbackTailQuiescentEnvelope {
     param([Parameter(Mandatory = $true)]$Envelope)
 
+    if (@($Envelope.aggregate.operations | Where-Object operationRole -ceq 'peer_proof_awaiting_checkpoint').Count -gt 0) {
+        $custody = Get-FileTransferEarlyCheckpointProofShape $Envelope
+        if ($null -eq $custody -or $custody.Kind -cne 'Discard') { return $false }
+        $remaining = $Envelope | Select-Object *
+        $remaining.aggregate = $Envelope.aggregate | Select-Object *
+        $remaining.aggregate.operations = @($Envelope.aggregate.operations | Where-Object operationRole -cne 'peer_proof_awaiting_checkpoint')
+        $before = $Envelope.aggregate.beforeBoundary; $after = $Envelope.aggregate.afterBoundary
+        if ($remaining.aggregate.operations.Count -ne 1 -or
+            $remaining.aggregate.operations[0].afterState -cne 'YieldIssued' -or
+            $remaining.aggregate.operations[0].fallbackTailYield.peerProofIdentity -cne '(none)' -or
+            $remaining.aggregate.operations[0].fallbackTailYield.pairedReleaseGeneration -ne 0 -or
+            $before.checkpointGeneration -le 0 -or $before.checkpointRequestId -in @('', '(none)') -or
+            $after.checkpointGeneration -ne 0 -or $after.checkpointRequestId -cne '(none)' -or
+            -not (Test-FileTransferCoordinatorSnapshotBoundaryEqualExceptCheckpoint $before $after)) { return $false }
+        # Checkpoint retirement was checked above; the remaining independent
+        # local yield must still satisfy the unchanged yield contract.
+        $remaining.aggregate.beforeBoundary = $after
+        return Test-FileTransferCoordinatorSnapshotFallbackTailQuiescentEnvelope $remaining
+    }
+
     if ([string]$Envelope.decisionKind -cne 'FallbackTailQuiescent' -or
         [string]$Envelope.decisionStatus -cne 'Accepted' -or
         [string]::IsNullOrWhiteSpace([string]$Envelope.decisionReason) -or
@@ -5322,6 +5346,13 @@ function Test-FileTransferCoordinatorSnapshotFallbackTailPeerProofEffect {
     )
 
     $operation = $Entry.Operation
+    $entryKey = Get-FileTransferCoordinatorSnapshotFallbackTailYieldEntryKey $Entry
+    if ($SupersessionPeerProofOrigins.ContainsKey($entryKey) -and
+        $SupersessionPeerProofOrigins[$entryKey].ContainsKey('Kind') -and
+        $SupersessionPeerProofOrigins[$entryKey].Kind -ceq 'CheckpointPromotion') {
+        $provenance = $SupersessionPeerProofOrigins[$entryKey]
+        return (Get-FileTransferCoordinatorSnapshotFallbackTailPeerProofSignature $operation) -ceq $provenance.Signature
+    }
     $typed = $operation.fallbackTailYield
     $receipt = @($typed.receipts | Where-Object {
             [string]$_.stage -ceq 'peer_proof' -and
@@ -5944,8 +5975,16 @@ function Test-FileTransferCoordinatorSnapshotFamily4StageEvidence {
 function Test-FileTransferCoordinatorSnapshotFamily4OperationCatalog {
     param(
         [Parameter(Mandatory = $true)]$Envelope,
-        [Parameter(Mandatory = $true)]$Operation
+        [Parameter(Mandatory = $true)]$Operation,
+        $Catalog = $null
     )
+
+    if ($Operation.operationRole -ceq 'peer_proof_awaiting_checkpoint' -or
+        ($Operation.operationRole -ceq 'peer_proof_pending_initial' -and
+         @($Envelope.aggregate.operations | Where-Object operationRole -ceq 'peer_proof_awaiting_checkpoint').Count -gt 0)) {
+        return $null -ne $Catalog -and $Catalog.Version -ceq $script:FileTransferCoordinatorEarlyCheckpointProofCatalogVersion -and
+            $null -ne (Get-FileTransferEarlyCheckpointProofShape $Envelope)
+    }
 
     if ([string]$Operation.family -notin
         $script:FileTransferCoordinatorSnapshotFamily4) {
@@ -7417,7 +7456,15 @@ function Get-FileTransferCoordinatorSnapshotInitialPublications {
                     $poisoned = $true; continue
                 }
                 $owner = $births[0]
-                foreach ($field in @('route','protocolVersion','liveRouteEpoch','routeCommitGeneration','terminalGeneration',
+                # Before the first owner exists, Tuna may be only the requested
+                # route. Core can select Regular V4 at this exact outbound birth;
+                # this does not admit a change to an already-owned route.
+                $initialRegularSelection = $boundary.direction -ceq 'outbound' -and
+                    $before.route -ceq 'file_tuna_v4' -and $after.route -ceq 'regular_nkn_v4_fast' -and
+                    [long]$before.protocolVersion -eq 4L -and [long]$after.protocolVersion -eq 4L -and
+                    [long]$after.runtimeGeneration -eq 1L -and [long]$after.legGeneration -eq 1L
+                if ($before.route -cne $after.route -and -not $initialRegularSelection) { $poisoned = $true }
+                foreach ($field in @('protocolVersion','liveRouteEpoch','routeCommitGeneration','terminalGeneration',
                         'transportEpoch','bridgeRecoveryGeneration','checkpointGeneration','checkpointRequestId',
                         'dataSessionIdentity','dataSessionGeneration')) {
                     if ([string]$before.$field -cne [string]$after.$field) { $poisoned = $true }
@@ -10616,7 +10663,7 @@ function Get-FileTransferCoordinatorSnapshotEvaluation {
                     $script:FileTransferCoordinatorCheckpointRepairContinuityCatalogVersion,
                     $script:FileTransferCoordinatorBootstrapCorrelationCatalogVersion,
                     $script:FileTransferCoordinatorBootstrapInitiationCatalogVersion, $script:FileTransferCoordinatorBootstrapCallbackCatalogVersion,
-                    $script:FileTransferCoordinatorRepairOwnerCatalogVersion, $script:FileTransferCoordinatorActivationRetryCatalogVersion, $script:FileTransferCoordinatorReceiverPreAdmissionCatalogVersion, $script:FileTransferCoordinatorInitialDataSessionCatalogVersion)) {
+                    $script:FileTransferCoordinatorRepairOwnerCatalogVersion, $script:FileTransferCoordinatorActivationRetryCatalogVersion, $script:FileTransferCoordinatorReceiverPreAdmissionCatalogVersion, $script:FileTransferCoordinatorInitialDataSessionCatalogVersion, $script:FileTransferCoordinatorEarlyCheckpointProofCatalogVersion)) {
                 $catalog = Get-FileTransferCoordinatorEvidenceCatalog -ProfileVersion $profileVersion
             }
         }
@@ -10964,7 +11011,7 @@ function Get-FileTransferCoordinatorSnapshotEvaluation {
                         continue
                     }
                     if ((Test-FileTransferCoordinatorBootstrapCallbackMarker $operation) -or
-                        ($catalog.Version -cin @($script:FileTransferCoordinatorBootstrapCallbackCatalogVersion, $script:FileTransferCoordinatorRepairOwnerCatalogVersion, $script:FileTransferCoordinatorActivationRetryCatalogVersion, $script:FileTransferCoordinatorReceiverPreAdmissionCatalogVersion, $script:FileTransferCoordinatorInitialDataSessionCatalogVersion) -and $operation.operationRole -ceq 'fallback_bootstrap_source_hold')) {
+                        ($catalog.Version -cin @($script:FileTransferCoordinatorBootstrapCallbackCatalogVersion, $script:FileTransferCoordinatorRepairOwnerCatalogVersion, $script:FileTransferCoordinatorActivationRetryCatalogVersion, $script:FileTransferCoordinatorReceiverPreAdmissionCatalogVersion, $script:FileTransferCoordinatorInitialDataSessionCatalogVersion, $script:FileTransferCoordinatorEarlyCheckpointProofCatalogVersion) -and $operation.operationRole -ceq 'fallback_bootstrap_source_hold')) {
                         if (-not (Test-FileTransferCoordinatorBootstrapCallbackOperation $envelope $operation $catalog)) {
                             $errors.Add("snapshot_bootstrap_callback_operation_invalid:$($record.LineIndex)")
                             break
@@ -11094,7 +11141,7 @@ function Get-FileTransferCoordinatorSnapshotEvaluation {
                     }
                     if (-not (Test-FileTransferCoordinatorSnapshotFamily4OperationCatalog `
                             -Envelope $envelope `
-                            -Operation $operation)) {
+                            -Operation $operation -Catalog $catalog)) {
                         $variant =
                             Get-FileTransferCoordinatorSnapshotFamily4CatalogVariant `
                                 -Envelope $envelope -Operation $operation
@@ -11479,10 +11526,10 @@ function Get-FileTransferCoordinatorSnapshotEvaluation {
     if ((Test-FileTransferCoordinatorBootstrapCorrelationCatalogCapability $catalog.Version) -and $errors.Count -eq 0) {
         foreach ($error in @(Get-FileTransferBootstrapCorrelationHistoryErrors -Boundaries @($boundaries))) { $errors.Add($error) }
     }
-    if ($catalog.Version -cin @($script:FileTransferCoordinatorBootstrapInitiationCatalogVersion, $script:FileTransferCoordinatorBootstrapCallbackCatalogVersion, $script:FileTransferCoordinatorRepairOwnerCatalogVersion, $script:FileTransferCoordinatorActivationRetryCatalogVersion, $script:FileTransferCoordinatorReceiverPreAdmissionCatalogVersion, $script:FileTransferCoordinatorInitialDataSessionCatalogVersion) -and $errors.Count -eq 0) {
+    if ($catalog.Version -cin @($script:FileTransferCoordinatorBootstrapInitiationCatalogVersion, $script:FileTransferCoordinatorBootstrapCallbackCatalogVersion, $script:FileTransferCoordinatorRepairOwnerCatalogVersion, $script:FileTransferCoordinatorActivationRetryCatalogVersion, $script:FileTransferCoordinatorReceiverPreAdmissionCatalogVersion, $script:FileTransferCoordinatorInitialDataSessionCatalogVersion, $script:FileTransferCoordinatorEarlyCheckpointProofCatalogVersion) -and $errors.Count -eq 0) {
         foreach ($error in @(Get-FileTransferBootstrapInitiationHistoryErrors -Boundaries @($boundaries))) { $errors.Add($error) }
     }
-    if ($catalog.Version -cin @($script:FileTransferCoordinatorBootstrapCallbackCatalogVersion, $script:FileTransferCoordinatorRepairOwnerCatalogVersion, $script:FileTransferCoordinatorActivationRetryCatalogVersion, $script:FileTransferCoordinatorReceiverPreAdmissionCatalogVersion, $script:FileTransferCoordinatorInitialDataSessionCatalogVersion) -and $errors.Count -eq 0) {
+    if ($catalog.Version -cin @($script:FileTransferCoordinatorBootstrapCallbackCatalogVersion, $script:FileTransferCoordinatorRepairOwnerCatalogVersion, $script:FileTransferCoordinatorActivationRetryCatalogVersion, $script:FileTransferCoordinatorReceiverPreAdmissionCatalogVersion, $script:FileTransferCoordinatorInitialDataSessionCatalogVersion, $script:FileTransferCoordinatorEarlyCheckpointProofCatalogVersion) -and $errors.Count -eq 0) {
         foreach ($error in @(Get-FileTransferBootstrapCallbackHistoryErrors -Boundaries @($boundaries))) { $errors.Add($error) }
     }
 
@@ -12843,6 +12890,12 @@ function Get-FileTransferCoordinatorSnapshotEvaluation {
     }
     $pendingPeerProofBindings = @(Get-FileTransferCoordinatorSnapshotPendingPeerProofBindings -AggregateEntries @($aggregateEntries) -Effects @($effects))
     $supersessionPeerProofOrigins = @{}
+    if ($catalog.Version -ceq $script:FileTransferCoordinatorEarlyCheckpointProofCatalogVersion) {
+        foreach ($failure in @(Resolve-FileTransferEarlyCheckpointProofHistory `
+                -AggregateEntries @($aggregateEntries) -Effects @($effects) -Origins $supersessionPeerProofOrigins)) {
+            $errors.Add([string]$failure)
+        }
+    }
     $validatedDisplacedTerminals = @{}
     if ($failedCheckpointYieldCandidates.Count -gt 0 -or $failedQuiescentSupersessionCandidates.Count -gt 0 -or
         $rejectedProbeRetryCycleCandidates.Count -gt 0) {

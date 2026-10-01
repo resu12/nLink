@@ -77,6 +77,27 @@ public sealed partial class SessionFileTransferService
                 state.PersistentState.FileTransferRouteTransition.BootstrapSourceHold?.Receipt is not null;
         }
         if (transport is not IFileTransferRouteTransitionBridge { SupportsFallbackBootstrapCorrelation: true } bridge) { return false; }
+        OutboundBootstrapSourceCallback[] outboundCallbacks = [];
+        if (context is OutboundTransferContext callbackContext)
+        {
+            outboundCallbacks = callbackContext.ActiveBootstrapSourceCallbacks.Values
+                .Where(callback => !IsBootstrapSourceCallbackRetiredLocked(state, callback)).ToArray();
+            // A transport pause may stale a callback before its completion is
+            // consumed. Do not create and invalidate a same-source hold for it:
+            // a later peer wake must still be able to request a fresh hold.
+            if (outboundCallbacks.Any(callback =>
+                !ReferenceEquals(callback.DataSession, callbackContext.DataSession) ||
+                callback.DataSession is not IFileTransferDataSessionGenerationProvider callbackProvider ||
+                callbackProvider.Generation != callback.Authority.ProviderGeneration ||
+                callback.Authority.TransportPaused != callbackContext.PullTransportPaused ||
+                callback.Authority.PauseInstance != (callbackContext.PullTransportPausedSinceUtc?.UtcTicks ?? 0) ||
+                !FileTransferCoordinator.IsFallbackBootstrapSourceCallbackSourceCurrent(state, callback.Authority)))
+            {
+                LogBootstrapCorrelationRejection(state.Direction, state.SessionId, state.TransferId,
+                    "bootstrap_source_hold_outbound_callback_unbound");
+                return false;
+            }
+        }
         var prepared = FileTransferCoordinator.PrepareFallbackBootstrapSourceHold(state, observation, peerWake);
         AdoptBootstrapCorrelationStateLocked(prepared.State, prepared.SnapshotEnvelope);
         if (!prepared.Accepted || prepared.Command is not { } command) { return false; }
@@ -85,7 +106,6 @@ public sealed partial class SessionFileTransferService
         bool paused;
         DateTimeOffset? pausedSince;
         OutboundPhysicalSendLease[] outboundLeases = [];
-        OutboundBootstrapSourceCallback[] outboundCallbacks = [];
         InboundBootstrapWriteOperation[] writes = [];
         InboundBootstrapFeedbackOperation[] feedback = [];
         Stream? stream = null;
@@ -97,15 +117,6 @@ public sealed partial class SessionFileTransferService
             session = outbound.DataSession; serviceGeneration = outbound.DataSessionGeneration;
             paused = outbound.PullTransportPaused; pausedSince = outbound.PullTransportPausedSinceUtc;
             outboundLeases = outbound.ActiveOutboundPhysicalSendLeases.Values.ToArray();
-            outboundCallbacks = outbound.ActiveBootstrapSourceCallbacks.Values
-                .Where(callback => !IsBootstrapSourceCallbackRetiredLocked(state, callback)).ToArray();
-            if (outboundCallbacks.Any(callback =>
-                !ReferenceEquals(callback.DataSession, session) ||
-                callback.DataSession is not IFileTransferDataSessionGenerationProvider callbackProvider ||
-                callbackProvider.Generation != callback.Authority.ProviderGeneration ||
-                callback.Authority.TransportPaused != paused || callback.Authority.PauseInstance != (pausedSince?.UtcTicks ?? 0) ||
-                !FileTransferCoordinator.IsFallbackBootstrapSourceCallbackSourceCurrent(state, callback.Authority)))
-            { return RejectCapture("bootstrap_source_hold_outbound_callback_unbound"); }
             if (outboundLeases.Any(lease => lease.PhysicalCompletionTask is null || !ReferenceEquals(lease.DataSession, session) ||
                 lease.DataSessionGeneration != serviceGeneration || lease.RuntimeOwner != state.CurrentRuntimeOwner ||
                 lease.RoutePublication != state.CurrentRoutePublicationToken || lease.TerminalGeneration != state.TerminalGeneration ||

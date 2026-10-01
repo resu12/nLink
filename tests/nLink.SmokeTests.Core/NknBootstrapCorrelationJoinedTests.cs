@@ -32,7 +32,8 @@ public sealed partial class NknAccelerationTransportTests
         => RunJoinedBootstrapCorrelationAsync(runExchange: true, stopMode, stopReason: "header_switch_off");
 
     private async Task RunJoinedBootstrapCorrelationAsync(bool runExchange, int stopMode = 0, string stopReason = "runtime_disabled",
-        JoinedFallbackFiles? files = null, RetainedRuntimeReadProbe? runtimeReads = null)
+        JoinedFallbackFiles? files = null, RetainedRuntimeReadProbe? runtimeReads = null,
+        NativeQueuedPumpProbe? queuedPump = null)
     {
         FakeNknClient.ResetNetwork();
         // The full-size file case is a correctness check, not a throughput gate.
@@ -44,7 +45,7 @@ public sealed partial class NknAccelerationTransportTests
         var logStart = GetOperationalLogLength();
         var streamOpens = 0;
         var priorBarrier = SessionFileTransferService.OutboundSparseBootstrapBarrierForTests;
-        var transferId = runtimeReads?.NativeDescriptor?.TransferId ?? "joined-bootstrap-correlation";
+        var transferId = queuedPump?.Native.Descriptor.TransferId ?? runtimeReads?.NativeDescriptor?.TransferId ?? "joined-bootstrap-correlation";
         SessionFileTransferService.OutboundSparseBootstrapBarrierForTests = (id, _, stage) =>
         {
             if (id != transferId || stage != "session_open_completion") { return Task.CompletedTask; }
@@ -73,16 +74,17 @@ public sealed partial class NknAccelerationTransportTests
                 InviteCapabilities.Chat | InviteCapabilities.FileTransfer, suppressAutomaticAccelerationNegotiation: true);
             Assert.True(((IFileTransferRouteTransitionBridge)host).SupportsFallbackBootstrapCorrelation);
             Assert.True(((IFileTransferRouteTransitionBridge)helper).SupportsFallbackBootstrapCorrelation);
-            using var sender = runtimeReads is null ? new SessionFileTransferService() : SessionFileTransferService.CreateForApp();
+            using var sender = runtimeReads is null && queuedPump is null ? new SessionFileTransferService() : SessionFileTransferService.CreateForApp();
             using var receiver = new SessionFileTransferService();
             sender.AttachTransport(host);
             receiver.AttachTransport(helper);
-            await sender.TryStartSendAsync(runtimeReads?.NativeDescriptor ?? new("joined-bootstrap.bin", runtimeReads is not null ? 268435456 : files?.ByteCount ?? 64 * 1024, transferId),
-                _ => runtimeReads is not null ? runtimeReads.OpenAsync(releaseReads.Task) : Task.FromResult<Stream>(files is not null
+            queuedPump?.Attach(sender, hostClient, helperClient, timeout.Token);
+            await sender.TryStartSendAsync(queuedPump?.Native.Descriptor ?? runtimeReads?.NativeDescriptor ?? new("joined-bootstrap.bin", runtimeReads is not null ? 268435456 : files?.ByteCount ?? 64 * 1024, transferId),
+                queuedPump?.Native.OpenReadStreamAsync ?? (_ => runtimeReads is not null ? runtimeReads.OpenAsync(releaseReads.Task) : Task.FromResult<Stream>(files is not null
                     ? files.OpenSource(releaseReads.Task)
                     : runExchange && Interlocked.Increment(ref streamOpens) > 1
                         ? new JoinedBootstrapReadGate(new byte[64 * 1024], releaseReads.Task)
-                        : new MemoryStream(new byte[64 * 1024], writable: false)), timeout.Token);
+                        : new MemoryStream(new byte[64 * 1024], writable: false))), timeout.Token);
             runtimeReads?.Bind(sender);
             await WaitUntilAsync(() => receiver.Snapshot.Inbound?.State == FileTransferTransferState.PendingDecision,
                 TimeSpan.FromSeconds(3));
@@ -105,6 +107,7 @@ public sealed partial class NknAccelerationTransportTests
                 await host.RequestAccelerationNegotiationAsync("runtime_unlock", timeout.Token);
                 await WaitFor("initial Tuna publication", () => Published(sender, outbound, FileTransferRoute.FileTunaV4) &&
                     Published(receiver, inbound, FileTransferRoute.FileTunaV4));
+                if (queuedPump is not null) { await queuedPump.WaitForTunaSendAsync(); }
                 // Only exact local reasons may capture a current source; remote/unknown observations cannot.
                 foreach (var transport in new[] { host, helper })
                 {
@@ -116,7 +119,13 @@ public sealed partial class NknAccelerationTransportTests
                     }
                     Assert.NotEmpty((Array)capture.Invoke(transport, [stopReason])!);
                 }
-                if (stopMode != 1) { await host.StopAccelerationAsync(stopReason, timeout.Token); }
+                if (queuedPump is not null)
+                {
+                    var stopping = host.StopAccelerationAsync(stopReason, timeout.Token);
+                    await queuedPump.RetireHeldCallbackAsync();
+                    await stopping;
+                }
+                else if (stopMode != 1) { await host.StopAccelerationAsync(stopReason, timeout.Token); }
                 if (stopMode != 0) { await helper.StopAccelerationAsync(stopReason, timeout.Token); }
                 if (runtimeReads?.ExpectRejection == true)
                 {
@@ -134,6 +143,7 @@ public sealed partial class NknAccelerationTransportTests
                 }
                 // Local-stop correlation uses its control pumps, not ordinary data traffic.
                 // Keep the source read held so synchronous mock send failures cannot starve peer receive.
+                if (queuedPump is not null) { await queuedPump.VerifySuccessorAsync(); }
                 await WaitFor("correlated fallback publication", () => Published(sender, outbound, FileTransferRoute.PostTunaFallbackV6) &&
                     Published(receiver, inbound, FileTransferRoute.PostTunaFallbackV6));
                 AssertJoinedBootstrapFallbackPublished(sender, outbound, receiver, inbound);
@@ -179,6 +189,7 @@ public sealed partial class NknAccelerationTransportTests
             timeout.Cancel();
             release.TrySetResult();
             releaseReads.TrySetResult();
+            queuedPump?.Dispose();
             SessionFileTransferService.OutboundSparseBootstrapBarrierForTests = priorBarrier;
             FakeNknClient.ResetNetwork();
         }

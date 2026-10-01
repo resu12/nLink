@@ -61,7 +61,7 @@ public sealed partial class SessionFileTransferV4SenderTests
             var before = CreateCoordinatorStateForTest(context);
             var leg = typeof(SessionFileTransferService).GetMethod("StartOutboundTransferLegLocked", BindingFlags.Instance | BindingFlags.NonPublic)!
                 .Invoke(service, [context, before.RouteSelection, "callback_retirement_recovery", FileTransferLegState.RecoveryActive,
-                    true, true, before.CurrentLeg!.TransportEpochId + 1, before.CurrentLeg.BridgeRecoveryGeneration, null, false, null, null]);
+                    true, true, before.CurrentLeg!.TransportEpochId + 1, before.CurrentLeg.BridgeRecoveryGeneration, null, false, null, null, null, false]);
             Assert.NotNull(leg);
             var after = CreateCoordinatorStateForTest(context);
             Assert.Equal(before.CurrentLiveRouteEpoch!.EpochId, after.CurrentLiveRouteEpoch!.EpochId);

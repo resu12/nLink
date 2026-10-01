@@ -43,7 +43,7 @@ function Test-FileTransferCoordinatorInitialDataSessionOperation {
     try {
         $payload=$Operation.initialDataSessionBinding
         $before=$Envelope.aggregate.beforeBoundary; $after=$Envelope.aggregate.afterBoundary
-        if ($Catalog.Version -cne $script:FileTransferCoordinatorInitialDataSessionCatalogVersion -or
+        if ($Catalog.Version -cnotin @($script:FileTransferCoordinatorInitialDataSessionCatalogVersion, $script:FileTransferCoordinatorEarlyCheckpointProofCatalogVersion) -or
             $Envelope.decisionKind -cne 'BindInitialFallbackDataSession' -or $Envelope.decisionStatus -cne 'Accepted' -or
             $Envelope.decisionReason -cne 'initial_fallback_data_session_bound' -or
             $Operation.family -cne 'route_runtime' -or $Operation.operationKind -cne 'InitialFallbackDataSessionBinding' -or
@@ -148,7 +148,7 @@ function Test-FileTransferCoordinatorInitialFallbackStartupAgreement {
 function Test-FileTransferCoordinatorInitialFallbackStartupInterval {
     param($Boundary, $Previous, $AggregateIndex, $InitialPublications, [string]$CatalogVersion)
 
-    if ($CatalogVersion -cne $script:FileTransferCoordinatorInitialDataSessionCatalogVersion -or
+    if ($CatalogVersion -cnotin @($script:FileTransferCoordinatorInitialDataSessionCatalogVersion, $script:FileTransferCoordinatorEarlyCheckpointProofCatalogVersion) -or
         $null -ne $Previous.LastTransition -or $null -eq $Previous.RuntimeOwner -or
         $Previous.Operation.operationGeneration -ne 1 -or
         $Previous.RouteBoundary.liveRouteEpoch -ne 0 -or
@@ -234,7 +234,7 @@ function Get-FileTransferCoordinatorInitialFallbackStartupPublications {
     param($AggregateIndex, $InitialPublications, [object[]]$Effects, [string]$CatalogVersion)
 
     $result = @{}
-    if ($CatalogVersion -cne $script:FileTransferCoordinatorInitialDataSessionCatalogVersion) { return $result }
+    if ($CatalogVersion -cnotin @($script:FileTransferCoordinatorInitialDataSessionCatalogVersion, $script:FileTransferCoordinatorEarlyCheckpointProofCatalogVersion)) { return $result }
     foreach ($streamKey in $AggregateIndex.Keys) {
         $boundaries = @($AggregateIndex[$streamKey].Boundaries.Values | ForEach-Object Boundary)
         $initial = @(foreach ($boundary in $boundaries) {

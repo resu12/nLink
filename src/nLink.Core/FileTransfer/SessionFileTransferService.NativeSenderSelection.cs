@@ -58,6 +58,12 @@ public sealed partial class SessionFileTransferService
         internal FileTransferReadStreamFactory OpenReadStreamAsync => ReferenceEquals(original, this) ? openReadStreamAsync : RejectOpen;
         private static Task<Stream> RejectOpen(CancellationToken ct) => Task.FromException<Stream>(Retired());
 
+        // Called under the service gate only to select reuse versus reopen.
+        // Native custody and coordinator currentness still gate every access.
+        internal bool IsReadBoundToPump(Stream? stream, long installGeneration) =>
+            ReferenceEquals(original, this) && stream is not null && ReferenceEquals(active, stream) &&
+            lastInstallGeneration == installGeneration;
+
         internal NativeSenderSelection(FrontierAppLifetime app, LocalCanonicalSenderSource source, FileStream anchor, string fileName)
         {
             original = this; this.app = app; this.source = source; this.anchor = anchor;

@@ -4538,6 +4538,8 @@ public sealed partial class SessionFileTransferService
             return;
         }
 
+        TryPublishInboundSparseReceiverRuntimeStartedLocked(context, disposition.RoutePublicationToken);
+
         LogLiveRouteEpochRecovered(
             FileTransferDirection.Inbound,
             context.TransferId,
