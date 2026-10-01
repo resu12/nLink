@@ -44,6 +44,24 @@ public sealed partial class SessionFileTransferService
     private bool IsInboundBootstrapFeedbackCurrentLocked(InboundTransferContext context, InboundBootstrapFeedbackOperation operation)
     {
         if (operation.WriteSource is { } source && !IsInboundBootstrapWriteSourceCurrentLocked(context, source)) { return false; }
+        return IsInboundBootstrapFeedbackSourceCurrentLocked(context, operation);
+    }
+
+    private bool IsInboundBootstrapFeedbackDrainCaptureCurrentLocked(InboundTransferContext context, InboundBootstrapFeedbackOperation operation)
+    {
+        if (operation.WriteSource is { } source && !IsInboundBootstrapWriteSourceCurrentLocked(context, source))
+        {
+            // Delivery can finish the parent write before all feedback copies settle.
+            // A retired, exactly settled parent permits drain capture only, never callback effects.
+            if (operation.Submission is null || source.Operation is not { } write || !ReferenceEquals(write.Source, source) ||
+                !write.Settled.Task.IsCompletedSuccessfully || context.ActiveBootstrapWriteOperations.ContainsKey(write.Generation) ||
+                !IsInboundBootstrapWriteSourceCurrentWithoutOperationLocked(context, source)) { return false; }
+        }
+        return IsInboundBootstrapFeedbackSourceCurrentLocked(context, operation);
+    }
+
+    private bool IsInboundBootstrapFeedbackSourceCurrentLocked(InboundTransferContext context, InboundBootstrapFeedbackOperation operation)
+    {
         if (!ReferenceEquals(inboundTransfer, context) || context.IsTerminal || context.UserPaused ||
             context.CoordinatorInstanceId != operation.CoordinatorInstanceId ||
             !ReferenceEquals(context.DataSession, operation.DataSession) || context.DataSessionGeneration != operation.ServiceGeneration ||

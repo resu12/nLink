@@ -535,7 +535,9 @@ public sealed partial class SessionFileTransferService
             var staged = inbound.PendingFallbackV6ProofBootstrapPeerFrameEvidence as FileTransferFallbackBootstrapFrameV6;
             if (!TryEnsureBootstrapSourceHoldLocked(inbound, inboundCorrelationState, inboundObservation, staged, evaluation))
             {
-                if (inbound.ReceiverSparseChunksPendingWrite.Count != 0 || inbound.PendingChunks.Count != 0 || HasUnsettledInboundBootstrapWrites(inbound))
+                // Only accepted hold capture may defer this initiation. Rejected work is diagnostic-only.
+                if (inbound.BootstrapSourceHoldExecution is { } pendingHold && IsBootstrapSourceHoldExecutionCurrentLocked(pendingHold) &&
+                    (inbound.ReceiverSparseChunksPendingWrite.Count != 0 || inbound.PendingChunks.Count != 0 || HasUnsettledInboundBootstrapWrites(inbound)))
                 { pendingWriteContext = inbound; }
                 return false;
             }

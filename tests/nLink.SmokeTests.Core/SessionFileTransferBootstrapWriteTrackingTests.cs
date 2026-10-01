@@ -296,16 +296,22 @@ public sealed partial class SessionFileTransferV4SenderTests
     private sealed class BootstrapWriteFixture : IDisposable
     {
         public SessionFileTransferService Service { get; } = new();
-        public InitialBootstrapRecordingDataSession Session { get; } = new("session_bootstrap_write_tracking", "bootstrap_write_tracking");
-        public InitialBootstrapRecordingDataSession Replacement { get; } = new("session_bootstrap_write_tracking", "bootstrap_write_tracking");
+        public InitialBootstrapRecordingDataSession Session { get; }
+        public InitialBootstrapRecordingDataSession Replacement { get; }
         public BootstrapPhaseTestBridge Bridge { get; private set; } = null!;
         public object Context { get; private set; } = null!;
         public BootstrapControlledWriteStream Stream { get; } = new();
         public BootstrapControlledWriteStream OtherStream { get; } = new();
 
-        public static async Task<BootstrapWriteFixture> CreateAsync(bool blockWrite = false)
+        private BootstrapWriteFixture(string sessionId)
         {
-            var fixture = new BootstrapWriteFixture();
+            Session = new(sessionId, "bootstrap_write_tracking");
+            Replacement = new(sessionId, "bootstrap_write_tracking");
+        }
+
+        public static async Task<BootstrapWriteFixture> CreateAsync(bool blockWrite = false, string sessionId = "session_bootstrap_write_tracking")
+        {
+            var fixture = new BootstrapWriteFixture(sessionId);
             fixture.Bridge = new(fixture.Session);
             var issuer = FileTransferBootstrapCorrelation.CreateIssuer("peer", fixture.Session.SessionId, fixture.Session.TransferId, FileTransferDirection.Outbound);
             fixture.Context = await CreateCommittedInitialInboundTunaForBootstrapTestAsync(fixture.Service, fixture.Bridge, fixture.Session,

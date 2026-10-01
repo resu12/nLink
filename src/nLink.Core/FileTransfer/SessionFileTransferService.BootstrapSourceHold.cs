@@ -1,5 +1,6 @@
 using System.Collections;
 using System.Collections.Immutable;
+using NLink.Core.Logging;
 
 namespace NLink.Core.FileTransfer;
 
@@ -77,6 +78,23 @@ public sealed partial class SessionFileTransferService
                 state.PersistentState.FileTransferRouteTransition.BootstrapSourceHold?.Receipt is not null;
         }
         if (transport is not IFileTransferRouteTransitionBridge { SupportsFallbackBootstrapCorrelation: true } bridge) { return false; }
+        InboundBootstrapWriteOperation[] writes = [];
+        InboundBootstrapFeedbackOperation[] feedback = [];
+        if (context is InboundTransferContext captureContext)
+        {
+            writes = captureContext.ActiveBootstrapWriteOperations.Values.ToArray();
+            feedback = captureContext.ActiveBootstrapFeedbackOperations.Values.ToArray();
+            var unboundWrites = writes.Count(write => !IsInboundBootstrapWriteSourceCurrentLocked(captureContext, write.Source));
+            var unboundFeedback = feedback.Count(send => !IsInboundBootstrapFeedbackDrainCaptureCurrentLocked(captureContext, send));
+            var unownedPendingWrites = captureContext.ReceiverSparseChunksPendingWrite.Count(index => !captureContext.BootstrapPendingWriteOwners.ContainsKey(index));
+            if (unboundWrites != 0 || unboundFeedback != 0 || captureContext.PendingChunks.Count != 0 || unownedPendingWrites != 0)
+            {
+                // Reject before creating a hold: stale work must not poison a later, independently valid peer wake.
+                LocalOperationalLog.Info("FileTransferService",
+                    $"event=filetransfer_bootstrap_source_hold_capture_rejected; direction=inbound; session_id={FormatProtocolLogValue(state.SessionId)}; transfer_id={FormatProtocolLogValue(state.TransferId)}; decision_reason=bootstrap_source_hold_inbound_work_unbound; active_write_count={writes.Length}; active_feedback_count={feedback.Length}; unbound_write_count={unboundWrites}; unbound_feedback_count={unboundFeedback}; pending_chunk_count={captureContext.PendingChunks.Count}; unowned_pending_write_count={unownedPendingWrites}; authority_effect=none");
+                return false;
+            }
+        }
         OutboundBootstrapSourceCallback[] outboundCallbacks = [];
         if (context is OutboundTransferContext callbackContext)
         {
@@ -106,8 +124,6 @@ public sealed partial class SessionFileTransferService
         bool paused;
         DateTimeOffset? pausedSince;
         OutboundPhysicalSendLease[] outboundLeases = [];
-        InboundBootstrapWriteOperation[] writes = [];
-        InboundBootstrapFeedbackOperation[] feedback = [];
         Stream? stream = null;
         BitArray? written = null;
         int chunkSize = 0, chunkCount = 0;
@@ -128,14 +144,8 @@ public sealed partial class SessionFileTransferService
             var inbound = (InboundTransferContext)context;
             session = inbound.DataSession; serviceGeneration = inbound.DataSessionGeneration;
             paused = inbound.PullTransportPaused; pausedSince = inbound.PullTransportPausedSinceUtc;
-            writes = inbound.ActiveBootstrapWriteOperations.Values.ToArray();
-            feedback = inbound.ActiveBootstrapFeedbackOperations.Values.ToArray();
             stream = inbound.WriteStream; written = inbound.ReceiverSparseChunksWritten;
             chunkSize = inbound.ChunkSizeBytes; chunkCount = inbound.ChunkCount; fileSize = inbound.FileSizeBytes;
-            if (writes.Any(write => !IsInboundBootstrapWriteSourceCurrentLocked(inbound, write.Source)) ||
-                feedback.Any(send => !IsInboundBootstrapFeedbackCurrentLocked(inbound, send)) || inbound.PendingChunks.Count != 0 ||
-                inbound.ReceiverSparseChunksPendingWrite.Any(index => !inbound.BootstrapPendingWriteOwners.ContainsKey(index)))
-            { return RejectCapture("bootstrap_source_hold_inbound_work_unbound"); }
         }
         if (session is not IFileTransferDataSessionGenerationProvider { Generation: > 0 } provider) { return RejectCapture("bootstrap_source_hold_session_unbound"); }
         var pauseSince = paused && pausedSince is { } existingPause ? existingPause : DateTimeOffset.UtcNow;
