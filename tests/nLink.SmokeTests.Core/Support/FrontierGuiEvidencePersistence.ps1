@@ -39,7 +39,7 @@ try {
         if($mode -ceq 'over-bound') {$capture.Writer.GetType().GetProperty('CreationPath').SetValue($capture.Writer,('x'*4097),$null)}
         if($mode -ceq 'budget') {
             $elapsed=@($work.GetType().GetFields($flags) | Where-Object {$_.Name -match '^_?elapsed$'})[0]
-            $elapsed.SetValue($work,[long]([Diagnostics.Stopwatch]::Frequency*11))
+            $elapsed.SetValue($work,[long]([Diagnostics.Stopwatch]::Frequency*16))
         }
         $evidence=$binding.TryPersistEvidence()
         if($mode -cin @('before-copy','missing-copy','active-work','collision','directory','closed-output','closed-copy','budget','over-bound')) {

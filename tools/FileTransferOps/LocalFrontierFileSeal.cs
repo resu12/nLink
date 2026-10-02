@@ -59,8 +59,15 @@ namespace NLink.Tools
                 work.Start();
                 try
                 {
+#if NLINK_TEST_NATIVE_CONTENT_ACQUISITION
+                    long sample = NLink.Tests.NativeContentParserProfileForTest.ReaderStart();
+#endif
                     if (!IsSourceVerified || buffer == null || offset < 0 || count < 0 || offset > buffer.Length - count ||
                         sealedSource.Position != sourceReadPosition) return false;
+#if NLINK_TEST_NATIVE_CONTENT_ACQUISITION
+                    NLink.Tests.NativeContentParserProfileForTest.ReaderStage(7, sample);
+                    sample = NLink.Tests.NativeContentParserProfileForTest.ReaderStart();
+#endif
                     if (count != 0)
                     {
                         int requested = (int)Math.Min(Math.Min(count, 32768), sealedLength - sourceReadPosition);
@@ -76,7 +83,15 @@ namespace NLink.Tools
                             sourceReadEnded = true;
                         }
                     }
-                    success = IsSourceVerified; return success;
+#if NLINK_TEST_NATIVE_CONTENT_ACQUISITION
+                    NLink.Tests.NativeContentParserProfileForTest.ReaderStage(8, sample);
+                    sample = NLink.Tests.NativeContentParserProfileForTest.ReaderStart();
+#endif
+                    success = IsSourceVerified;
+#if NLINK_TEST_NATIVE_CONTENT_ACQUISITION
+                    NLink.Tests.NativeContentParserProfileForTest.ReaderStage(9, sample);
+#endif
+                    return success;
                 }
                 catch { return false; }
                 finally
@@ -275,9 +290,17 @@ namespace NLink.Tools
 
         private bool SealedSourceMatches()
         {
+#if NLINK_TEST_NATIVE_CONTENT_ACQUISITION
+            long sample = NLink.Tests.NativeContentParserProfileForTest.ReaderStart();
+            bool result = sealedSource != null && sealedLength > 0 && sealedLength <= LocalFrontierFileManifest.MaximumSourceBytes &&
+                sealedSource.Length == sealedLength && Matches(sealedSource.SafeFileHandle, adopted[0].Manifest.Source, true) &&
+                Matches(sealedSource.SafeFileHandle, adopted[1].Manifest.Source, true);
+            NLink.Tests.NativeContentParserProfileForTest.ReaderStage(18, sample); return result;
+#else
             return sealedSource != null && sealedLength > 0 && sealedLength <= LocalFrontierFileManifest.MaximumSourceBytes &&
                 sealedSource.Length == sealedLength && Matches(sealedSource.SafeFileHandle, adopted[0].Manifest.Source, true) &&
                 Matches(sealedSource.SafeFileHandle, adopted[1].Manifest.Source, true);
+#endif
         }
         private static bool SameHash(byte[] a, byte[] b)
         {

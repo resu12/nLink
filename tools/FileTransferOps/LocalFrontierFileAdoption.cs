@@ -18,7 +18,7 @@ namespace NLink.Tools
 #endif
     internal sealed partial class LocalFrontierFileAdoption : IDisposable
     {
-        internal const int MaximumActiveMilliseconds = 10000;
+        internal const int MaximumActiveMilliseconds = 15000;
         private readonly LocalFrontierFileAdoption original;
         private readonly object sync = new object();
         private readonly Guid gui;
@@ -69,10 +69,18 @@ namespace NLink.Tools
 
         private bool RetainedFilesCurrent()
         {
+#if NLINK_TEST_NATIVE_CONTENT_ACQUISITION
+            long sample = NLink.Tests.NativeContentParserProfileForTest.ReaderStart();
+#endif
             foreach (var item in adopted)
                 for (int i = 0; i < item.Files.Count; i++)
                     if (!Matches(item.Files[i].SafeFileHandle, i == 0 ? item.Manifest.Source : item.Manifest.Payloads[i - 1].File, i == 0)) return false;
+#if NLINK_TEST_NATIVE_CONTENT_ACQUISITION
+            bool result = !sourceVerified || SealedSourceMatches();
+            NLink.Tests.NativeContentParserProfileForTest.ReaderStage(17, sample); return result;
+#else
             return !sourceVerified || SealedSourceMatches();
+#endif
         }
 
         // One attempt for each fixed slot; failure retires BOTH contributions.
@@ -154,8 +162,17 @@ namespace NLink.Tools
             foreach (var payload in manifest.Payloads) { yield return payload.Completion; yield return payload.Marker; }
         }
         private bool Current()
-        { return !disposed && work.ElapsedMilliseconds <= MaximumActiveMilliseconds && current() &&
-            (sealScope == null || sealScope()) && !disposed && work.ElapsedMilliseconds <= MaximumActiveMilliseconds; }
+        {
+#if NLINK_TEST_NATIVE_CONTENT_ACQUISITION
+            long sample = NLink.Tests.NativeContentParserProfileForTest.ReaderStart();
+            bool result = !disposed && NLink.Tests.NativeSemanticCopyProbeForTest.CheckBudget("adoption_entry_budget", work.ElapsedMilliseconds, MaximumActiveMilliseconds) && current() &&
+                (sealScope == null || sealScope()) && !disposed && NLink.Tests.NativeSemanticCopyProbeForTest.CheckBudget("adoption_exit_budget", work.ElapsedMilliseconds, MaximumActiveMilliseconds);
+            NLink.Tests.NativeContentParserProfileForTest.ReaderStage(19, sample); return result;
+#else
+            return !disposed && work.ElapsedMilliseconds <= MaximumActiveMilliseconds && current() &&
+                (sealScope == null || sealScope()) && !disposed && work.ElapsedMilliseconds <= MaximumActiveMilliseconds;
+#endif
+        }
         private bool Verify(FileStream file, long length, byte[] expected)
         {
             using (var hash = SHA256.Create())

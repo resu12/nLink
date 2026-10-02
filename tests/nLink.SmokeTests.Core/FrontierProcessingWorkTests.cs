@@ -51,7 +51,7 @@ public sealed partial class FrontierFileAdoptionTests
         if (fault == "cpu-budget")
         {
             // No read occurs between these calls: CPU/control time is still charged.
-            typeof(Stopwatch).GetField("_elapsed", flags)!.SetValue(work, Stopwatch.Frequency * 11);
+            typeof(Stopwatch).GetField("_elapsed", flags)!.SetValue(work, Stopwatch.Frequency * 16);
             Assert.False(owner.FinishProcessingWork(token)); Assert.False(work.IsRunning); Assert.False(owner.IsRetained); Assert.True(lifetime.IsCancellationRequested); return;
         }
         var buffer = new byte[32768];

@@ -55,7 +55,7 @@ try {
         'budget' {
             $watch=$owned.GetType().GetField('work',$flags).GetValue($owned)
             $elapsed=@($watch.GetType().GetFields($flags) | Where-Object {$_.Name -match '^_?elapsed$'})[0]
-            $elapsed.SetValue($watch,[long]([Diagnostics.Stopwatch]::Frequency*21))
+            $elapsed.SetValue($watch,[long]([Diagnostics.Stopwatch]::Frequency*181))
         }
         'record-budget' {$owned.GetType().GetField('evaluationVisits',$flags).SetValue($owned,[long][NLink.Tools.LocalPublicationInputLimits]::EvaluationVisits)}
     }

@@ -40,10 +40,30 @@ try {
         if($mode -ceq 'mutable-result') { $result.SemanticSha256='wrong'; $result.SemanticByteCount=999; $result.SemanticLineCount=999; $result.Writers=@() }
         if($mode -ceq 'budget') {
             $elapsed=@($work.GetType().GetFields($flags) | Where-Object {$_.Name -match '^_?elapsed$'})[0]
-            $elapsed.SetValue($work,[long]([Diagnostics.Stopwatch]::Frequency*11))
+            $elapsed.SetValue($work,[long]([Diagnostics.Stopwatch]::Frequency*16))
+        }
+        if($mode -ceq 'profile-valid') {
+            $elapsed=@($work.GetType().GetFields($flags) | Where-Object {$_.Name -match '^_?elapsed$'})[0]
+            $elapsed.SetValue($work,[long]([Diagnostics.Stopwatch]::Frequency*14))
+        }
+        if($mode -ceq 'profile-budget') {
+            [NLink.Tests.NativeSemanticCopyProbeForTest]::FaultAfterFirstChunkForTest=[Action]{
+                $elapsed=@($work.GetType().GetFields($flags) | Where-Object {$_.Name -match '^_?elapsed$'})[0]
+                $elapsed.SetValue($work,[long]([Diagnostics.Stopwatch]::Frequency*16))
+            }
         }
         $copy=$binding.TryCopySemanticEvidence()
-        if($mode -cin @('missing-cursor','active-work','collision','hash','lines','closed-output','budget')) {
+        if($mode.StartsWith('profile-',[StringComparison]::Ordinal)) {
+            $probe=[ordered]@{Completed=[NLink.Tests.NativeSemanticCopyProbeForTest]::Completed;
+                RejectedPredicate=[NLink.Tests.NativeSemanticCopyProbeForTest]::RejectedPredicate;
+                RejectedCumulativeMilliseconds=[NLink.Tests.NativeSemanticCopyProbeForTest]::RejectedCumulativeMilliseconds;
+                CopiedBytes=[NLink.Tests.NativeSemanticCopyProbeForTest]::CopiedBytes;ExpectedBytes=[NLink.Tests.NativeSemanticCopyProbeForTest]::ExpectedBytes;
+                CumulativeMilliseconds=$work.ElapsedMilliseconds}
+            if($mode -ceq 'profile-budget' -and ($null -ne $copy -or $probe.Completed -or $probe.RejectedPredicate -cne 'adoption_entry_budget' -or $probe.RejectedCumulativeMilliseconds -lt 16000 -or $probe.CopiedBytes -le 0)) {throw 'Forced semantic-copy budget observation differs'}
+            if($mode -ceq 'profile-valid' -and ($null -eq $copy -or -not $probe.Completed -or $null -ne $probe.RejectedPredicate -or $probe.CopiedBytes -ne $probe.ExpectedBytes -or $probe.CumulativeMilliseconds -lt 14000 -or $probe.CumulativeMilliseconds -gt 15000)) {throw 'Successful semantic-copy observation differs'}
+            [IO.File]::WriteAllText((Join-Path $Directory 'semantic-copy-control.json'),($probe | ConvertTo-Json -Compress),[Text.UTF8Encoding]::new($false))
+        }
+        if($mode -cin @('missing-cursor','active-work','collision','hash','lines','closed-output','budget','profile-budget')) {
             if($null -ne $copy -or $binding.IsCurrent) { throw ('Invalid copy accepted: '+$mode) }
             if($mode -ceq 'collision' -and [IO.File]::ReadAllText($destination) -cne 'sentinel') { throw 'Copy overwrote existing evidence' }
         } else {

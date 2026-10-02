@@ -10,13 +10,15 @@ namespace NLink.Tools
     {
         public sealed partial class FrontierWorkerInputs
         {
+            private void CheckRetainedPayload()
+            { if (!RetainedResourceCurrent) throw new IOException("frontier_source_not_current"); }
             private string ReadPayload(int index, LocalFrontierFileManifest.Payload fact)
             {
                 SafeFileHandle handle = null; FileStream file = null;
                 byte[] bytes = null;
                 try
                 {
-                    CheckSource();
+                    CheckRetainedPayload();
                     if (fact == null || fact.File.Length < 1 || fact.File.Length > LocalFrontierFileManifest.MaximumPayloadBytes ||
                         !DuplicateSourceHandle(GetCurrentProcess(), pins.Handles[10 + index], GetCurrentProcess(), out handle, 0x80000000, false, 0)) return null;
                     file = new FileStream(handle, FileAccess.Read); handle = null;
@@ -26,12 +28,12 @@ namespace NLink.Tools
                         file = null; bytes = new byte[checked((int)fact.File.Length)]; int position = 0;
                         while (position < bytes.Length)
                         {
-                            CheckSource();
+                            CheckRetainedPayload();
                             int take = Math.Min(32768, bytes.Length - position);
                             if (stream.Read(bytes, position, take) != take) return null;
                             position += take;
                         }
-                        CheckSource();
+                        CheckRetainedPayload();
                         return DecodePayload(bytes, fact.Hash);
                     }
                 }

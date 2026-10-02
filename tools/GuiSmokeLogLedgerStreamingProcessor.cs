@@ -321,6 +321,9 @@ namespace NLink.Tools
                             output.Write(buffer, 0, read); hash.TransformBlock(buffer, 0, read, buffer, 0);
                             for (int i = 0; i < read; i++) if (buffer[i] == 10) feeds++;
                             bytes += read; last = buffer[read - 1];
+#if NLINK_TEST_NATIVE_CONTENT_ACQUISITION
+                            NLink.Tests.NativeSemanticCopyProbeForTest.Progress(bytes, expected.ByteCount);
+#endif
                         }
                         if (!current() || !IsCurrent || input.ReadByte() != -1 || input.Position != expected.ByteCount) return null;
                         hash.TransformFinalBlock(new byte[0], 0, 0);
@@ -374,6 +377,7 @@ namespace NLink.Tools
         internal ReadOnlyCollection<long> CursorLineStarts { get { return cursorReader == null ? null : cursorReader.LineStarts.AsReadOnly(); } }
         internal ReadOnlyCollection<GuiSmokeLedgerPrefixWriter> InitialWriters;
         private readonly Stopwatch clock = Stopwatch.StartNew();
+        private readonly int maximumProcessingMilliseconds = 5000;
         private readonly char[] buffer = new char[32768];
         private int offset, count, originCount;
         private bool skipLf;
@@ -384,6 +388,7 @@ namespace NLink.Tools
                 throw new InvalidDataException("stream_source_not_original_start");
 #if NLINK_FRONTIER_LEDGER
             ownedSource = source as LocalGuiWriterRequest.FrontierSourceRead;
+            if (cursorMode && ownedSource != null) maximumProcessingMilliseconds = 10000;
             if (ownedSource != null) CheckBufferedWork();
 #endif
             if (cursorMode) cursorReader = new GuiSmokeLedgerLfRead(source, CheckBufferedWork, false, CheckReadBoundary);
@@ -404,16 +409,40 @@ namespace NLink.Tools
             NLink.Tests.BufferedLedgerProbe.Boundary("full");
 #endif
 #if NLINK_FRONTIER_LEDGER
-            if (ownedSource != null && !ownedSource.BufferedProcessingWorkCurrent) RejectCurrent();
+            if (ownedSource != null && !ownedSource.BufferedProcessingWorkCurrent)
+            {
+#if NLINK_TEST_NATIVE_CONTENT_ACQUISITION
+                NLink.Tests.NativeContentParserProfileForTest.Reject("native_buffered_custody", clock.ElapsedMilliseconds);
 #endif
-            if (clock.ElapsedMilliseconds > 5000 || !Source.CanRead) RejectCurrent();
+                RejectCurrent();
+            }
+#endif
+#if NLINK_TEST_NATIVE_CONTENT_ACQUISITION
+            long elapsed = clock.ElapsedMilliseconds;
+            if (elapsed > maximumProcessingMilliseconds || !Source.CanRead)
+            {
+                NLink.Tests.NativeContentParserProfileForTest.Reject(elapsed > maximumProcessingMilliseconds ? "local_clock" : "source_can_read", elapsed);
+                RejectCurrent();
+            }
+#else
+            if (clock.ElapsedMilliseconds > maximumProcessingMilliseconds || !Source.CanRead) RejectCurrent();
+#endif
         }
         private void CheckBufferedWork()
         {
 #if NLINK_FRONTIER_LEDGER
             if (ownedSource != null)
             {
-                if (clock.ElapsedMilliseconds > 5000 || !ownedSource.BufferedProcessingWorkCurrent) RejectCurrent();
+#if NLINK_TEST_NATIVE_CONTENT_ACQUISITION
+                long elapsed = clock.ElapsedMilliseconds;
+                if (elapsed > maximumProcessingMilliseconds || !ownedSource.BufferedProcessingWorkCurrent)
+                {
+                    NLink.Tests.NativeContentParserProfileForTest.Reject(elapsed > maximumProcessingMilliseconds ? "local_clock" : "native_buffered_custody", elapsed);
+                    RejectCurrent();
+                }
+#else
+                if (clock.ElapsedMilliseconds > maximumProcessingMilliseconds || !ownedSource.BufferedProcessingWorkCurrent) RejectCurrent();
+#endif
                 return;
             }
 #endif
@@ -443,7 +472,13 @@ namespace NLink.Tools
                 NLink.Tests.BufferedLedgerProbe.Boundary(name);
 #endif
                 CheckCurrent();
-                if (capture != null && !capture.IsCurrent) RejectCurrent();
+                if (capture != null && !capture.IsCurrent)
+                {
+#if NLINK_TEST_NATIVE_CONTENT_ACQUISITION
+                    NLink.Tests.NativeContentParserProfileForTest.Reject("capture_custody", clock.ElapsedMilliseconds);
+#endif
+                    RejectCurrent();
+                }
             }
 #endif
         }
@@ -505,12 +540,32 @@ namespace NLink.Tools
             {
                 while (true)
                 {
+#if NLINK_TEST_NATIVE_CONTENT_ACQUISITION
+                    long sample = NLink.Tests.NativeContentParserProfileForTest.ReaderStart();
+#endif
                     current();
+#if NLINK_TEST_NATIVE_CONTENT_ACQUISITION
+                    NLink.Tests.NativeContentParserProfileForTest.ReaderStage(0, sample);
+#endif
                     if (offset == count)
                     {
+#if NLINK_TEST_NATIVE_CONTENT_ACQUISITION
+                        sample = NLink.Tests.NativeContentParserProfileForTest.ReaderStart();
+#endif
                         if (readBoundary != null) readBoundary();
+#if NLINK_TEST_NATIVE_CONTENT_ACQUISITION
+                        NLink.Tests.NativeContentParserProfileForTest.ReaderStage(1, sample);
+                        sample = NLink.Tests.NativeContentParserProfileForTest.ReaderStart();
+#endif
                         count = source.Read(buffer, 0, buffer.Length); offset = 0;
+#if NLINK_TEST_NATIVE_CONTENT_ACQUISITION
+                        NLink.Tests.NativeContentParserProfileForTest.ReaderStage(2, sample);
+                        sample = NLink.Tests.NativeContentParserProfileForTest.ReaderStart();
+#endif
                         if (readBoundary != null) readBoundary();
+#if NLINK_TEST_NATIVE_CONTENT_ACQUISITION
+                        NLink.Tests.NativeContentParserProfileForTest.ReaderStage(1, sample);
+#endif
                         if (count == 0)
                         {
                             if (bytes.Length != 0)
@@ -521,11 +576,17 @@ namespace NLink.Tools
                             return null;
                         }
                     }
+#if NLINK_TEST_NATIVE_CONTENT_ACQUISITION
+                    sample = NLink.Tests.NativeContentParserProfileForTest.ReaderStart();
+#endif
                     int lf = Array.IndexOf(buffer, (byte)10, offset, count - offset);
                     int take = (lf < 0 ? count : lf) - offset;
                     if (bytes.Length + take > 4L * GuiSmokeLedgerStreamRead.MaximumLineCodeUnits + 3)
                         throw new InvalidDataException("stream_source_line_limit");
                     bytes.Write(buffer, offset, take); offset += take; position += take;
+#if NLINK_TEST_NATIVE_CONTENT_ACQUISITION
+                    NLink.Tests.NativeContentParserProfileForTest.ReaderStage(3, sample);
+#endif
                     if (lf < 0) continue;
                     offset++; position++;
                     return FinishLine(bytes);
@@ -534,11 +595,17 @@ namespace NLink.Tools
         }
         private string FinishLine(MemoryStream bytes)
         {
+#if NLINK_TEST_NATIVE_CONTENT_ACQUISITION
+            long sample = NLink.Tests.NativeContentParserProfileForTest.ReaderStart();
+#endif
             if (LineStarts.Count == GuiSmokeLedgerStreamRead.MaximumLines) throw new InvalidDataException("cursor_line_limit");
             string line = utf8.GetString(bytes.ToArray());
             if (lineStart == 0 && line.Length != 0 && line[0] == '\ufeff') line = line.Substring(1);
             if (line.EndsWith("\r", StringComparison.Ordinal)) line = line.Substring(0, line.Length - 1);
             if (line.Length > GuiSmokeLedgerStreamRead.MaximumLineCodeUnits) throw new InvalidDataException("stream_source_line_limit");
+#if NLINK_TEST_NATIVE_CONTENT_ACQUISITION
+            NLink.Tests.NativeContentParserProfileForTest.ReaderStage(4, sample);
+#endif
             LineStarts.Add(lineStart); lineStart = position; current(); return line;
         }
     }
@@ -986,8 +1053,14 @@ namespace NLink.Tools
             {
                 for (long index = 0; index < frozenLineCount; index++)
                 {
+#if NLINK_TEST_NATIVE_CONTENT_ACQUISITION
+                    NLink.Tests.NativeContentParserProfileForTest.BeginRow(index);
+#endif
                     if (streamRead != null && index == bookmark) streamRead.CaptureInitialWriters(writers.Values);
                     string line = reader.ReadLine();
+#if NLINK_TEST_NATIVE_CONTENT_ACQUISITION
+                    NLink.Tests.NativeContentParserProfileForTest.Stage(0);
+#endif
                     if (line == null)
                         throw new InvalidDataException("writer_evidence_source_short_read:index=" +
                             index.ToString(CultureInfo.InvariantCulture) + ";expected=" +
@@ -1002,7 +1075,13 @@ namespace NLink.Tools
                             ref retainedLineCount, ref retainedByteCount);
                     }
 
+#if NLINK_TEST_NATIVE_CONTENT_ACQUISITION
+                    NLink.Tests.NativeContentParserProfileForTest.Stage(1);
+#endif
                     ParsedLine parsed = Parse(line);
+#if NLINK_TEST_NATIVE_CONTENT_ACQUISITION
+                    NLink.Tests.NativeContentParserProfileForTest.Stage(2);
+#endif
                     string eventName = Get(parsed, "event");
                     if (writeSemantic && semanticNames.Contains(eventName))
                     {
@@ -1011,6 +1090,9 @@ namespace NLink.Tools
                             ref semanticLineCount, ref semanticByteCount);
                     }
                     string writerId = Get(parsed, "log_writer_id");
+#if NLINK_TEST_NATIVE_CONTENT_ACQUISITION
+                    NLink.Tests.NativeContentParserProfileForTest.Stage(3);
+#endif
                     if (parsed.DuplicateWriterEvidenceField)
                     {
                         foreach (string candidate in parsed.WriterIds)
@@ -1094,6 +1176,9 @@ namespace NLink.Tools
                         ref writerLineCount, ref writerByteCount);
 
                     long generation, first, last, ticks;
+#if NLINK_TEST_NATIVE_CONTENT_ACQUISITION
+                    NLink.Tests.NativeContentParserProfileForTest.Stage(4);
+#endif
                     bool numeric = TryLong(Get(parsed, "log_writer_batch_generation"), out generation) &
                         TryLong(Get(parsed, "log_writer_batch_first_sequence"), out first) &
                         TryLong(Get(parsed, "log_writer_batch_last_sequence"), out last) &
@@ -1144,6 +1229,9 @@ namespace NLink.Tools
                         }
                         list.Add(sequence);
                     }
+#if NLINK_TEST_NATIVE_CONTENT_ACQUISITION
+                    NLink.Tests.NativeContentParserProfileForTest.Stage(5);
+#endif
                 }
 
                 if (streamRead != null && bookmark == frozenLineCount) streamRead.CaptureInitialWriters(writers.Values);

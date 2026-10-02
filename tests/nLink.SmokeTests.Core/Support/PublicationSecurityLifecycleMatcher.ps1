@@ -33,25 +33,32 @@ function SWitnessBound($Witnesses) { YRequire ($Witnesses.Count -le 64) 'securit
 function SWork($Work) {
     YRequire ($null -ne $Work -and $Work.ElapsedMilliseconds -le [NLink.Tools.LocalPublicationInputLimits]::ProducerMilliseconds) 'security_span_work_limit'
 }
-function Get-RecordedSecurityContextSpans($Rows,[int[]]$SelectedPositions,$Endpoints,[Diagnostics.Stopwatch]$Work) {
+function Get-RecordedSecurityContextSpans($Rows,[int[]]$SelectedPositions,$Endpoints,[Diagnostics.Stopwatch]$Work,[switch]$ContentCoverage) {
     SWork $Work
     YRequire ($Rows.Count -gt 0 -and $Rows.Count -le 4096) 'security_span_record_limit'
-    YRequire ($SelectedPositions.Count -eq 8 -and @($SelectedPositions | Sort-Object -Unique).Count -eq 8) 'security_span_selection'
+    $selectionCount=if($ContentCoverage) {4} else {8}
+    YRequire ($SelectedPositions.Count -eq $selectionCount -and @($SelectedPositions | Sort-Object -Unique).Count -eq $selectionCount) 'security_span_selection'
     foreach($p in $SelectedPositions) { YRequire ($p -ge 0 -and $p -lt $Rows.Count) 'security_span_selection' }
     $selected=@($SelectedPositions | ForEach-Object { $Rows[$_] })
-    $sender=$selected[0].Fields['log_writer_id']; $receiver=$selected[5].Fields['log_writer_id']
+    $receiverPosition=if($ContentCoverage) {2} else {5}
+    $sender=$selected[0].Fields['log_writer_id']; $receiver=$selected[$receiverPosition].Fields['log_writer_id']
     YRequire ($sender -cne $receiver -and $Endpoints.Count -eq 2) 'security_span_writer_scope'
     $owners=@($sender,$sender,$receiver,$receiver,$sender,$receiver,$receiver,$receiver)
     $events=@('filetransfer_data_path_send_result','filetransfer_fallback_tail_yield_evidence','filetransfer_fallback_tail_yield_evidence',
         'filetransfer_fallback_tail_yield_evidence','filetransfer_fallback_tail_yield_evidence','filetransfer_data_path_receive_result',
         'filetransfer_tuna_data_path_mismatch','filetransfer_data_frame_ignored')
+    if($ContentCoverage) {
+        $owners=@($sender,$sender,$receiver,$receiver)
+        $events=@('filetransfer_data_path_send_result','filetransfer_data_path_send_result',
+            'filetransfer_data_path_receive_result','filetransfer_data_path_receive_result')
+    }
     $contexts=@{}; $uses=@{}
     for($i=0;$i -lt $selected.Count;$i++) {
         $row=$selected[$i]; $f=$row.Fields; $tuple=SContext $f; $writer=$owners[$i]
         YRequire ($f['event'] -ceq $events[$i] -and $f['log_writer_id'] -ceq $writer -and
             $f['security_context_status'] -ceq 'captured') 'security_span_selected_status'
         [void](SInteger $f 'security_sequence')
-        if($i -ge 1 -and $i -le 4) {
+        if(-not $ContentCoverage -and $i -ge 1 -and $i -le 4) {
             $role=if($i -in @(1,3)) {'send_copy'} else {'receive_dispatch'}
             YRequire ($f['yield_evidence_role'] -ceq $role -and $f['yield_evidence_status'] -ceq 'bound') 'security_span_selected_yield'
         }

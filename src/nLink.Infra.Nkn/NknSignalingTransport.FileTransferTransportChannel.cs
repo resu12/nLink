@@ -658,6 +658,7 @@ public sealed partial class NknSignalingTransport
             throw new InvalidOperationException($"File-transfer state rejected message '{messageType}': {failureReason}.");
         }
 
+        var terminalContentOwner = CaptureTerminalContentOwner(normalizedTransferId);
         var securePayload = CreateSecureFileTransferPayload(messageType, normalizedTransferId, plaintextPayload);
         var envelope = CreateEnvelope(envelopeCode, messageType, securePayload, replyTo: null);
         if (messageType == MsgType.FileTransferChunk)
@@ -669,7 +670,7 @@ public sealed partial class NknSignalingTransport
             await SendEnvelopeAsync(destination, envelope, ct).ConfigureAwait(false);
         }
 
-        if (!TryValidateAndTrackFileTransferMessage(messageType, normalizedTransferId, inbound: false, applyStateChange: true, out _))
+        if (!TryValidateAndTrackFileTransferMessage(messageType, normalizedTransferId, inbound: false, applyStateChange: true, out _, terminalContentOwner))
         {
             LocalOperationalLog.Warn(
                 "SessionSecurity",
@@ -719,6 +720,7 @@ public sealed partial class NknSignalingTransport
             throw new InvalidOperationException($"File-transfer state rejected message '{messageType}': {failureReason}.");
         }
 
+        var terminalContentOwner = CaptureTerminalContentOwner(normalizedTransferId);
         var controlPayload = CreateSecureFileTransferPayload(messageType, normalizedTransferId, plaintextPayload);
         var controlEnvelope = CreateEnvelope(envelopeCode, messageType, controlPayload, replyTo: null);
         var controlTask = SendFileTransferLifecycleCopyAsync(
@@ -759,7 +761,7 @@ public sealed partial class NknSignalingTransport
             throw controlResult.Error ?? bulkResult.Error ?? new InvalidOperationException($"File-transfer lifecycle send failed on both lanes for '{messageType}'.");
         }
 
-        if (!TryValidateAndTrackFileTransferMessage(messageType, normalizedTransferId, inbound: false, applyStateChange: true, out _))
+        if (!TryValidateAndTrackFileTransferMessage(messageType, normalizedTransferId, inbound: false, applyStateChange: true, out _, terminalContentOwner))
         {
             LocalOperationalLog.Warn(
                 "SessionSecurity",
@@ -836,6 +838,7 @@ public sealed partial class NknSignalingTransport
             throw new InvalidOperationException($"File-transfer state rejected message '{MsgType.FileTransferCancel}': {failureReason}.");
         }
 
+        var terminalContentOwner = CaptureTerminalContentOwner(normalizedTransferId);
         var controlPayload = CreateSecureFileTransferPayload(MsgType.FileTransferCancel, normalizedTransferId, plaintextPayload);
         var controlEnvelope = CreateEnvelope(envelopeCode, MsgType.FileTransferCancel, controlPayload, replyTo: null);
         Envelope? bulkEnvelope = null;
@@ -881,7 +884,7 @@ public sealed partial class NknSignalingTransport
             throw new InvalidOperationException("File-transfer cancel send failed on all peer-visible lifecycle lanes.");
         }
 
-        if (!TryValidateAndTrackFileTransferMessage(MsgType.FileTransferCancel, normalizedTransferId, inbound: false, applyStateChange: true, out _))
+        if (!TryValidateAndTrackFileTransferMessage(MsgType.FileTransferCancel, normalizedTransferId, inbound: false, applyStateChange: true, out _, terminalContentOwner))
         {
             LocalOperationalLog.Warn(
                 "SessionSecurity",
@@ -969,7 +972,8 @@ public sealed partial class NknSignalingTransport
         RuntimeUnlockPreCommitProbeSendAuthority? runtimeUnlockPreCommitProbeAuthority = null,
         RuntimeUnlockPreCommitAckSendAuthority? runtimeUnlockPreCommitAckAuthority = null,
         FileTransferDataPathSendAuthority? dataPathSendAuthority = null,
-        FileTransferDataFrame? dataFrame = null)
+        FileTransferDataFrame? dataFrame = null,
+        TransportFileTransferDataSession? originatingDataSession = null)
     {
         var normalizedTransferId = NormalizeRequiredFileTransferId(transferId);
 
@@ -987,6 +991,9 @@ public sealed partial class NknSignalingTransport
         var securePayload = CreateSecureFileTransferPayloadWithEvidence(
             messageType, normalizedTransferId, plaintextPayload, useBulkLane, out var securityEvidence);
         var publicationUse = FileTransferPublicationUseEvidence.GetSend(dataPathSendAuthority);
+        var contentEvidence = messageType == MsgType.FileTransferDataFrame
+            ? CaptureFileTransferContentEvidence(plaintextPayload, originatingDataSession,
+                dataPathSendAuthority, publicationUse, securityEvidence) : null;
         var envelope = CreateEnvelope(envelopeCode, messageType, securePayload, replyTo: null);
         var transportPayload = EnvelopeCodec.Serialize(envelope);
         ObserveOfflineFileFrame(dataFrame, transportPayload);
@@ -1184,7 +1191,8 @@ public sealed partial class NknSignalingTransport
                 CreateFileTransferDataPathEnvelopeEvidence(
                     envelope.MessageId,
                     dataFrame?.SessionId ?? dataPathSendAuthority?.SessionId,
-                    dataFrame?.TransferId ?? normalizedTransferId) with { SecurityEvidence = securityEvidence, PublicationUse = publicationUse });
+                    dataFrame?.TransferId ?? normalizedTransferId) with { SecurityEvidence = securityEvidence, PublicationUse = publicationUse },
+                contentEvidence);
         }
 
         if (messageType == MsgType.FileTransferDataFrame && !sentViaAcceleration)
@@ -2927,7 +2935,8 @@ public sealed partial class NknSignalingTransport
         string? batchProfile,
         FileTransferDataPathSendAuthority? dataPathSendAuthority,
         FileTransferDataFrame? dataFrame,
-        FileTransferDataPathEnvelopeEvidence envelopeEvidence)
+        FileTransferDataPathEnvelopeEvidence envelopeEvidence,
+        FileTransferContentEvidence? contentEvidence = null)
     {
         var explicitAuthority = dataPathSendAuthority;
         var hasExplicitAuthority = explicitAuthority is not null;
@@ -2946,6 +2955,8 @@ public sealed partial class NknSignalingTransport
             : FormatFileTransferDataPathAuthoritySuffix(hasAuthority, routeHint);
         var frameIdentitySuffix = FormatFileTransferDataPathFrameIdentitySuffix(dataFrame);
         var envelopeEvidenceSuffix = FormatFileTransferDataPathEnvelopeEvidenceSuffix(envelopeEvidence);
+        var contentEvidenceSuffix = FormatFileTransferContentEvidenceSuffix(contentEvidence,
+            transferId, normalizedFrameType, rawPayloadBytes, batchChunkCount, dataFrame, envelopeEvidence);
         var sessionIdForLog = hasExplicitAuthority
             ? explicitAuthority!.SessionId
             : hasAuthority
@@ -2953,7 +2964,7 @@ public sealed partial class NknSignalingTransport
                 : currentSessionSecurityState.SessionId?.Value ?? "(none)";
         LocalOperationalLog.Info(
             "SessionSecurity",
-            $"event=filetransfer_data_path_send_result; transfer_id={SanitizeLogToken(transferId)}; session_id={SanitizeLogToken(sessionIdForLog)}; frame_type={SanitizeLogToken(normalizedFrameType)}; lane={SanitizeLogToken(lane)}; actual_transport={actualTransportText}; delivery_transport={actualTransportText}; sent_via_acceleration={(sentViaAcceleration ? 1 : 0)}; force_regular_nkn_bulk={(forceRegularNknBulk ? 1 : 0)}; payload_bytes={payloadBytes}; raw_payload_bytes={rawPayloadBytes}; plaintext_payload_bytes={plaintextPayloadBytes}; transport_payload_bytes={transportPayloadBytes}; batch_chunk_count={batchChunkCount}; batch_profile={SanitizeLogToken(normalizedBatchProfile)}; delivery_result=sent{frameIdentitySuffix}{authoritySuffix}{envelopeEvidenceSuffix}");
+            $"event=filetransfer_data_path_send_result; transfer_id={SanitizeLogToken(transferId)}; session_id={SanitizeLogToken(sessionIdForLog)}; frame_type={SanitizeLogToken(normalizedFrameType)}; lane={SanitizeLogToken(lane)}; actual_transport={actualTransportText}; delivery_transport={actualTransportText}; sent_via_acceleration={(sentViaAcceleration ? 1 : 0)}; force_regular_nkn_bulk={(forceRegularNknBulk ? 1 : 0)}; payload_bytes={payloadBytes}; raw_payload_bytes={rawPayloadBytes}; plaintext_payload_bytes={plaintextPayloadBytes}; transport_payload_bytes={transportPayloadBytes}; batch_chunk_count={batchChunkCount}; batch_profile={SanitizeLogToken(normalizedBatchProfile)}; delivery_result=sent{frameIdentitySuffix}{authoritySuffix}{envelopeEvidenceSuffix}{contentEvidenceSuffix}");
 
         var hasFileTunaV4Authority = hasExplicitAuthority
             ? IsFileTunaV4TargetTuna(explicitAuthority!)
@@ -6431,7 +6442,8 @@ public sealed partial class NknSignalingTransport
         string transferId,
         bool inbound,
         bool applyStateChange,
-        out string failureReason)
+        out string failureReason,
+        FileTransferContentTerminalCapture? terminalContentOwner = null)
     {
         var normalizedTransferId = NormalizeRequiredFileTransferId(transferId);
 
@@ -6444,7 +6456,7 @@ public sealed partial class NknSignalingTransport
 
             if (applyStateChange)
             {
-                CommitFileTransferStateLocked(normalizedTransferId, nextState);
+                CommitFileTransferStateLocked(normalizedTransferId, nextState, terminalContentOwner);
             }
 
             return true;
@@ -6455,7 +6467,8 @@ public sealed partial class NknSignalingTransport
         FileTransferDataFrame frame,
         bool inbound,
         bool applyStateChange,
-        out string failureReason)
+        out string failureReason,
+        FileTransferContentTerminalCapture? terminalContentOwner = null)
     {
         var normalizedTransferId = NormalizeRequiredFileTransferId(frame.TransferId);
 
@@ -6468,16 +6481,18 @@ public sealed partial class NknSignalingTransport
 
             if (applyStateChange && !IsBootstrapEvidenceOnlyDataFrame(frame))
             {
-                CommitFileTransferStateLocked(normalizedTransferId, nextState);
+                CommitFileTransferStateLocked(normalizedTransferId, nextState, terminalContentOwner);
             }
 
             return true;
         }
     }
 
-    private void TrackOutboundFileTransferDataFrameLifecycle(FileTransferDataFrame frame)
+    private void TrackOutboundFileTransferDataFrameLifecycle(FileTransferDataFrame frame,
+        TransportFileTransferDataSession? originatingDataSession = null)
     {
-        if (!TryValidateAndTrackFileTransferDataFrame(frame, inbound: false, applyStateChange: true, out var failureReason))
+        if (!TryValidateAndTrackFileTransferDataFrame(frame, inbound: false, applyStateChange: true, out var failureReason,
+            originatingDataSession is null ? null : new FileTransferContentTerminalCapture(originatingDataSession)))
         {
             var level = IsBenignLateFileTransferDataFrameRejection(frame, failureReason) ? "Info" : "Warn";
             var message =
@@ -7190,10 +7205,14 @@ public sealed partial class NknSignalingTransport
         return false;
     }
 
-    private void CommitFileTransferStateLocked(string transferId, FileTransferTransportState nextState)
+    private void CommitFileTransferStateLocked(string transferId, FileTransferTransportState nextState,
+        FileTransferContentTerminalCapture? terminalContentOwner = null)
     {
         if (nextState.IsTerminal)
         {
+            var diagnosticOwner = terminalContentOwner.HasValue ? terminalContentOwner.Value.Owner
+                : fileTransferContentEvidenceSlot?.Owner;
+            if (diagnosticOwner?.TransferId == transferId) { RetireFileTransferContentEvidenceLocked(diagnosticOwner); }
             PruneExpiredFileTransferTerminalTombstonesLocked();
             fileTransferTerminalTombstones[transferId] = new FileTransferTerminalTombstone(
                 nextState.Phase,
@@ -7844,6 +7863,10 @@ public sealed partial class NknSignalingTransport
             ClearPendingFileTransferV6Handoffs($"data_session_removed_{reason}", session.SessionId);
         }
 
+        // Do not nest the route gate and security gate. Late removal of an old
+        // owner must not retire a replacement owner's diagnostic scope.
+        lock (controlSecureStateGate) { RetireFileTransferContentEvidenceLocked(session); }
+
         lock (accelerationGate)
         {
             if (initialReceiverBarriers.TryGetValue(session.TransferId, out var barrier) &&
@@ -7911,6 +7934,7 @@ public sealed partial class NknSignalingTransport
         private int queuedPriorityControlFrameCount;
         private long queuedPriorityControlBytes;
         private int disposed;
+        internal bool ContentEvidenceRetired; // Accessed only under the owner's security gate.
         private int activeReader;
         private int available = 1;
         private long chunkBatchTransportSummaryCount;
@@ -8183,7 +8207,7 @@ public sealed partial class NknSignalingTransport
             ArgumentNullException.ThrowIfNull(frame);
 
             await SendAsyncCore(frame, ct, dataPathSendAuthority: null).ConfigureAwait(false);
-            owner.TrackOutboundFileTransferDataFrameLifecycle(frame);
+            owner.TrackOutboundFileTransferDataFrameLifecycle(frame, this);
         }
 
         public async Task SendAsync(
@@ -8196,7 +8220,7 @@ public sealed partial class NknSignalingTransport
             ValidateDataPathSendAuthority(frame, authority);
 
             await SendAsyncCore(frame, ct, authority).ConfigureAwait(false);
-            owner.TrackOutboundFileTransferDataFrameLifecycle(frame);
+            owner.TrackOutboundFileTransferDataFrameLifecycle(frame, this);
         }
 
         public FileTransferPhysicalSendSubmission SubmitPhysicalSend(
@@ -8242,7 +8266,7 @@ public sealed partial class NknSignalingTransport
             try
             {
                 await SendAsyncCore(frame, ct, authority, completion).ConfigureAwait(false);
-                owner.TrackOutboundFileTransferDataFrameLifecycle(frame);
+                owner.TrackOutboundFileTransferDataFrameLifecycle(frame, this);
             }
             finally
             {
@@ -9013,7 +9037,8 @@ public sealed partial class NknSignalingTransport
                         batchProfile: batchProfile,
                         forceRegularNknBulk: batch.ForceRegularNknBulk && useBulkLane,
                         dataPathSendAuthority: dataPathSendAuthority,
-                        dataFrame: batch)
+                        dataFrame: batch,
+                        originatingDataSession: this)
                     .ConfigureAwait(false);
 
                 return new RedundantFeedbackSendResult(lane, true, null);
@@ -9183,7 +9208,8 @@ public sealed partial class NknSignalingTransport
                             requireAcceleratedBulk: true,
                             allowAccelerationDuringRegularNknFallback: true,
                             dataPathSendAuthority: dataPathSendAuthority,
-                            dataFrame: batch)
+                            dataFrame: batch,
+                            originatingDataSession: this)
                         .ConfigureAwait(false);
                     return;
                 }
@@ -9215,7 +9241,8 @@ public sealed partial class NknSignalingTransport
                     requireAcceleratedBulk: requireTunaBulk,
                     allowAccelerationDuringRegularNknFallback: requireTunaBulk,
                     dataPathSendAuthority: dataPathSendAuthority,
-                    dataFrame: batch)
+                    dataFrame: batch,
+                    originatingDataSession: this)
                 .ConfigureAwait(false);
         }
 

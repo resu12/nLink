@@ -63,7 +63,7 @@ namespace NLink.Tools
             private void VisitEvaluation()
             {
                 if (++evaluationVisits > LocalPublicationInputLimits.EvaluationVisits ||
-                    work.ElapsedMilliseconds > (evaluation == null ? LocalPublicationInputLimits.ProducerMilliseconds : LocalPublicationInputLimits.EvaluationMilliseconds))
+                    work.ElapsedMilliseconds > (evaluation == null ? LocalPublicationInputLimits.ProducerMilliseconds : RetainedMilliseconds))
                     throw new InvalidOperationException("frontier_evaluation_budget");
             }
             private int[] CaptureOrigins(string[] lines, int[] ordinals, string[] snapshot)
@@ -101,12 +101,12 @@ namespace NLink.Tools
                 private bool Original { get { return Object.ReferenceEquals(inputs.evaluation, this); } }
                 private bool Current()
                 {
-                    if (state == 4 || !inputs.ResourceCurrentWithin(LocalPublicationInputLimits.EvaluationMilliseconds) || !inputs.sourceEnded) return false;
+                    if (state == 4 || !inputs.ResourceCurrentWithin(RetainedMilliseconds) || !inputs.sourceEnded) return false;
                     for (int i = 0; i < full.Length; i++)
                     { inputs.VisitEvaluation(); if (!Object.ReferenceEquals(full[i], fullCopy[i])) return false; }
                     for (int i = 0; i < compact.Length; i++)
                     { inputs.VisitEvaluation(); if (!Object.ReferenceEquals(compact[i], compactCopy[i])) return false; }
-                    return (witnessBatch == null || witnessBatch.StateCurrent()) && inputs.ResourceCurrentWithin(LocalPublicationInputLimits.EvaluationMilliseconds);
+                    return (witnessBatch == null || witnessBatch.StateCurrent()) && inputs.ResourceCurrentWithin(RetainedMilliseconds);
                 }
                 public bool RecordFull(string[] lines, object view) { return Record(false, lines, view); }
                 public bool RecordCompact(string[] lines, object view) { return Record(true, lines, view); }

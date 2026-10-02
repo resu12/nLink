@@ -36,6 +36,17 @@ namespace NLink.Tests
                 if (field.Name.TrimStart('_') == "elapsed") { field.SetValue(work, Stopwatch.Frequency * seconds); return; }
             throw new InvalidOperationException("work_clock_field_missing");
         }
+        public static void CheckGenericCursorBudget()
+        {
+            foreach (bool cursor in new[] { false, true })
+                using (var source = new MemoryStream(System.Text.Encoding.UTF8.GetBytes("first\nsecond\n"), false))
+                using (var input = new GuiSmokeLedgerStreamRead(source, cursor))
+                {
+                    Require(input.ReadLine() == "first", "generic_first_line_missing");
+                    Expire((Stopwatch)typeof(GuiSmokeLedgerStreamRead).GetField("clock", Flags).GetValue(input), 6);
+                    Rejected(() => input.ReadLine());
+                }
+        }
         public static void Run(LocalGuiWriterRequest.FrontierFinalizerBinding binding, object rawAdoption,
             string name, string directory, string sourcePath, string mode)
         {
@@ -58,6 +69,27 @@ namespace NLink.Tests
                     copy.Dispose(); Require(source.IsCurrent, "copy_retired_original"); return;
                 }
                 fullChecks = 0;
+                if (mode == "cursor-local-budget" || mode == "cursor-cumulative-budget" || mode == "cursor-cancel-budget")
+                {
+                    using (var input = new GuiSmokeLedgerStreamRead(source, true))
+                    {
+                        Require(input.ReadLine() != null, "cursor_budget_first_line_missing");
+                        var local = (Stopwatch)typeof(GuiSmokeLedgerStreamRead).GetField("clock", Flags).GetValue(input);
+                        Expire(local, 6);
+                        Require(input.ReadLine() != null && source.IsCurrent, "owned_cursor_rejected_extended_allowance");
+                        if (mode == "cursor-local-budget") Expire(local, 11);
+                        else if (mode == "cursor-cumulative-budget")
+                        {
+                            Expire(work, 11);
+                            Require(input.ReadLine() != null && source.IsCurrent, "owned_cursor_rejected_shared_allowance");
+                            Expire(work, 16);
+                        }
+                        else lifetime.Cancel();
+                        Rejected(() => input.ReadLine());
+                        Require(!source.IsCurrent, "cursor_budget_invalid_original_not_retired");
+                    }
+                    return;
+                }
                 if (mode == "native-buffered" || mode == "cursor-buffered" || mode == "budget-buffered" ||
                     mode == "local-budget-buffered" || mode == "cancel-buffered" || mode == "generic-wrapper")
                 {
@@ -67,7 +99,7 @@ namespace NLink.Tests
                     {
                         Require(input.ReadLine() != null, "first_line_missing");
                         int before = fullChecks;
-                        if (mode == "budget-buffered") Expire(work, 11);
+                        if (mode == "budget-buffered") Expire(work, 16);
                         else if (mode == "local-budget-buffered") Expire((Stopwatch)typeof(GuiSmokeLedgerStreamRead).GetField("clock", Flags).GetValue(input), 6);
                         else if (mode == "cancel-buffered") lifetime.Cancel();
                         else closed.Set();
@@ -95,7 +127,7 @@ namespace NLink.Tests
                     if (mode == "owner-capture") closed.Set();
                     else if (mode == "cancel-duplicate") lifetime.Cancel();
                     else if (mode == "output-return") firstOutput.Dispose();
-                    else Expire(work, 11);
+                    else Expire(work, 16);
                 };
                 GuiSmokeLedgerStreamingResult result = null;
                 try

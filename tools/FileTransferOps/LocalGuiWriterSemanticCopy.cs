@@ -32,6 +32,9 @@ namespace NLink.Tools
                         // The legacy finalizer owns its separate analyzer path.
                         var path = Path.Combine(finalizer.root, "filetransfer-frontier-retained-log-slice.log");
                         GuiSmokeLedgerCapturedOutput output = null;
+#if NLINK_TEST_NATIVE_CONTENT_ACQUISITION
+                        NLink.Tests.NativeSemanticCopyProbeForTest.Begin();
+#endif
                         if (!adoption.TryRunRecoveryRead(() =>
                         {
                             output = capture.CopySemantic(path, () => adoption.IsSourceVerified);
@@ -41,7 +44,13 @@ namespace NLink.Tools
                         success = OwnsSemanticCopy(semanticCopy); return success ? semanticCopy : null;
                     }
                     catch { return null; }
-                    finally { if (!success) Dispose(); }
+                    finally
+                    {
+#if NLINK_TEST_NATIVE_CONTENT_ACQUISITION
+                        NLink.Tests.NativeSemanticCopyProbeForTest.End(success);
+#endif
+                        if (!success) Dispose();
+                    }
                 }
             }
             internal bool OwnsSemanticCopy(FrontierSemanticCopy value)

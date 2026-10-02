@@ -33,7 +33,7 @@ namespace NLink.Tests
         private static void Expire(Stopwatch work)
         {
             foreach (var field in typeof(Stopwatch).GetFields(Flags))
-                if (field.Name.TrimStart('_') == "elapsed") { field.SetValue(work, Stopwatch.Frequency * 11); return; }
+                if (field.Name.TrimStart('_') == "elapsed") { field.SetValue(work, Stopwatch.Frequency * 16); return; }
             throw new InvalidOperationException("work_clock_field_missing");
         }
         public static void Run(LocalGuiWriterRequest.FrontierFinalizerBinding binding, object adoption, string name, string mode)

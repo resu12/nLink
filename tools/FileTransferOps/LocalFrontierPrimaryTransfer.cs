@@ -87,7 +87,7 @@ namespace NLink.Tools
                 catch { CloseTransferPair(); }
             }
             private bool TransferPairCurrent
-            { get { return ResourceCurrentWithin(LocalPublicationInputLimits.EvaluationMilliseconds) && transferPair != null && transferPair.IsCurrent && transferChannel != null && transferChannel.Current && transferChannel.State == 2; } }
+            { get { return RetainedResourceCurrent && transferPair != null && transferPair.IsCurrent && transferChannel != null && transferChannel.Current && transferChannel.State == 2; } }
             private void CloseTransferPair()
             {
                 if (transferPair != null) transferPair.Dispose();

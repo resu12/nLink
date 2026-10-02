@@ -13,7 +13,7 @@ try {
     }
     if($ackCase -ceq 'gui-budget') {
         $elapsed=@($work.GetType().GetFields($flags) | Where-Object {$_.Name -match '^_?elapsed$'})[0]
-        $elapsed.SetValue($work,[long]([Diagnostics.Stopwatch]::Frequency*11))
+        $elapsed.SetValue($work,[long]([Diagnostics.Stopwatch]::Frequency*16))
     }
     $before=$work.ElapsedTicks; $confirmed=$binding.TryConfirmParentAcknowledgment()
     $rejectConfirmation=$ackCase -cin @('parent-budget','gui-budget','repeat-ack','missing-ack','header','offer','facts','reserved','state')

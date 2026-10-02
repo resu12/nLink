@@ -13,7 +13,7 @@ switch($prepareMode) {
     'budget' {
         $owned=$worker.FrontierInputs; $watch=$owned.GetType().GetField('work',$flags).GetValue($owned)
         $elapsed=@($watch.GetType().GetFields($flags) | Where-Object {$_.Name -match '^_?elapsed$'})[0]
-        $elapsed.SetValue($watch,[long]([Diagnostics.Stopwatch]::Frequency*([NLink.Tools.LocalPublicationInputLimits]::EvaluationMilliseconds+1000)/1000))
+        $elapsed.SetValue($watch,[long]([Diagnostics.Stopwatch]::Frequency*181))
     }
 }
 $preparation=$batch.TryPrepareDiagnostic()

@@ -3,6 +3,10 @@ param([string]$RepoRoot,[string]$Name,[guid]$RequestId,[string]$Directory,[strin
 $ErrorActionPreference='Stop'
 Set-StrictMode -Version Latest
 $custodyLedger=$Case.StartsWith('buffered-custody-',[StringComparison]::Ordinal) -and $Case.EndsWith('-ledger',[StringComparison]::Ordinal)
+$contentProfile=$Case -cin @('cursor-parent-files-facts-ack-commit-primary-worker-content-native-scale-profile','cursor-parent-files-facts-ack-commit-primary-worker-content-native-terminal-scale')
+$contentScale=$contentProfile -or $Case -ceq 'cursor-parent-files-facts-ack-commit-primary-worker-content-native-scale'
+$appPreparationWait=if($contentScale) {120000} else {15000}
+$appExitWait=if($contentScale) {120000} else {20000}
 if($App) {
     $events=@{}
     foreach($part in @('begin','prepared','ack','done','exit','held-ready')) { $events[$part]=[Threading.EventWaitHandle]::OpenExisting($SignalName+'.'+$part) }
@@ -53,6 +57,9 @@ if($App) {
         if($Case.StartsWith('cursor-parent-files-facts-ack-commit-primary-worker-join-scope-fault-',[StringComparison]::Ordinal)) {$variant='primary_watchdog'}
         if($Case.StartsWith('cursor-parent-files-facts-ack-commit-primary-worker-join-data-session-',[StringComparison]::Ordinal)) {$variant='primary_data_session'}
         $fixture=[NLink.SmokeTests.FrontierGenuineSubmissionFixture]::Create($lease,$variant,$Ordinal)
+        if($contentScale) {
+            [NLink.SmokeTests.NativeContentAcquisitionFixture]::WriteScaleRows($Ordinal)
+        }
         [void]$fixture.PrepareAsync().GetAwaiter().GetResult()
         if(-not $fixture.Submit()) { throw 'Seal genuine submission failed' }
         if($Case.StartsWith('markers-',[StringComparison]::Ordinal)) {
@@ -64,7 +71,7 @@ if($App) {
         }
         if($Case -ceq 'cursor-parent-files-facts-markers') {$fixture.WriteRecoveryMarkers('valid')}
         [void]$events.prepared.Set()
-        if(-not $events.ack.WaitOne(15000) -or -not $fixture.TakeAck()) { throw 'Seal app acknowledgment failed' }
+        if(-not $events.ack.WaitOne($appPreparationWait) -or -not $fixture.TakeAck()) { throw 'Seal app acknowledgment failed' }
         if($Case -cne 'missing-completion' -or $Ordinal -ne 1) {
             if(-not $lease.CompleteAttachment()) { throw 'Seal app completion failed' }
         }
@@ -96,7 +103,7 @@ if($App) {
             try { if(-not $events['held-ready'].WaitOne(15000)) { throw 'Seal pipe holder deadline' } } finally { $holder.Dispose() }
         }
         [void]$events.done.Set()
-        if(-not $events.exit.WaitOne(20000)) { throw 'Seal app exit deadline' }
+        if(-not $events.exit.WaitOne($appExitWait)) { throw 'Seal app exit deadline' }
         if($Case -ceq 'nonzero' -and $Ordinal -eq 1) { exit 7 }
     } finally {
         if($null -ne $fixture) { $fixture.Dispose() }
@@ -105,7 +112,9 @@ if($App) {
     }
     exit 0
 }
-if($Case.StartsWith('buffered-',[StringComparison]::Ordinal) -or $Case.StartsWith('markers-buffered-',[StringComparison]::Ordinal)) {
+if($contentProfile -or $Case -cin @('cursor-copy-profile-valid','cursor-copy-profile-budget')) {
+    . (Join-Path $RepoRoot 'tests/nLink.SmokeTests.Core/Support/NativeContentAcquisitionLoader.ps1') -RepoRoot $RepoRoot
+} elseif($Case.StartsWith('buffered-',[StringComparison]::Ordinal) -or $Case.StartsWith('markers-buffered-',[StringComparison]::Ordinal)) {
     . (Join-Path $RepoRoot 'tests/nLink.SmokeTests.Core/Support/BufferedLedgerLoader.ps1') -RepoRoot $RepoRoot
 } else {. (Join-Path $RepoRoot 'tools/FileTransferOps/LocalGuiWriterRequest.ps1')}
 $begin=[Threading.EventWaitHandle]::OpenExisting($Name+'.test.begin')
@@ -182,7 +191,7 @@ try {
     # First writer drains before the second starts writing the same source.
     for($i=0;$i -lt 2;$i++) {
         $entry=$apps[$i]; [void]$entry.Events.begin.Set()
-        if(-not $entry.Events.prepared.WaitOne(15000)) { throw 'Seal genuine preparation deadline' }
+        if(-not $entry.Events.prepared.WaitOne($appPreparationWait)) { throw 'Seal genuine preparation deadline' }
         if(-not $requests[$i].TryAdoptFiles()) { throw 'Seal original GUI adoption failed' }
         [void]$entry.Events.ack.Set()
         if(-not $entry.Events.done.WaitOne(15000)) { throw 'Seal original app completion deadline' }
@@ -221,7 +230,7 @@ try {
     if($Case -ceq 'budget') {
         $work=$adopter.GetType().GetField('work',$flags).GetValue($adopter)
         $elapsed=@($work.GetType().GetFields($flags) | Where-Object {$_.Name -match '^_?elapsed$'})[0]
-        $elapsed.SetValue($work,[long]([Diagnostics.Stopwatch]::Frequency*11))
+        $elapsed.SetValue($work,[long]([Diagnostics.Stopwatch]::Frequency*16))
     }
     if($Case -ceq 'copied') {
         $ownerCopy=[object].GetMethod('MemberwiseClone',$flags).Invoke($owner,$null)
@@ -282,7 +291,15 @@ try {
         if($null -eq $proof) {throw 'Buffered source seal missing'}
         $finalizer=[NLink.Tools.LocalGuiWriterRequest]::TryAttach($Name,$RequestId,'frontier-gui-run','frontier-gui-scenario',$Directory)
         $binding=$finalizer.TryTakeFrontierBinding()
-        try {[NLink.Tests.BufferedLedgerProbe]::Run($binding,$adopter,$Name,$Directory,$source,$Case.Substring(9))}
+        try {
+            [NLink.Tests.NativeContentParserProfileForTest]::Begin()
+            [NLink.Tests.BufferedLedgerProbe]::Run($binding,$adopter,$Name,$Directory,$source,$Case.Substring(9))
+            $expectedPredicate=switch($Case) {'buffered-local-budget-buffered' {'local_clock'} 'buffered-cursor-local-budget' {'local_clock'}
+                'buffered-cursor-cumulative-budget' {'native_buffered_custody'} 'buffered-cursor-cancel-budget' {'native_buffered_custody'}
+                'buffered-cancel-buffered' {'native_buffered_custody'} default {$null}}
+            if($null -ne $expectedPredicate -and [NLink.Tests.NativeContentParserProfileForTest]::RejectedPredicate -cne $expectedPredicate) {throw 'Native parser rejection predicate differs'}
+            'native-parser-rejected-predicate='+[NLink.Tests.NativeContentParserProfileForTest]::RejectedPredicate
+        }
         finally {if($null -ne $binding){$binding.Dispose()}}
         'frontier-gui-worker=buffered-ledger-verified'
         return

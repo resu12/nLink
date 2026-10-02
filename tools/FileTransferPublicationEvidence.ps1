@@ -35,7 +35,8 @@ function Resolve-FileTransferPublicationEvidence {
     foreach ($scope in @(@('session_id', $session), @('transfer_id', $transfer))) {
         $raw = F $scope[0]
         if ([string]::IsNullOrWhiteSpace($raw) -or
-            ($raw -cne '[redacted]' -and (ConvertTo-FileTransferCoordinatorEvidenceToken $raw) -cne $scope[1])) { return $null }
+            ($raw -cne '[redacted]' -and -not ($scope[0] -ceq 'session_id' -and $raw -ceq 'sess_[redacted]') -and
+                (ConvertTo-FileTransferCoordinatorEvidenceToken $raw) -cne $scope[1])) { return $null }
     }
     if ($Event.Fields.ContainsKey('continuity_coordinator_id') -and
         (F 'continuity_coordinator_id') -cne $coordinator) { return $null }

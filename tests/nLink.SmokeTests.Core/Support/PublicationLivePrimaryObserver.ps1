@@ -137,6 +137,13 @@ if($env:NLINK_PUBLICATION_SERVICE_YIELD_CONSUMER -ceq '1') {
     $probe='try { '+$probe+' } catch { [IO.File]::WriteAllText((Join-Path $ArtifactDir ''service-yield-consumer-error.txt''),[string]$_ + "`n" + $_.ScriptStackTrace) }'
     $primary=$primary.Replace($needle,$probe+"`n        "+$needle)
 }
+if($env:NLINK_PUBLICATION_CONTENT_COVERAGE_SHADOW -ceq '1') {
+    $supportRoot=$PSScriptRoot.Replace("'","''")
+    $probePath=(Join-Path $PSScriptRoot 'PublicationContentCoverageProbe.ps1').Replace("'","''")
+    $probe="& ([scriptblock]::Create([IO.File]::ReadAllText('$probePath'))) -Context `$private:localPrimaryInputs -Custody `$private:localPrimaryCustody -Evaluations `$private:localCompletedEvaluations -Index `$Index -Failure `$firstCompactProofChainFailure -Witness `$preparedLocalFailureWitness -Prepared `$private:localPublicationWitness -OriginalMismatchProof `$fileTunaV4DataPathMismatchProof -RouteState `$routeConsistencyState -ArtifactDir `$ArtifactDir -SupportRoot '$supportRoot'"
+    $probe='try { '+$probe+' } catch { [IO.File]::WriteAllText((Join-Path $ArtifactDir ''content-coverage-shadow-error.txt''),[string]$_ + "`n" + $_.ScriptStackTrace) }'
+    $primary=$primary.Replace($needle,$probe+"`n        "+$needle)
+}
 if($env:NLINK_OFFLINE_PUBLICATION_PREPARATION_PROBE -ceq '1') {
     $before='$private:localPrimaryInputs = New-FileTransferPrimaryEvaluationInputs'
     $after='$fullSnapshotEvaluation = Get-FileTransferCoordinatorSnapshotEvaluation -Lines $primaryFullSnapshotLines'

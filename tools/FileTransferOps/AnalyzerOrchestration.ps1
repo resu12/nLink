@@ -9,6 +9,70 @@ $fileTransferSoakRoot = Join-Path $fileTransferOpsRoot 'FileTransferSoak'
 . (Join-Path $fileTransferSoakRoot 'RouteProjectionCorrelationIndex.ps1')
 . (Join-Path $fileTransferSoakRoot 'FrontierGraceCorrelationIndex.ps1')
 . (Join-Path $fileTransferSoakRoot 'BaselineComparison.ps1')
+. (Join-Path $fileTransferOpsRoot 'FileTransferPublicationEvidence.ps1')
+. (Join-Path $fileTransferOpsRoot 'GuiSmokeStructuredFields.ps1')
+
+function New-FileTransferFileTunaV4CandidateAccounting {
+    param([Parameter(Mandatory = $true)]$Proof)
+
+    # Project the existing distinct decisions only; never correlate or recover.
+    $keys = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
+    $ordinal = 0
+    [object[]]$rows = @(foreach ($record in @($Proof.CandidateRecords | Sort-Object `
+            @{ Expression = { [int64]$_.Event.Sequence } },
+            @{ Expression = { [string]$_.Event.FilePath } },
+            @{ Expression = { [int]$_.Event.LineNumber } })) {
+        [void]$keys.Add([string]$record.DistinctKey)
+        $ordinal++
+        $event = $record.Event
+        $diagnostic = $record.RejectionDiagnostic
+        [pscustomobject]@{
+            ordinal = $ordinal
+            recovered = [bool]$record.Recovered
+            variant = [string]$record.Variant
+            source_path = [string]$event.FilePath
+            source_line = [int]$event.LineNumber
+            source_sequence = [int64]$event.Sequence
+            event_name = [string]$event.EventName
+            writer_id = Get-FileTransferEventField -Event $event -Name 'log_writer_id' -Default ''
+            writer_sequence = Get-FileTransferEventInt64Field -Event $event -Name 'log_writer_sequence' -Default 0
+            diagnostic_recorded = $null -ne $diagnostic
+            diagnostic_reason = if ($null -ne $diagnostic) { [string]$diagnostic.Reason } else { $null }
+            diagnostic_variant = if ($null -ne $diagnostic) { [string]$diagnostic.Variant } else { $null }
+            diagnostic_recovered = if ($null -ne $diagnostic) { [bool]$diagnostic.Recovered } else { $null }
+            rejection_chain_matched = if ($null -ne $diagnostic) { [bool]$diagnostic.RejectionChainMatched } else { $null }
+            receive_disposition = if ($null -ne $diagnostic) { [string]$diagnostic.ReceiveDisposition } else { $null }
+        }
+    })
+    $recoveredCount = @($rows | Where-Object { $_.recovered }).Count
+    $unresolvedCount = $rows.Count - $recoveredCount
+    [object[]]$reasonCounts = @($rows | Group-Object -Property recovered, diagnostic_reason, diagnostic_variant |
+        ForEach-Object {
+            [pscustomobject]@{
+                recovered = $_.Group[0].recovered
+                diagnostic_reason = $_.Group[0].diagnostic_reason
+                diagnostic_variant = $_.Group[0].diagnostic_variant
+                count = $_.Count
+            }
+        })
+    return [pscustomobject]@{
+        schema = 'file_tuna_v4_candidate_accounting_v1'
+        diagnostic_only = $true
+        reconciled = $rows.Count -eq $Proof.DistinctCount -and $keys.Count -eq $rows.Count -and
+            $recoveredCount -eq $Proof.RecoveredCount -and $unresolvedCount -eq $Proof.UnresolvedCount -and
+            $Proof.RawCandidateCount -ge $rows.Count
+        expected_raw_candidate_count = [int]$Proof.RawCandidateCount
+        expected_distinct_count = [int]$Proof.DistinctCount
+        expected_recovered_count = [int]$Proof.RecoveredCount
+        expected_unresolved_count = [int]$Proof.UnresolvedCount
+        reported_candidate_count = $rows.Count
+        unique_candidate_count = $keys.Count
+        reported_recovered_count = $recoveredCount
+        reported_unresolved_count = $unresolvedCount
+        reason_counts = $reasonCounts
+        candidates = $rows
+    }
+}
 
 function Get-FileTransferFallbackTailLocalYieldScopeKey {
     param([Parameter(Mandatory = $true)]$Event)
@@ -5165,6 +5229,13 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
                     -RouteCommitSendDrainProof $runtimeUnlockRegularV4RouteCommitSendDrainProof `
                     -DataPathIndex $fileTunaV4DataPathCorrelationIndex
             }
+    $tunaRouteCycleAcceptance = $null
+    if ($LiveRouteProofMode -ceq 'RegularActivationCycle') {
+        $tunaRouteCycleAcceptance = Get-FileTransferTunaRouteCycleAcceptance `
+            -Events $Index.AllEvents -MismatchProof $fileTunaV4DataPathMismatchProof `
+            -SnapshotEvaluation $fullSnapshotEvaluation -ComparisonEvaluation $compactSnapshotEvaluation `
+            -DataPathIndex $fileTunaV4DataPathCorrelationIndex
+    }
     $dataPathCorrelationStopwatch.Stop()
     $validFallbackTerminalProofCount =
         @($fallbackTailBridgeRecoveryPairingProof.ValidTerminalProofEvents).Count
@@ -5559,7 +5630,12 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
                 'coordinator_route_transition_draining_treated_as_transport_disconnect'
         }) | Out-Null
     }
-    if ($fileTunaV4DataPathMismatchProof.EffectiveCount -gt 0) {
+    if ($null -ne $tunaRouteCycleAcceptance) {
+        foreach ($candidateRecord in @($tunaRouteCycleAcceptance.BlockingCandidateRecords + $tunaRouteCycleAcceptance.DeliveryFailureRecords)) {
+            $compactProofChainCandidates.Add($candidateRecord) | Out-Null
+        }
+    }
+    elseif ($fileTunaV4DataPathMismatchProof.EffectiveCount -gt 0) {
         foreach ($candidateRecord in @($fileTunaV4DataPathMismatchProof.EffectiveCandidateRecords)) {
             $compactProofChainCandidates.Add([pscustomobject]@{
                 Class = 'file_tuna_data_path_mismatch'
@@ -6277,6 +6353,8 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
             $acceptanceFailureClass = 'route_runtime'
         }
         elseif ($firstCompactClass -in @(
+                'filetransfer_authenticated_stale_rejection_unproven',
+                'filetransfer_tuna_activation_delivery_unproven',
                 'filetransfer_gui_live_fallback_fault_window_missed',
                 'filetransfer_gui_live_reactivation_action_window_missed',
                 'runtime_unlock_retry_dispatch_install_grant_evidence_incomplete',
@@ -6360,7 +6438,8 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
 
     if (($snapshotEvaluation.Mode -ne 'LegacyV0' -and
          $snapshotEvaluation.ArtifactEvidenceVerdict -ne 'pass') -or
-        $snapshotParity.Verdict -ne 'pass') {
+        $snapshotParity.Verdict -ne 'pass' -or
+        ($null -ne $tunaRouteCycleAcceptance -and $tunaRouteCycleAcceptance.Report.full_compact_parity_verdict -cne 'pass')) {
         $verdict = 'FAIL_ARTIFACT_EVIDENCE'
         $gateStatus = 'fail'
         $acceptanceFailureClass = 'artifact_evidence'
@@ -6402,6 +6481,8 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
     $failureVariant = if ($null -ne $firstCompactProofChainFailure -and
         [string]$firstCompactProofChainFailure.Class -in @(
             'file_tuna_data_path_mismatch',
+            'filetransfer_authenticated_stale_rejection_unproven',
+            'filetransfer_tuna_activation_delivery_unproven',
             'runtime_unlock_responder_acked_probe_route_transition_handoff_missing',
             'fallback_tail_local_yield_missing',
             'paired_fallback_tail_yield_missing',
@@ -7166,6 +7247,19 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         'warnings:',
         ($(if ($warningKinds.Count -gt 0) { $warningKinds.ToArray() } else { '(none)' }))
     )
+    if ($null -ne $tunaRouteCycleAcceptance) {
+        $report = $tunaRouteCycleAcceptance.Report
+        $operatorLines += @(
+            ('file_tuna_route_cycle_contract={0}' -f $report.contract),
+            ('file_tuna_route_cycle_acceptance_verdict={0}' -f $report.verdict),
+            ('file_tuna_route_cycle_safe_rejected_count={0}' -f $report.safe_rejected_count),
+            ('file_tuna_route_cycle_blocking_count={0}' -f $report.blocking_count),
+            ('file_tuna_route_cycle_delivery_verdict={0}' -f $report.delivery_verdict),
+            ('file_tuna_route_cycle_full_compact_parity_verdict={0}' -f $report.full_compact_parity_verdict))
+        foreach ($activation in $report.activations) {
+            $operatorLines += ('file_tuna_activation_{0}_delivery_verdict={1}' -f $activation.activation, $activation.verdict)
+        }
+    }
     Set-Content -LiteralPath (Join-Path $ArtifactDir 'filetransfer-operator-verdict.txt') -Value $operatorLines -Encoding UTF8
 
     $routeMismatchLines = New-Object System.Collections.Generic.List[string]
@@ -8669,6 +8763,8 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         file_tuna_v4_data_path_mismatch_distinct_count = $fileTunaV4DataPathMismatchProof.DistinctCount
         file_tuna_v4_data_path_mismatch_recovered_count = $fileTunaV4DataPathMismatchProof.RecoveredCount
         file_tuna_v4_data_path_mismatch_unresolved_count = $fileTunaV4DataPathMismatchProof.UnresolvedCount
+        file_tuna_v4_candidate_accounting = New-FileTransferFileTunaV4CandidateAccounting -Proof $fileTunaV4DataPathMismatchProof
+        file_tuna_route_cycle_acceptance = $(if ($null -ne $tunaRouteCycleAcceptance) {$tunaRouteCycleAcceptance.Report} else {$null})
         runtime_unlock_retry_dispatch_authority_granted_raw_count = $runtimeUnlockRetryDispatchInstallProof.AuthorityGrantedRawCount
         runtime_unlock_retry_dispatch_decision_staged_count = $runtimeUnlockRetryDispatchInstallProof.DecisionStagedCount
         runtime_unlock_retry_dispatch_install_receipt_issued_count = $runtimeUnlockRetryDispatchInstallProof.ReceiptIssuedCount
@@ -12694,10 +12790,29 @@ function Invoke-FileTransferRetainedAnalysis {
                 -NotePropertyValue $fullRouteConsistency `
                 -Force
         }
+        $fullTunaRouteCycleAcceptance = $null
+        if ($LiveRouteProofMode -ceq 'RegularActivationCycle') {
+            $fullDataPathProof = Get-FileTransferFileTunaV4DataPathProof -Summary $summary `
+                -CoordinatorSnapshotEvaluation $fullSnapshotEvaluation -TunaRouteCycleCompactEvaluation $compactSnapshotEvaluation
+            $fullTunaRouteCycleAcceptance = $fullDataPathProof.RouteCycleAcceptance
+        }
         $artifactStopwatch.Stop()
 
         $gateStopwatch = [System.Diagnostics.Stopwatch]::StartNew()
         $gate = Get-FileTransferStabilizationGateResult -Summary $summary -LiveRouteProofMode $LiveRouteProofMode
+        if ($null -ne $fullTunaRouteCycleAcceptance -and $fullTunaRouteCycleAcceptance.Report.verdict -cne 'pass' -and $gate.GateStatus -ne 'fail') {
+            $gate.Verdict = 'INCONCLUSIVE'
+            $gate.GateStatus = 'fail'
+            $gate.HardFailures += 'required authenticated stale-ingress safety or per-activation Tuna delivery is unproven'
+            $gate.NextArtifact = 'filetransfer-retained-full-summary.json'
+            if (@($fullTunaRouteCycleAcceptance.BlockingCandidateRecords | Where-Object Class -CEQ 'file_tuna_data_path_mismatch').Count -gt 0) {
+                $gate.Verdict = 'FAIL_PROTOCOL_OR_INTEGRITY'
+            }
+        }
+        if ($null -ne $fullTunaRouteCycleAcceptance -and $fullTunaRouteCycleAcceptance.Report.full_compact_parity_verdict -cne 'pass') {
+            $gate.Verdict = 'FAIL_ARTIFACT_EVIDENCE'
+            $gate.GateStatus = 'fail'
+        }
         $gateStopwatch.Stop()
         $stageDiagnostics['gate_ms'] = $gateStopwatch.ElapsedMilliseconds
         $stageDiagnostics['total_ms'] = $totalStopwatch.ElapsedMilliseconds
@@ -12714,6 +12829,7 @@ function Invoke-FileTransferRetainedAnalysis {
                 Set-Content -LiteralPath (Join-Path $resolvedArtifactDir 'filetransfer-coordinator-snapshot-parity-summary.json') -Encoding UTF8
             $fullRetainedSummary = [ordered]@{
                 retained_analysis_mode = 'full'
+                file_tuna_route_cycle_acceptance = $(if ($null -ne $fullTunaRouteCycleAcceptance) {$fullTunaRouteCycleAcceptance.Report} else {$null})
                 verdict = [string]$gate.Verdict
                 gate_status = [string]$gate.GateStatus
                 event_count = [long]$eventsForArtifacts.Count

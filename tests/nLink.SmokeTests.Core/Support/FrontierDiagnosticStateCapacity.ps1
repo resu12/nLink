@@ -93,13 +93,13 @@ if((Reason {$meter.Action.Invoke()}) -cne 'frontier_evaluation_budget') {throw '
 $meter=Meter;$guard=Capture (Fixture) 1 $meter
 $elapsed.SetValue($meter.Watch,[long]([Diagnostics.Stopwatch]::Frequency*21))
 if((Reason {$current.Invoke($guard,$null)}) -cne 'frontier_evaluation_budget') {throw 'State currentness bypassed cumulative work'}
-foreach($milliseconds in @(21000,60000,60001)) {
+foreach($milliseconds in @(21000,60000,70000,180000,180001)) {
     $meter=Meter -Evaluation
     $elapsed=@($meter.Watch.GetType().GetFields($flags) | Where-Object {$_.Name -match '^_?elapsed$'})[0]
     $elapsed.SetValue($meter.Watch,[long]([Diagnostics.Stopwatch]::Frequency*$milliseconds/1000))
     $reason=Reason {$meter.Action.Invoke()}
-    if(($reason -ceq '') -ne ($milliseconds -le 60000) -or
-        ($milliseconds -gt 60000 -and $reason -cne 'frontier_evaluation_budget') -or
+    if(($reason -ceq '') -ne ($milliseconds -le 180000) -or
+        ($milliseconds -gt 180000 -and $reason -cne 'frontier_evaluation_budget') -or
         $meter.Watch.ElapsedMilliseconds -ne $milliseconds -or $meter.Watch.IsRunning -or
         [long]$meter.Visits.GetValue($meter.Inputs) -ne 1) {throw 'Evaluation work boundary or cumulative accounting changed'}
 }

@@ -1,4 +1,6 @@
 $mode=$Case.Substring('cursor-parent-'.Length)
+$contentProfile=$mode -cin @('files-facts-ack-commit-primary-worker-content-native-scale-profile','files-facts-ack-commit-primary-worker-content-native-terminal-scale')
+$contentScale=$contentProfile -or $mode -ceq 'files-facts-ack-commit-primary-worker-content-native-scale'
 $clone=[object].GetMethod('MemberwiseClone',$flags)
 $proof=$owner.TrySealFiles()
 if($null -eq $proof) {throw 'Parent registration seal missing'}
@@ -18,6 +20,9 @@ try {
     }
     if($mode -cne 'early') {
         $semanticEvents=[string[]]@('operational_log_writer_started','writer_only_contribution')
+        if($contentScale) {
+            $semanticEvents+=[string[]]@('content_native_boundary_shape_fixture','content_native_size_fixture')
+        }
         if($mode.StartsWith('files-facts-ack-commit-primary-worker-join-',[StringComparison]::Ordinal) -or
             $mode.StartsWith('files-facts-ack-commit-primary-parent-',[StringComparison]::Ordinal) -or
             $mode.StartsWith('files-facts-ack-commit-primary-prepare-Wrapper-start-rendezvous-',[StringComparison]::Ordinal) -or
@@ -39,8 +44,58 @@ try {
         if($mode -cin @('files-facts-ack-commit-primary-worker-witnesses-maximum','files-facts-ack-commit-primary-worker-witnesses-over-cap')) {
             $semanticEvents+=[string[]]@('frontier_witness_fixture')
         }
-        $result=$binding.TryProcessObservedLedger($semanticEvents)
-        if($null -eq $result -or $null -eq $binding.TryCopySemanticEvidence()) {throw 'Parent registration original inputs missing'}
+        if($contentProfile) {
+            $result=$binding.TryProcessObservedLedgerForContentScaleTest($semanticEvents)
+            $scaleWork=$owner.GetType().GetField('frontierWork',$flags).GetValue($owner)
+            $scaleDiagnostic=[ordered]@{Stage=$binding.ContentScaleStageForTest;Processed=($null -ne $result);
+                Error=$binding.ContentScaleErrorForTest;ParseMilliseconds=$binding.ContentScaleParseMillisecondsForTest;ParseMaximumMilliseconds=10000;
+                RejectedPredicate=[NLink.Tests.NativeContentParserProfileForTest]::RejectedPredicate;
+                RejectedLocalMilliseconds=[NLink.Tests.NativeContentParserProfileForTest]::RejectedLocalMilliseconds;
+                RowsStarted=[NLink.Tests.NativeContentParserProfileForTest]::RowsStarted;
+                StageTicks=[NLink.Tests.NativeContentParserProfileForTest]::StageTicks;
+                StageSamples=[NLink.Tests.NativeContentParserProfileForTest]::StageSamples;StopwatchFrequency=[Diagnostics.Stopwatch]::Frequency;
+                StageNames=[string[]]@('source_read','retained_write','field_parse','semantic_write','writer_identity_write','batch_chronology');
+                ReaderTicks=[NLink.Tests.NativeContentParserProfileForTest]::ReaderTicks;
+                ReaderSamples=[NLink.Tests.NativeContentParserProfileForTest]::ReaderSamples;
+                ReaderNames=[string[]]@('buffered_guard','full_boundary_guard','native_read','lf_scan_copy','utf8_finish','native_read_entry_check',
+                    'native_adoption_and_exit_check','adoption_entry_guard','sealed_file_io','adoption_exit_guard',
+                    'scope_process_events','gui_registration','app_registration','file_channels','ledger_origin','parent_registration',
+                    'final_app_exit_checks','retained_files','sealed_source_identity','adoption_scope',
+                    'channel_packet_word_read','channel_packet_word_compare','channel_packet_tail','channel_submission_identity','channel_header_and_cancel');
+                CumulativeMilliseconds=$scaleWork.ElapsedMilliseconds;MaximumMilliseconds=15000;AdapterStarted=$false}
+            $scaleJson=$scaleDiagnostic | ConvertTo-Json -Compress
+            [IO.File]::WriteAllText((Join-Path $Directory 'content-native-parser-profile.json'),$scaleJson,[Text.UTF8Encoding]::new($false))
+            'content-native-scale-registration='+$scaleJson
+        } elseif($contentScale) {
+            $observedWork=[Diagnostics.Stopwatch]::StartNew()
+            $result=$binding.TryProcessObservedLedger($semanticEvents)
+            $observedWork.Stop()
+            $scaleWork=$owner.GetType().GetField('frontierWork',$flags).GetValue($owner)
+            $scaleJson=[ordered]@{ProductionProcessingPath=$true;Processed=($null -ne $result);
+                ObservedProcessingMilliseconds=$observedWork.ElapsedMilliseconds;
+                CumulativeMilliseconds=$scaleWork.ElapsedMilliseconds;MaximumMilliseconds=15000;
+                ParseMaximumMilliseconds=10000;AdapterStarted=$false} | ConvertTo-Json -Compress
+            [IO.File]::WriteAllText((Join-Path $Directory 'content-native-registration.json'),$scaleJson,[Text.UTF8Encoding]::new($false))
+            'content-native-scale-registration='+$scaleJson
+        } else {$result=$binding.TryProcessObservedLedger($semanticEvents)}
+        if($null -eq $result) {throw 'Parent registration original inputs missing'}
+        $semanticCopy=$binding.TryCopySemanticEvidence()
+        if($contentProfile) {
+            $copyDiagnostic=[ordered]@{DiagnosticOnly=$true;Completed=[NLink.Tests.NativeSemanticCopyProbeForTest]::Completed;
+                RejectedPredicate=[NLink.Tests.NativeSemanticCopyProbeForTest]::RejectedPredicate;
+                RejectedCumulativeMilliseconds=[NLink.Tests.NativeSemanticCopyProbeForTest]::RejectedCumulativeMilliseconds;
+                RejectedCopyMilliseconds=[NLink.Tests.NativeSemanticCopyProbeForTest]::RejectedCopyMilliseconds;
+                CopyMilliseconds=[NLink.Tests.NativeSemanticCopyProbeForTest]::CopyMilliseconds;
+                CopiedBytes=[NLink.Tests.NativeSemanticCopyProbeForTest]::CopiedBytes;ExpectedBytes=[NLink.Tests.NativeSemanticCopyProbeForTest]::ExpectedBytes;
+                CumulativeMilliseconds=$scaleWork.ElapsedMilliseconds;MaximumMilliseconds=15000;CopyReturned=($null -ne $semanticCopy);AdapterStarted=$false}
+            [IO.File]::WriteAllText((Join-Path $Directory 'semantic-copy-profile.json'),($copyDiagnostic | ConvertTo-Json -Compress),[Text.UTF8Encoding]::new($false))
+        } elseif($contentScale) {
+            $copyDiagnostic=[ordered]@{DiagnosticOnly=$true;CopyReturned=($null -ne $semanticCopy);
+                CopiedBytes=$(if($null -ne $semanticCopy) {$semanticCopy.Output.ByteCount} else {0});
+                CumulativeMilliseconds=$scaleWork.ElapsedMilliseconds;MaximumMilliseconds=15000;AdapterStarted=$false}
+            [IO.File]::WriteAllText((Join-Path $Directory 'content-native-semantic-copy.json'),($copyDiagnostic | ConvertTo-Json -Compress),[Text.UTF8Encoding]::new($false))
+        }
+        if($null -eq $semanticCopy) {throw 'Parent registration original semantic copy missing'}
         if($mode -cne 'before-persistence') {
             $evidence=$binding.TryPersistEvidence()
             if($null -eq $evidence) {throw 'Parent registration persistence missing'}
@@ -53,7 +108,7 @@ try {
     $work=$owner.GetType().GetField('frontierWork',$flags).GetValue($owner); $elapsedBefore=$work.ElapsedTicks
     if($mode -ceq 'budget') {
         $elapsed=@($work.GetType().GetFields($flags) | Where-Object {$_.Name -match '^_?elapsed$'})[0]
-        $elapsed.SetValue($work,[long]([Diagnostics.Stopwatch]::Frequency*11))
+        $elapsed.SetValue($work,[long]([Diagnostics.Stopwatch]::Frequency*16))
     }
     $handoff=$binding.TryAttachParentHandoff()
     $rejected=$mode -cin @('unbound','relay','missing','early','before-persistence','request-id','parent-process','gui-process','parent-incarnation','gui-incarnation','digest','reserved','nonce','version','state','budget')

@@ -13,7 +13,7 @@ try {
     if($factCase -ceq 'mutable-result') {$result.Writers=@(); $result.SourceLineVisitCount=99999; $result.RetainedSha256='foreign'; $result.DeferredBatches=@()}
     if($factCase -ceq 'gui-budget') {
         $elapsed=@($work.GetType().GetFields($flags) | Where-Object {$_.Name -match '^_?elapsed$'})[0]
-        $elapsed.SetValue($work,[long]([Diagnostics.Stopwatch]::Frequency*11))
+        $elapsed.SetValue($work,[long]([Diagnostics.Stopwatch]::Frequency*16))
     }
     $before=$work.ElapsedTicks; $published=$binding.TryPublishParentFacts()
     if(-not $published -and $factCase -cin @('valid','markers')) {

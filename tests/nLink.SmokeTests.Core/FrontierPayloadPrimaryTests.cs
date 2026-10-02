@@ -121,7 +121,7 @@ public sealed class FrontierPayloadPrimaryTests : FileTransferOpsScriptsTestBase
     }
 
     [Fact]
-    public async Task PairCurrentness_UsesEvaluationAllowanceWithoutExtendingProducerAttachment()
+    public async Task PairCurrentness_UsesRetainedAllowanceWithoutExtendingProducerAttachment()
     {
         var source = await File.ReadAllTextAsync(Path.Combine(FindRepoRoot(), "tools/FileTransferOps/LocalFrontierPrimaryTransfer.cs"));
         var start = source.IndexOf("private void AttachTransferPair", StringComparison.Ordinal);
@@ -129,8 +129,8 @@ public sealed class FrontierPayloadPrimaryTests : FileTransferOpsScriptsTestBase
         var end = source.IndexOf("private void CloseTransferPair", guard, StringComparison.Ordinal);
         Assert.Contains("!ResourceCurrent || !transferChannel.MarkPulled()", source[start..guard]);
         Assert.DoesNotContain("ResourceCurrentWithin", source[start..guard]);
-        Assert.Contains("ResourceCurrentWithin(LocalPublicationInputLimits.EvaluationMilliseconds) && transferPair != null && transferPair.IsCurrent && transferChannel != null && transferChannel.Current && transferChannel.State == 2", source[guard..end]);
-        Assert.Equal(1, source.Split("ResourceCurrentWithin(LocalPublicationInputLimits.EvaluationMilliseconds)").Length - 1);
+        Assert.Contains("RetainedResourceCurrent && transferPair != null && transferPair.IsCurrent && transferChannel != null && transferChannel.Current && transferChannel.State == 2", source[guard..end]);
+        Assert.Equal(1, source.Split("RetainedResourceCurrent").Length - 1);
     }
 
     [Fact]

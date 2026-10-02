@@ -78,14 +78,22 @@ namespace NLink.Tools
             internal FrontierWorkerInputs(Worker owner, LocalFrontierPrimaryScope scope, Stopwatch work) { this.owner = owner; this.scope = scope; this.work = work; }
             private bool ResourceCurrent
             { get { return ResourceCurrentWithin(LocalPublicationInputLimits.ProducerMilliseconds); } }
-            // Evaluation may use its larger cumulative allowance; source APIs
-            // keep the producer limit and every original resource check.
+            private const int RetainedMilliseconds = 180000;
+            private int RetainedMaximumMilliseconds
+            { get { return evaluation != null && sourceEnded ? RetainedMilliseconds : LocalPublicationInputLimits.ProducerMilliseconds; } }
+            // Registration selects a time allowance, never resource authority.
+            private bool RetainedResourceCurrent
+            { get { return ResourceCurrentWithin(RetainedMaximumMilliseconds); } }
             private bool ResourceCurrentWithin(int maximumMilliseconds)
             {
 #if NLINK_TEST_ATTEMPT_DISPATCH
                 return PrimarySourceCheckForTest("resource:closed", !closed) && PrimarySourceBudgetForTest("resource:budget", work.ElapsedMilliseconds, maximumMilliseconds) &&
                     PrimarySourceCheckForTest("resource:base", PrimaryMeasuredCurrentForTest(0)) && PrimarySourceCheckForTest("resource:scope", PrimaryMeasuredCurrentForTest(1)) &&
                     PrimarySourceCheckForTest("resource:files", PrimaryMeasuredCurrentForTest(2)) && PrimarySourceCheckForTest("resource:pins", PrimaryMeasuredCurrentForTest(3));
+#elif NLINK_TEST_NATIVE_SELECTION_COMPONENT_PROFILE
+                return !closed && work.ElapsedMilliseconds <= maximumMilliseconds &&
+                    ContentSelectionComponentCurrentForTest(0) && ContentSelectionComponentCurrentForTest(1) &&
+                    ContentSelectionComponentCurrentForTest(2) && ContentSelectionComponentCurrentForTest(3);
 #else
                 return !closed && work.ElapsedMilliseconds <= maximumMilliseconds &&
                     owner.FrontierBaseCurrent && scope.IsCurrent && (files == null || files.IsCurrent) && (pins == null || pins.IsCurrent);
@@ -139,7 +147,7 @@ namespace NLink.Tools
                     lock (owner.frontierWorkerSync)
                     {
                         if (!Object.ReferenceEquals(owner.frontierWorkerInputs, this)) return false;
-                        lock (sync) { if (attached && ResourceCurrent) return true; Close(); return false; }
+                        lock (sync) { if (attached && RetainedResourceCurrent) return true; Close(); return false; }
                     }
                 }
             }

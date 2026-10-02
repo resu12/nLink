@@ -56,7 +56,7 @@ try {
     if(($null -eq $custody) -ne $initialReject) {throw ('Evaluation admission mismatch: '+$mode)}
     if($mode -ceq 'producer-budget' -and $null -ne $owned.GetType().GetField('evaluation',$flags).GetValue($owned)) {throw 'Expired producer acquired evaluation time'}
     if($null -ne $custody) {
-        if($mode -cin @('evaluation-extended','evaluation-replay')) {Set-EvaluationWork 21000}
+        if($mode -cin @('evaluation-extended','evaluation-replay')) {Set-EvaluationWork 70000}
         # Caller-owned ordinal arrays are not retained as authority.
         $fullOrdinals[0]=999; if($compactOrdinals.Length) {$compactOrdinals[0]=999}
         if($mode -cin @('valid','evaluation-extended')) {
@@ -76,7 +76,7 @@ try {
             'budget' {
                 $watch=$owned.GetType().GetField('work',$flags).GetValue($owned)
                 $elapsed=@($watch.GetType().GetFields($flags) | Where-Object {$_.Name -match '^_?elapsed$'})[0]
-                $elapsed.SetValue($watch,[long]([Diagnostics.Stopwatch]::Frequency*([NLink.Tools.LocalPublicationInputLimits]::EvaluationMilliseconds+1000)/1000))
+                $elapsed.SetValue($watch,[long]([Diagnostics.Stopwatch]::Frequency*181))
             }
             'record-budget' {$owned.GetType().GetField('evaluationVisits',$flags).SetValue($owned,[long][NLink.Tools.LocalPublicationInputLimits]::EvaluationVisits)}
         }
@@ -130,12 +130,12 @@ try {
                         'source-close' {$reader.Dispose()}
                         'custody-dispose' {$custody.Dispose()}
                         'evaluation-source-origin' {
-                            Set-EvaluationWork 21000
-                            if($reader.GetFrontierPhysicalOrigin(1,$full[0]) -ne 0) {throw 'Raw origin acquired evaluation allowance'}
+                            Set-EvaluationWork 70000
+                            if($reader.GetFrontierPhysicalOrigin(1,$full[0]) -ne $expectedOrigins[0]) {throw 'Retained origin lost original mapping'}
                         }
                         'evaluation-source-complete' {
-                            Set-EvaluationWork 21000
-                            if($reader.InputReadComplete) {throw 'Source completion acquired evaluation allowance'}
+                            Set-EvaluationWork 70000
+                            if(-not $reader.InputReadComplete) {throw 'Retained source completion lost custody'}
                         }
                     }
                     if(($fullView | ConvertTo-Json -Depth 60 -Compress) -cne $beforeFull -or
@@ -146,19 +146,19 @@ try {
     }
     [void]$signals.attached.Set()
     if(-not $signals.release.WaitOne(30000)) {throw 'Evaluation review deadline'}
-    $positive=$mode -cin @('valid','actual-evaluations','evaluation-extended')
+    $positive=$mode -cin @('valid','actual-evaluations','evaluation-extended','evaluation-source-origin','evaluation-source-complete')
     if($null -ne $custody -and $custody.Owns($pair,$context,$full,$compact,$fullView,$compactView) -ne $positive) {throw 'Final pair ownership mismatch'}
     if($mode -like 'evaluation-*' -or $mode -ceq 'producer-budget') {
         $watch=$owned.GetType().GetField('work',$flags).GetValue($owned)
         if($watch.ElapsedMilliseconds -lt 21000 -or $watch.IsRunning) {throw 'Phase/rejection reset the original clock'}
     }
     if($mode -ceq 'evaluation-extended') {
-        Set-EvaluationWork 61000
+        Set-EvaluationWork 181000
         $beforeExpired=$owned.GetType().GetField('evaluationVisits',$flags).GetValue($owned)
         if($custody.Owns($pair,$context,$full,$compact,$fullView,$compactView) -or
             $custody.Owns($pair,$context,$full,$compact,$fullView,$compactView) -or
             $null -ne $worker.TryBeginFrontierPrimary($reader,$context,$full,([int[]]@(1,2,3)),$compact,([int[]]@(2,3)))) {throw 'Expired evaluation reopened'}
-        if($watch.ElapsedMilliseconds -lt 61000 -or $watch.IsRunning -or
+        if($watch.ElapsedMilliseconds -lt 181000 -or $watch.IsRunning -or
             $owned.GetType().GetField('evaluationVisits',$flags).GetValue($owned) -ne $beforeExpired) {throw 'Expired calls changed clock or visits'}
         $positive=$false
     }

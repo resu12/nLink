@@ -88,6 +88,9 @@ namespace NLink.Tools
             {
                 try
                 {
+#if NLINK_TEST_NATIVE_CONTENT_ACQUISITION
+                    long sample = NLink.Tests.NativeContentParserProfileForTest.ReaderStart();
+#endif
                     if (Volatile.Read(ref disposed) != 0 || cancelled.WaitOne(0)) return false;
                     // Fresh bounded snapshots only: retain every comparison,
                     // without acquiring the mapped view separately per byte.
@@ -102,6 +105,9 @@ namespace NLink.Tools
                     var reserved = new byte[HeaderBytes - 160];
                     if (View.ReadArray(160, reserved, 0, reserved.Length) != reserved.Length) return false;
                     for (int i = 0; i < reserved.Length; i++) if (reserved[i] != 0) return false;
+#if NLINK_TEST_NATIVE_CONTENT_ACQUISITION
+                    NLink.Tests.NativeContentParserProfileForTest.ReaderStage(24, sample);
+#endif
                     return body == null || MatchesSubmission();
                 }
                 catch { return false; }
@@ -133,19 +139,46 @@ namespace NLink.Tools
         }
         private bool MatchesSubmission()
         {
+#if NLINK_TEST_NATIVE_CONTENT_ACQUISITION
+            long sample = NLink.Tests.NativeContentParserProfileForTest.ReaderStart();
+#endif
             if (View.ReadInt32(88) != body.Length || ReadId(128) != submission) return false;
+#if NLINK_TEST_NATIVE_CONTENT_ACQUISITION
+            NLink.Tests.NativeContentParserProfileForTest.ReaderStage(23, sample);
+#endif
             if (!MatchesBytes(96, digest) || !MatchesBytes(HeaderBytes, body)) return false;
+#if NLINK_TEST_NATIVE_CONTENT_ACQUISITION
+            sample = NLink.Tests.NativeContentParserProfileForTest.ReaderStart();
+            int state = State;
+            bool result = state >= Submitted && (state < Adopted ? ReadId(144) == Guid.Empty : ReadId(144) == submission);
+            NLink.Tests.NativeContentParserProfileForTest.ReaderStage(23, sample); return result;
+#else
             int state = State;
             return state >= Submitted && (state < Adopted ? ReadId(144) == Guid.Empty : ReadId(144) == submission);
+#endif
         }
         private bool MatchesBytes(int offset, byte[] expected)
         {
+#if NLINK_TEST_NATIVE_CONTENT_ACQUISITION
+            long sample = NLink.Tests.NativeContentParserProfileForTest.ReaderStart();
+#endif
             var actual = new long[expected.Length / 8];
             if (View.ReadArray(offset, actual, 0, actual.Length) != actual.Length) return false;
+#if NLINK_TEST_NATIVE_CONTENT_ACQUISITION
+            NLink.Tests.NativeContentParserProfileForTest.ReaderStage(20, sample);
+            sample = NLink.Tests.NativeContentParserProfileForTest.ReaderStart();
+#endif
             // Compare every byte against the retained packet on every call.
             // Group complete words without caching approval or skipping tails.
             for (int i = 0; i < actual.Length; i++) if (actual[i] != BitConverter.ToInt64(expected, i * 8)) return false;
+#if NLINK_TEST_NATIVE_CONTENT_ACQUISITION
+            NLink.Tests.NativeContentParserProfileForTest.ReaderStage(21, sample);
+            sample = NLink.Tests.NativeContentParserProfileForTest.ReaderStart();
+#endif
             for (int i = actual.Length * 8; i < expected.Length; i++) if (View.ReadByte(offset + i) != expected[i]) return false;
+#if NLINK_TEST_NATIVE_CONTENT_ACQUISITION
+            NLink.Tests.NativeContentParserProfileForTest.ReaderStage(22, sample);
+#endif
             return true;
         }
         // The original callers signal peers only after releasing the mutex.

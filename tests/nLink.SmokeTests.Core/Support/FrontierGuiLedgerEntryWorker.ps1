@@ -21,6 +21,7 @@ function Reset-ScenarioContext {param($Context) if($Case -ceq 'cleanup-failure')
 $ctx=[pscustomobject]@{}
 $script:GuiSmokeAppLogLedger=New-GuiSmokeLogLedgerState
 $private:guiFrontierOwner=$null; $private:guiFrontierOrigin=$null; $private:savedOwner=$null; $private:savedOrigin=$null
+$private:guiCanonicalAttempt=$null
 $flags=[Reflection.BindingFlags]'Instance,NonPublic'
 $originalRequestId=$env:NLINK_GUI_WRITER_REQUEST_ID
 $path=Join-Path $Directory 'live-operational-log/nlink.log'
@@ -85,7 +86,7 @@ try {
     if($Case -ceq 'budget') {
         $watch=$guiFrontierOwner.GetType().GetField('frontierWork',$flags).GetValue($guiFrontierOwner)
         $elapsed=@($watch.GetType().GetFields($flags) | Where-Object {$_.Name -match '^_?elapsed$'})[0]
-        $elapsed.SetValue($watch,[long]([Diagnostics.Stopwatch]::Frequency*11))
+        $elapsed.SetValue($watch,[long]([Diagnostics.Stopwatch]::Frequency*16))
     }
     if($Case -ceq 'wrong-path') {
         $created=$true
@@ -142,7 +143,7 @@ try {
 } finally {
     try {Invoke-Expression $cleanup} catch {$cleanupFailure=$_.Exception.Message}
 }
-if($cleanupFailure -cne $(if($Case -ceq 'cleanup-failure') {'original cleanup failure'} else {''})) {throw 'Original cleanup failure changed'}
+if($cleanupFailure -cne $(if($Case -ceq 'cleanup-failure') {'original cleanup failure'} else {''})) {throw "Original cleanup failure changed: $cleanupFailure"}
 if(($null -ne $savedOwner -and $savedOwner.IsCurrent) -or ($null -ne $savedOrigin -and $savedOrigin.IsCurrent)) {throw 'GUI cleanup leaked native owner'}
 if([IO.File]::Exists($path)) {[IO.File]::Move($path,$path+'.released')}
 [Console]::Out.WriteLine('ordinary ledger entry stdout'); [Console]::Error.Write('ordinary ledger entry stderr')

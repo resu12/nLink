@@ -187,7 +187,7 @@ namespace NLink.Tools
                 lock (sync)
                 {
                     if (!OriginalSource(candidate)) return false;
-                    if (!ResourceCurrent) { Close(); return false; }
+                    if (!RetainedResourceCurrent) { Close(); return false; }
                     return sourceEnded;
                 }
             }
@@ -205,7 +205,7 @@ namespace NLink.Tools
                     work.Start();
                     try
                     {
-                        if (!ResourceCurrent) { Close(); return 0; }
+                        if (!RetainedResourceCurrent) { Close(); return 0; }
 #if NLINK_TEST_ATTEMPT_DISPATCH
                         int originForTest = sourceEnded && ordinal > 0 && ordinal <= sourceLines.Count &&
                             Object.ReferenceEquals(sourceLines[ordinal - 1], line) ? facts.SemanticOrigin(ordinal - 1) : 0;

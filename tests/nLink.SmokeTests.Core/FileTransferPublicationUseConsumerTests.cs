@@ -131,6 +131,28 @@ public sealed partial class FileTransferPublicationUseConsumerTests : FileTransf
         => await RunGeneratedConsumerAsync("PublicationTunaPayloadIntegrationGenerated", "tuna-payload-integration=", "publication-tuna-payload-integration-20260915",
             twoWriterFixture: true, serviceIngressFixture: true, tunaPayloadMode: mode);
 
+    [Theory]
+    [InlineData("rebatch_same")]
+    [InlineData("rebatch_changed")]
+    [Trait("FileTransferAnalyzerSuite", "PublicationTunaPayloadIntegration")]
+    public async Task PublicationTunaPayloadIntegration_RebatchingRequiresContentEquality(string mode)
+        => await RunGeneratedConsumerAsync("PublicationTunaPayloadIntegrationGenerated", "tuna-payload-integration=", "publication-tuna-rebatching-20261001",
+            twoWriterFixture: true, serviceIngressFixture: true, tunaPayloadMode: mode);
+
+    [Theory]
+    [InlineData("rebatch_same")]
+    [InlineData("rebatch_changed")]
+    [Trait("FileTransferAnalyzerSuite", "PublicationContentCoverage")]
+    public async Task PublicationContentCoverage_SeparateShadowRequiresBoundContentEquality(string mode)
+        => await RunGeneratedConsumerAsync("PublicationContentCoverageGenerated", "content-coverage=", "publication-content-coverage-20261001",
+            twoWriterFixture: true, serviceIngressFixture: true, tunaPayloadMode: mode);
+
+    [Fact]
+    [Trait("FileTransferAnalyzerSuite", "PublicationContentCoverage")]
+    public async Task PublicationContentCoverage_ContainingBatchMiddleSlotUsesExactWireContent()
+        => await RunGeneratedConsumerAsync("PublicationContentCoverageGenerated", "content-coverage=", "publication-content-coverage-20261001",
+            twoWriterFixture: true, serviceIngressFixture: true, tunaPayloadMode: "rebatch_middle");
+
     [Fact]
     [Trait("FileTransferAnalyzerSuite", "PublicationPeerLineagePrototype")]
     public async Task PublicationPeerLineagePrototype_ExactCandidateLinksDoNotEstablishAuthenticatedLineage()

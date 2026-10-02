@@ -34,7 +34,7 @@ namespace NLink.Tools
 #if NLINK_TEST_ATTEMPT_DISPATCH
                         ProbeOriginBatchForTest("entry", -1);
 #endif
-                        if (!ResourceCurrent) { Close(); return null; }
+                        if (!RetainedResourceCurrent) { Close(); return null; }
                         if (!sourceEnded || ordinals == null || lines == null || ordinals.Length < 1 ||
                             ordinals.Length > 64 || lines.Length != ordinals.Length) return null;
                         var result = new int[ordinals.Length];
@@ -55,7 +55,7 @@ namespace NLink.Tools
 #if NLINK_TEST_ATTEMPT_DISPATCH
                         ProbeOriginBatchForTest("commit", -1);
 #endif
-                        if (!ResourceCurrent) { Close(); return null; }
+                        if (!RetainedResourceCurrent) { Close(); return null; }
 #if NLINK_TEST_ATTEMPT_DISPATCH
                         ProbeOriginBatchForTest("verified", -1);
 #endif
@@ -76,7 +76,7 @@ namespace NLink.Tools
             // Abort-only checks. Only the full entry/exit checks can admit a batch.
             private bool CanContinueOriginBatch()
             {
-                return !closed && work.ElapsedMilliseconds <= LocalPublicationInputLimits.ProducerMilliseconds &&
+                return !closed && work.ElapsedMilliseconds <= RetainedMaximumMilliseconds &&
                     owner.FrontierBaseCurrent && scope.IsCurrent && !files.Cancelled.WaitOne(0) && !files.Facts.Cancelled.WaitOne(0);
             }
         }

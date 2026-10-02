@@ -13,7 +13,7 @@ public sealed partial class FrontierFileAdoptionTests : FileTransferOpsScriptsTe
     [Fact]
     public void Adoption_ApprovedGuiBudgetKeepsOriginalClockAndAccumulatedWork()
     {
-        Assert.Equal(10000, LocalFrontierFileAdoption.MaximumActiveMilliseconds);
+        Assert.Equal(15000, LocalFrontierFileAdoption.MaximumActiveMilliseconds);
         var work = new Stopwatch();
         var flags = BindingFlags.NonPublic | BindingFlags.Instance;
         var elapsed = typeof(Stopwatch).GetField("_elapsed", flags)!;
@@ -32,6 +32,12 @@ public sealed partial class FrontierFileAdoptionTests : FileTransferOpsScriptsTe
         Assert.True(owner.TryRunControl(() => true));
         Assert.True(work.ElapsedTicks >= Stopwatch.Frequency * 9);
         elapsed.SetValue(work, Stopwatch.Frequency * 11);
+        Assert.True(owner.TryRunControl(() => true));
+        Assert.True(work.ElapsedTicks >= Stopwatch.Frequency * 11);
+        elapsed.SetValue(work, Stopwatch.Frequency * 14);
+        Assert.True(owner.TryRunControl(() => true));
+        Assert.True(work.ElapsedTicks >= Stopwatch.Frequency * 14);
+        elapsed.SetValue(work, Stopwatch.Frequency * 16);
         Assert.False(owner.TryRunControl(() => throw new InvalidOperationException("Expired work ran")));
         Assert.False(work.IsRunning);
         Assert.False(owner.IsRetained);
@@ -51,7 +57,7 @@ public sealed partial class FrontierFileAdoptionTests : FileTransferOpsScriptsTe
             Assert.True(work.IsRunning);
             Assert.True(owner.TryAdopt(0, app.Handle, app.Bytes));
             Assert.True(work.IsRunning);
-            typeof(Stopwatch).GetField("_elapsed", BindingFlags.NonPublic | BindingFlags.Instance)!.SetValue(work, Stopwatch.Frequency * 11);
+            typeof(Stopwatch).GetField("_elapsed", BindingFlags.NonPublic | BindingFlags.Instance)!.SetValue(work, Stopwatch.Frequency * 16);
             return true;
         }));
         Assert.False(work.IsRunning); Assert.False(owner.IsRetained);
@@ -275,7 +281,7 @@ public sealed partial class FrontierFileAdoptionTests : FileTransferOpsScriptsTe
             if (fault == "budget")
             {
                 var work = (Stopwatch)typeof(LocalFrontierFileAdoption).GetField("work", BindingFlags.NonPublic | BindingFlags.Instance)!.GetValue(owner)!;
-                typeof(Stopwatch).GetField("_elapsed", BindingFlags.NonPublic | BindingFlags.Instance)!.SetValue(work, Stopwatch.Frequency * 11);
+                typeof(Stopwatch).GetField("_elapsed", BindingFlags.NonPublic | BindingFlags.Instance)!.SetValue(work, Stopwatch.Frequency * 16);
             }
             Assert.False(fault == "repeat" ? owner.TryAdopt(0, a.Handle, a.Bytes) : owner.TryAdopt(1, b.Handle, bytes));
         }

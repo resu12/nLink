@@ -1,5 +1,6 @@
 param([string]$RepoRoot,[string]$Directory,[string]$RunId,[string]$ScenarioId,
-    [ValidateSet('off','write','existing','write-error','guards')][string]$PersistenceMode='off',[switch]$LiveScaleFixture,[switch]$ObservePrimary,[switch]$ReceiveFixture,[switch]$TwoWriterFixture,[switch]$RecoveredIngressFixture)
+    [ValidateSet('off','write','existing','write-error','guards')][string]$PersistenceMode='off',[switch]$LiveScaleFixture,[switch]$ObservePrimary,[switch]$ReceiveFixture,[switch]$TwoWriterFixture,[switch]$RecoveredIngressFixture,
+    [ValidateSet('None','RegularActivationCycle')][string]$LiveProofMode='None')
 $ErrorActionPreference='Stop'; Set-StrictMode -Version Latest
 . (Join-Path $RepoRoot 'tools/FileTransferSoak/RetainedAnalysisEvidence.ps1')
 . (Join-Path $RepoRoot 'tools/FileTransferOps/LocalRetainedSourceRequest.ps1')
@@ -54,7 +55,7 @@ $settings=Join-Path $output 'offline-settings.json'
 $generatedName=if($TwoWriterFixture) { 'two-writer-source.log' } else { 'nlink.log' }
 # The current explicit persistence opt-in also requests the owned frontier relay.
 # Let the worker validate that real native attachment; keep the default guard.
-[IO.File]::WriteAllText($settings,(@{RepoRoot=$RepoRoot;Directory=$output;Output=$output;Mode='valid';GeneratedSource=(Join-Path $Directory $generatedName);LiveScaleFixture=$LiveScaleFixture.IsPresent;FrontierLaunch=($PersistenceMode -cin @('write','existing','write-error'))} | ConvertTo-Json))
+[IO.File]::WriteAllText($settings,(@{RepoRoot=$RepoRoot;Directory=$output;Output=$output;Mode='valid';GeneratedSource=(Join-Path $Directory $generatedName);LiveScaleFixture=$LiveScaleFixture.IsPresent;AnalysisProofMode=$LiveProofMode;FrontierLaunch=($PersistenceMode -cin @('write','existing','write-error'))} | ConvertTo-Json))
 $env:NLINK_PUBLICATION_INTEGRATION_SETTINGS=$settings
 $script:atomic=(Get-Command Write-FileTransferEvidenceAtomicJson).ScriptBlock
 $script:hash=(Get-Command Get-FileTransferEvidenceSha256).ScriptBlock

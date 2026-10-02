@@ -55,7 +55,7 @@ public sealed partial class FrontierFileAdoptionTests
         if (fault == "budget")
         {
             var work = (Stopwatch)typeof(LocalFrontierFileAdoption).GetField("work", flags)!.GetValue(owner)!;
-            typeof(Stopwatch).GetField("_elapsed", flags)!.SetValue(work, Stopwatch.Frequency * 11);
+            typeof(Stopwatch).GetField("_elapsed", flags)!.SetValue(work, Stopwatch.Frequency * 16);
         }
         if (fault == "closed") { handle.Dispose(); }
         if (fault == "position") { stream.Position = 1; }

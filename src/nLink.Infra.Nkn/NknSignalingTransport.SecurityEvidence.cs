@@ -48,6 +48,7 @@ public sealed partial class NknSignalingTransport
 
     private void RetireFileTransferSecurityContextLocked()
     {
+        RetireFileTransferContentEvidenceLocked();
         if (fileTransferSecurityContext is not { } context)
         {
             return;

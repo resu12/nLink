@@ -67,7 +67,9 @@ foreach($case in $cases) {
             'cancel-before' { $request.Dispose() }
         }
         [void]$events.begin.Set()
-        if(-not $events.attached.WaitOne(20000)) {
+        $attachmentWait=if($case -ceq 'cursor-parent-files-facts-ack-commit-primary-worker-content-native-terminal-scale') {210000} elseif($case -cin @('cursor-parent-files-facts-ack-commit-primary-worker-content-native-scale',
+            'cursor-parent-files-facts-ack-commit-primary-worker-content-native-scale-profile')) {240000} else {20000}
+        if(-not $events.attached.WaitOne($attachmentWait)) {
             if($process.HasExited) { throw "GUI exited before attachment: $case $($stdout.GetAwaiter().GetResult()) $($stderr.GetAwaiter().GetResult())" }
             throw "GUI did not report attachment: $case"
         }

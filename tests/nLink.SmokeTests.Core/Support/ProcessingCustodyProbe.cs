@@ -64,21 +64,21 @@ namespace NLink.Tests
             }
             if (mode == "budget-window")
             {
-                Require(LocalFrontierFileAdoption.MaximumActiveMilliseconds == 10000, "approved_budget_changed");
+                Require(LocalFrontierFileAdoption.MaximumActiveMilliseconds == 15000, "approved_budget_changed");
                 Require(source.Read(new byte[32768], 0, 32768) > 0, "extended_read_missing");
                 Drain(source);
                 Require(source.TryFinishProcessingWork(), "extended_finish_failed");
                 Require(!work.IsRunning && work.ElapsedMilliseconds >= 6000, "accumulated_work_reset");
-                SetElapsed(work, 9);
+                SetElapsed(work, 14);
                 Count(source, 10, true);
                 Require(Object.ReferenceEquals(work, Get(adoption, "work")) &&
                     Object.ReferenceEquals(work, Get(owner, "frontierWork")) &&
-                    !work.IsRunning && work.ElapsedMilliseconds >= 9000, "finalization_clock_changed");
+                    !work.IsRunning && work.ElapsedMilliseconds >= 14000, "finalization_clock_changed");
                 var handles = new List<SafeFileHandle>();
                 foreach (var item in (IList)Get(adoption, "adopted"))
                     foreach (FileStream file in (IList)Get(item, "Files")) handles.Add(file.SafeFileHandle);
                 handles.Add(((FileStream)Get(adoption, "sealedSource")).SafeFileHandle);
-                SetElapsed(work, 11);
+                SetElapsed(work, 16);
                 Require(!source.CanRead, "expired_finalization_current");
                 foreach (var handle in handles) Require(handle.IsClosed, "expired_finalization_handle_leaked");
             }
@@ -180,7 +180,7 @@ namespace NLink.Tests
                             var payloads = (Array)Get(Get(contributions[0], "Manifest"), "Payloads");
                             var expected = Get(payloads.GetValue(0), "File"); Set(expected, "Length", (long)Get(expected, "Length") + 1);
                         }
-                        else if (mutation == "budget") SetElapsed(work, 11);
+                        else if (mutation == "budget") SetElapsed(work, 16);
                         else if (mutation == "stopped") ((Stopwatch)Get(adoption, "work")).Stop();
                         else if (mutation == "cancel") ((CancellationTokenSource)Get(adoption, "processingLifetime")).Cancel();
                         else if (mutation == "finish") Require(adoption.FinishProcessingWork(source), "race_finish_failed");

@@ -19,7 +19,7 @@ $reader=$null; $capture=$null; $markers=$null; $match=$null; $outputFiles=@()
 function Expire-MarkerWork {
     $work=$adopter.GetType().GetField('work',$flags).GetValue($adopter)
     $elapsed=@($work.GetType().GetFields($flags) | Where-Object {$_.Name -match '^_?elapsed$'})[0]
-    $elapsed.SetValue($work,[long]([Diagnostics.Stopwatch]::Frequency*11))
+    $elapsed.SetValue($work,[long]([Diagnostics.Stopwatch]::Frequency*16))
 }
 try {
     if($mode.StartsWith('buffered-',[StringComparison]::Ordinal)) {

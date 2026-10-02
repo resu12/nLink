@@ -9,6 +9,7 @@ public static partial class FileTransferDataFrameCodec
 {
     private const uint BinaryMagic = 0x3246544E; // "NFT2"
     private const byte BinaryVersion = 1;
+    private const byte V4ChunkBatchFrameCode = 20;
 
     public static byte[] Serialize(FileTransferDataFrame frame)
     {
@@ -416,7 +417,7 @@ public static partial class FileTransferDataFrameCodec
                     TransferPauseReason = v4TransferPauseReason,
                 };
                 break;
-            case 20:
+            case V4ChunkBatchFrameCode:
                 if (!reader.TryReadInt32(out var v4StartChunkIndex) ||
                     !reader.TryReadInt32(out var v4BatchChunkCount) ||
                     !reader.TryReadInt32(out var v4BatchSegmentCount) ||
@@ -1866,7 +1867,7 @@ public static partial class FileTransferDataFrameCodec
         {
             FileTransferManifestFrameV4 and not FileTransferManifestFrameV6 => 18,
             FileTransferStateFrameV4 and not FileTransferReceiverStateFrameV6 => 19,
-            FileTransferChunkBatchFrameV4 and not FileTransferChunkBatchFrameV6 => 20,
+            FileTransferChunkBatchFrameV4 and not FileTransferChunkBatchFrameV6 => V4ChunkBatchFrameCode,
             FileTransferCompleteFrameV4 and not FileTransferCompleteFrameV6 => 21,
             FileTransferCancelFrameV4 and not FileTransferCancelFrameV6 => 22,
             FileTransferErrorFrameV4 and not FileTransferErrorFrameV6 => 23,
@@ -1958,6 +1959,7 @@ public static partial class FileTransferDataFrameCodec
         }
 
         public bool IsFullyConsumed => remaining.IsEmpty;
+        public int RemainingLength => remaining.Length;
 
         public bool TryReadByte(out byte value)
         {
@@ -2077,6 +2079,22 @@ public static partial class FileTransferDataFrameCodec
             }
 
             value = remaining[..length].ToArray();
+            remaining = remaining[length..];
+            return true;
+        }
+
+        public bool TryReadBytesView(out ReadOnlySpan<byte> value)
+        {
+            value = default;
+            if (!TryReadInt32(out var length) ||
+                length <= 0 ||
+                length > FileTransferProtocol.MaxChunkRawBytes ||
+                remaining.Length < length)
+            {
+                return false;
+            }
+
+            value = remaining[..length];
             remaining = remaining[length..];
             return true;
         }

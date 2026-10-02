@@ -40,6 +40,9 @@ namespace NLink.Tools
             }
             private bool FinalSealAppsCurrent()
             {
+#if NLINK_TEST_NATIVE_CONTENT_ACQUISITION
+                long sample = NLink.Tests.NativeContentParserProfileForTest.ReaderStart();
+#endif
                 if (fileChannels == null || fileRequests == null || fileRequests.Length != 2 || apps.Count != 2) return false;
                 for (int i = 0; i < 2; i++)
                 {
@@ -49,6 +52,9 @@ namespace NLink.Tools
                         !launch.Exit.WaitOne(0) || !GetExitCodeProcess(launch.Exit.SafeWaitHandle, out code) || code != 0 ||
                         launch.Output == null || !launch.Output.Drained) return false;
                 }
+#if NLINK_TEST_NATIVE_CONTENT_ACQUISITION
+                NLink.Tests.NativeContentParserProfileForTest.ReaderStage(16, sample);
+#endif
                 return true;
             }
             // Null selects the unchanged non-processing path. Once selected,

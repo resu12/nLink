@@ -8,8 +8,8 @@ namespace NLink.SmokeTests;
 public sealed class FrontierPrimarySourceDiagnosticsTests : FileTransferOpsScriptsTestBase
 {
     [Theory]
-    [InlineData("LocalFrontierPrimarySource.cs", "78ad84bfffb1365beee24000678d6c6c27ed409cb0e73b8157e1bf3e326da296")]
-    [InlineData("LocalFrontierPrimaryWorker.cs", "8a3542eb735be48d50a6638470b611a6f7b1032e25168012ea0e07d75978039d")]
+    [InlineData("LocalFrontierPrimarySource.cs", "3eaabbd0cf73a81ce618e1bb332de90658f8dcc1e0670168a705575c43f6d20d")]
+    [InlineData("LocalFrontierPrimaryWorker.cs", "1b6cb2b3ad8599d87c2be10b2392e5bf13d6386640a7fc38c6cfa5d3904326ce")]
     public async Task DefaultProjection_MatchesReviewedContract(string file, string expected)
     {
         var source = await File.ReadAllTextAsync(Path.Combine(FindRepoRoot(), "tools/FileTransferOps", file));
@@ -116,7 +116,8 @@ public sealed class FrontierPrimarySourceDiagnosticsTests : FileTransferOpsScrip
             switch (line.Trim())
             {
                 case "#if NLINK_TEST_ATTEMPT_DISPATCH": Assert.Null(branch); branch = profile; break;
-                case "#else": Assert.NotNull(branch); branch = !branch.Value; break;
+                case "#elif NLINK_TEST_NATIVE_SELECTION_COMPONENT_PROFILE": Assert.NotNull(branch); branch = false; break;
+                case "#else": Assert.NotNull(branch); branch = !profile; break;
                 case "#endif": Assert.NotNull(branch); branch = null; break;
                 default: Assert.False(line.TrimStart().StartsWith('#')); if (branch != false) output.Add(line); break;
             }

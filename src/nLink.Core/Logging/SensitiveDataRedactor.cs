@@ -44,6 +44,7 @@ public static partial class SensitiveDataRedactor
         redacted = ProtectRepairOwnerEvidenceValues(redacted, protectedSnapshotEvidenceValues);
         redacted = ProtectDataPathEnvelopeEvidenceValues(redacted, protectedSnapshotEvidenceValues);
         redacted = ProtectFileTransferSecurityEvidenceValues(redacted, protectedSnapshotEvidenceValues);
+        redacted = ProtectFileTransferContentEvidenceValues(redacted, protectedSnapshotEvidenceValues);
         redacted = ProtectYieldEvidenceValues(redacted, protectedSnapshotEvidenceValues);
         redacted = ProtectFrontierReceiptEvidenceValues(redacted, protectedSnapshotEvidenceValues);
         redacted = ProtectFrontierPayloadMarkerValues(redacted, protectedSnapshotEvidenceValues);

@@ -9,6 +9,7 @@ using NLink.Core;
 using NLink.Core.FileTransfer;
 using NLink.Core.Logging;
 using NLink.Core.SessionConnect;
+using NLink.Core.SessionSecurity;
 using NLink.Infra.Nkn;
 
 namespace NLink.SmokeTests;
@@ -82,10 +83,13 @@ public sealed partial class NknFileTransferTransportTests
         var startChunk = serviceFallback ? 100 : 12;
         var chunkSize = serviceFallback ? 21 * 1024 : 1024;
         var tunaPayloadMode = Environment.GetEnvironmentVariable("NLINK_PUBLICATION_TUNA_PAYLOAD_MODE") ?? "none";
+        var rebatching = tunaPayloadMode is "rebatch_same" or "rebatch_changed" or "rebatch_middle";
+        var middleRebatch = tunaPayloadMode == "rebatch_middle";
         var independentPairs = tunaPayloadMode is "independent_pairs" or "independent_missing_receive";
         var omitSecondReceive = tunaPayloadMode is "missing_receive" or "independent_missing_receive";
-        var secondTunaStart = independentPairs ? 20 : tunaPayloadMode == "wrong_range" ? 13 : 12;
+        var secondTunaStart = independentPairs ? 20 : middleRebatch ? 11 : tunaPayloadMode == "wrong_range" ? 13 : 12;
         if (independentPairs) { Assert.True(serviceFixture && serviceYieldFixture); }
+        if (rebatching) { Assert.True(serviceFixture && !finalFallbackFixture && !serviceYieldFixture); }
         using var tunaLane = tunaPayloadMode == "none" ? null : new FakeNknAccelerationLane();
         var client = new FakeNknClient(sender ? senderAddress : receiverAddress);
         using var transport = new NknSignalingTransport(client, NknTransportOptions.Load(),
@@ -150,6 +154,30 @@ public sealed partial class NknFileTransferTransportTests
             link.SendingYield = serviceYieldFixture;
             await link.SignalAsync("regular-ready");
             await link.WaitAsync("held");
+            FileTransferChunkBatchFrameV4? heldChunk = null;
+            string? heldPayloadFingerprint = null;
+            object? rebatchingResult = null;
+            if (rebatching)
+            {
+                // Decode the actual held wire privately; this does not enter the
+                // adapter replay window or dispatch the stale packet.
+                var heldWire = Convert.FromBase64String(await link.WaitAsync("rebatching-held-wire"));
+                Assert.True(EnvelopeCodec.TryDeserialize(heldWire, out var heldEnvelope));
+                var key = Assert.IsType<byte[]>(typeof(NknSignalingTransport)
+                    .GetMethod("GetFileTransferSessionSharedKeyOrThrow", BindingFlags.Instance | BindingFlags.NonPublic)!
+                    .Invoke(transport, null));
+                var decoded = SessionSecureEnvelopeCodec.Decrypt(key, heldEnvelope.Payload,
+                    new SessionSecureEnvelopeExpectation(Family: SessionSecureMessageFamily.FileTransfer,
+                        SessionId: new SessionId(sessionId), RequestId: transferId));
+                Assert.True(FileTransferDataFrameCodec.TryDeserializeLegacyV4(decoded.Plaintext, out var heldFrame));
+                heldChunk = Assert.IsType<FileTransferChunkBatchFrameV4>(heldFrame);
+                Assert.Equal(sessionId, heldChunk.SessionId);
+                Assert.Equal(transferId, heldChunk.TransferId);
+                Assert.Equal(startChunk, heldChunk.StartChunkIndex);
+                Assert.Equal(1, heldChunk.ChunkCount);
+                Assert.Equal(Enumerable.Repeat((byte)17, chunkSize), Assert.Single(heldChunk.DataSegments));
+                heldPayloadFingerprint = SecurityFingerprint("payload", "ftpay1-", heldEnvelope.Payload);
+            }
             await SessionFileTransferV4SenderTests.CreateSecondTunaPublicationEvidenceFixtureAsync(
                 replayPostCommitCallbacks: false, sessionId: sessionId, suppliedTransferId: transferId,
                 receivePeerYield: serviceYieldFixture ? null : async hints =>
@@ -177,15 +205,41 @@ public sealed partial class NknFileTransferTransportTests
                             var received = Assert.IsType<FileTransferChunkBatchFrameV4>(await dataSession.ReceiveAsync(ct));
                             receivedTunaStart = secondTunaStart;
                             Assert.Equal(receivedTunaStart, received.StartChunkIndex);
-                            Assert.Equal(2, received.ChunkCount);
-                            Assert.Equal(Enumerable.Repeat((byte)17, 1024), received.DataSegments[0]);
-                            Assert.Equal(Enumerable.Repeat((byte)34, 1024), received.DataSegments[1]);
+                            Assert.Equal(rebatching ? 3 : 2, received.ChunkCount);
+                            var expectedFirst = Enumerable.Repeat(middleRebatch ? (byte)34 : (byte)17, 1024).ToArray();
+                            if (tunaPayloadMode == "rebatch_changed") { expectedFirst[0] ^= 1; }
+                            Assert.Equal(expectedFirst, received.DataSegments[0]);
+                            Assert.Equal(Enumerable.Repeat(middleRebatch ? (byte)17 : (byte)34, 1024), received.DataSegments[1]);
+                            if (rebatching)
+                            {
+                                Assert.Equal(3, received.DataSegments.Count);
+                                Assert.Equal(Enumerable.Repeat((byte)51, 1024), received.DataSegments[2]);
+                                Assert.NotNull(heldChunk);
+                                var selectedSlot = heldChunk.StartChunkIndex - received.StartChunkIndex;
+                                Assert.Equal(middleRebatch ? 1 : 0, selectedSlot);
+                                Assert.Equal(heldChunk.DataSegments[0].Length, received.DataSegments[selectedSlot].Length);
+                                var contentEqual = heldChunk.DataSegments[0].AsSpan().SequenceEqual(received.DataSegments[selectedSlot]);
+                                Assert.Equal(tunaPayloadMode != "rebatch_changed", contentEqual);
+                                rebatchingResult = new
+                                {
+                                    Schema = "test-only-rebatching-byte-comparison-v1", Mode = tunaPayloadMode,
+                                    Comparison = "decoded_held_wire_to_data_session_receive", ContentEqual = contentEqual,
+                                    HeldPayloadFingerprint = heldPayloadFingerprint, ChunkIndex = heldChunk.StartChunkIndex,
+                                    SegmentBytes = heldChunk.DataSegments[0].Length, HeldChunkCount = 1, ReceivedChunkCount = 3,
+                                    ReceiverProcessId = Environment.ProcessId,
+                                };
+                            }
                         }
                         await link.SignalAsync("tuna-payload-checked");
                     }
                     await CheckDelayedIngressAsync(transport, dataSession, publication, link, peerYieldReceived: true, receivedTunaStart,
                         startChunk, chunkSize, peerYieldDispatches: serviceYieldFixture ? yieldCopies : 1,
-                        firstTunaReceived: independentPairs);
+                        firstTunaReceived: independentPairs, heldChunkCount: rebatching ? 1 : 2);
+                    if (rebatchingResult is not null)
+                    {
+                        await File.WriteAllTextAsync(Path.Combine(directory, "rebatching-fixture.json"),
+                            JsonSerializer.Serialize(rebatchingResult), ct);
+                    }
                 },
                 sendLocalYield: serviceYieldFixture || (tunaLane is null && !serviceFallback) ? null : frame => dataSession.SendAsync(frame, ct),
                 prepareFinalFallbackReceive: !serviceFallback ? null : async (hints, repairId) =>
@@ -239,8 +293,9 @@ public sealed partial class NknFileTransferTransportTests
             link.HoldDataFrame = true;
             var frame = new FileTransferChunkBatchFrameV4
             {
-                SessionId = sessionId, TransferId = transferId, StartChunkIndex = startChunk, ChunkCount = 2,
-                DataSegments = [Enumerable.Repeat((byte)17, chunkSize).ToArray(), Enumerable.Repeat((byte)34, chunkSize).ToArray()],
+                SessionId = sessionId, TransferId = transferId, StartChunkIndex = startChunk, ChunkCount = rebatching ? 1 : 2,
+                DataSegments = rebatching ? [Enumerable.Repeat((byte)17, chunkSize).ToArray()] :
+                    [Enumerable.Repeat((byte)17, chunkSize).ToArray(), Enumerable.Repeat((byte)34, chunkSize).ToArray()],
                 BatchProfile = "v4_default_21k",
             };
             var authority = Assert.IsType<FileTransferDataPathSendAuthority>(typeof(SessionFileTransferService)
@@ -249,6 +304,7 @@ public sealed partial class NknFileTransferTransportTests
             FileTransferPublicationUseEvidence.CaptureSend(authority, evidence, FileTransferPublicationUseKind.V4PhysicalSubmission);
             await Assert.IsAssignableFrom<IFileTransferDataPathAuthoritySession>(dataSession).SendAsync(frame, authority, ct);
             Assert.NotNull(link.HeldFrame);
+            if (rebatching) { await link.SignalAsync("rebatching-held-wire", Convert.ToBase64String(link.HeldFrame.Payload!)); }
             await link.SignalAsync("held");
         }
         else { await link.WaitAsync("held"); }
@@ -368,11 +424,17 @@ public sealed partial class NknFileTransferTransportTests
                 .GetMethod("CreateDataPathSendAuthority", BindingFlags.Static | BindingFlags.NonPublic)!
                 .Invoke(null, [publication, "two_writer_exact_tuna_payload_fixture"]));
             FileTransferPublicationUseEvidence.CaptureSend(authority, publicationEvidence, FileTransferPublicationUseKind.V4PhysicalSubmission);
+            var segments = new List<byte[]> { Enumerable.Repeat((byte)17, 1024).ToArray(), Enumerable.Repeat((byte)34, 1024).ToArray() };
+            if (rebatching)
+            {
+                segments.Add(Enumerable.Repeat((byte)51, 1024).ToArray());
+                if (middleRebatch) { (segments[0], segments[1]) = (segments[1], segments[0]); }
+                if (tunaPayloadMode == "rebatch_changed") { segments[0][0] ^= 1; }
+            }
             await Assert.IsAssignableFrom<IFileTransferDataPathAuthoritySession>(dataSession).SendAsync(new FileTransferChunkBatchFrameV4
             {
                 SessionId = sessionId, TransferId = transferId, StartChunkIndex = firstChunk,
-                ChunkCount = 2, BatchProfile = "v4_default_21k",
-                DataSegments = [Enumerable.Repeat((byte)17, 1024).ToArray(), Enumerable.Repeat((byte)34, 1024).ToArray()],
+                ChunkCount = segments.Count, BatchProfile = "v4_default_21k", DataSegments = segments,
             }, authority, ct);
             var sent = Assert.Single(tunaLane.Sent.Skip(before));
             Assert.Equal(NknBridgeChannel.Bulk, sent.Lane);
@@ -400,7 +462,7 @@ public sealed partial class NknFileTransferTransportTests
 
     private static async Task CheckDelayedIngressAsync(NknSignalingTransport transport, IFileTransferDataSession dataSession,
         RoutePublicationToken publication, IngressPacketPipe link, bool peerYieldReceived = false, int receivedTunaStart = -1,
-        int startChunk = 12, int chunkSize = 1024, int peerYieldDispatches = 1, bool firstTunaReceived = false)
+        int startChunk = 12, int chunkSize = 1024, int peerYieldDispatches = 1, bool firstTunaReceived = false, int heldChunkCount = 2)
     {
         var states = Assert.IsAssignableFrom<IDictionary>(GetPrivateField(transport, "fileTransferStates"));
         var before = states[publication.TransferId];
@@ -433,7 +495,7 @@ public sealed partial class NknFileTransferTransportTests
         {
             AssertDataPathPublication(line, publication);
             Assert.Contains("authority_effect=none;", line, StringComparison.Ordinal);
-            AssertDataPathFrame(line, startChunk, chunkSize);
+            AssertDataPathFrame(line, startChunk, chunkSize, heldChunkCount);
         });
         Assert.Equal(before, states[publication.TransferId]);
         Assert.Equal(dispatchedBefore, FindOperationalLogLines(line => line.Contains("event=filetransfer_data_frame_dispatched;", StringComparison.Ordinal)));

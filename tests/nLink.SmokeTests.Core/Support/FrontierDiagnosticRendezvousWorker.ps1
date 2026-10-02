@@ -16,7 +16,7 @@ if($rv -ceq 'mutation-before-commit') {$original.Recovered=$true}
 if($rv -ceq 'worker-budget') {
     $watch=$owned.GetType().GetField('work',$flags).GetValue($owned)
     $elapsed=@($watch.GetType().GetFields($flags) | Where-Object {$_.Name -match '^_?elapsed$'})[0]
-    $elapsed.SetValue($watch,[long]([Diagnostics.Stopwatch]::Frequency*([NLink.Tools.LocalPublicationInputLimits]::EvaluationMilliseconds+1000)/1000))
+    $elapsed.SetValue($watch,[long]([Diagnostics.Stopwatch]::Frequency*181))
 }
 $stateBefore=@($fullView,$compactView,$proof) | ConvertTo-Json -Depth 70 -Compress
 $waitClock=[Diagnostics.Stopwatch]::StartNew()

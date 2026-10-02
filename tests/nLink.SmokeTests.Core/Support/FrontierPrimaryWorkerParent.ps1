@@ -3,6 +3,9 @@ $sourceDiagnostics=$workerCase.StartsWith('source-diagnostic-',[StringComparison
 if($sourceDiagnostics) {$workerCase='source-'+$workerCase.Substring('source-diagnostic-'.Length)}
 $piping=$workerCase.StartsWith('join-pipes-',[StringComparison]::Ordinal); $primaryOutput=$null
 $nativeProcess=$null; $offerMap=$null; $offerView=$null; $factsMap=$null; $factsView=$null; $signals=@{}
+$contentWorker=$workerCase.StartsWith('content-native-',[StringComparison]::Ordinal)
+$nativeOut=$null;$nativeErr=$null;$contentWorkerPhase='startup';$contentWorkerDeadline=$false
+$workerAttachmentMilliseconds=if($workerCase -ceq 'content-native-terminal-scale') {180000} elseif($workerCase -cin @('content-native-scale','content-native-scale-profile')) {210000} else {30000}
 $endpoint=$primary.Name+'.frontier-primary-v1.files-v1'
 try {
     foreach($part in @('begin','attached','release')) {$signals[$part]=[Threading.EventWaitHandle]::new($false,[Threading.EventResetMode]::ManualReset,$primary.Name+'.test.worker.'+$part)}
@@ -13,6 +16,7 @@ try {
     if($workerCase.StartsWith('read-validation-',[StringComparison]::Ordinal)) {$script=Join-Path $RepoRoot 'tests/nLink.SmokeTests.Core/Support/FrontierPrimaryReadValidation.ps1'}
     if($workerCase.StartsWith('origin-batch-',[StringComparison]::Ordinal)) {$script=Join-Path $RepoRoot 'tests/nLink.SmokeTests.Core/Support/FrontierPrimaryOrigins.ps1'}
     if($workerCase.StartsWith('evaluations-',[StringComparison]::Ordinal)) {$script=Join-Path $RepoRoot 'tests/nLink.SmokeTests.Core/Support/FrontierPrimaryEvaluations.ps1'}
+    if($workerCase.StartsWith('content-native-',[StringComparison]::Ordinal)) {$script=Join-Path $RepoRoot 'tests/nLink.SmokeTests.Core/Support/NativeContentAcquisitionWorker.ps1'}
     if($workerCase.StartsWith('payloads-',[StringComparison]::Ordinal)) {$script=Join-Path $RepoRoot 'tests/nLink.SmokeTests.Core/Support/FrontierPrimaryPayloads.ps1'}
     if($workerCase.StartsWith('witnesses-',[StringComparison]::Ordinal)) {$script=Join-Path $RepoRoot 'tests/nLink.SmokeTests.Core/Support/FrontierPrimaryWitnesses.ps1'}
     if($workerCase.StartsWith('join-',[StringComparison]::Ordinal)) {$script=Join-Path $RepoRoot 'tests/nLink.SmokeTests.Core/Support/FrontierPrimaryJoin.ps1'}
@@ -95,8 +99,10 @@ try {
             $digest=$sha.ComputeHash($snapshot); for($i=0;$i -lt 32;$i++) {$factsView.Write([long](16+$i),$digest[$i])}
         } finally {$sha.Dispose()}
     }
+    $contentWorkerPhase='attached_wait'
     [void]$signals.begin.Set()
-    if(-not $signals.attached.WaitOne(30000)) {
+    if(-not $signals.attached.WaitOne($workerAttachmentMilliseconds)) {
+        $contentWorkerDeadline=$true
         if($nativeProcess.HasExited) {throw "Native worker failed before attachment: $($nativeOut.GetAwaiter().GetResult()) $($nativeErr.GetAwaiter().GetResult())"}
         throw 'Native worker attachment deadline'
     }
@@ -154,9 +160,11 @@ try {
             try {[void]$event.Set()} finally {$event.Dispose()}
         }
     }
+    $contentWorkerPhase='exit_wait'
     [void]$signals.release.Set()
-    if(-not $nativeProcess.WaitForExit(30000)) {throw 'Native worker exit deadline'}
+    if(-not $nativeProcess.WaitForExit(30000)) {$contentWorkerDeadline=$true;throw 'Native worker exit deadline'}
     $nativeProcess.WaitForExit(); $output=$nativeOut.GetAwaiter().GetResult(); $nativeError=$nativeErr.GetAwaiter().GetResult()
+    $contentWorkerPhase='validate_output'
     if($nativeProcess.ExitCode -ne 0 -or $output -notmatch 'frontier-primary-worker=') {throw "Native worker fixture failed: $output $nativeError"}
     $originLine=@($output -split '\r?\n' | Where-Object {$_.StartsWith('frontier-primary-source-origins=')})
     if($originLine.Count) {
@@ -216,12 +224,21 @@ try {
     $output.Trim()
     $primary.Dispose()
     if($inputs.IsCurrent -or @($primaryPins | Where-Object {-not $_.IsClosed}).Count) {throw 'Native worker handoff leaked parent pins'}
+    $contentWorkerPhase='completed'
 } finally {
     if($signals.ContainsKey('release')) {[void]$signals.release.Set()}
     if($null -ne $nativeProcess) {
         try { if($null -ne $nativeProcess.Id -and -not $nativeProcess.WaitForExit(5000)) {$nativeProcess.Kill(); [void]$nativeProcess.WaitForExit(5000)} }
         catch [InvalidOperationException] { }
-        finally {$nativeProcess.Dispose()}
+        finally {
+            if($contentWorker) {
+                try {
+                    . (Join-Path $RepoRoot 'tests/nLink.SmokeTests.Core/Support/NativeContentWorkerOutput.ps1')
+                    Save-NativeContentWorkerOutput $Directory $contentWorkerPhase $contentWorkerDeadline $nativeOut $nativeErr $workerAttachmentMilliseconds
+                } catch {Write-Warning ('Content native diagnostic capture failed: '+$_.Exception.Message) -WarningAction Continue}
+            }
+            $nativeProcess.Dispose()
+        }
     }
     if($null -ne $primaryOutput) {$primaryOutput.Dispose()}
     if($null -ne $offerView) {$offerView.Dispose()}; if($null -ne $offerMap) {$offerMap.Dispose()}

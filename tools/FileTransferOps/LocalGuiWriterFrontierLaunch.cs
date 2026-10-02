@@ -104,11 +104,16 @@ namespace NLink.Tools
             }
             internal bool MatchesRequest()
             {
-                int stage = view.ReadInt32(48);
-                if (view.ReadInt32(0) != Magic || ReadId(view) != id || view.ReadInt32(4) != parentId ||
-                    view.ReadInt64(8) != parentCreation || view.ReadInt32(16) != guiId || view.ReadInt64(40) != guiCreation ||
-                    view.ReadInt32(20) != registration.Length || (stage != 0 && stage != 1) || view.ReadInt32(52) != 0 ||
-                    view.ReadInt64(56) != 0) return false;
+                // Fresh per-call bytes, never cached approval. Keep every
+                // original comparison and the separate registration-body read.
+                var header = new byte[HeaderBytes];
+                if (view.ReadArray(0, header, 0, header.Length) != header.Length) return false;
+                var request = new byte[16]; Buffer.BlockCopy(header, 24, request, 0, request.Length);
+                int stage = BitConverter.ToInt32(header, 48);
+                if (BitConverter.ToInt32(header, 0) != Magic || new Guid(request) != id || BitConverter.ToInt32(header, 4) != parentId ||
+                    BitConverter.ToInt64(header, 8) != parentCreation || BitConverter.ToInt32(header, 16) != guiId || BitConverter.ToInt64(header, 40) != guiCreation ||
+                    BitConverter.ToInt32(header, 20) != registration.Length || (stage != 0 && stage != 1) || BitConverter.ToInt32(header, 52) != 0 ||
+                    BitConverter.ToInt64(header, 56) != 0) return false;
                 var bytes = new byte[registration.Length];
                 if (view.ReadArray(HeaderBytes, bytes, 0, bytes.Length) != bytes.Length) return false;
                 for (int i = 0; i < bytes.Length; i++) if (bytes[i] != registration[i]) return false;

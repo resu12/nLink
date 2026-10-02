@@ -153,8 +153,18 @@ namespace NLink.Tools
             {
                 try
                 {
+#if NLINK_TEST_NATIVE_CONTENT_ACQUISITION
+                    return Object.ReferenceEquals(frontierLaunchOwner, this) && !disposed && sealedLaunches && FileAdoptionWithinDeadline() &&
+                        NLink.Tests.NativeContentParserProfileForTest.Check(10, () => !parentExit.WaitOne(0) && !closed.WaitOne(0)) &&
+                        NLink.Tests.NativeContentParserProfileForTest.Check(11, MatchesRequest) &&
+                        NLink.Tests.NativeContentParserProfileForTest.Check(12, AppRequestsCurrent) &&
+                        NLink.Tests.NativeContentParserProfileForTest.Check(13, FileChannelsCurrent) &&
+                        NLink.Tests.NativeContentParserProfileForTest.Check(14, LedgerOriginCurrent) &&
+                        NLink.Tests.NativeContentParserProfileForTest.Check(15, ParentRegistrationCurrent) && FileAdoptionWithinDeadline();
+#else
                     return Object.ReferenceEquals(frontierLaunchOwner, this) && !disposed && sealedLaunches && FileAdoptionWithinDeadline() &&
                         !parentExit.WaitOne(0) && !closed.WaitOne(0) && MatchesRequest() && AppRequestsCurrent() && FileChannelsCurrent() && LedgerOriginCurrent() && ParentRegistrationCurrent() && FileAdoptionWithinDeadline();
+#endif
                 }
                 catch { return false; }
             }

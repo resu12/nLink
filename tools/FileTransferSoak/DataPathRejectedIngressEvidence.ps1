@@ -1001,6 +1001,254 @@ function Get-FileTransferFileTunaV4DataPathMismatchRejectedFailClosedResult {
     return $result
 }
 
+function Get-FileTransferTunaRouteCycleAcceptance {
+    param([object[]]$Events, $MismatchProof, $SnapshotEvaluation, $DataPathIndex = $null, $ComparisonEvaluation = $null)
+
+    # The canonical route-cycle policy separates stale ingress safety from
+    # delivery. Legacy exact-redelivery decisions remain unchanged.
+    $publications = New-FileTransferPublicationEvidenceIndex $SnapshotEvaluation
+    $owners = @{}
+    $security = @{}
+    $uses = @{}
+    $sourceByWriterSequence = @{}
+    foreach ($event in $Events) {
+        $writer = Get-FileTransferEventField $event 'log_writer_id' ''
+        $sequence = Get-FileTransferEventField $event 'log_writer_sequence' ''
+        $sourceByWriterSequence["$writer|$sequence"] = $event
+        if ($event.EventName -in @('filetransfer_security_context_installed', 'filetransfer_security_context_retired')) {
+            $key = "$writer|$(Get-FileTransferEventField $event 'security_transport_id' '')"
+            if (-not $security.ContainsKey($key)) { $security[$key] = @() }
+            $security[$key] += $event
+        }
+    }
+    foreach ($items in $publications.Boundaries.Values) {
+        foreach ($boundary in $items) {
+            $key = "$($boundary.coordinatorInstanceId)|$($boundary.writer)|$($boundary.direction)|$($boundary.sessionId)|$($boundary.transferId)"
+            if (-not $owners.ContainsKey($key)) { $owners[$key] = @() }
+            $owners[$key] += $boundary
+        }
+    }
+    $routeFields = @{route='route'; protocol_version='protocolVersion'; live_route_epoch='liveRouteEpoch';
+        runtime_generation='runtimeGeneration'; terminal_generation='terminalGeneration'; leg_generation='legGeneration';
+        route_publication_generation='routePublicationGeneration'; route_commit_generation='routeCommitGeneration'}
+    function BoundUse($Event, [string]$Kind) {
+        $cacheKey = "$($Event.Sequence)|$Kind"
+        if ($uses.ContainsKey($cacheKey)) { return $uses[$cacheKey] }
+        $uses[$cacheKey] = $null
+        $f = ConvertFrom-GuiSmokeLogLedgerStructuredFields $Event.RawLine
+        if ($f.ContainsKey('__nlink_duplicate_structured_field') -or $f['publication_use_kind'] -cne $Kind -or
+            $f['security_context_status'] -cne 'captured' -or $f['frame_type'] -cne 'filetransfer.chunk_batch.v4') { return $null }
+        if ($f['target_route'] -cne $f['route'] -or $f['target_protocol_version'] -cne $f['protocol_version'] -or
+            $f['target_transport'] -cne $(if ($f['route'] -ceq 'file_tuna_v4') {'tuna'} else {'regular_nkn'})) { return $null }
+        if ($Kind -ceq 'v4_physical_submission' -and
+            ($f['event'] -cne 'filetransfer_data_path_send_result' -or $f['direction'] -cne 'outbound')) { return $null }
+        if ($Kind -ceq 'receive_guard' -and ($f['direction'] -cne 'inbound' -or $f['route'] -cne 'file_tuna_v4' -or
+            $f['receive_disposition'] -cne 'rejected_before_dispatch' -or $f['authority_effect'] -cne 'none')) { return $null }
+        if ($Kind -ceq 'receive_dispatch' -and ($f['event'] -cne 'filetransfer_data_path_receive_result' -or
+            $f['direction'] -cne 'inbound' -or $f['receive_disposition'] -cne 'dispatch_entered')) { return $null }
+        $shapes = @{security_transport_id='ftst1-[0-9a-f]{32}'; security_installation_id='ftsi1-[0-9a-f]{32}';
+            security_establishment_fingerprint='ftest1-[0-9a-f]{64}'; security_payload_fingerprint='ftpay1-[0-9a-f]{64}';
+            data_path_envelope_fingerprint='ftenv1-[0-9a-f]{64}'}
+        foreach ($name in $shapes.Keys) {
+            if ([string]$f[$name] -cnotmatch ('\A'+$shapes[$name]+'\z')) { return $null }
+        }
+        foreach ($name in @('log_writer_sequence','security_installation_generation','security_sequence')) {
+            $number = 0L
+            if ([string]$f[$name] -cnotmatch '\A[1-9][0-9]*\z' -or
+                -not [long]::TryParse([string]$f[$name], [ref]$number)) { return $null }
+        }
+        foreach ($scope in @('session','transfer')) {
+            $id = [string]$f["publication_evidence_${scope}_id"]
+            if ($id -cnotmatch '\Afte1-[0-9a-f]{24}\z' -or $f["security_${scope}_id"] -cne $id -or
+                $f["data_path_${scope}_id"] -cne $id) { return $null }
+        }
+        $strictEvent = [pscustomobject]@{Fields=$f}
+        $reference = Resolve-FileTransferPublicationEvidence -Index $publications -Event $strictEvent
+        if ($null -eq $reference) { return $null }
+        $boundary = $publications.Boundaries["$($reference.CoordinatorId)|$($f['publication_evidence_boundary_id'])"][0]
+        if (@($boundary.operations | Where-Object { $_.operationKey -ceq $f['publication_evidence_operation_key'] -and $_.stateApplied }).Count -ne 1) { return $null }
+        $useSequence = [long]$f['log_writer_sequence']
+        if ([long]$boundary.writerSequence -ge $useSequence) { return $null }
+        $stateKey = "$($reference.CoordinatorId)|$($f['publication_evidence_observed_state_generation'])"
+        if (@($publications.States[$stateKey].afterStateHash | Sort-Object -Unique).Count -ne 1) { return $null }
+        $ownerKey = "$($boundary.coordinatorInstanceId)|$($boundary.writer)|$($boundary.direction)|$($boundary.sessionId)|$($boundary.transferId)"
+        foreach ($later in $owners[$ownerKey]) {
+            if ([long]$later.writerSequence -le [long]$boundary.writerSequence -or [long]$later.writerSequence -ge $useSequence) { continue }
+            foreach ($name in $routeFields.Keys) {
+                if ([string]$later.afterBoundary.($routeFields[$name]) -cne [string]$f[$name]) { return $null }
+            }
+        }
+        $securityKey = "$($f['log_writer_id'])|$($f['security_transport_id'])"
+        if (-not $security.ContainsKey($securityKey)) { return $null }
+        $lifecycle = @($security[$securityKey] | Where-Object {
+            (Get-FileTransferEventField $_ 'security_installation_id' '') -ceq $f['security_installation_id']
+        })
+        $install = @($lifecycle | Where-Object EventName -CEQ 'filetransfer_security_context_installed')
+        $retire = @($lifecycle | Where-Object EventName -CEQ 'filetransfer_security_context_retired')
+        if ($install.Count -ne 1 -or $retire.Count -ne 1) { return $null }
+        foreach ($row in $lifecycle) {
+            $fields = ConvertFrom-GuiSmokeLogLedgerStructuredFields $row.RawLine
+            if ($fields.ContainsKey('__nlink_duplicate_structured_field')) { return $null }
+            foreach ($name in @('log_writer_id','security_transport_id','security_installation_id',
+                    'security_installation_generation','security_establishment_fingerprint','security_session_id')) {
+                if ([string]$fields[$name] -cne [string]$f[$name]) { return $null }
+            }
+        }
+        $start = Get-FileTransferEventInt64Field $install[0] 'log_writer_sequence' 0
+        $end = Get-FileTransferEventInt64Field $retire[0] 'log_writer_sequence' 0
+        if ($start -le 0 -or $start -ge $useSequence -or $end -le $useSequence -or
+            (Get-FileTransferEventField $install[0] 'security_context_status' '') -cne 'captured' -or
+            (Get-FileTransferEventField $retire[0] 'security_context_status' '') -cne 'retired') { return $null }
+        foreach ($other in $security[$securityKey]) {
+            if ((Get-FileTransferEventField $other 'security_installation_id' '') -ceq $f['security_installation_id']) { continue }
+            $sequence = Get-FileTransferEventInt64Field $other 'log_writer_sequence' 0
+            if ($sequence -ge $start -and $sequence -le $end) { return $null }
+            # An older unretired context must not enclose the selected span.
+            if ($other.EventName -ceq 'filetransfer_security_context_installed' -and $sequence -lt $start) {
+                $mates = @($security[$securityKey] | Where-Object {
+                    $_.EventName -ceq 'filetransfer_security_context_retired' -and
+                    (Get-FileTransferEventField $_ 'security_installation_id' '') -ceq
+                        (Get-FileTransferEventField $other 'security_installation_id' '')
+                })
+                if ($mates.Count -ne 1 -or (Get-FileTransferEventInt64Field $mates[0] 'log_writer_sequence' 0) -ge $start) { return $null }
+            }
+        }
+        if ($Event.EventName -cne 'filetransfer_data_frame_ignored' -and
+            [string]::IsNullOrWhiteSpace((Get-FileTransferFileTunaV4DataPathPayloadIdentityKey $strictEvent))) { return $null }
+        $uses[$cacheKey] = [pscustomobject]@{Event=$Event;Fields=$f;Reference=$reference;Boundary=$boundary}
+        return $uses[$cacheKey]
+    }
+    function SameEnvelope($Left,$Right) {
+        $names = @('frame_type','data_path_envelope_fingerprint','security_payload_fingerprint','security_sequence',
+            'security_establishment_fingerprint','data_path_session_id','data_path_transfer_id','security_session_id','security_transfer_id')
+        # The ignored companion has only chunk_index, not repeated payload
+        # statistics. Its exact fingerprint and existing chain bind the payload.
+        if ($Right.Event.EventName -ceq 'filetransfer_data_frame_ignored') { $names += 'chunk_index' }
+        else { $names += @('start_chunk_index','last_end_chunk_exclusive','raw_payload_bytes','batch_chunk_count','frame_chunk_count') }
+        foreach ($name in $names) {
+            if ([string]::IsNullOrWhiteSpace([string]$Left.Fields[$name]) -or
+                [string]$Left.Fields[$name] -cne [string]$Right.Fields[$name]) { return $false }
+        }
+        return $true
+    }
+    function TunaPublications($OwnerKey) {
+        @(foreach ($b in @($owners[$OwnerKey] | Sort-Object { [long]$_.writerSequence })) {
+            foreach ($op in $b.operations) {
+                if ($op.family -ceq 'route_runtime' -and $op.operationRole -ceq 'route_publication' -and
+                    $op.afterState -ceq 'Published' -and $op.stateApplied -and $op.receiptValidated -and
+                    $op.receiptStatus -ceq 'Accepted' -and $op.routeRuntime.boundary.route -ceq 'file_tuna_v4' -and
+                    $op.routeRuntime.boundary.protocolVersion -eq 4) { $b }
+            }
+        })
+    }
+    $senderOwners = @($owners.Keys | Where-Object { $owners[$_][0].direction -ceq 'outbound' })
+    $receiverOwners = @($owners.Keys | Where-Object { $owners[$_][0].direction -ceq 'inbound' })
+    $sendPublications = @(); $receivePublications = @()
+    if ($senderOwners.Count -eq 1 -and $receiverOwners.Count -eq 1) {
+        $sendPublications = @(TunaPublications $senderOwners[0])
+        $receivePublications = @(TunaPublications $receiverOwners[0])
+    }
+    $index = $DataPathIndex
+    if ($null -eq $index) { $index = New-FileTransferFileTunaV4DataPathCorrelationIndex -Events $Events }
+    $blocking = New-Object 'System.Collections.Generic.List[object]'
+    $candidateReports = @(foreach ($record in @($MismatchProof.CandidateRecords | Sort-Object { $_.Event.Sequence })) {
+        $event = $record.Event
+        $chain = Get-FileTransferFileTunaV4DataPathRejectedReceiveChain -Reference $event -DataPathIndex $index
+        $safe = $false
+        if ($null -ne $chain) {
+            $receive = BoundUse $chain.Receive 'receive_guard'
+            $mismatch = BoundUse $chain.Mismatch 'receive_guard'
+            $ignored = BoundUse $chain.Ignored[0] 'receive_guard'
+            if ($null -ne $receive -and $null -ne $mismatch -and $null -ne $ignored -and
+                (SameEnvelope $receive $mismatch) -and (SameEnvelope $receive $ignored)) {
+                $sourceSends = @(Get-FileTransferFileTunaV4DataPathIndexedPayloadEvents -Index $index -Event $chain.Receive | Where-Object {
+                    $_.EventName -ceq 'filetransfer_data_path_send_result' -and
+                    (Get-FileTransferEventField $_ 'data_path_envelope_fingerprint' '') -ceq $receive.Fields['data_path_envelope_fingerprint']
+                })
+                if ($sourceSends.Count -eq 1) {
+                    $source = BoundUse $sourceSends[0] 'v4_physical_submission'
+                    if ($null -ne $source -and (SameEnvelope $source $receive) -and
+                        $source.Fields['route'] -ceq 'regular_nkn_v4_fast' -and $source.Fields['protocol_version'] -ceq '4' -and
+                        $source.Fields['actual_transport'] -ceq 'regular_nkn' -and $source.Fields['delivery_transport'] -ceq 'regular_nkn' -and
+                        $source.Fields['delivery_result'] -ceq 'sent' -and $source.Fields['direction'] -ceq 'outbound' -and
+                        $source.Fields['log_writer_id'] -cne $receive.Fields['log_writer_id'] -and
+                        $sendPublications.Count -ge 1 -and
+                        $source.Reference.CoordinatorId -ceq $sendPublications[0].coordinatorInstanceId -and
+                        [long]$source.Fields['log_writer_sequence'] -lt [long]$sendPublications[0].writerSequence) { $safe = $true }
+                }
+            }
+        }
+        if (-not $safe) {
+            $class = if ((Get-FileTransferEventField $event 'direction' '') -ceq 'outbound' -or
+                (Get-FileTransferEventField $event 'receive_disposition' '') -ceq 'dispatch_entered') {
+                'file_tuna_data_path_mismatch'
+            } else { 'filetransfer_authenticated_stale_rejection_unproven' }
+            $blocking.Add([pscustomobject]@{Class=$class;Event=$event;Reason='authenticated_stale_rejection_unproven';Variant='authenticated_stale_rejection_unproven'}) | Out-Null
+        }
+        [pscustomobject]@{source_path=$event.FilePath;source_line=$event.LineNumber;source_sequence=$event.Sequence;
+            classification=$(if ($safe) {'authenticated_stale_rejected'} else {'blocking_mismatch'});legacy_recovered=[bool]$record.Recovered}
+    })
+    $deliveryFailures = New-Object 'System.Collections.Generic.List[object]'
+    $legs = @(foreach ($activation in @(0,1)) {
+        $send = $null; $receive = $null
+        if ($sendPublications.Count -eq 2 -and $receivePublications.Count -eq 2) {
+            $sb = $sendPublications[$activation]; $rb = $receivePublications[$activation]
+            foreach ($event in $Events) {
+                if ($event.EventName -cne 'filetransfer_data_path_send_result' -or
+                    (Get-FileTransferEventField $event 'publication_evidence_boundary_id' '') -cne $sb.boundaryId -or
+                    (Get-FileTransferEventField $event 'actual_transport' '') -cne 'tuna') { continue }
+                $s = BoundUse $event 'v4_physical_submission'
+                if ($null -eq $s -or $s.Fields['delivery_result'] -cne 'sent' -or $s.Fields['delivery_transport'] -cne 'tuna') { continue }
+                $matches = @(Get-FileTransferFileTunaV4DataPathIndexedPayloadEvents -Index $index -Event $event | Where-Object {
+                    $_.EventName -ceq 'filetransfer_data_path_receive_result' -and
+                    (Get-FileTransferEventField $_ 'data_path_envelope_fingerprint' '') -ceq $s.Fields['data_path_envelope_fingerprint']
+                })
+                if ($matches.Count -ne 1) { continue }
+                $r = BoundUse $matches[0] 'receive_dispatch'
+                if ($null -ne $r -and (SameEnvelope $s $r) -and $r.Fields['actual_transport'] -ceq 'tuna' -and
+                    $r.Fields['delivery_transport'] -ceq 'tuna' -and $r.Fields['delivery_result'] -ceq 'received' -and
+                    $r.Fields['receive_disposition'] -ceq 'dispatch_entered' -and $r.Boundary.boundaryId -ceq $rb.boundaryId -and
+                    $s.Reference.CoordinatorId -cne $r.Reference.CoordinatorId) { $send=$s.Event; $receive=$r.Event; break }
+            }
+        }
+        if ($null -eq $receive) {
+            $anchor = $null
+            if ($sendPublications.Count -gt $activation) {
+                $b = $sendPublications[$activation]
+                $key = "$($b.writer)|$($b.writerSequence)"
+                if ($sourceByWriterSequence.ContainsKey($key)) { $anchor = $sourceByWriterSequence[$key] }
+            }
+            if ($null -eq $anchor -and $Events.Count -gt 0) { $anchor = $Events[0] }
+            $deliveryFailures.Add([pscustomobject]@{Class='filetransfer_tuna_activation_delivery_unproven';Event=$anchor;
+                Reason=('tuna_activation_{0}_matched_delivery_unproven' -f ($activation+1));Variant=('activation_{0}' -f ($activation+1))}) | Out-Null
+        }
+        [pscustomobject]@{activation=$activation+1;verdict=$(if ($null -ne $receive) {'pass'} else {'unproven'});
+            send_source_line=$(if ($null -ne $send) {$send.LineNumber} else {$null});
+            receive_source_line=$(if ($null -ne $receive) {$receive.LineNumber} else {$null})}
+    })
+    $deliveryPass = @($legs | Where-Object verdict -CNE 'pass').Count -eq 0
+    $result = [pscustomobject]@{
+        BlockingCandidateRecords=@($blocking.ToArray())
+        DeliveryFailureRecords=@($deliveryFailures.ToArray())
+        Report=[pscustomobject]@{contract='authenticated_stale_rejection_and_tuna_activation_delivery_v1';
+            verdict=$(if ($blocking.Count -eq 0 -and $deliveryPass) {'pass'} else {'fail'});
+            candidate_count=$candidateReports.Count;safe_rejected_count=$candidateReports.Count-$blocking.Count;blocking_count=$blocking.Count;
+            delivery_verdict=$(if ($deliveryPass) {'pass'} else {'unproven'});activations=$legs;candidates=$candidateReports}
+    }
+    if ($null -ne $ComparisonEvaluation) {
+        $other = Get-FileTransferTunaRouteCycleAcceptance -Events $Events -MismatchProof $MismatchProof `
+            -SnapshotEvaluation $ComparisonEvaluation -DataPathIndex $index
+        $same = ($result.Report | ConvertTo-Json -Depth 8 -Compress) -ceq ($other.Report | ConvertTo-Json -Depth 8 -Compress)
+        $result.Report | Add-Member -NotePropertyName full_compact_parity_verdict -NotePropertyValue $(if ($same) {'pass'} else {'fail'})
+        if (-not $same) {
+            $result.Report.verdict = 'fail'
+            $result.DeliveryFailureRecords += [pscustomobject]@{Class='filetransfer_tuna_route_cycle_acceptance_parity_unproven';
+                Event=$(if ($Events.Count -gt 0) {$Events[0]} else {$null});Reason='tuna_route_cycle_acceptance_full_compact_parity_failed';Variant='parity'}
+        }
+    }
+    return $result
+}
+
 function Test-FileTransferFileTunaV4DataPathMismatchRejectedFailClosed {
     param(
         [Parameter(Mandatory = $true)]$Mismatch,

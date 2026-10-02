@@ -87,9 +87,19 @@ namespace NLink.Tools
                 if (offset < 0 || count < 0 || offset > buffer.Length - count) throw new ArgumentOutOfRangeException();
                 // Never enter the finalizer/GUI locks from under the adopter lock.
                 int read;
+#if NLINK_TEST_NATIVE_CONTENT_ACQUISITION
+                long sample = NLink.Tests.NativeContentParserProfileForTest.ReaderStart();
+#endif
                 if (!IsCurrent) throw new IOException("frontier_source_not_current");
+#if NLINK_TEST_NATIVE_CONTENT_ACQUISITION
+                NLink.Tests.NativeContentParserProfileForTest.ReaderStage(5, sample);
+                sample = NLink.Tests.NativeContentParserProfileForTest.ReaderStart();
+#endif
                 if (!adoption.TryReadSealedSource(this, buffer, offset, count, out read) || !IsCurrent)
                 { binding.Dispose(); throw new IOException("frontier_source_read_failed"); }
+#if NLINK_TEST_NATIVE_CONTENT_ACQUISITION
+                NLink.Tests.NativeContentParserProfileForTest.ReaderStage(6, sample);
+#endif
                 return read;
             }
             protected override void Dispose(bool disposing)

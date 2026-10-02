@@ -36,8 +36,8 @@ if($Stage -ceq 'Bind') {
         $private:work=$inputs.GetType().GetField('work',$fields).GetValue($inputs)
         $private:elapsed=@($work.GetType().GetFields($fields) | Where-Object {$_.Name -match '^_?elapsed$'})[0]
         if($work.IsRunning) {throw 'Pair regression requires the stopped original clock'}
-        $elapsed.SetValue($work,[long]([Diagnostics.Stopwatch]::Frequency*21))
-        if(-not $nativePrimaryCustody.Owns($arguments[0],$arguments[1],$arguments[2],$arguments[3],$arguments[4],$arguments[5])) {throw 'Evaluation custody expired before pair binding at 21 seconds'}
+        $elapsed.SetValue($work,[long]([Diagnostics.Stopwatch]::Frequency*70))
+        if(-not $nativePrimaryCustody.Owns($arguments[0],$arguments[1],$arguments[2],$arguments[3],$arguments[4],$arguments[5])) {throw 'Evaluation custody expired before pair binding at 70 seconds'}
         $private:visits=$inputs.GetType().GetField('evaluationVisits',$fields)
         $private:beforeForeign=$visits.GetValue($inputs)
     }
@@ -49,7 +49,7 @@ if($Stage -ceq 'Bind') {
     elseif($primaryFault -ceq 'owner-retired') {$inputs.Dispose()}
     if($primaryFault.StartsWith('evaluation-')) {
         if($work.ElapsedMilliseconds -lt 21000 -or $work.IsRunning -or $visits.GetValue($inputs) -ne $beforeForeign) {throw 'Foreign calls reset or charged the original pair budget'}
-        if($primaryFault -ceq 'evaluation-expired') {$elapsed.SetValue($work,[long]([Diagnostics.Stopwatch]::Frequency*61))}
+        if($primaryFault -ceq 'evaluation-expired') {$elapsed.SetValue($work,[long]([Diagnostics.Stopwatch]::Frequency*181))}
     }
     $script:transferEvaluation=$nativePrimaryCustody.TryBindTransferPair($arguments[0],$arguments[1],$arguments[2],$arguments[3],$arguments[4],$arguments[5])
     $private:actualPair=$null -ne $script:transferEvaluation
@@ -76,7 +76,7 @@ if($Stage -ceq 'Bind') {
             if($script:transferEvaluation.IsCurrent -or $script:transferEvaluation.ByteCount -ne 0 -or
                 $null -ne $script:transferEvaluation.Sha256) {throw 'Retired pair channel remained current under evaluation allowance'}
         } elseif($primaryFault -ceq 'evaluation-expired') {
-            if($work.ElapsedMilliseconds -lt 61000 -or
+            if($work.ElapsedMilliseconds -lt 181000 -or
                 $inputs.GetType().GetField('PrimarySourceRejectionForTest',$fields).GetValue($inputs) -cne 'resource:budget') {throw 'Expired pair did not retain its original budget rejection'}
             if($null -ne $nativePrimaryCustody.TryBindTransferPair($arguments[0],$arguments[1],$arguments[2],$arguments[3],$arguments[4],$arguments[5]) -or
                 $visits.GetValue($inputs) -ne $beforeForeign) {throw 'Expired pair reopened or refilled its visits'}
