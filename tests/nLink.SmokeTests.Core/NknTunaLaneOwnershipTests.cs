@@ -481,11 +481,24 @@ public sealed class NknTunaLaneOwnershipTests
     [InlineData(true, "tuna_cap_handoff_requested")]
     [InlineData(false, "tuna_cap_handoff_requested")]
     public void ListenerEvents_RetainCapturedPurposeAcrossOwnershipChange(bool preparation, string eventName)
+        => AssertListenerEventPurpose(preparation, eventName, false);
+
+    [Theory]
+    [InlineData("tuna_bridge_terminal")]
+    [InlineData("tuna_stream_rejected")]
+    [InlineData("error")]
+    [InlineData("tuna_cap_handoff_requested")]
+    [Trait("FileTransferInfraSuite", "FallbackListenerPreparation")]
+    public void FallbackListenerPreparation_ListenerFailureNeverRequestsRuntimeHandoff(string eventName)
+        => AssertListenerEventPurpose(true, eventName, true);
+
+    private static void AssertListenerEventPurpose(bool preparation, string eventName, bool fallbackPreparation)
     {
         NknTunaListenerSidecarSupervisor supervisor = null!;
         var request = new NknTunaListenerStartRequest("test-peer", NknAccelerationLaneKind.File,
-            preparation ? NknTunaListenerLifetimePolicy.SessionPreparation : NknTunaListenerLifetimePolicy.GenericBounded,
-            "captured-owner");
+            fallbackPreparation ? NknTunaListenerLifetimePolicy.CoordinatorScopedInitialActivation :
+                preparation ? NknTunaListenerLifetimePolicy.SessionPreparation : NknTunaListenerLifetimePolicy.GenericBounded,
+            "captured-owner", PreparationOnly: fallbackPreparation);
         var handoffs = 0;
         using (supervisor = new(new()
         {
@@ -601,6 +614,55 @@ public sealed class NknTunaLaneOwnershipTests
         Assert.Equal(accepted ? snapshot with { CurrentRequest = successor, OwnershipGeneration = 4 } : snapshot, current);
         if (accepted) Assert.False(supervisor.TryAdoptCurrentListener(snapshot, successor));
         Assert.True(owner.IsRunning);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    [Trait("FileTransferInfraSuite", "FallbackListenerPreparation")]
+    public async Task FallbackListenerPreparation_RealLaneIsEvidenceOnlyAndAdoptionRetiresOldCleanup(bool adopt)
+    {
+        using var lifetime = new CancellationTokenSource(TimeSpan.FromSeconds(8));
+        using var revocation = new CancellationTokenSource();
+        var server = new TcpListener(IPAddress.Loopback, 0);
+        server.Start();
+        try
+        {
+            using var supervisor = new ExactSupervisor(((IPEndPoint)server.LocalEndpoint).ToString(), initiallyIdle: true);
+            using var lane = CreateLane(supervisor);
+            var events = new List<AccelerationStateChangedEventArgs>();
+            lane.StateChanged += (_, e) => events.Add(e);
+            var start = lane.StartPreparationLaneAsync(new("fallback-preparation", "test-peer", true,
+                ListenerLifetimePolicy: NknTunaListenerLifetimePolicy.CoordinatorScopedInitialActivation), revocation.Token);
+            using var connection = await server.AcceptTcpClientAsync(lifetime.Token);
+            await WriteStatusAsync(connection, lifetime.Token);
+            var lease = Assert.IsType<NknTunaLaneLease>(await start.WaitAsync(lifetime.Token));
+            Assert.True(lease.Listener!.CurrentRequest.PreparationOnly);
+            Assert.All(events, e => Assert.Equal("fallback-preparation", e.SessionPreparationExecutionIdentity));
+            var current = lease;
+            if (adopt)
+            {
+                Assert.True(lane.TryAdoptCurrentListener(lease.Listener,
+                    lease.Listener.CurrentRequest with { ExecutionIdentity = "installed-retry", PreparationOnly = false }, out _));
+                current = lane.CaptureCurrentLaneLease()!;
+                Assert.NotEqual(lease, current);
+            }
+            revocation.Cancel();
+            Assert.Equal(adopt, lane.IsAvailable);
+            if (adopt)
+            {
+                Assert.False(lane.TryStopCurrentLaneLease(lease, "stale_preparation"));
+                var received = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+                lane.MessageReceived += (_, _) => received.TrySetResult();
+                await NknTunaSidecarFrameProtocol.WriteFrameAsync(connection.GetStream(), NknTunaSidecarFrameType.Data,
+                    NknTunaSidecarLane.Bulk, 1, DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(), new byte[] { 7 }, lifetime.Token);
+                await received.Task.WaitAsync(lifetime.Token);
+                Assert.True(lane.TryStopCurrentLaneLease(current, "installed_owner_cleanup"));
+            }
+            Assert.Equal(1, supervisor.ExactStops);
+            Assert.Equal(0, supervisor.GlobalStops);
+        }
+        finally { server.Stop(); }
     }
 
     private static NknTunaAccelerationLane CreateLane(INknTunaListenerSidecarSupervisor? supervisor = null)

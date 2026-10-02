@@ -1,3 +1,5 @@
+using NLink.Core.SessionSecurity;
+
 namespace NLink.Core.FileTransfer;
 
 public sealed partial class SessionFileTransferService : IFileTransferSessionPreparationAuthority
@@ -88,6 +90,54 @@ public sealed partial class SessionFileTransferService : IFileTransferSessionPre
         preparationEpoch = epoch;
         preparationAdmission = null;
         return true;
+    }
+
+    FileTransferFallbackListenerPreparationPermit? IFileTransferSessionPreparationAuthority.BeginFallbackListenerPreparation(
+        FileTransferSessionPreparationAttachment attachment, FileTransferSessionPreparationSecurityEpoch epoch)
+    {
+        lock (gate)
+        {
+            FileTransferFallbackListenerPreparationPermit? result = null;
+            epoch.TryUse(() =>
+            {
+                if (!IsPreparationAttachmentCurrentLocked(attachment, epoch) ||
+                    epoch.Security?.ApprovalExpiresAt is not { } expires ||
+                    !epoch.Security.HasCapability(CapabilityGrant.FileTransfer, DateTimeOffset.UtcNow)) return;
+                var active = CaptureFallbackListenerPreparationStateLocked();
+                if (active is not null && active.SessionId == epoch.SessionId)
+                    result = FileTransferCoordinator.CreateFallbackListenerPreparationPermit(
+                        active, epoch.Id, expires, DateTimeOffset.UtcNow);
+            });
+            return result;
+        }
+    }
+
+    bool IFileTransferSessionPreparationAuthority.IsFallbackListenerPreparationCurrent(
+        FileTransferSessionPreparationAttachment attachment, FileTransferSessionPreparationSecurityEpoch epoch,
+        FileTransferFallbackListenerPreparationPermit permit)
+    {
+        lock (gate)
+        {
+            var current = false;
+            epoch.TryUse(() =>
+            {
+                if (!IsPreparationAttachmentCurrentLocked(attachment, epoch) ||
+                    !epoch.Security!.HasCapability(CapabilityGrant.FileTransfer, DateTimeOffset.UtcNow)) return;
+                var active = CaptureFallbackListenerPreparationStateLocked();
+                current = active is not null && active.SessionId == epoch.SessionId &&
+                    FileTransferCoordinator.IsFallbackListenerPreparationPermitCurrent(
+                        active, permit, epoch.Id, DateTimeOffset.UtcNow);
+            });
+            return current;
+        }
+    }
+
+    private FileTransferCoordinatorState? CaptureFallbackListenerPreparationStateLocked()
+    {
+        var outbound = outboundTransfer is { IsTerminal: false };
+        var inbound = inboundTransfer is { IsTerminal: false };
+        return outbound == inbound ? null : outbound
+            ? CreateCoordinatorStateLocked(outboundTransfer!) : CreateCoordinatorStateLocked(inboundTransfer!);
     }
 
     FileTransferAccelerationRequestSelection IFileTransferSessionPreparationAuthority.SelectRequest(

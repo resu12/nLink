@@ -147,6 +147,9 @@ public sealed partial class NknSignalingTransport
 
     private void HandleSessionPreparationLaneState(AccelerationStateChangedEventArgs e)
     {
+        lock (accelerationGate)
+            if (!e.IsAvailable && fallbackListenerPreparation?.Identity == e.SessionPreparationExecutionIdentity)
+                RetireFallbackListenerPreparationUnsafe();
         PreparationLaneWork? work;
         lock (preparationExecutionGate) work = preparationLaneWork;
         // The event carries its original purpose/owner. Even a late predecessor

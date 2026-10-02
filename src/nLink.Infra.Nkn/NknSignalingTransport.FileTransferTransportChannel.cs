@@ -2656,6 +2656,10 @@ public sealed partial class NknSignalingTransport
 
         foreach (var key in staleKeys)
         {
+            lock (accelerationGate)
+                if (fallbackListenerPreparation?.Permit.Publication is { } preparation &&
+                    preparation.SessionId == key.SessionId && preparation.TransferId == key.TransferId)
+                    RetireFallbackListenerPreparationUnsafe();
             fileTransferRouteHints.Remove(key);
             fileTransferRoutePublicationAuthorities.Remove(key);
             fileTransferPublicationCaptures.Remove(key);
@@ -2729,6 +2733,10 @@ public sealed partial class NknSignalingTransport
                     SanitizeLogToken(authority.CoordinatorDecisionReason),
                     DateTimeOffset.UtcNow);
                 fileTransferRoutePublicationAuthorities[routeHintKey] = authority;
+                lock (accelerationGate)
+                    if (fallbackListenerPreparation is { } preparation &&
+                        !FileTransferCoordinator.MatchesRoutePublicationAuthority(authority, preparation.Permit.Publication))
+                        RetireFallbackListenerPreparationUnsafe();
                 if (notification.PublicationEvidence is { } publicationEvidence)
                 {
                     fileTransferPublicationCaptures[routeHintKey] = new(
@@ -6370,6 +6378,7 @@ public sealed partial class NknSignalingTransport
     private void InstallControlSessionSharedKey(byte[] sharedKey, string? sessionId, byte[]? approvalBytes)
     {
         ArgumentNullException.ThrowIfNull(sharedKey);
+        RetireFallbackListenerPreparation();
 
         lock (controlSecureStateGate)
         {
@@ -6410,6 +6419,7 @@ public sealed partial class NknSignalingTransport
 
     private void ResetControlSecureState()
     {
+        RetireFallbackListenerPreparation();
         lock (controlSecureStateGate)
         {
             sessionPreparationLifecycle.ResetKey();

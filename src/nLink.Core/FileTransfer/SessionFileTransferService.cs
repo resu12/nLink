@@ -7181,7 +7181,7 @@ public sealed partial class SessionFileTransferService :
             string.Equals(request.TransferId, outbound.TransferId, StringComparison.Ordinal))
         {
             var current = CreateCoordinatorStateLocked(outbound);
-            if (decision.Contract is { } contract)
+            if (!current.IsTerminal && decision.Contract is { } contract)
             {
                 var invalidation =
                     FileTransferCoordinator
@@ -7204,7 +7204,7 @@ public sealed partial class SessionFileTransferService :
                  string.Equals(request.TransferId, inbound.TransferId, StringComparison.Ordinal))
         {
             var current = CreateCoordinatorStateLocked(inbound);
-            if (decision.Contract is { } contract)
+            if (!current.IsTerminal && decision.Contract is { } contract)
             {
                 var invalidation =
                     FileTransferCoordinator

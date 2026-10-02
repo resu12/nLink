@@ -978,6 +978,7 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
         }
 
         disposed = true;
+        RetireFallbackListenerPreparation();
         RetireSessionPreparationExecution();
         CancelRuntimeUnlockRetryPhysicalSendScope("dispose");
         InvalidateInboundRuntimeUnlockDialLifecycleForSessionChange("dispose");

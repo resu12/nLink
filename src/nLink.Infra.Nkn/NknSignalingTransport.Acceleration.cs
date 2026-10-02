@@ -16073,6 +16073,8 @@ public sealed partial class NknSignalingTransport
                 return;
             }
 
+            if (adoptionSnapshot.CurrentRequest.PreparationOnly)
+                preflightLanes &= NknAccelerationLaneKind.File;
             adoptedListenerRequest = new NknTunaListenerStartRequest(
                 remoteEndpoint,
                 preflightLanes,
@@ -31240,6 +31242,20 @@ public sealed partial class NknSignalingTransport
         RuntimeUnlockRetryNegotiationIntent intent,
         RuntimeUnlockRetryNegotiationSlotReceipt slotReceipt)
     {
+        await AwaitFallbackListenerPreparationAsync(intent.SourcePublicationAuthority).ConfigureAwait(false);
+        if (!TryCaptureRuntimeUnlockRetryNegotiationSourceScope(intent.SourcePublicationAuthority, out var preparedSource) ||
+            preparedSource != intent.SourceScope)
+        {
+            lock (accelerationGate)
+                if (runtimeUnlockRetryNegotiationSlotReceipt == slotReceipt && slotReceipt.InstallReceipt is null)
+                    TryReleaseAccelerationNegotiationSlotUnsafe(slotReceipt.SlotGeneration, AccelerationNegotiationSlotOwner.RuntimeUnlockRetryIntent);
+            LogRuntimeUnlockRetryListenerPreparation("Rejected", intent, slotReceipt, 0, null, null,
+                "preparation_source_retired_before_listener_start");
+            return;
+        }
+        lock (accelerationGate)
+            if (disposed || pendingRuntimeUnlockRetryNegotiationIntent != intent ||
+                runtimeUnlockRetryNegotiationSlotReceipt != slotReceipt) return;
         var preparationGeneration = Interlocked.Increment(
             ref runtimeUnlockRetryListenerPreparationNextGeneration);
         if (accelerationLane is not INknTunaAccelerationSession tunaSession ||
@@ -40619,6 +40635,7 @@ public sealed partial class NknSignalingTransport
                     RuntimeUnlockPostFallbackSchedulingBoundaryKind
                         .AwaitingRetryAuthority)
                 {
+                    RequestFallbackListenerPreparation(ct);
                     RecheckPendingRuntimeUnlockRetryNegotiationIntentAfterUnlock(
                         postFallbackSchedulingBoundary,
                         reason);
@@ -41021,6 +41038,7 @@ public sealed partial class NknSignalingTransport
         }
         var bootstrapLocalStopAlreadyPublished =
             PublishFallbackBootstrapLocalStopsBeforeReset(bootstrapLocalStops, normalizedReason);
+        RetireFallbackListenerPreparation();
         string? fallbackSessionId;
         NknAccelerationLaneKind fallbackLanes;
         bool preserveRuntimeUnlockPendingAnswer;

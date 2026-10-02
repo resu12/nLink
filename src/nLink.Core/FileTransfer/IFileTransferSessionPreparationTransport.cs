@@ -22,6 +22,10 @@ internal interface IFileTransferSessionPreparationAdmissionTransport
 
 internal interface IFileTransferSessionPreparationAuthority
 {
+    FileTransferFallbackListenerPreparationPermit? BeginFallbackListenerPreparation(
+        FileTransferSessionPreparationAttachment attachment, FileTransferSessionPreparationSecurityEpoch epoch) => null;
+    bool IsFallbackListenerPreparationCurrent(FileTransferSessionPreparationAttachment attachment,
+        FileTransferSessionPreparationSecurityEpoch epoch, FileTransferFallbackListenerPreparationPermit permit) => false;
     FileTransferAccelerationRequestSelection SelectRequest(FileTransferSessionPreparationAttachment attachment,
         FileTransferSessionPreparationSecurityEpoch epoch)
         => new(FileTransferAccelerationRequestPurpose.Unavailable, "preparation_selection_unsupported");

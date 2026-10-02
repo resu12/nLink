@@ -1319,6 +1319,11 @@ public sealed partial class SessionFileTransferService
         OutboundTransferContext context,
         RuntimeUnlockRetryDispatchSettlementDecision decision)
     {
+        if (context.IsTerminal)
+        {
+            return;
+        }
+
         ApplyRuntimeUnlockRetryLifecycleStateLocked(
             context,
             decision.State,
@@ -1346,6 +1351,11 @@ public sealed partial class SessionFileTransferService
         InboundTransferContext context,
         RuntimeUnlockRetryDispatchSettlementDecision decision)
     {
+        if (context.IsTerminal)
+        {
+            return;
+        }
+
         ApplyRuntimeUnlockRetryLifecycleStateLocked(
             context,
             decision.State,

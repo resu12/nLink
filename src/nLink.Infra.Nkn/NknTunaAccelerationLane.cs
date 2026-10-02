@@ -290,6 +290,13 @@ internal sealed partial class NknTunaAccelerationLane : INknTunaAccelerationSess
                 OwnershipGeneration = snapshot.OwnershipGeneration + 1,
             };
             clientGeneration++; // Rebinding ownership invalidates predecessor cleanup.
+            if (currentClientStart?.Preparation == true &&
+                snapshot.CurrentRequest.LifetimePolicy == NknTunaListenerLifetimePolicy.CoordinatorScopedInitialActivation &&
+                !successorRequest.PreparationOnly)
+            {
+                currentClientStart.Revocation.Unregister();
+                currentClientStart = null;
+            }
             receipt = new NknTunaListenerAdoptionReceipt(
                 snapshot,
                 successorRequest,

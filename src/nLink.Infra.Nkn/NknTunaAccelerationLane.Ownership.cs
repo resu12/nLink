@@ -32,6 +32,7 @@ internal sealed partial class NknTunaAccelerationLane
     public async Task<NknTunaLaneLease?> StartPreparationLaneAsync(NknTunaLanePreparationRequest request, CancellationToken ct)
     {
         if (!options.Enabled || (options.Lanes & NknAccelerationLaneKind.File) == 0 ||
+            request.ListenerLifetimePolicy is not (NknTunaListenerLifetimePolicy.SessionPreparation or NknTunaListenerLifetimePolicy.CoordinatorScopedInitialActivation) ||
             string.IsNullOrWhiteSpace(request.ExecutionIdentity) || string.IsNullOrWhiteSpace(request.ExpectedRemotePeer) ||
             request.LocalIsPayer && (listenerSupervisor is null || !CanOfferListener) ||
             !request.LocalIsPayer && string.IsNullOrWhiteSpace(request.RemoteTunaAddress)) return null;
@@ -49,7 +50,8 @@ internal sealed partial class NknTunaAccelerationLane
         {
             connected = request.LocalIsPayer
                 ? await ConnectListenerAsync(new(request.ExpectedRemotePeer, NknAccelerationLaneKind.File,
-                    NknTunaListenerLifetimePolicy.SessionPreparation, request.ExecutionIdentity), operation, ct).ConfigureAwait(false)
+                    request.ListenerLifetimePolicy, request.ExecutionIdentity,
+                    PreparationOnly: request.ListenerLifetimePolicy == NknTunaListenerLifetimePolicy.CoordinatorScopedInitialActivation), operation, ct).ConfigureAwait(false)
                 : await StartDialerSidecarCoreAsync(request.RemoteTunaAddress!, request.ExpectedRemotePeer, operation, ct).ConfigureAwait(false);
         }
         finally { FinishLaneStart(operation); }

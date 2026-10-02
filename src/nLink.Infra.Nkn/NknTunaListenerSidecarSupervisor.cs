@@ -608,7 +608,7 @@ internal sealed class NknTunaListenerSidecarSupervisor : INknTunaListenerSidecar
                         "NKN.Tuna",
                         $"event=tuna_listener_cap_handoff_requested; cap_reason={SanitizeLogToken(capReason)}; bytes_moved={TryGetInt64(root, "bytesMoved") ?? -1}; projected_bytes={TryGetInt64(root, "projectedBytes") ?? -1}; limit_bytes={TryGetInt64(root, "limitBytes") ?? -1}; remaining_bytes={TryGetInt64(root, "remainingBytes") ?? -1}");
                     SetStatus("cap_handoff_pending");
-                    if (request?.LifetimePolicy == NknTunaListenerLifetimePolicy.SessionPreparation)
+                    if (request?.PreparationOnly == true || request?.LifetimePolicy == NknTunaListenerLifetimePolicy.SessionPreparation)
                         RaiseStateUnavailable("listener_cap_" + capReason, request);
                     else RequestCapHandoff(capReason);
                     break;
@@ -925,7 +925,7 @@ internal sealed class NknTunaListenerSidecarSupervisor : INknTunaListenerSidecar
                 new AccelerationStateChangedEventArgs(
                     isAvailable: false,
                     SanitizeLogToken(reason), sessionPreparationExecutionIdentity:
-                        request?.LifetimePolicy == NknTunaListenerLifetimePolicy.SessionPreparation
+                        request?.PreparationOnly == true || request?.LifetimePolicy == NknTunaListenerLifetimePolicy.SessionPreparation
                             ? request.ExecutionIdentity : null));
         }
         catch

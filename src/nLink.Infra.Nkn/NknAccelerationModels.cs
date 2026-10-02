@@ -172,7 +172,8 @@ internal sealed record NknTunaLaneLease(
 // A physical-resource request, not Core authorization. Callers must hold the
 // current preparation permit and revoke the supplied token on its retirement.
 internal sealed record NknTunaLanePreparationRequest(
-    string ExecutionIdentity, string ExpectedRemotePeer, bool LocalIsPayer, string? RemoteTunaAddress = null);
+    string ExecutionIdentity, string ExpectedRemotePeer, bool LocalIsPayer, string? RemoteTunaAddress = null,
+    NknTunaListenerLifetimePolicy ListenerLifetimePolicy = NknTunaListenerLifetimePolicy.SessionPreparation);
 
 internal enum NknTunaListenerLifetimePolicy
 {
@@ -187,7 +188,7 @@ internal sealed record NknTunaListenerStartRequest(
     NknAccelerationLaneKind Lanes,
     NknTunaListenerLifetimePolicy LifetimePolicy =
         NknTunaListenerLifetimePolicy.GenericBounded,
-    string ExecutionIdentity = "");
+    string ExecutionIdentity = "", bool PreparationOnly = false);
 
 internal sealed record NknTunaListenerSidecarEndpoint(
     string LocalIpc,

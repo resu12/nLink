@@ -186,6 +186,7 @@ public sealed class SessionFileTransferRuntimeUnlockRetryAuthorityTests :
             "test_terminal_between_retry_stage_and_install",
             CancellationToken.None);
         Assert.NotNull(terminal);
+        var terminalState = GetCoordinatorPersistentState(fixture.Context);
 
         allowStageReturn.Set();
         await request.WaitAsync(TimeSpan.FromSeconds(3));
@@ -196,6 +197,7 @@ public sealed class SessionFileTransferRuntimeUnlockRetryAuthorityTests :
         Assert.Null(GetCurrentAttempt(fixture.Context));
         Assert.Null(GetCurrentInstallReceipt(fixture.Context));
         Assert.False(fixture.Bridge.HasPendingStage);
+        Assert.Equal(terminalState, GetCoordinatorPersistentState(fixture.Context));
     }
 
     [Fact]
@@ -1206,6 +1208,7 @@ public sealed class SessionFileTransferRuntimeUnlockRetryAuthorityTests :
         Assert.Null(GetCurrentAttempt(fixture.Context));
         Assert.False(contract.TryCreateSettlementReport(out _));
         Assert.Null(GetLastSettlement(fixture.Context));
+        var terminalState = GetCoordinatorPersistentState(fixture.Context);
 
         var terminalReport = new RuntimeUnlockRetryDispatchSettlementReport(
             contract.Authority,
@@ -1221,6 +1224,7 @@ public sealed class SessionFileTransferRuntimeUnlockRetryAuthorityTests :
         Assert.Null(GetCurrentAttempt(fixture.Context));
         Assert.Null(GetLastSettlement(fixture.Context));
         Assert.Equal(1, fixture.Bridge.SettlementDecisionCount);
+        Assert.Equal(terminalState, GetCoordinatorPersistentState(fixture.Context));
     }
 
     [Fact]
