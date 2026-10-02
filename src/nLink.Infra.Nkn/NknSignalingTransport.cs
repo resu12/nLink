@@ -341,6 +341,8 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
     private long inboundFileTransferDispatchGeneration;
     private bool inboundFileTransferControlDispatchActive;
     private Task inboundFileTransferLifecycleDispatchTail = Task.CompletedTask;
+    private TaskCompletionSource<bool> inboundFileTransferDispatchReset =
+        new(TaskCreationOptions.RunContinuationsAsynchronously);
     private TaskCompletionSource<bool> hostReadyTcs = CreateHostReadyTcs();
     private long hostReadyGeneration;
     private string hostReadyRole = "(none)";

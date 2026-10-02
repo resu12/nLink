@@ -2405,6 +2405,7 @@ public sealed partial class NknSignalingTransport
                             receipt) { FallbackProjection = CaptureFileFallbackProjectionUnsafe(authority), FallbackProofEpisode = CaptureFallbackProofEpisodeUnsafe(authority) },
                         RetainedPredecessor = predecessor,
                     };
+                    predecessor.PayloadCutoverCompletion.TrySetResult(true);
                 }
                 else if (shadow.Current is not null ||
                          shadow.PendingAvailabilityDisposition is not null)
@@ -2432,6 +2433,7 @@ public sealed partial class NknSignalingTransport
                                     command,
                                     receipt) { FallbackProjection = CaptureFileFallbackProjectionUnsafe(authority), FallbackProofEpisode = CaptureFallbackProofEpisodeUnsafe(authority) },
                         };
+                        retained.PayloadCutoverCompletion.TrySetResult(true);
                     }
                     else
                     {
@@ -2694,6 +2696,7 @@ public sealed partial class NknSignalingTransport
             }
             else
             {
+                var completedBinding = predecessorMatches ? shadow.RetainedPredecessor! : shadow.Current!;
                 if (currentMatches && shadow.RetainedPredecessor is null)
                 {
                     fallbackProjectionRetired = ApplyFileFallbackProjectionDispositionUnsafe(
@@ -2793,6 +2796,14 @@ public sealed partial class NknSignalingTransport
                     {
                         wakeRetryAfterAnswerBarrier = true;
                     }
+                }
+                // A superseded binding without a successor remains paused.
+                // Rejected/idempotent callbacks never release payload work.
+                if (command.Kind != FileTransferRouteTransitionDispositionKind.Superseded ||
+                    fileTransferRouteTransitionExecutionShadow.Current is not null)
+                {
+                    completedBinding.PayloadCutoverCompletion.TrySetResult(
+                        command.Kind != FileTransferRouteTransitionDispositionKind.TerminalInvalidated);
                 }
             }
         }
@@ -3109,6 +3120,9 @@ public sealed partial class NknSignalingTransport
         public TunaFallbackProofState? FallbackProjection { get; init; }
 
         public FileTransferFallbackProofEpisode? FallbackProofEpisode { get; init; }
+
+        public TaskCompletionSource<bool> PayloadCutoverCompletion { get; } =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
     }
 
     private sealed record FileTransferRouteTransitionExecutionShadow(

@@ -27,6 +27,46 @@ function Assert-StaleConsumed([string]$name, [scriptblock]$mutate, [bool]$expect
     $script:staleControlCount++
 }
 Assert-StaleConsumed 'exact_completed' {param($b) $b} $true
+Assert-StaleConsumed 'commit_with_applied_pressure_settlement' {
+    param($b)
+    $c=@($b | Where-Object decisionKind -CEQ 'CommitFileTransferRouteTransition')[0]
+    $terminal=@($c.operations | Where-Object { $_.family -ceq 'route_transition' -and $_.operationRole -ceq 'terminal' })[0]
+    # The descriptor projects its latest typed receipt, not necessarily commit.
+    $settlement=$terminal.routeTransition.receipts[-1] | Select-Object *
+    $settlement.stage='pressure_settlement'
+    $settlement.receiptStatus='Applied'
+    $terminal.routeTransition.receipts+=@($settlement)
+    $terminal.receiptStatus='Applied'
+    $b
+} $true
+Assert-StaleConsumed 'missing_commit_receipt' {
+    param($b)
+    $c=@($b | Where-Object decisionKind -CEQ 'CommitFileTransferRouteTransition')[0]
+    $terminal=@($c.operations | Where-Object { $_.family -ceq 'route_transition' -and $_.operationRole -ceq 'terminal' })[0]
+    $terminal.routeTransition.receipts=@($terminal.routeTransition.receipts | Where-Object stage -CNE 'commit')
+    $b
+}
+Assert-StaleConsumed 'duplicate_commit_receipt' {
+    param($b)
+    $c=@($b | Where-Object decisionKind -CEQ 'CommitFileTransferRouteTransition')[0]
+    $terminal=@($c.operations | Where-Object { $_.family -ceq 'route_transition' -and $_.operationRole -ceq 'terminal' })[0]
+    $terminal.routeTransition.receipts+=@($terminal.routeTransition.receipts | Where-Object stage -CEQ 'commit')
+    $b
+}
+foreach ($field in @('commandIdentity','commandGeneration','commandFingerprint','receiptIdentity','receiptGeneration',
+        'receiptStatus','receiptFingerprint','receiptValidated','stage')) {
+    Assert-StaleConsumed "wrong_commit_receipt_$field" {
+        param($b)
+        $c=@($b | Where-Object decisionKind -CEQ 'CommitFileTransferRouteTransition')[0]
+        $terminal=@($c.operations | Where-Object { $_.family -ceq 'route_transition' -and $_.operationRole -ceq 'terminal' })[0]
+        $receipt=@($terminal.routeTransition.receipts | Where-Object stage -CEQ 'commit')[0]
+        if ($receipt.$field -is [bool]) { $receipt.$field=$false }
+        elseif ($field -in @('commandFingerprint','receiptFingerprint')) { $receipt.$field='(none)' }
+        elseif ($receipt.$field -is [string]) { $receipt.$field='different' }
+        else { $receipt.$field++ }
+        $b
+    }
+}
 foreach ($kind in @('ObserveRuntimeUnlockResponderPeerProbeHandoff','PrepareFileTransferRouteTransition',
         'BeginFileTransferRouteTransitionPhysicalDrain','CommitFileTransferRouteTransition','ApplyFileTransferRouteTransitionDispositionReceipt')) {
     Assert-StaleConsumed "missing_$kind" {param($b,$r) $b | Where-Object { $_.decisionKind -cne $kind -or $_.boundaryId -ceq $r.boundaryId }}

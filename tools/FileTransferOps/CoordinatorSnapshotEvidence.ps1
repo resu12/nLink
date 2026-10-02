@@ -10047,7 +10047,6 @@ function Test-FileTransferCoordinatorResponderProbeHandoffObservationConsumed {
             [long]$_.operationGeneration -eq $linkedGeneration -and
             [string]$_.beforeState -ceq 'None' -and
             [string]$_.afterState -ceq 'Committed' -and
-            [string]$_.receiptStatus -ceq 'Committed' -and
             [bool]$_.receiptValidated
         })
     $dispositionRoute = @($dispositionEntry.Boundary.operations | Where-Object {
@@ -10072,6 +10071,22 @@ function Test-FileTransferCoordinatorResponderProbeHandoffObservationConsumed {
         $committedRoute.Count -ne 1 -or $dispositionRoute.Count -ne 1 -or
         $publication.Count -ne 1) {
         return $false
+    }
+    # The terminal descriptor projects the latest receipt (for example an
+    # Applied pressure settlement). Commit authority is its typed commit receipt.
+    $commitReceipts = @($committedRoute[0].routeTransition.receipts | Where-Object stage -CEQ 'commit')
+    if ($commitReceipts.Count -ne 1) { return $false }
+    $commitReceipt = $commitReceipts[0]
+    if ([string]$commitReceipt.receiptStatus -cne 'Committed' -or
+        -not [bool]$commitReceipt.receiptValidated -or
+        [long]$commitReceipt.commandGeneration -ne $linkedGeneration -or
+        [long]$commitReceipt.receiptGeneration -ne $linkedGeneration -or
+        [string]$commitReceipt.commandIdentity -cne [string]$commitReceipt.receiptIdentity) {
+        return $false
+    }
+    foreach ($field in @('commandIdentity','commandFingerprint','receiptIdentity','receiptFingerprint')) {
+        if ([string]::IsNullOrWhiteSpace([string]$commitReceipt.$field) -or
+            [string]$commitReceipt.$field -ceq '(none)') { return $false }
     }
     if (-not (Test-FileTransferCoordinatorSnapshotBoundaryEqual `
             -Left $publication[0].routeRuntime.boundary `

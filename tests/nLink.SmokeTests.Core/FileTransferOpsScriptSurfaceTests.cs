@@ -1483,6 +1483,16 @@ public sealed class FileTransferOpsScriptSurfaceTests : FileTransferOpsScriptsTe
                     operationKind='RegularV4ToTunaV4'; authorityId='route-transition-1'
                     operationGeneration=1L; beforeState=$beforeState; afterState=$afterState
                     receiptStatus=$receiptStatus; receiptValidated=$validated
+                    routeTransition=[pscustomobject]@{
+                        receipts=@(if ($role -ceq 'terminal' -and $afterState -ceq 'Committed') {
+                            [pscustomobject]@{
+                                stage='commit'; commandIdentity='route-transition-1:commit'; commandGeneration=1L
+                                commandFingerprint='drain-command-fingerprint'; receiptIdentity='route-transition-1:commit'
+                                receiptGeneration=1L; receiptStatus='Committed'; receiptFingerprint='commit-fingerprint'
+                                receiptValidated=$true
+                            }
+                        })
+                    }
                 }
             }
             function New-PublicationOperation {

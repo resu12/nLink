@@ -3660,6 +3660,9 @@ public sealed partial class NknSignalingTransport
             inboundFileTransferControlDispatchActive = false;
             Interlocked.Increment(ref inboundFileTransferDispatchGeneration);
             inboundFileTransferLifecycleDispatchTail = Task.CompletedTask;
+            var previousReset = inboundFileTransferDispatchReset;
+            inboundFileTransferDispatchReset = new(TaskCreationOptions.RunContinuationsAsynchronously);
+            previousReset.TrySetResult(true);
         }
 
         if (pendingLifecycleCompletions is null)
@@ -4416,6 +4419,7 @@ public sealed partial class NknSignalingTransport
     private bool TryPrepareFileTransferDataFrameDispatch(string source, NknBridgeChannel channel, Envelope env, out InboundFileTransferDispatchWork work)
     {
         work = default;
+        var dispatchGeneration = Volatile.Read(ref inboundFileTransferDispatchGeneration);
         if (!TryDecryptFileTransferPayloadWithEvidence(source, env, MsgType.FileTransferDataFrame,
                 out var securePayload, out var securityEvidence, channel))
         {
@@ -4454,11 +4458,40 @@ public sealed partial class NknSignalingTransport
         var receivedTransportKind = ResolveInboundFileTransferDataFrameTransportKind(channel);
         var envelopeEvidence = CreateFileTransferDataPathEnvelopeEvidence(
             env.MessageId, frame.SessionId, frame.TransferId) with { SecurityEvidence = securityEvidence };
+        return TryPrepareAuthenticatedFileTransferDataFrameDispatch(source, channel, env, frame,
+            receivedTransportKind, envelopeEvidence, dispatchGeneration, out work);
+    }
+
+    private bool TryPrepareAuthenticatedFileTransferDataFrameDispatch(
+        string source, NknBridgeChannel channel, Envelope env, FileTransferDataFrame frame,
+        FileTransferTransportKind receivedTransportKind, FileTransferDataPathEnvelopeEvidence envelopeEvidence,
+        long dispatchGeneration, out InboundFileTransferDispatchWork work)
+    {
+        work = default;
         var yieldEvidence = CaptureYieldEvidence(frame, envelopeEvidence,
             channel == NknBridgeChannel.Bulk ? "bulk" : "control");
-        if (ShouldRejectFileTunaV4PayloadReceive(frame, channel, receivedTransportKind, envelopeEvidence))
+        // Bind and use share accelerationGate; publication capture and use share
+        // gate. No service callback runs under either transport lock.
+        lock (gate)
+        lock (accelerationGate)
         {
-            return false;
+            if (disposed || dispatchGeneration != Volatile.Read(ref inboundFileTransferDispatchGeneration))
+                return false;
+            if (GetInboundPayloadCutoverPauseUnsafe(frame) is { } binding)
+            {
+                work = CreateInboundFileTransferDispatchWork(MsgType.FileTransferDataFrame, frame.TransferId,
+                    () => _ = ResumeInboundPayloadAfterCutoverAsync(binding, dispatchGeneration, () =>
+                    {
+                        // Authentication/replay tracking has already succeeded.
+                        // Do not decrypt this envelope a second time.
+                        if (TryPrepareAuthenticatedFileTransferDataFrameDispatch(source, channel, env, frame,
+                                receivedTransportKind, envelopeEvidence, dispatchGeneration, out var resumed))
+                            resumed.Dispatch();
+                    }), usesDedicatedChunkDispatch: true);
+                return true;
+            }
+            if (ShouldRejectFileTunaV4PayloadReceive(frame, channel, receivedTransportKind, envelopeEvidence))
+                return false;
         }
 
         if (!TryValidateAndTrackFileTransferDataFrame(frame, inbound: true, applyStateChange: true, out var failureReason))
@@ -4553,28 +4586,29 @@ public sealed partial class NknSignalingTransport
 
         var effectiveTransport = FormatFileTransferTransportKindForLog(receivedTransportKind);
         var usesDedicatedChunkDispatch = ShouldUseDedicatedChunkDispatchForFileTransferDataFrame(frame);
-        work = CreateInboundFileTransferDispatchWork(
-            MsgType.FileTransferDataFrame,
-            frame.TransferId,
-            () =>
+        void DispatchFrame()
+        {
+            bool hasRouteAuthority;
+            FileTransferRouteHint routeHint;
+            FileTransferRoutePublicationEvidence? publication;
+            lock (gate)
+            lock (accelerationGate)
             {
+                if (disposed || dispatchGeneration != Volatile.Read(ref inboundFileTransferDispatchGeneration))
+                    return;
+                if (GetInboundPayloadCutoverPauseUnsafe(frame) is { } binding)
+                {
+                    _ = ResumeInboundPayloadAfterCutoverAsync(binding, dispatchGeneration, DispatchFrame);
+                    return;
+                }
                 // A queued frame may outlive its ingress publication. Use the
                 // same dispatch-time capture for the guard and its diagnostics.
-                var hasRouteAuthority = TryGetFileTransferDataPathRouteAuthorityWithEvidence(
-                    frame.SessionId, frame.TransferId, FileTransferDirection.Inbound, out var routeHint, out var publication);
+                hasRouteAuthority = TryGetFileTransferDataPathRouteAuthorityWithEvidence(
+                    frame.SessionId, frame.TransferId, FileTransferDirection.Inbound, out routeHint, out publication);
                 if (hasRouteAuthority && ShouldRejectFileTunaV4PayloadReceiveWithAuthority(
                         frame, channel, receivedTransportKind, envelopeEvidence, routeHint, publication))
                 {
                     return;
-                }
-
-                if (receivedTransportKind != FileTransferTransportKind.Tuna && !IsBootstrapEvidenceOnlyDataFrame(frame))
-                {
-                    RecordTunaFallbackFileTransferDataFrameReceived(
-                        frame,
-                        channel,
-                        env.Payload.Length,
-                        frame.SessionId);
                 }
 
                 var dispatchEvidence = envelopeEvidence with
@@ -4584,11 +4618,17 @@ public sealed partial class NknSignalingTransport
                 LogFileTransferDataPathReceiveResult(
                     frame, channel, receivedTransportKind, dispatchEvidence,
                     "dispatch_entered", hasRouteAuthority, routeHint);
-                yieldEvidence?.WriteCopy("receive_dispatch", yieldEvidence.First);
-                DeliverFileTransferDataFrame(frame, channel, receivedTransportKind, source, yieldEvidence);
-                LogFileTransferEnvelopeEvent("received", MsgType.FileTransferDataFrame, frame.TransferId, source, effectiveTransport);
-            },
-            usesDedicatedChunkDispatch);
+            }
+            if (receivedTransportKind != FileTransferTransportKind.Tuna && !IsBootstrapEvidenceOnlyDataFrame(frame))
+            {
+                RecordTunaFallbackFileTransferDataFrameReceived(frame, channel, env.Payload.Length, frame.SessionId);
+            }
+            yieldEvidence?.WriteCopy("receive_dispatch", yieldEvidence.First);
+            DeliverFileTransferDataFrame(frame, channel, receivedTransportKind, source, yieldEvidence);
+            LogFileTransferEnvelopeEvent("received", MsgType.FileTransferDataFrame, frame.TransferId, source, effectiveTransport);
+        }
+        work = CreateInboundFileTransferDispatchWork(MsgType.FileTransferDataFrame, frame.TransferId,
+            DispatchFrame, usesDedicatedChunkDispatch);
         return true;
     }
 
