@@ -23036,7 +23036,7 @@ public sealed partial class SessionFileTransferService
                     case FileTransferChunkBatchFrameV6 batch when ShouldUseV6SparseCreditEnvelope(context) ||
                                                                  ShouldUsePostTunaFallbackV6SparseRuntimeLocked(context):
                         MarkInboundV4PeerFrameReceived(context);
-                        await HandleInboundV6ChunkBatchAsync(context, batch, received.TransportKind).ConfigureAwait(false);
+                        await HandleInboundV6ChunkBatchFromReceiveAsync(context, batch, received.TransportKind, writeIngress).ConfigureAwait(false);
                         break;
                     case FileTransferChunkBatchFrameV4 batch:
                         if (isPrimaryRegularNknBulkV6)
@@ -24441,14 +24441,14 @@ public sealed partial class SessionFileTransferService
         bool forceSend = false,
         InboundBootstrapWriteSource? requiredWriteSource = null,
         InboundFinalizationSource? requiredFinalizationSource = null)
-        => requiredWriteSource is not null
+        => requiredWriteSource is { FallbackRepairSource: null }
             ? SendInboundV4StateWithWriteBindingAsync(context, reason, terminalReady, requireMissingRange, forceMissingRange,
                 forceSend, null, null, requiredWriteSource, requiredFinalizationSource)
             : ShouldUsePostTunaFallbackV6FeedbackEnvelope(context)
             ? SendInboundV6ReceiverStateWithFinalizationSourceAsync(context, reason, forceSend || requireMissingRange || forceMissingRange, terminalReady,
-                requiredFinalizationSource: requiredFinalizationSource)
+                requiredFinalizationSource: requiredFinalizationSource, requiredWriteSource: requiredWriteSource)
             : SendInboundV4StateWithWriteBindingAsync(context, reason, terminalReady, requireMissingRange, forceMissingRange,
-                forceSend, null, null, null, requiredFinalizationSource);
+                forceSend, null, null, requiredWriteSource, requiredFinalizationSource);
 
     private Task<bool> SendInboundV4StateAsync(
         InboundTransferContext context,

@@ -2937,6 +2937,18 @@ public sealed record FileTransferReceivedDataFrame(
     internal FileTransferFallbackTailYieldEvidence? YieldEvidence { get; init; }
 }
 
+internal sealed record FileTransferControlPlanePhysicalSendSubmission(
+    Task<FileTransferControlPlaneDeliveryResult> DeliveryTask,
+    Task PhysicalCompletionTask);
+
+internal interface IFileTransferControlPlanePhysicalSendSubmissionTransport
+{
+    // As with data-session submission, once work starts both tasks must be returned.
+    // Delivery acceptance or cancellation alone is not all-copy settlement.
+    FileTransferControlPlanePhysicalSendSubmission SubmitFileTransferControlPlanePhysicalSend(
+        FileTransferControlPlaneDeliveryRequest request, CancellationToken ct);
+}
+
 public interface IFileTransferDataSession : IDisposable
 {
     string SessionId { get; }

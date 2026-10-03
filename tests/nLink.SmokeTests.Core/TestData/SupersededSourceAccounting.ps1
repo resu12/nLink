@@ -23,7 +23,7 @@ Invoke-Expression $definition[0].Extent.Text
 $lines=[IO.File]::ReadAllLines($InputPath)
 $snapshot=Get-FileTransferCoordinatorSnapshotEvaluation -Lines $lines
 Check ($snapshot.ArtifactEvidenceVerdict -ceq 'pass' -and $snapshot.StreamComplete) $snapshot.ArtifactEvidenceFailureReason
-Check ($snapshot.CatalogVersion -ceq $script:FileTransferCoordinatorEarlyCheckpointProofCatalogVersion -and
+Check ($snapshot.CatalogVersion -ceq $script:FileTransferCoordinatorFallbackRepairHandoffCatalogVersion -and
     $snapshot.CatalogHash -ceq (Get-FileTransferCoordinatorEarlyCheckpointProofCatalog).Hash) 'Fresh producer must use the exact current catalog.'
 $events=@(Parse $lines)
 $hold=@($events | Where-Object EventName -CEQ 'filetransfer_v6_frontier_request_deferred')[0]

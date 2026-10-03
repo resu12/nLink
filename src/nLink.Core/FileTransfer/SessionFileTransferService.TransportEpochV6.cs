@@ -7575,12 +7575,14 @@ public sealed partial class SessionFileTransferService
         FileTransferTransportKind receivedTransportKind,
         int appliedChunkCount,
         int committedChunkIndex,
-        int previousCommittedChunkIndex)
+        int previousCommittedChunkIndex,
+        InboundBootstrapWriteSource? requiredWriteSource = null)
     {
         FileTransferRepairProofV6? proof = null;
         bool inferredRepairRequestId = false;
         lock (gate)
         {
+            if (requiredWriteSource is not null && !IsInboundBootstrapWriteSourceCurrentLocked(context, requiredWriteSource)) { return; }
             var epoch = context.V6TransportEpoch;
             var repairRequestId = batch.RepairRequestId?.Trim();
             var fallbackFrontierRuntime = IsFallbackFrontierRouteRuntime(context);
@@ -7696,8 +7698,13 @@ public sealed partial class SessionFileTransferService
 
         try
         {
-            var currentTransport = GetTransportOrThrow();
-            await currentTransport.SendFileTransferRepairProofAsync(proof, CancellationToken.None).ConfigureAwait(false);
+            Task sending;
+            lock (gate)
+            {
+                if (requiredWriteSource is not null && !IsInboundBootstrapWriteSourceCurrentLocked(context, requiredWriteSource)) { return; }
+                sending = GetTransportOrThrow().SendFileTransferRepairProofAsync(proof, CancellationToken.None);
+            }
+            await sending.ConfigureAwait(false);
             LocalOperationalLog.Info(
                 "FileTransferService",
                 $"event=filetransfer_v6_repair_proof_sent; direction=inbound; transfer_id={context.TransferId}; session_id={context.SessionId}; transport_epoch={proof.TransportEpoch}; repair_request_id={FormatProtocolLogValue(proof.RepairRequestId ?? "(none)")}; applied_chunk_count={proof.AppliedChunkCount}; committed_chunk={proof.CommittedChunkIndex}; recovery_mode={FormatProtocolLogValue(proof.RecoveryMode ?? "(none)")}");

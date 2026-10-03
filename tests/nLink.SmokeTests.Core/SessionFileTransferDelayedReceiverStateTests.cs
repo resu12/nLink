@@ -43,7 +43,9 @@ public sealed partial class SessionFileTransferV4SenderTests
 
         var log = ReadOperationalLogTail(logStart);
         Assert.Contains("event=filetransfer_runtime_owner_stale_update_rejected;", log, StringComparison.Ordinal);
-        Assert.Contains("event=filetransfer_control_plane_delivery_observed; direction=inbound; kind=receiver_state;", log, StringComparison.Ordinal);
+        Assert.Contains(log.Split(Environment.NewLine), line =>
+            line.Contains("event=filetransfer_control_plane_delivery_observed;", StringComparison.Ordinal) &&
+            line.Contains("direction=inbound; kind=receiver_state;", StringComparison.Ordinal));
         var completion = ReadOperationalLogTail(completionLogStart);
         Assert.DoesNotContain("event=filetransfer_v6_receiver_state_sent;", completion, StringComparison.Ordinal);
         Assert.DoesNotContain("event=filetransfer_fallback_tail_terminal_proof_consumed;", completion, StringComparison.Ordinal);

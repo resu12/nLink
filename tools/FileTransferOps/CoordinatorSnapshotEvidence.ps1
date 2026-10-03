@@ -9,6 +9,7 @@ Set-StrictMode -Version Latest
 . (Join-Path $PSScriptRoot 'ReceiverPreAdmissionEvidence.ps1')
 . (Join-Path $PSScriptRoot 'InitialDataSessionEvidence.ps1')
 . (Join-Path $PSScriptRoot 'EarlyCheckpointPeerProofEvidence.ps1')
+. (Join-Path $PSScriptRoot 'FallbackRepairHandoffEvidence.ps1')
 
 $script:FileTransferCoordinatorSnapshotContractVersion = 1
 $script:FileTransferCoordinatorSnapshotCatalogVersion = 'snapshot-authority-v1'
@@ -538,6 +539,9 @@ function Get-FileTransferCoordinatorEvidenceCatalog {
     [CmdletBinding()]
     param([string]$ProfileVersion = $script:FileTransferCoordinatorSnapshotCatalogVersion)
 
+    if ($ProfileVersion -ceq $script:FileTransferCoordinatorFallbackRepairHandoffCatalogVersion) {
+        return Get-FileTransferCoordinatorFallbackRepairHandoffCatalog
+    }
     if ($ProfileVersion -ceq $script:FileTransferCoordinatorEarlyCheckpointProofCatalogVersion) {
         return Get-FileTransferCoordinatorEarlyCheckpointProofCatalog
     }
@@ -968,7 +972,8 @@ function Test-FileTransferCoordinatorSnapshotEffectScope {
         [Parameter(Mandatory = $true)]$Effect
     )
 
-    if ((Test-FileTransferCoordinatorRepairOwnerMarker $Operation) -or
+    if ((Test-FileTransferFallbackRepairHandoffMarker $Operation) -or
+        (Test-FileTransferCoordinatorRepairOwnerMarker $Operation) -or
         (Test-FileTransferCoordinatorCheckpointRepairContinuityMarker $Operation) -or
         (Test-FileTransferCoordinatorBootstrapCorrelationMarker $Operation) -or
         (Test-FileTransferCoordinatorBootstrapInitiationMarker $Operation) -or
@@ -1045,7 +1050,8 @@ function Test-FileTransferCoordinatorSnapshotEffectReceipt {
         [Parameter(Mandatory = $true)]$Effect
     )
 
-    if ((Test-FileTransferCoordinatorRepairOwnerMarker $Operation) -or
+    if ((Test-FileTransferFallbackRepairHandoffMarker $Operation) -or
+        (Test-FileTransferCoordinatorRepairOwnerMarker $Operation) -or
         (Test-FileTransferCoordinatorCheckpointRepairContinuityMarker $Operation) -or
         (Test-FileTransferCoordinatorBootstrapCorrelationMarker $Operation) -or
         (Test-FileTransferCoordinatorBootstrapInitiationMarker $Operation) -or
@@ -5979,10 +5985,13 @@ function Test-FileTransferCoordinatorSnapshotFamily4OperationCatalog {
         $Catalog = $null
     )
 
+    if (Test-FileTransferFallbackRepairHandoffMarker $Operation) {
+        return $null -ne $Catalog -and (Test-FileTransferFallbackRepairHandoffOperation $Envelope $Operation $Catalog)
+    }
     if ($Operation.operationRole -ceq 'peer_proof_awaiting_checkpoint' -or
         ($Operation.operationRole -ceq 'peer_proof_pending_initial' -and
          @($Envelope.aggregate.operations | Where-Object operationRole -ceq 'peer_proof_awaiting_checkpoint').Count -gt 0)) {
-        return $null -ne $Catalog -and $Catalog.Version -ceq $script:FileTransferCoordinatorEarlyCheckpointProofCatalogVersion -and
+        return $null -ne $Catalog -and $Catalog.Version -cin @($script:FileTransferCoordinatorEarlyCheckpointProofCatalogVersion, $script:FileTransferCoordinatorFallbackRepairHandoffCatalogVersion) -and
             $null -ne (Get-FileTransferEarlyCheckpointProofShape $Envelope)
     }
 
@@ -6002,6 +6011,11 @@ function Test-FileTransferCoordinatorSnapshotFamily4OperationCatalog {
         Test-FileTransferCoordinatorSnapshotFallbackTailQuiescentEnvelope `
             -Envelope $Envelope
     $knownAtomicDecision =
+        ($null -ne $Catalog -and $Catalog.Version -ceq $script:FileTransferCoordinatorFallbackRepairHandoffCatalogVersion -and
+            $decisionKind -ceq 'RestoreInboundFallbackRepairHandoff' -and
+            @($Envelope.aggregate.operations | Where-Object { $_.operationRole -ceq 'repair_handoff' -and
+                $_.beforeState -ceq 'Drained' -and $_.afterState -ceq 'Restored' -and
+                (Test-FileTransferFallbackRepairHandoffOperation $Envelope $_ $Catalog) }).Count -eq 1) -or
         $decisionKind -in $script:FileTransferCoordinatorSnapshotFamily4DecisionKinds -or
         $isExactFallbackTailQuiescent -or
         (Test-FileTransferCoordinatorSnapshotFallbackTailFailedEnvelope $Envelope) -or
@@ -10678,7 +10692,7 @@ function Get-FileTransferCoordinatorSnapshotEvaluation {
                     $script:FileTransferCoordinatorCheckpointRepairContinuityCatalogVersion,
                     $script:FileTransferCoordinatorBootstrapCorrelationCatalogVersion,
                     $script:FileTransferCoordinatorBootstrapInitiationCatalogVersion, $script:FileTransferCoordinatorBootstrapCallbackCatalogVersion,
-                    $script:FileTransferCoordinatorRepairOwnerCatalogVersion, $script:FileTransferCoordinatorActivationRetryCatalogVersion, $script:FileTransferCoordinatorReceiverPreAdmissionCatalogVersion, $script:FileTransferCoordinatorInitialDataSessionCatalogVersion, $script:FileTransferCoordinatorEarlyCheckpointProofCatalogVersion)) {
+                    $script:FileTransferCoordinatorRepairOwnerCatalogVersion, $script:FileTransferCoordinatorActivationRetryCatalogVersion, $script:FileTransferCoordinatorReceiverPreAdmissionCatalogVersion, $script:FileTransferCoordinatorInitialDataSessionCatalogVersion, $script:FileTransferCoordinatorEarlyCheckpointProofCatalogVersion, $script:FileTransferCoordinatorFallbackRepairHandoffCatalogVersion)) {
                 $catalog = Get-FileTransferCoordinatorEvidenceCatalog -ProfileVersion $profileVersion
             }
         }
@@ -10992,6 +11006,13 @@ function Get-FileTransferCoordinatorSnapshotEvaluation {
                     }
                 }
                 foreach ($operation in @($envelope.aggregate.operations)) {
+                    if (Test-FileTransferFallbackRepairHandoffMarker $operation) {
+                        if (-not (Test-FileTransferFallbackRepairHandoffOperation $envelope $operation $catalog)) {
+                            $errors.Add("snapshot_fallback_repair_handoff_operation_invalid:$($record.LineIndex)")
+                            break
+                        }
+                        continue
+                    }
                     if ([string]::IsNullOrWhiteSpace([string]$operation.family) -or
                         [string]::IsNullOrWhiteSpace([string]$operation.operationRole) -or
                         [string]::IsNullOrWhiteSpace([string]$operation.operationKey) -or
@@ -11026,7 +11047,7 @@ function Get-FileTransferCoordinatorSnapshotEvaluation {
                         continue
                     }
                     if ((Test-FileTransferCoordinatorBootstrapCallbackMarker $operation) -or
-                        ($catalog.Version -cin @($script:FileTransferCoordinatorBootstrapCallbackCatalogVersion, $script:FileTransferCoordinatorRepairOwnerCatalogVersion, $script:FileTransferCoordinatorActivationRetryCatalogVersion, $script:FileTransferCoordinatorReceiverPreAdmissionCatalogVersion, $script:FileTransferCoordinatorInitialDataSessionCatalogVersion, $script:FileTransferCoordinatorEarlyCheckpointProofCatalogVersion) -and $operation.operationRole -ceq 'fallback_bootstrap_source_hold')) {
+                        ($catalog.Version -cin @($script:FileTransferCoordinatorBootstrapCallbackCatalogVersion, $script:FileTransferCoordinatorRepairOwnerCatalogVersion, $script:FileTransferCoordinatorActivationRetryCatalogVersion, $script:FileTransferCoordinatorReceiverPreAdmissionCatalogVersion, $script:FileTransferCoordinatorInitialDataSessionCatalogVersion, $script:FileTransferCoordinatorEarlyCheckpointProofCatalogVersion, $script:FileTransferCoordinatorFallbackRepairHandoffCatalogVersion) -and $operation.operationRole -ceq 'fallback_bootstrap_source_hold')) {
                         if (-not (Test-FileTransferCoordinatorBootstrapCallbackOperation $envelope $operation $catalog)) {
                             $errors.Add("snapshot_bootstrap_callback_operation_invalid:$($record.LineIndex)")
                             break
@@ -11541,10 +11562,10 @@ function Get-FileTransferCoordinatorSnapshotEvaluation {
     if ((Test-FileTransferCoordinatorBootstrapCorrelationCatalogCapability $catalog.Version) -and $errors.Count -eq 0) {
         foreach ($error in @(Get-FileTransferBootstrapCorrelationHistoryErrors -Boundaries @($boundaries))) { $errors.Add($error) }
     }
-    if ($catalog.Version -cin @($script:FileTransferCoordinatorBootstrapInitiationCatalogVersion, $script:FileTransferCoordinatorBootstrapCallbackCatalogVersion, $script:FileTransferCoordinatorRepairOwnerCatalogVersion, $script:FileTransferCoordinatorActivationRetryCatalogVersion, $script:FileTransferCoordinatorReceiverPreAdmissionCatalogVersion, $script:FileTransferCoordinatorInitialDataSessionCatalogVersion, $script:FileTransferCoordinatorEarlyCheckpointProofCatalogVersion) -and $errors.Count -eq 0) {
+    if ($catalog.Version -cin @($script:FileTransferCoordinatorBootstrapInitiationCatalogVersion, $script:FileTransferCoordinatorBootstrapCallbackCatalogVersion, $script:FileTransferCoordinatorRepairOwnerCatalogVersion, $script:FileTransferCoordinatorActivationRetryCatalogVersion, $script:FileTransferCoordinatorReceiverPreAdmissionCatalogVersion, $script:FileTransferCoordinatorInitialDataSessionCatalogVersion, $script:FileTransferCoordinatorEarlyCheckpointProofCatalogVersion, $script:FileTransferCoordinatorFallbackRepairHandoffCatalogVersion) -and $errors.Count -eq 0) {
         foreach ($error in @(Get-FileTransferBootstrapInitiationHistoryErrors -Boundaries @($boundaries))) { $errors.Add($error) }
     }
-    if ($catalog.Version -cin @($script:FileTransferCoordinatorBootstrapCallbackCatalogVersion, $script:FileTransferCoordinatorRepairOwnerCatalogVersion, $script:FileTransferCoordinatorActivationRetryCatalogVersion, $script:FileTransferCoordinatorReceiverPreAdmissionCatalogVersion, $script:FileTransferCoordinatorInitialDataSessionCatalogVersion, $script:FileTransferCoordinatorEarlyCheckpointProofCatalogVersion) -and $errors.Count -eq 0) {
+    if ($catalog.Version -cin @($script:FileTransferCoordinatorBootstrapCallbackCatalogVersion, $script:FileTransferCoordinatorRepairOwnerCatalogVersion, $script:FileTransferCoordinatorActivationRetryCatalogVersion, $script:FileTransferCoordinatorReceiverPreAdmissionCatalogVersion, $script:FileTransferCoordinatorInitialDataSessionCatalogVersion, $script:FileTransferCoordinatorEarlyCheckpointProofCatalogVersion, $script:FileTransferCoordinatorFallbackRepairHandoffCatalogVersion) -and $errors.Count -eq 0) {
         foreach ($error in @(Get-FileTransferBootstrapCallbackHistoryErrors -Boundaries @($boundaries))) { $errors.Add($error) }
     }
 
@@ -12905,13 +12926,16 @@ function Get-FileTransferCoordinatorSnapshotEvaluation {
     }
     $pendingPeerProofBindings = @(Get-FileTransferCoordinatorSnapshotPendingPeerProofBindings -AggregateEntries @($aggregateEntries) -Effects @($effects))
     $supersessionPeerProofOrigins = @{}
-    if ($catalog.Version -ceq $script:FileTransferCoordinatorEarlyCheckpointProofCatalogVersion) {
+    if ($catalog.Version -cin @($script:FileTransferCoordinatorEarlyCheckpointProofCatalogVersion, $script:FileTransferCoordinatorFallbackRepairHandoffCatalogVersion)) {
         foreach ($failure in @(Resolve-FileTransferEarlyCheckpointProofHistory `
                 -AggregateEntries @($aggregateEntries) -Effects @($effects) -Origins $supersessionPeerProofOrigins)) {
             $errors.Add([string]$failure)
         }
     }
     $validatedDisplacedTerminals = @{}
+    foreach ($failure in @(Get-FileTransferFallbackRepairHandoffHistoryErrors -AggregateEntries @($aggregateEntries))) {
+        $errors.Add([string]$failure)
+    }
     if ($failedCheckpointYieldCandidates.Count -gt 0 -or $failedQuiescentSupersessionCandidates.Count -gt 0 -or
         $rejectedProbeRetryCycleCandidates.Count -gt 0) {
         $invalidAggregateBoundaries = @{}

@@ -273,7 +273,28 @@ internal sealed record FileTransferCoordinatorOperationTransitionSnapshot(
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     FileTransferCoordinatorRepairOwnerOperationSnapshot? RepairOwner = null,
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
-    InitialFallbackDataSessionSnapshot? InitialDataSessionBinding = null);
+    InitialFallbackDataSessionSnapshot? InitialDataSessionBinding = null,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    FileTransferCoordinatorFallbackRepairHandoffSnapshot? FallbackRepairHandoff = null);
+
+internal sealed record FileTransferCoordinatorRepairHandoffCheckpointSnapshot(
+    int StateEpoch, int ContiguousCommittedChunkIndex, int DurableHighestChunkIndex,
+    int ChunkCount, int CheckpointGeneration, string Fingerprint);
+
+internal sealed record FileTransferCoordinatorFallbackRepairHandoffSnapshot(
+    FileTransferCoordinatorStateBoundarySnapshot SourceBoundary,
+    string PeerProofIdentity, string PeerProofFingerprint, long PauseInstance,
+    ImmutableArray<long> CapturedWrites, ImmutableArray<long> CapturedFeedback,
+    ImmutableArray<long> SettledWrites, ImmutableArray<long> SettledFeedback,
+    FileTransferCoordinatorRepairHandoffCheckpointSnapshot? CaptureCheckpoint,
+    ImmutableArray<FileTransferRepairHandoffRange> CapturedGaps,
+    FileTransferCoordinatorRepairHandoffCheckpointSnapshot? DrainCheckpoint,
+    ImmutableArray<FileTransferRepairHandoffRange> RemainingGaps,
+    FileTransferCoordinatorRepairHandoffCheckpointSnapshot? RestoreCheckpoint,
+    ImmutableArray<FileTransferRepairHandoffRange> RestoredGaps,
+    string DispositionKind, string TransitionAuthorityId, long TransitionGeneration,
+    string DispositionFingerprint,
+    ImmutableArray<FileTransferCoordinatorReceiptTransitionSnapshot> Receipts);
 
 internal sealed record FileTransferCoordinatorReceiverBarrierOperationSnapshot(
     string Role,
@@ -3307,7 +3328,8 @@ internal static partial class FileTransferCoordinator
             operation.RegularV4FrontierRepairPressure,
             operation.ResponderProbeHandoff,
             operation.ReceiverBarrier,
-            operation.CheckpointRepairContinuity);
+            operation.CheckpointRepairContinuity,
+            FallbackRepairHandoff: operation.FallbackRepairHandoff);
 
     internal static ImmutableArray<
         FileTransferCoordinatorOperationTransitionSnapshot>
@@ -3345,6 +3367,7 @@ internal static partial class FileTransferCoordinator
         AddRuntimeUnlockRetryOperationDescriptors(state, builder);
         AddReceiveRecoveryOperationDescriptors(state, builder);
         AddFallbackTailYieldOperationDescriptors(state, builder);
+        AddFallbackRepairHandoffDescriptor(state, builder);
         AddRegularV4FrontierRepairPressureOperationDescriptors(state, builder);
         AddInitialActivationReceiverBarrierDescriptors(state, builder);
         AddCheckpointRepairContinuityDescriptors(state, builder);
@@ -6643,5 +6666,7 @@ internal static partial class FileTransferCoordinator
         [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
         FileTransferCoordinatorReceiverBarrierOperationSnapshot? ReceiverBarrier = null,
         [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
-        FileTransferCoordinatorCheckpointRepairContinuityOperationSnapshot? CheckpointRepairContinuity = null);
+        FileTransferCoordinatorCheckpointRepairContinuityOperationSnapshot? CheckpointRepairContinuity = null,
+        [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        FileTransferCoordinatorFallbackRepairHandoffSnapshot? FallbackRepairHandoff = null);
 }

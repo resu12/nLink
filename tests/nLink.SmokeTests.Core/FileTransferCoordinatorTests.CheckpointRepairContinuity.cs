@@ -54,8 +54,13 @@ public sealed partial class FileTransferCoordinatorTests
     [InlineData("transfer")]
     [Trait("FileTransferCoordinatorSuite", "CheckpointRepairContinuity")]
     public void CheckpointContinuity_ScopeMutationRemovesOriginAndCannotReviveThroughAba(string mutation)
+        => AssertCheckpointContinuityScopeMutation(CreateCheckpointRepairContinuityFixture(), mutation);
+
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private static void AssertCheckpointContinuityScopeMutation(
+        (FileTransferCoordinatorState State, FallbackFrontierRepairAuthority Authority,
+            IReadOnlyList<FileTransferCoordinatorTransitionEnvelope> Envelopes) fixture, string mutation)
     {
-        var fixture = CreateCheckpointRepairContinuityFixture();
         var before = fixture.State;
         var changed = mutation switch
         {

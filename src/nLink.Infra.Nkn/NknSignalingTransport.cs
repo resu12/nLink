@@ -2415,6 +2415,14 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
                 effectiveCt);
         }
 
+        if (options.PhysicalCompletionObserver is { } observePhysicalCompletion)
+        {
+            var children = new List<Task> { controlQueueTask, controlCopyTask };
+            if (controlAckTask is not null) { children.Add(controlAckTask); }
+            if (bulkCopyTask is not null) { children.Add(bulkCopyTask); }
+            observePhysicalCompletion(Task.WhenAll(children));
+        }
+
         try
         {
         LifecycleCopySendResult controlQueueResult;
@@ -2793,7 +2801,8 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
         TimeSpan? CopyTimeout = null,
         Func<bool>? PreSendValidator = null,
         bool DrainChildrenOnCompletion = false,
-        IOfflinePublicationDelay? OfflinePublicationDelay = null);
+        IOfflinePublicationDelay? OfflinePublicationDelay = null,
+        Action<Task>? PhysicalCompletionObserver = null);
 
     private sealed class LifecyclePreSendValidationException : Exception
     {

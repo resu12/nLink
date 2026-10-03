@@ -7,13 +7,18 @@ namespace NLink.SmokeTests;
 public sealed partial class SessionFileTransferV4SenderTests
 {
     [Theory]
-    [InlineData(true, false)]
-    [InlineData(true, true)]
-    [InlineData(false, false)]
-    [InlineData(false, true)]
+    [InlineData(true, false, false)]
+    [InlineData(true, true, false)]
+    [InlineData(false, false, false)]
+    [InlineData(false, true, false)]
+    [InlineData(true, false, true)]
+    [InlineData(true, true, true)]
+    [InlineData(false, false, true)]
+    [InlineData(false, true, true)]
     [Trait("FileTransferRuntimeSuite", "InboundPeerFirstFrontier")]
     public void InboundPeerFirstYield_WaitsForCurrentFrontierObligation(
-        bool settledRepair, bool allowCurrentTransportEpochRecoveryHandoff)
+        bool settledRepair, bool allowCurrentTransportEpochRecoveryHandoff,
+        bool rollingGapsUntilTerminal)
     {
         const string transferId = "inbound_peer_first_frontier";
         using var service = new SessionFileTransferService();
@@ -98,6 +103,68 @@ public sealed partial class SessionFileTransferV4SenderTests
         Assert.DoesNotContain("event=filetransfer_fallback_tail_quiescent_yield_granted;", log, StringComparison.Ordinal);
         Assert.DoesNotContain("event=filetransfer_fallback_tail_recovery_owner_retired_after_yield;", log, StringComparison.Ordinal);
         Assert.DoesNotContain("event=filetransfer_fallback_tail_paired_yield_granted;", log, StringComparison.Ordinal);
+
+        if (rollingGapsUntilTerminal)
+        {
+            // Reproduce the live failure boundary: the original repair makes
+            // progress, but each new contiguous frontier still has a sparse gap.
+            // Physical preparation and an accepted peer yield do not own it.
+            var securityIncarnation = Guid.NewGuid();
+            var now = DateTimeOffset.UtcNow;
+            var permit = Assert.IsType<FileTransferFallbackListenerPreparationPermit>(
+                FileTransferCoordinator.CreateFallbackListenerPreparationPermit(
+                    blocked, securityIncarnation, now.AddMinutes(1), now));
+            var markQuiescent = type.GetMethod("TryMarkInboundFallbackTailQuiescentLocked",
+                BindingFlags.Instance | BindingFlags.NonPublic)!;
+            if (!settledRepair) SettleRepair();
+            for (var frontier = 2; frontier < 8; frontier++)
+            {
+                written[frontier - 1] = true;
+                written[frontier] = false;
+                SetPrivateProperty(context, "NextChunkIndex", frontier);
+                SetPrivateProperty(context, "PullHighestReceivedChunkIndex", 7);
+                var beforeRecheck = CreateCoordinatorStateForTest(context);
+                Assert.True(FileTransferCoordinator.IsFallbackListenerPreparationPermitCurrent(
+                    beforeRecheck, permit, securityIncarnation, now));
+                Assert.False(Assert.IsType<bool>(markQuiescent.Invoke(service,
+                    [context, leg.TransportEpochId, "chunk_batch_committed"])));
+                var afterRecheck = CreateCoordinatorStateForTest(context);
+                Assert.Equal(beforeRecheck.PersistentState, afterRecheck.PersistentState);
+                Assert.Equal(blocked.CurrentRuntimeOwner, afterRecheck.CurrentRuntimeOwner);
+                Assert.Equal(blocked.CurrentRoutePublicationToken, afterRecheck.CurrentRoutePublicationToken);
+                Assert.Null(afterRecheck.CurrentRuntimeUnlockAdmission);
+                Assert.Null(GetCoordinatorFallbackTailYieldSubstate(context).CurrentOperation);
+                Assert.Equal(pending.PendingPeerProofBeforeLocalYield,
+                    GetCoordinatorFallbackTailYieldSubstate(context).PendingPeerProofBeforeLocalYield);
+                Assert.Same(written, GetPrivatePropertyValue(context, "ReceiverSparseChunksWritten"));
+                Assert.False(written[frontier]);
+                Assert.Equal(frontier, GetPrivateProperty<int>(context, "NextChunkIndex"));
+                Assert.True(GetPrivateProperty<bool>(context, "PullPostTunaRecoveryActive"));
+                Assert.Same(contract, GetPrivatePropertyValue(context, "CurrentFallbackFrontierRepairContract"));
+
+                // A rejected old peer proof cannot turn the current gap into a
+                // release or replace the already accepted pending proof.
+                applyPeer.Invoke(service, [context, peer with { TransportEpoch = leg.TransportEpochId - 1 }]);
+                Assert.Equal(afterRecheck.PersistentState, CreateCoordinatorStateForTest(context).PersistentState);
+            }
+
+            written.SetAll(true);
+            SetPrivateProperty(context, "NextChunkIndex", 8);
+            Assert.False(Assert.IsType<bool>(markQuiescent.Invoke(service,
+                [context, leg.TransportEpochId, "chunk_batch_committed"])));
+            Assert.Null(GetCoordinatorFallbackTailYieldSubstate(context).CurrentOperation);
+            SetPrivateProperty(context, "State", FileTransferTransferState.Completed);
+            var terminal = CreateCoordinatorStateForTest(context);
+            Assert.False(FileTransferCoordinator.IsFallbackListenerPreparationPermitCurrent(
+                terminal, permit, securityIncarnation, now));
+            Assert.False(Assert.IsType<bool>(markQuiescent.Invoke(service,
+                [context, leg.TransportEpochId, "late_frontier_progress"])));
+            applyPeer.Invoke(service, [context, peer]);
+            Assert.Equal(terminal.PersistentState, CreateCoordinatorStateForTest(context).PersistentState);
+            Assert.Equal(terminal.CurrentRoutePublicationToken,
+                CreateCoordinatorStateForTest(context).CurrentRoutePublicationToken);
+            return;
+        }
 
         // Fresh current progress closes the gap; the original pending peer
         // proof must carry into a legitimate local yield without redelivery.

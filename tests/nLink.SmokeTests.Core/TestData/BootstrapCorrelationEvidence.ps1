@@ -2,7 +2,7 @@ param([string]$RepoRoot, [string]$InputPath)
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 . (Join-Path $RepoRoot 'tools/FileTransferOps/CoordinatorSnapshotEvidence.ps1')
-$version = $script:FileTransferCoordinatorActivationRetryCatalogVersion
+$version = $script:FileTransferCoordinatorFallbackRepairHandoffCatalogVersion
 $catalog = Get-FileTransferCoordinatorEvidenceCatalog -ProfileVersion $version
 $captured = [IO.File]::ReadAllLines($InputPath)
 if ($captured[0] -cnotmatch ([regex]::Escape('snapshot_catalog_version=' + $version) + ';')) { throw 'correlation profile not declared' }
@@ -22,7 +22,8 @@ foreach ($name in $frozen.Keys) {
     if ($old.Hash -cne $frozen[$name] -or ($old.RequiredFamilies -join ',') -cne ($catalog.RequiredFamilies -join ',')) { throw 'Frozen catalog changed' }
     if ($name -cin @($script:FileTransferCoordinatorBootstrapInitiationCatalogVersion,
             $script:FileTransferCoordinatorBootstrapCallbackCatalogVersion,
-            $script:FileTransferCoordinatorRepairOwnerCatalogVersion, $version) -and
+            $script:FileTransferCoordinatorRepairOwnerCatalogVersion,
+            $script:FileTransferCoordinatorActivationRetryCatalogVersion, $version) -and
         $old.ParentCatalogHash -cne $previousHash) { throw 'Extension parent hash mismatch' }
     $previousHash = $old.Hash
 }

@@ -9,10 +9,10 @@ namespace NLink.Core.FileTransfer;
 public sealed partial class SessionFileTransferService
 {
     private const string CoordinatorSnapshotCatalogVersion =
-        "snapshot-authority-v1-receiver-barrier-v1-checkpoint-repair-continuity-v1-fallback-bootstrap-correlation-v1-fallback-bootstrap-initiation-v1-source-callback-v1-repair-owner-v1-activation-retry-v1-receiver-pre-admission-v1-initial-data-session-v1-early-checkpoint-proof-v1";
+        "snapshot-authority-v1-receiver-barrier-v1-checkpoint-repair-continuity-v1-fallback-bootstrap-correlation-v1-fallback-bootstrap-initiation-v1-source-callback-v1-repair-owner-v1-activation-retry-v1-receiver-pre-admission-v1-initial-data-session-v1-early-checkpoint-proof-v1-fallback-repair-handoff-v1";
 
     private const string CoordinatorSnapshotCatalogHash =
-        "a5589d2ced4470105f2643a73921f2f9918e97804043581b9b10ef2c367c5be4";
+        "47e13f6036f632533f75d505eb7502e949129fce0133080e1e319214c3ea6bf0";
 
     private const string CoordinatorSnapshotEmittedFamilyCoverage =
         "route_runtime,route_transition,runtime_unlock_retry_lifecycle,receive_recovery,fallback_tail_yield,regular_v4_frontier_repair_pressure,responder_probe_handoff";
@@ -3686,6 +3686,18 @@ public sealed partial class SessionFileTransferService
                     RuntimeOwnerFingerprint = EvidenceToken(binding.RuntimeOwnerFingerprint),
                     PublicationFingerprint = EvidenceToken(binding.PublicationFingerprint),
                 } : null,
+                FallbackRepairHandoff = operation.FallbackRepairHandoff is { } handoff ? handoff with
+                {
+                    SourceBoundary = CreateEvidenceBoundary(handoff.SourceBoundary),
+                    PeerProofIdentity = EvidenceToken(handoff.PeerProofIdentity),
+                    PeerProofFingerprint = EvidenceToken(handoff.PeerProofFingerprint),
+                    CaptureCheckpoint = RepairHandoffCheckpoint(handoff.CaptureCheckpoint),
+                    DrainCheckpoint = RepairHandoffCheckpoint(handoff.DrainCheckpoint),
+                    RestoreCheckpoint = RepairHandoffCheckpoint(handoff.RestoreCheckpoint),
+                    TransitionAuthorityId = EvidenceToken(handoff.TransitionAuthorityId),
+                    DispositionFingerprint = EvidenceToken(handoff.DispositionFingerprint),
+                    Receipts = handoff.Receipts.Select(CreateEvidenceReceipt).ToImmutableArray(),
+                } : null,
                 RepairOwner = operation.RepairOwner is { } owner ? owner with
                 {
                     CoordinatorInstanceId = EvidenceToken(owner.CoordinatorInstanceId),
@@ -3707,6 +3719,10 @@ public sealed partial class SessionFileTransferService
                 } : null,
             };
         }
+
+        private static FileTransferCoordinatorRepairHandoffCheckpointSnapshot? RepairHandoffCheckpoint(
+            FileTransferCoordinatorRepairHandoffCheckpointSnapshot? checkpoint)
+            => checkpoint is { } value ? value with { Fingerprint = EvidenceToken(value.Fingerprint) } : null;
 
         private static CheckpointRepairContinuityScope CreateCheckpointContinuityScopeEvidence(
             CheckpointRepairContinuityScope scope)

@@ -858,7 +858,8 @@ public sealed partial class SessionFileTransferService
     private async Task<bool> SendInboundAuthorizedFallbackFrontierRequestAsync(
         InboundTransferContext context,
         string reason,
-        bool forceSend)
+        bool forceSend,
+        InboundBootstrapWriteSource? requiredWriteSource = null)
     {
         FileTransferFrontierRequestFrameV6 request;
         IFileTransferDataSession dataSession;
@@ -868,9 +869,12 @@ public sealed partial class SessionFileTransferService
         int rescueRequestCount;
         int rescueStep;
         int frontierChunkIndex;
+        InboundFallbackRepairFeedbackOperation? feedbackOperation = null;
 
         lock (gate)
         {
+            if (HasInboundFallbackRepairHandoffLocked(context)) { return false; }
+            if (requiredWriteSource is not null && !IsInboundBootstrapWriteSourceCurrentLocked(context, requiredWriteSource)) { return false; }
             if (!ReferenceEquals(inboundTransfer, context) ||
                 context.IsTerminal ||
                 context.DataSession is null ||
@@ -1128,6 +1132,7 @@ public sealed partial class SessionFileTransferService
             FileTransferControlPlaneDeliveryRequest? controlPlaneRequest = null;
             lock (gate)
             {
+                if (requiredWriteSource is not null && !IsInboundBootstrapWriteSourceCurrentLocked(context, requiredWriteSource)) { return false; }
                 if (ReferenceEquals(inboundTransfer, context) &&
                     !context.IsTerminal &&
                     ReferenceEquals(context.CurrentFallbackFrontierRepairContract, contract) &&
@@ -1139,31 +1144,47 @@ public sealed partial class SessionFileTransferService
                         FileTransferControlPlaneKind.FrontierRequest,
                         request,
                         reason);
+                    controlPlaneRequest = BindInboundTrackedWriteControlRequest(context, controlPlaneRequest, requiredWriteSource);
+                    if (!TryRegisterInboundFallbackRepairFeedbackLocked(context, dataSession, controlPlaneRequest, out feedbackOperation)) { return false; }
+                    controlPlaneRequest = BindInboundFallbackRepairFeedbackRequest(context, controlPlaneRequest, feedbackOperation);
                 }
             }
 
             if (controlPlaneRequest is not null)
             {
-                var delivery = await SendInboundFallbackControlPlaneOrDataSessionAsync(
+                var delivery = await SendInboundFallbackControlPlaneOrDataSessionWithWriteBindingAsync(
                         context,
                         dataSession,
                         controlPlaneRequest,
                         context.LifetimeCts.Token,
                         GetCheckpointRepairContinuityStamp(contract,
                             request.RepairRequestId, request.RequestCorrelationId),
-                        frontierRepairContract: contract)
+                        frontierRepairContract: contract, requiredWriteSource: requiredWriteSource,
+                        requiredFeedbackOperation: feedbackOperation)
                     .ConfigureAwait(false);
                 if (!delivery.Sent)
                 {
-                    SettleFailedInboundFallbackFrontierDispatch(context, contract, "control_plane_delivery_rejected");
+                    lock (gate)
+                    {
+                        if (feedbackOperation is not null && !IsInboundFallbackRepairFeedbackCurrentLocked(context, feedbackOperation)) { return false; }
+                        if (requiredWriteSource is not null && !IsInboundBootstrapWriteSourceCurrentLocked(context, requiredWriteSource)) { return false; }
+                        SettleFailedInboundFallbackFrontierDispatch(context, contract, "control_plane_delivery_rejected");
+                    }
                     return false;
                 }
             }
             else
             {
-                await dataSession.SendAsync(request, context.LifetimeCts.Token).ConfigureAwait(false);
+                Task sending;
                 lock (gate)
                 {
+                    if (requiredWriteSource is not null && !IsInboundBootstrapWriteSourceCurrentLocked(context, requiredWriteSource)) { return false; }
+                    sending = dataSession.SendAsync(request, context.LifetimeCts.Token);
+                }
+                await sending.ConfigureAwait(false);
+                lock (gate)
+                {
+                    if (requiredWriteSource is not null && !IsInboundBootstrapWriteSourceCurrentLocked(context, requiredWriteSource)) { return false; }
                     if (!TryCompleteInboundFallbackFrontierDispatchLocked(context, dataSession, contract, request, reason))
                     {
                         return false;
@@ -1188,26 +1209,31 @@ public sealed partial class SessionFileTransferService
         }
         catch (Exception ex) when (!context.LifetimeCts.IsCancellationRequested)
         {
-            var allowRecovery = SettleFailedInboundFallbackFrontierDispatch(
-                context,
-                contract,
-                ex is OperationCanceledException ? "request_send_canceled" : "request_send_failed");
-            if (allowRecovery &&
-                TryDeferInboundV6ControlSendForTunaActivationBarrier(
+            lock (gate)
+            {
+                if (feedbackOperation is not null && !IsInboundFallbackRepairFeedbackCurrentLocked(context, feedbackOperation)) { return false; }
+                if (requiredWriteSource is not null && !IsInboundBootstrapWriteSourceCurrentLocked(context, requiredWriteSource)) { return false; }
+                var allowRecovery = SettleFailedInboundFallbackFrontierDispatch(
                     context,
-                    "frontier_request",
-                    reason,
-                    ex,
-                    state: null,
-                    request))
-            {
-                return false;
-            }
+                    contract,
+                    ex is OperationCanceledException ? "request_send_canceled" : "request_send_failed");
+                if (allowRecovery &&
+                    TryDeferInboundV6ControlSendForTunaActivationBarrier(
+                        context,
+                        "frontier_request",
+                        reason,
+                        ex,
+                        state: null,
+                        request))
+                {
+                    return false;
+                }
 
-            if (allowRecovery &&
-                TryDeferInboundV6ControlSendFailureForRecovery(context, "frontier_request", reason, ex))
-            {
-                return false;
+                if (allowRecovery &&
+                    TryDeferInboundV6ControlSendFailureForRecovery(context, "frontier_request", reason, ex))
+                {
+                    return false;
+                }
             }
 
             LocalOperationalLog.Warn(
@@ -1215,6 +1241,7 @@ public sealed partial class SessionFileTransferService
                 $"event=filetransfer_v6_frontier_request_failed; {FileTransferDiagnosticScopeEvidence.Format(contract.Authority.SessionId, contract.Authority.TransferId)}{FormatFallbackFrontierRepairAuthorityTuple(contract.Authority)}; repair_request_id={FormatProtocolLogValue(request.RepairRequestId)}; request_correlation_id={FormatProtocolLogValue(request.RequestCorrelationId)}; reason={FormatProtocolLogValue(reason)}; error={FormatProtocolLogValue(ex.Message)}");
             return false;
         }
+        finally { await FinalizeInboundFallbackRepairFeedbackAsync(context, feedbackOperation).ConfigureAwait(false); }
     }
 
     private bool TryCompleteInboundFallbackFrontierDispatchLocked(

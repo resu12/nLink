@@ -801,6 +801,31 @@ function Get-FileTransferSelectedRouteForEvent {
         )
     }
 
+    # The production commit path logs its transition before the matching selection.
+    # Bind only the exact coordinator publication; a route hint is not sufficient.
+    if ($Event.EventName -ceq 'filetransfer_route_transitioned' -and
+        (Get-FileTransferEventInt64Field $Event 'route_publication_generation' 0) -gt 0 -and
+        (Get-FileTransferEventField $Event 'new_route' '') -ceq $eventRoute -and
+        (Get-FileTransferEventField $Event 'new_protocol_version' '') -ceq (Get-FileTransferRouteExpectedProtocol $eventRoute) -and
+        $routeMatchCandidates.Count -gt 0 -and
+        (Get-FileTransferEventField $routeMatchCandidates[-1] 'route' '') -ceq (Get-FileTransferEventField $Event 'previous_route' '') -and
+        (Get-FileTransferEventField $routeMatchCandidates[-1] 'protocol_version' '') -ceq (Get-FileTransferEventField $Event 'previous_protocol_version' '')) {
+        $matchingPublications=@($RouteSelectedEvents | Where-Object {
+            $candidate=$_; $exact=$candidate.Sequence -gt $Event.Sequence -and
+                (Test-FileTransferProductionRouteEvidenceEvent $candidate) -and
+                (Get-FileTransferRouteEventKey $candidate) -ceq $transferKey -and
+                (Get-FileTransferRouteEventDirection $candidate) -ceq $direction
+            foreach ($name in @('route','protocol_version','live_route_epoch','route_publication_generation','runtime_generation',
+                    'terminal_generation','leg_generation','route_commit_generation','target_route','target_protocol_version',
+                    'target_transport','route_publication_action_kind','coordinator_decision_reason')) {
+                $value=Get-FileTransferEventField $Event $name ''
+                if ($value -cin @('', '(none)') -or $value -cne (Get-FileTransferEventField $candidate $name '')) { $exact=$false; break }
+            }
+            $exact
+        })
+        if ($matchingPublications.Count -eq 1) { return $matchingPublications[0] }
+    }
+
     if (-not [string]::IsNullOrWhiteSpace($eventRoute) -and $eventLiveRouteEpoch -gt 0) {
         $epochCandidates = @(
             $routeMatchCandidates |

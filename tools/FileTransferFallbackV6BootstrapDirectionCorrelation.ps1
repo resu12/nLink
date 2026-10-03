@@ -385,7 +385,10 @@ function Test-FileTransferFallbackV6BootstrapCorrelatedEpisodeConsumed {
     if ($SnapshotEvaluation.CatalogVersion -cin @($script:FileTransferCoordinatorBootstrapInitiationCatalogVersion,
             $script:FileTransferCoordinatorBootstrapCallbackCatalogVersion,
             $script:FileTransferCoordinatorRepairOwnerCatalogVersion,
-            $script:FileTransferCoordinatorActivationRetryCatalogVersion) -and
+            $script:FileTransferCoordinatorActivationRetryCatalogVersion,
+            $script:FileTransferCoordinatorReceiverPreAdmissionCatalogVersion,
+            $script:FileTransferCoordinatorInitialDataSessionCatalogVersion,
+            $script:FileTransferCoordinatorEarlyCheckpointProofCatalogVersion, $script:FileTransferCoordinatorFallbackRepairHandoffCatalogVersion) -and
         -not (Test-FileTransferFallbackV6BootstrapSourceHoldConsumed $completed[0] $streamHistory)) { return $false }
     return $latest.Key -ceq $owner.Key -and $latest.Operation.afterState -ceq 'Completed' -and
         $correlation.agreementEnabled -and $correlation.version -eq 1 -and

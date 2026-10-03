@@ -907,6 +907,7 @@ public sealed partial class SessionFileTransferService
 
     private bool TryPauseInboundTransportLocked(InboundTransferContext context, string reason, bool requiresResumeRequest)
     {
+        if (HasInboundFallbackRepairHandoffLocked(context)) { return false; }
         if (HasBootstrapSourceHoldLocked(context)) { InvalidatePendingBootstrapCorrelationLocked(CreateCoordinatorStateLocked(context), "bootstrap_transport_paused"); }
         if (context.IsTerminal)
         {
@@ -1776,6 +1777,12 @@ public sealed partial class SessionFileTransferService
         FileTransferTransportKind targetTransport)
     {
         if (HasBootstrapSourceHoldLocked(context)) { return false; }
+        if (HasInboundFallbackRepairHandoffLocked(context))
+        {
+            return requiresResumeRequest && ShouldPromotePostTunaFallbackV6ToFileTunaV4(
+                context.RouteRuntime, context.NegotiatedDataProtocolVersion, handoffKind, targetTransport) &&
+                TryPromoteInboundPostTunaFallbackV6ToFileTunaV4Locked(context, reason, handoffKind, targetTransport);
+        }
         if (context.IsTerminal)
         {
             return false;
@@ -5960,6 +5967,16 @@ public sealed partial class SessionFileTransferService
 
             if (!context.PullTransportPaused)
             {
+                return false;
+            }
+
+            if (HasInboundFallbackRepairHandoffLocked(context) && context.FallbackRepairHandoffExecution is { } repairHold &&
+                IsInboundFallbackRepairHandoffExecutionCurrentLocked(context, repairHold))
+            {
+                if (context.PullTransportGraceDeadlineUtc is { } deadline && DateTimeOffset.UtcNow >= deadline)
+                {
+                    _ = TryRestoreInboundFallbackRepairHandoffLocked(context);
+                }
                 return false;
             }
 

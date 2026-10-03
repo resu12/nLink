@@ -45,7 +45,7 @@ function Test-FileTransferCoordinatorRepairOwnerOperation {
     param($Envelope,$Operation,$Catalog)
     try {
         $definition=$script:FileTransferCoordinatorRepairOwnerCatalog
-        if ($Catalog.Version -cnotin @($script:FileTransferCoordinatorRepairOwnerCatalogVersion, $script:FileTransferCoordinatorActivationRetryCatalogVersion, $script:FileTransferCoordinatorReceiverPreAdmissionCatalogVersion, $script:FileTransferCoordinatorInitialDataSessionCatalogVersion, $script:FileTransferCoordinatorEarlyCheckpointProofCatalogVersion) -or
+        if ($Catalog.Version -cnotin @($script:FileTransferCoordinatorRepairOwnerCatalogVersion, $script:FileTransferCoordinatorActivationRetryCatalogVersion, $script:FileTransferCoordinatorReceiverPreAdmissionCatalogVersion, $script:FileTransferCoordinatorInitialDataSessionCatalogVersion, $script:FileTransferCoordinatorEarlyCheckpointProofCatalogVersion, $script:FileTransferCoordinatorFallbackRepairHandoffCatalogVersion) -or
             $Operation.family -cne $definition.family -or $Operation.operationKind -cne $definition.operationKind -or
             $Operation.operationRole -cne $definition.operationRole -or
             $Envelope.decisionKind -cne $definition.decisionKind -or $Envelope.decisionStatus -cne 'Idempotent' -or
@@ -129,7 +129,7 @@ function Resolve-FileTransferRepairOwnerEvidence {
         (Get-FileTransferCoordinatorSnapshotObjectProperty $SnapshotEvidence 'ArtifactEvidenceVerdict') -cne 'pass' -or
         (Get-FileTransferCoordinatorSnapshotObjectProperty $SnapshotEvidence 'StreamComplete') -ne $true -or
         'route_runtime' -cnotin @(Get-FileTransferCoordinatorSnapshotObjectProperty $SnapshotEvidence 'AuthoritativeFamilies' @()) -or
-        (F 'repair_owner_profile') -cnotin @($script:FileTransferCoordinatorRepairOwnerCatalogVersion, $script:FileTransferCoordinatorActivationRetryCatalogVersion, $script:FileTransferCoordinatorReceiverPreAdmissionCatalogVersion, $script:FileTransferCoordinatorInitialDataSessionCatalogVersion, $script:FileTransferCoordinatorEarlyCheckpointProofCatalogVersion)) { return $null }
+        (F 'repair_owner_profile') -cnotin @($script:FileTransferCoordinatorRepairOwnerCatalogVersion, $script:FileTransferCoordinatorActivationRetryCatalogVersion, $script:FileTransferCoordinatorReceiverPreAdmissionCatalogVersion, $script:FileTransferCoordinatorInitialDataSessionCatalogVersion, $script:FileTransferCoordinatorEarlyCheckpointProofCatalogVersion, $script:FileTransferCoordinatorFallbackRepairHandoffCatalogVersion)) { return $null }
     $index=Get-FileTransferCoordinatorSnapshotObjectProperty $SnapshotEvidence '__RepairOwnerEvidence'
     if ($null -eq $index -or $index.CatalogVersion -cne (F 'repair_owner_profile') -or
         @($index.Errors).Count -gt 0 -or

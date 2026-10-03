@@ -5498,7 +5498,7 @@ public sealed partial class SessionFileTransferService :
                 "FileTransferService",
                 $"event=filetransfer_lifecycle_priority_sent; kind=complete; transfer_id={transferId}; session_id={sessionId}; path=control; file_size_bytes={context.FileSizeBytes}");
 
-            if (requiredWriteSource is null && ShouldUseV6SparseCreditEnvelope(context))
+            if ((requiredWriteSource is null || requiredWriteSource.FallbackRepairSource is not null) && ShouldUseV6SparseCreditEnvelope(context))
             {
                 using var dataFrameTimeout = new CancellationTokenSource(TimeSpan.FromMilliseconds(LifecyclePrioritySendTimeoutMs));
                 Task sendingEcho;
@@ -17403,6 +17403,8 @@ public sealed partial class SessionFileTransferService :
 
     private void ResolveInboundFallbackTailSurvivalLocked(InboundTransferContext context, string reason)
     {
+        TryStartInboundFallbackRepairHandoffLocked(context);
+        if (HasInboundFallbackRepairHandoffLocked(context) && !TryGetDrainedInboundFallbackRepairHandoffLocked(context, out _)) { return; }
         var operation = GetCurrentFallbackTailYieldOperation(context);
         if (operation?.PairedRelease is not null)
         {
@@ -17671,13 +17673,14 @@ public sealed partial class SessionFileTransferService :
 
         var committed = Math.Clamp(context.NextChunkIndex, 0, Math.Max(0, context.ChunkCount));
         var highestObserved = Math.Max(-1, context.PullHighestReceivedChunkIndex);
-        if (IsInboundPostFallbackFrontierGapMissingLocked(context) ||
+        var parkedRepair = TryGetDrainedInboundFallbackRepairHandoffLocked(context, out var repairReceipt);
+        if (!parkedRepair && (IsInboundPostFallbackFrontierGapMissingLocked(context) ||
             IsFallbackFrontierObligationBlockingTailYield(
                 context.CurrentFallbackFrontierRepairContract,
                 currentLeg.StartCommittedChunkIndex,
                 committed,
                 highestObserved,
-                frontierGapObserved: highestObserved >= committed))
+                frontierGapObserved: highestObserved >= committed)))
         {
             LogFallbackTailYieldBlockedByFrontierObligation(
                 FileTransferDirection.Inbound,
@@ -17700,24 +17703,26 @@ public sealed partial class SessionFileTransferService :
             return false;
         }
 
-        if (!allowCurrentTransportEpochRecoveryHandoff &&
+        if (!parkedRepair && !allowCurrentTransportEpochRecoveryHandoff &&
             IsV6TransportHandoffBlockingTail(context.V6TransportHandoff))
         {
             LogBlocked("fallback_tail_local_owner_work_pending");
             return false;
         }
 
+        var yieldCommitted = parkedRepair ? repairReceipt!.Checkpoint.ContiguousCommittedChunkIndex : currentLeg.ProvenCommittedChunkIndex;
+        var yieldHighest = parkedRepair ? repairReceipt!.Checkpoint.DurableHighestChunkIndex : currentLeg.ProvenHighestObservedChunkIndex;
         if (!TryMarkInboundFallbackTailQuiescentWithCoordinatorLocked(
                 context,
                 currentLeg,
                 currentLeg.TransportEpochId,
                 Math.Clamp(
-                    currentLeg.ProvenCommittedChunkIndex,
+                    yieldCommitted,
                     0,
                     Math.Max(0, context.ChunkCount)),
                 Math.Max(
                     -1,
-                    currentLeg.ProvenHighestObservedChunkIndex),
+                    yieldHighest),
                 reason,
                 out var yieldDecision))
         {
@@ -17730,18 +17735,21 @@ public sealed partial class SessionFileTransferService :
                 context,
                 currentLeg,
                 yieldDecision,
-                currentLeg.ProvenCommittedChunkIndex,
-                currentLeg.ProvenHighestObservedChunkIndex,
+                yieldCommitted,
+                yieldHighest,
                 reason))
         {
             return false;
         }
 
-        ClearInboundFallbackTailRecoveryOwnershipAfterYieldWithSnapshotLocked(
-            context,
-            currentLeg,
-            "fallback_tail_quiescent",
-            yieldSnapshot);
+        if (!parkedRepair)
+        {
+            ClearInboundFallbackTailRecoveryOwnershipAfterYieldWithSnapshotLocked(
+                context,
+                currentLeg,
+                "fallback_tail_quiescent",
+                yieldSnapshot);
+        }
         ClearPostTunaFallbackControlPlanePressure(context.TransferId, "fallback_tail_quiescent");
         LogFileTransferFallbackTailQuiescentYieldGranted(
             FileTransferDirection.Inbound,
@@ -20629,32 +20637,63 @@ public sealed partial class SessionFileTransferService :
         }
     }
 
-    private async Task<(bool Sent, FileTransferControlPlaneDeliveryResult? Result)> SendInboundFallbackControlPlaneOrDataSessionAsync(
+    private Task<(bool Sent, FileTransferControlPlaneDeliveryResult? Result)> SendInboundFallbackControlPlaneOrDataSessionAsync(
+        InboundTransferContext context, IFileTransferDataSession dataSession, FileTransferControlPlaneDeliveryRequest request,
+        CancellationToken ct, CheckpointRepairContinuityStamp? checkpointContinuityStamp = null,
+        FallbackFrontierRepairContract? frontierRepairContract = null)
+        => SendInboundFallbackControlPlaneOrDataSessionWithWriteBindingAsync(context, dataSession, request, ct,
+            checkpointContinuityStamp, frontierRepairContract, null);
+
+    private async Task<(bool Sent, FileTransferControlPlaneDeliveryResult? Result)> SendInboundFallbackControlPlaneOrDataSessionWithWriteBindingAsync(
         InboundTransferContext context,
         IFileTransferDataSession dataSession,
         FileTransferControlPlaneDeliveryRequest request,
         CancellationToken ct,
         CheckpointRepairContinuityStamp? checkpointContinuityStamp = null,
-        FallbackFrontierRepairContract? frontierRepairContract = null)
+        FallbackFrontierRepairContract? frontierRepairContract = null,
+        InboundBootstrapWriteSource? requiredWriteSource = null,
+        InboundFallbackRepairFeedbackOperation? requiredFeedbackOperation = null)
     {
         FallbackControlPlaneDeliveryContract? deliveryContract = null;
+        InboundFallbackRepairFeedbackOperation? feedbackOperation = requiredFeedbackOperation;
+        Task<FileTransferControlPlaneDeliveryResult>? controlPlaneSendTask = null;
         Task? dataSessionFallbackSendTask = null;
         try
         {
             lock (gate)
             {
+                if (feedbackOperation is not null && !IsInboundFallbackRepairFeedbackCurrentLocked(context, feedbackOperation)) { return (false, null); }
+                if (requiredWriteSource is not null && !IsInboundBootstrapWriteSourceCurrentLocked(context, requiredWriteSource)) { return (false, null); }
                 if (!TryAuthorizeInboundFallbackControlPlaneSendLocked(context, request, out deliveryContract))
                 {
                     return (false, null);
                 }
 
                 request = EnsureControlPlaneDeliveryRequestCorrelation(deliveryContract?.Request ?? request);
+                if (feedbackOperation is null && !TryRegisterInboundFallbackRepairFeedbackLocked(context, dataSession, request, out feedbackOperation))
+                {
+                    return (false, null);
+                }
+                request = BindInboundFallbackRepairFeedbackRequest(context, request, feedbackOperation);
                 if (request.PreTransportDeliveryValidator is { } validator && !validator())
                 {
                     return (false, null);
                 }
 
-                if (transport is not IFileTransferControlPlaneDeliveryTransport)
+                if (feedbackOperation is not null && transport is IFileTransferControlPlanePhysicalSendSubmissionTransport physicalTransport)
+                {
+                    var submission = physicalTransport.SubmitFileTransferControlPlanePhysicalSend(request, ct);
+                    feedbackOperation.PhysicalCompletionTask = submission.PhysicalCompletionTask;
+                    controlPlaneSendTask = submission.DeliveryTask;
+                }
+                else if (feedbackOperation is not null && transport is not IFileTransferControlPlaneDeliveryTransport &&
+                    dataSession is IFileTransferPhysicalSendSubmissionSession physicalSession)
+                {
+                    var submission = physicalSession.SubmitPhysicalSend(request.Frame, null, ct);
+                    feedbackOperation.PhysicalCompletionTask = submission.PhysicalCompletionTask;
+                    dataSessionFallbackSendTask = submission.DeliveryTask;
+                }
+                else if (transport is not IFileTransferControlPlaneDeliveryTransport)
                 {
                     // For a data-session fallback, validation and SendAsync invocation
                     // form one Core commit point. Await completion after releasing the
@@ -20674,13 +20713,17 @@ public sealed partial class SessionFileTransferService :
             }
             else
             {
-                result = await SendFileTransferControlPlaneOrDataSessionCoreAsync(dataSession, request, ct).ConfigureAwait(false);
+                result = controlPlaneSendTask is not null
+                    ? await controlPlaneSendTask.ConfigureAwait(false)
+                    : await SendFileTransferControlPlaneOrDataSessionCoreAsync(dataSession, request, ct).ConfigureAwait(false);
             }
 
             if (result is not null)
             {
                 lock (gate)
                 {
+                    if (feedbackOperation is not null && !IsInboundFallbackRepairFeedbackCurrentLocked(context, feedbackOperation)) { return (false, result); }
+                    if (requiredWriteSource is not null && !IsInboundBootstrapWriteSourceCurrentLocked(context, requiredWriteSource)) { return (false, result); }
                     if (!TryCompleteInboundFallbackControlPlaneSendLocked(context, request, deliveryContract, result))
                     {
                         LogFileTransferControlPlaneDeliveryResult(
@@ -20718,12 +20761,14 @@ public sealed partial class SessionFileTransferService :
             }
             else
             {
-                deliveryContract?.Lifecycle.TrySettle(
-                    FallbackControlPlaneDeliveryOutcome.DataSessionFallbackCompleted,
-                    "data_session_fallback_completed");
-                if (frontierRepairContract is not null)
+                lock (gate)
                 {
-                    lock (gate)
+                    if (feedbackOperation is not null && !IsInboundFallbackRepairFeedbackCurrentLocked(context, feedbackOperation)) { return (false, null); }
+                    if (requiredWriteSource is not null && !IsInboundBootstrapWriteSourceCurrentLocked(context, requiredWriteSource)) { return (false, null); }
+                    deliveryContract?.Lifecycle.TrySettle(
+                        FallbackControlPlaneDeliveryOutcome.DataSessionFallbackCompleted,
+                        "data_session_fallback_completed");
+                    if (frontierRepairContract is not null)
                     {
                         if (request.Frame is not FileTransferFrontierRequestFrameV6 frontierRequest ||
                             !TryCompleteInboundFallbackFrontierDispatchLocked(
@@ -20735,21 +20780,31 @@ public sealed partial class SessionFileTransferService :
                 }
             }
 
-            MaybeObserveInboundPostTunaFallbackControlPlanePressure(context, request);
+            lock (gate)
+            {
+                if (feedbackOperation is not null && !IsInboundFallbackRepairFeedbackCurrentLocked(context, feedbackOperation)) { return (false, result); }
+                if (requiredWriteSource is not null && !IsInboundBootstrapWriteSourceCurrentLocked(context, requiredWriteSource)) { return (false, result); }
+                MaybeObserveInboundPostTunaFallbackControlPlanePressure(context, request);
+            }
             return (true, result);
         }
         catch (Exception ex)
         {
-            SettleFallbackControlPlaneDeliveryFailure(deliveryContract, ex);
-            if (request.Kind == FileTransferControlPlaneKind.ReceiverState &&
-                TryDeferInboundV6ControlSendFailureForRecovery(
-                    context,
-                    "receiver_state",
-                    request.Reason,
-                    ex,
-                    requireRecoverableFailure: false))
+            lock (gate)
             {
-                return (false, null);
+                if (feedbackOperation is not null && !IsInboundFallbackRepairFeedbackCurrentLocked(context, feedbackOperation)) { return (false, null); }
+                if (requiredWriteSource is not null && !IsInboundBootstrapWriteSourceCurrentLocked(context, requiredWriteSource)) { return (false, null); }
+                SettleFallbackControlPlaneDeliveryFailure(deliveryContract, ex);
+                if (request.Kind == FileTransferControlPlaneKind.ReceiverState &&
+                    TryDeferInboundV6ControlSendFailureForRecovery(
+                        context,
+                        "receiver_state",
+                        request.Reason,
+                        ex,
+                        requireRecoverableFailure: false))
+                {
+                    return (false, null);
+                }
             }
 
             if (ex is not OperationCanceledException &&
@@ -20762,6 +20817,10 @@ public sealed partial class SessionFileTransferService :
             }
 
             throw;
+        }
+        finally
+        {
+            if (feedbackOperation is not null && requiredFeedbackOperation is null) { _ = RetireInboundFallbackRepairFeedbackAsync(context, feedbackOperation); }
         }
     }
 
@@ -26088,6 +26147,11 @@ public sealed partial class SessionFileTransferService :
         public long LastBootstrapFeedbackOperationGeneration { get; set; }
 
         public Dictionary<long, InboundBootstrapFeedbackOperation> ActiveBootstrapFeedbackOperations { get; } = [];
+
+        public long LastFallbackRepairFeedbackOperationGeneration { get; set; }
+
+        public Dictionary<long, InboundFallbackRepairFeedbackOperation> ActiveFallbackRepairFeedbackOperations { get; } = [];
+        public InboundFallbackRepairHandoffExecution? FallbackRepairHandoffExecution { get; set; }
         public BootstrapSourceHoldExecution? BootstrapSourceHoldExecution { get; set; }
 
         public long ReceiverSparseBytesWritten { get; set; }

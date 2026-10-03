@@ -17,7 +17,7 @@ using NLink.Core.SessionSecurity;
 
 namespace NLink.Infra.Nkn;
 
-public sealed partial class NknSignalingTransport
+public sealed partial class NknSignalingTransport : IFileTransferControlPlanePhysicalSendSubmissionTransport
 {
     private static readonly TimeSpan FileTransferTerminalTombstoneRetention = TimeSpan.FromMinutes(2);
     private static readonly TimeSpan TunaActivationPauseCancellationRecoveryWindow = TimeSpan.FromSeconds(10);
@@ -297,9 +297,43 @@ public sealed partial class NknSignalingTransport
             .ConfigureAwait(false);
     }
 
-    public async Task<FileTransferControlPlaneDeliveryResult> SendFileTransferControlPlaneFrameAsync(
+    public Task<FileTransferControlPlaneDeliveryResult> SendFileTransferControlPlaneFrameAsync(
         FileTransferControlPlaneDeliveryRequest request,
         CancellationToken ct)
+        => SendFileTransferControlPlaneFrameCoreAsync(request, ct, null);
+
+    FileTransferControlPlanePhysicalSendSubmission IFileTransferControlPlanePhysicalSendSubmissionTransport.SubmitFileTransferControlPlanePhysicalSend(
+        FileTransferControlPlaneDeliveryRequest request, CancellationToken ct)
+    {
+        var children = new TaskCompletionSource<Task>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var delivery = SendFileTransferControlPlaneWithPhysicalTrackingAsync(request, ct, children);
+        return new(delivery, WaitForFileTransferControlPlanePhysicalCompletionAsync(delivery, children.Task));
+    }
+
+    private async Task<FileTransferControlPlaneDeliveryResult> SendFileTransferControlPlaneWithPhysicalTrackingAsync(
+        FileTransferControlPlaneDeliveryRequest request, CancellationToken ct, TaskCompletionSource<Task> children)
+    {
+        try
+        {
+            return await SendFileTransferControlPlaneFrameCoreAsync(request, ct,
+                task => children.TrySetResult(task)).ConfigureAwait(false);
+        }
+        finally
+        {
+            // Pre-send rejection/exception has no admitted children.
+            children.TrySetResult(Task.CompletedTask);
+        }
+    }
+
+    private static async Task WaitForFileTransferControlPlanePhysicalCompletionAsync(Task delivery, Task<Task> children)
+    {
+        try { await delivery.ConfigureAwait(false); } catch { /* Delivery outcome remains on DeliveryTask. */ }
+        try { await (await children.ConfigureAwait(false)).ConfigureAwait(false); }
+        catch { /* Failed/canceled copies are settled, not successful delivery. */ }
+    }
+
+    private async Task<FileTransferControlPlaneDeliveryResult> SendFileTransferControlPlaneFrameCoreAsync(
+        FileTransferControlPlaneDeliveryRequest request, CancellationToken ct, Action<Task>? physicalCompletionObserver)
     {
         ArgumentNullException.ThrowIfNull(request);
         ThrowIfDisposed();
@@ -380,7 +414,8 @@ public sealed partial class NknSignalingTransport
                     ThrowOnFailure: false,
                     CopyTimeout: request.CopyTimeout,
                     PreSendValidator: request.PreTransportDeliveryValidator,
-                    OfflinePublicationDelay: BindOfflinePublicationDelay(request, controlEnvelope, bulkEnvelope)),
+                    OfflinePublicationDelay: BindOfflinePublicationDelay(request, controlEnvelope, bulkEnvelope),
+                    PhysicalCompletionObserver: physicalCompletionObserver),
                 new LifecycleEnvelopeSet(controlEnvelope, bulkEnvelope),
                 ct)
             .ConfigureAwait(false);

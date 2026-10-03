@@ -32,7 +32,7 @@ function Test-FileTransferActivationRetryOperation {
     $t=Get-FileTransferCoordinatorSnapshotObjectProperty $Operation 'routeTransition'
     $p=Get-FileTransferCoordinatorSnapshotObjectProperty $t 'activationRetryBinding'
     if ($null -eq $p) { return $true }
-    if ($Catalog.Version -cnotin @($script:FileTransferCoordinatorActivationRetryCatalogVersion, $script:FileTransferCoordinatorReceiverPreAdmissionCatalogVersion, $script:FileTransferCoordinatorInitialDataSessionCatalogVersion, $script:FileTransferCoordinatorEarlyCheckpointProofCatalogVersion) -or
+    if ($Catalog.Version -cnotin @($script:FileTransferCoordinatorActivationRetryCatalogVersion, $script:FileTransferCoordinatorReceiverPreAdmissionCatalogVersion, $script:FileTransferCoordinatorInitialDataSessionCatalogVersion, $script:FileTransferCoordinatorEarlyCheckpointProofCatalogVersion, $script:FileTransferCoordinatorFallbackRepairHandoffCatalogVersion) -or
         $Operation.family -cne 'route_transition' -or $t.transitionKind -cne 'PostTunaFallbackV6ToTunaV4' -or
         $t.proofBoundaryKind -cne 'FileTransferTunaActivationTransitionProofBoundary' -or
         -not (Test-FileTransferCheckpointRepairContinuityFields $p $script:FileTransferCoordinatorActivationRetryCatalog.payloadFields)) { return $false }
@@ -47,7 +47,7 @@ function Test-FileTransferActivationRetryOperation {
 function Get-FileTransferActivationRetryEvidence {
     param([AllowEmptyCollection()][object[]]$Boundaries,$Catalog)
     $bindings=@{}; $errors=[System.Collections.Generic.List[string]]::new()
-    if ($Catalog.Version -cnotin @($script:FileTransferCoordinatorActivationRetryCatalogVersion, $script:FileTransferCoordinatorReceiverPreAdmissionCatalogVersion, $script:FileTransferCoordinatorInitialDataSessionCatalogVersion, $script:FileTransferCoordinatorEarlyCheckpointProofCatalogVersion)) {
+    if ($Catalog.Version -cnotin @($script:FileTransferCoordinatorActivationRetryCatalogVersion, $script:FileTransferCoordinatorReceiverPreAdmissionCatalogVersion, $script:FileTransferCoordinatorInitialDataSessionCatalogVersion, $script:FileTransferCoordinatorEarlyCheckpointProofCatalogVersion, $script:FileTransferCoordinatorFallbackRepairHandoffCatalogVersion)) {
         return [pscustomobject]@{ CatalogVersion=$Catalog.Version; Bindings=$bindings; Errors=@() }
     }
     function SameStream($a,$b) {

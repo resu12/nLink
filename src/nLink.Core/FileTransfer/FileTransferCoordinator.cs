@@ -878,6 +878,8 @@ internal sealed record FileTransferFallbackTailYieldSubstate(
     int LastRetryDispatchHoldGeneration = 0,
     int LastRetryDispatchRecheckGeneration = 0)
 {
+    public FileTransferFallbackRepairHandoffOperation? RepairHandoff { get; init; }
+
     internal static FileTransferFallbackTailYieldSubstate Empty { get; } =
         new();
 }
@@ -7681,6 +7683,13 @@ internal static partial class FileTransferCoordinator
             return false;
         }
 
+        if (!IsFallbackRepairHandoffTransitionCommitAllowed(state, authority))
+        {
+            earlyDecision = FileTransferRouteTransitionDecisionFor(state, FileTransferRouteTransitionDecisionStatus.Rejected,
+                "fallback_repair_handoff_not_drained_for_transition");
+            return false;
+        }
+
         if (RequiresRuntimeUnlockRetryLifecycleScopeInvalidation(state))
         {
             earlyDecision = FileTransferRouteTransitionDecisionFor(
@@ -8179,6 +8188,7 @@ internal static partial class FileTransferCoordinator
         };
         materializedState = RecordBootstrapSourceCallbackSuccessor(committedState, in authority, in terminalOperation,
             transitionState.BootstrapSourceHold, transitionState.BootstrapExchange, transitionState.BootstrapAgreement);
+        materializedState = RecordInboundFallbackRepairHandoffSuccessor(state, materializedState, disposition);
         return true;
     }
 
@@ -9328,6 +9338,12 @@ internal static partial class FileTransferCoordinator
                     FileTransferCoordinatorActionKind.FallbackTailFailed
                     ? FallbackTailYieldKind.Failed
                     : FallbackTailYieldKind.Quiescent);
+            if (requestedYieldKind == FallbackTailYieldKind.Quiescent && !IsInboundFallbackRepairHandoffLocalYieldAllowed(state))
+            {
+                earlyDecision = ActionDecision(state, request.Kind, accepted: false,
+                    rejectionReason: "fallback_repair_handoff_not_drained_for_yield");
+                return true;
+            }
             var requestedPredecessor =
                 request.FallbackTailYieldTransportEpochReauthorization
                     ?.PredecessorDecision.AuthorityId ??
@@ -10710,6 +10726,12 @@ internal static partial class FileTransferCoordinator
                 terminalizedToken);
         }
 
+        if (!IsInboundFallbackRepairHandoffLocalYieldAllowed(state))
+        {
+            return AdmissionDecision(state, RuntimeUnlockAdmissionStatus.WaitingForFallbackOwner,
+                "fallback_repair_handoff_not_drained", survivalState);
+        }
+
         var policy = EvaluateRuntimeUnlockAdmission(
             state.IsTerminal,
             runtimeOwnerCurrent: true,
@@ -10719,9 +10741,9 @@ internal static partial class FileTransferCoordinator
             survivalState.StateRefreshSendInFlight,
             survivalState.DeferredStateRefreshPending,
             survivalState.ProofReplayPending,
-            survivalState.BridgeRecoveryPending,
+            survivalState.BridgeRecoveryPending && !HasDrainedInboundFallbackRepairHandoff(state),
             survivalState.ControlPlanePressurePending,
-            survivalState.FallbackTailRepairPending,
+            survivalState.FallbackTailRepairPending && !HasDrainedInboundFallbackRepairHandoff(state),
             transactionFailed: false,
             HasCurrentFallbackTailPairedRelease(state));
 

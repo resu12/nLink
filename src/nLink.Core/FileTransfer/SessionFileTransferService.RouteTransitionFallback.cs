@@ -1978,6 +1978,7 @@ public sealed partial class SessionFileTransferService
         }
 
         var coordinatorState = CreateCoordinatorStateLocked(context);
+        if (HasInboundFallbackRepairHandoffLocked(context) && !TryGetDrainedInboundFallbackRepairHandoffLocked(context, out _)) { return false; }
         var fallbackOperation = GetCurrentFallbackTailYieldOperation(context);
         if (fallbackOperation is not
             {
@@ -2034,6 +2035,7 @@ public sealed partial class SessionFileTransferService
             owner,
             publication,
             leg);
+        if (TryGetDrainedInboundFallbackRepairHandoffLocked(context, out var repairReceipt)) { checkpoint = repairReceipt!.Checkpoint; }
         var request = new FileTransferRouteTransitionPrepareRequest(
             FileTransferRouteTransitionKind.PostTunaFallbackV6ToTunaV4,
             owner,
@@ -3098,6 +3100,13 @@ public sealed partial class SessionFileTransferService
                 drainCommand,
                 out var drainReceipt))
         {
+            return false;
+        }
+
+        if (HasInboundFallbackRepairHandoffLocked(context) &&
+            (!TryGetDrainedInboundFallbackRepairHandoffLocked(context, out var repairReceipt) || authority.DurableCheckpoint != repairReceipt!.Checkpoint))
+        {
+            rejectionReason = "fallback_repair_handoff_not_current_for_commit";
             return false;
         }
 
@@ -4182,6 +4191,10 @@ public sealed partial class SessionFileTransferService
         {
             return false;
         }
+
+        if (context.FallbackRepairHandoffExecution is not null &&
+            command.Value.Kind is FileTransferRouteTransitionDispositionKind.Committed or FileTransferRouteTransitionDispositionKind.RolledBack &&
+            !TryAdoptInboundFallbackRepairHandoffDispositionLocked(context, command.Value)) { return false; }
 
         EnqueueRouteTransitionAuthorityEffect(
             context,
@@ -5428,7 +5441,7 @@ public sealed partial class SessionFileTransferService
         InboundTransferContext context)
     {
         context.PullTransportPaused = true;
-        context.PullTransportPausedSinceUtc = DateTimeOffset.UtcNow;
+        context.PullTransportPausedSinceUtc = context.FallbackRepairHandoffExecution?.PausedSinceUtc ?? DateTimeOffset.UtcNow;
         context.PullTransportGraceDeadlineUtc = null;
         context.PullTransportPauseReason = "filetransfer_route_transition_draining";
         context.PullTransportResumeRequestPending = false;
