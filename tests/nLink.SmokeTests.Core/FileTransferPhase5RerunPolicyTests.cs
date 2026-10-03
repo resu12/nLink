@@ -239,17 +239,17 @@ public sealed class FileTransferPhase5RerunPolicyTests : FileTransferAcceptanceP
         try
         {
             var environment = BuildFakeRouteAcceptanceEnvironment("phase5-performance-first-rerun-setup-fail");
-            environment["NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_PHASE4_LIVE_SWITCH_OFF_HELPEE_64MB_GOODPUT_BPS"] = "1";
-            environment["NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_PHASE4_LIVE_SWITCH_OFF_HELPEE_64MB_RERUN_TRANSIENT_SETUP_FAILURE"] = "1";
-            environment["NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_PHASE4_LIVE_SWITCH_OFF_HELPEE_64MB_RERUN_TRANSIENT_SETUP_PHASE"] = "activation_offer_answer";
-            environment["NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_PHASE4_LIVE_SWITCH_OFF_HELPEE_64MB_RERUN_TRANSIENT_SETUP_REASON"] = "activation_offer_sent_waiting_answer";
+            environment["NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_PHASE4_ACTIVE_TUNA_V4_64MB_GOODPUT_BPS"] = "1";
+            environment["NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_PHASE4_ACTIVE_TUNA_V4_64MB_RERUN_TRANSIENT_SETUP_FAILURE"] = "1";
+            environment["NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_PHASE4_ACTIVE_TUNA_V4_64MB_RERUN_TRANSIENT_SETUP_PHASE"] = "activation_offer_answer";
+            environment["NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_PHASE4_ACTIVE_TUNA_V4_64MB_RERUN_TRANSIENT_SETUP_REASON"] = "activation_offer_sent_waiting_answer";
 
             var result = await RunPowerShellFileAsync(
                 repoRoot,
                 Path.Combine(repoRoot, "tools", "Run-FileTransferRouteAcceptance.ps1"),
                 [
                     "-MatrixMode", "phase5-analyzer-gui-acceptance",
-                    "-ScenarioName", "live-switch-off-helpee-64mb",
+                    "-ScenarioName", "active-tuna-v4-64mb",
                     "-ArtifactRoot", artifactRoot,
                     "-TimeoutSeconds", "30",
                     "-ProgressTimeoutSeconds", "30"
@@ -264,10 +264,10 @@ public sealed class FileTransferPhase5RerunPolicyTests : FileTransferAcceptanceP
             Assert.Equal("PASS", summary["verdict"]);
             Assert.Equal("PASS", summary["correctness_verdict"]);
             Assert.Equal("FAIL", summary["performance_verdict"]);
-            Assert.Equal("1", summary["live-switch-off-helpee-64mb.retry_used"]);
-            Assert.Equal("1", summary["live-switch-off-helpee-64mb.selected_attempt"]);
-            Assert.Equal("performance", summary["live-switch-off-helpee-64mb.acceptance_failure_class"]);
-            Assert.Contains("activation_offer_sent_waiting_answer", summary["live-switch-off-helpee-64mb.rerun_failure_reason"], StringComparison.Ordinal);
+            Assert.Equal("1", summary["active-tuna-v4-64mb.retry_used"]);
+            Assert.Equal("1", summary["active-tuna-v4-64mb.selected_attempt"]);
+            Assert.Equal("performance", summary["active-tuna-v4-64mb.acceptance_failure_class"]);
+            Assert.Contains("activation_offer_sent_waiting_answer", summary["active-tuna-v4-64mb.rerun_failure_reason"], StringComparison.Ordinal);
             Assert.DoesNotContain("scenario rerun setup failed; preserving first-attempt evidence", summaryText, StringComparison.Ordinal);
         }
         finally
@@ -292,15 +292,15 @@ public sealed class FileTransferPhase5RerunPolicyTests : FileTransferAcceptanceP
         try
         {
             var environment = BuildFakeRouteAcceptanceEnvironment("phase5-performance-first-rerun-warning-fail");
-            environment["NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_PHASE4_LIVE_SWITCH_OFF_HELPER_64MB_GOODPUT_BPS"] = "1";
-            environment["NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_PHASE4_LIVE_SWITCH_OFF_HELPER_64MB_RERUN_WARNING_CAP_EXCESS"] = "1";
+            environment["NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_PHASE4_ACTIVE_TUNA_V4_64MB_GOODPUT_BPS"] = "1";
+            environment["NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_PHASE4_ACTIVE_TUNA_V4_64MB_RERUN_WARNING_CAP_EXCESS"] = "1";
 
             var result = await RunPowerShellFileAsync(
                 repoRoot,
                 Path.Combine(repoRoot, "tools", "Run-FileTransferRouteAcceptance.ps1"),
                 [
                     "-MatrixMode", "phase5-analyzer-gui-acceptance",
-                    "-ScenarioName", "live-switch-off-helper-64mb",
+                    "-ScenarioName", "active-tuna-v4-64mb",
                     "-ArtifactRoot", artifactRoot,
                     "-TimeoutSeconds", "30",
                     "-ProgressTimeoutSeconds", "30"
@@ -314,11 +314,11 @@ public sealed class FileTransferPhase5RerunPolicyTests : FileTransferAcceptanceP
             Assert.Equal("PASS", summary["verdict"]);
             Assert.Equal("PASS", summary["correctness_verdict"]);
             Assert.Equal("FAIL", summary["performance_verdict"]);
-            Assert.Equal("1", summary["live-switch-off-helper-64mb.retry_used"]);
-            Assert.Equal("1", summary["live-switch-off-helper-64mb.selected_attempt"]);
-            Assert.Equal("performance", summary["live-switch-off-helper-64mb.acceptance_failure_class"]);
-            Assert.Contains("goodput regression exceeded", summary["live-switch-off-helper-64mb.first_failure_reason"], StringComparison.Ordinal);
-            Assert.Contains("rerun introduced warning_policy failure", summary["live-switch-off-helper-64mb.rerun_failure_reason"], StringComparison.Ordinal);
+            Assert.Equal("1", summary["active-tuna-v4-64mb.retry_used"]);
+            Assert.Equal("1", summary["active-tuna-v4-64mb.selected_attempt"]);
+            Assert.Equal("performance", summary["active-tuna-v4-64mb.acceptance_failure_class"]);
+            Assert.Contains("goodput regression exceeded", summary["active-tuna-v4-64mb.first_failure_reason"], StringComparison.Ordinal);
+            Assert.Contains("rerun introduced warning_policy failure", summary["active-tuna-v4-64mb.rerun_failure_reason"], StringComparison.Ordinal);
         }
         finally
         {

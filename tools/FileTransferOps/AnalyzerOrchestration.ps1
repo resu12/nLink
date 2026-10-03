@@ -2180,12 +2180,46 @@ function Read-FileTransferCompactGuiSummary {
     param([Parameter(Mandatory = $true)][string]$ArtifactDir)
 
     $summaryPath = Join-Path $ArtifactDir 'filetransfer-tuna-gui-summary.json'
-    if (-not (Test-Path -LiteralPath $summaryPath -PathType Leaf)) {
-        return $null
-    }
-
     try {
-        return Get-Content -LiteralPath $summaryPath -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+        if (Test-Path -LiteralPath $summaryPath -PathType Leaf) {
+            return Get-Content -LiteralPath $summaryPath -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+        }
+
+        $cyclePath = Join-Path $ArtifactDir 'filetransfer-live-nkn-cycles.jsonl'
+        if (-not (Test-Path -LiteralPath $cyclePath -PathType Leaf)) { return $null }
+        $cycles = @(foreach ($line in Get-Content -LiteralPath $cyclePath -ErrorAction Stop) {
+            if ([string]::IsNullOrWhiteSpace($line)) { continue }
+            if (-not $line.TrimStart().StartsWith('{', [StringComparison]::Ordinal)) { return $null }
+            $cycle = $line | ConvertFrom-Json -ErrorAction Stop
+            if ($cycle -isnot [pscustomobject]) { return $null }
+            $cycle
+        })
+        if ($cycles.Count -eq 0) { return $null }
+
+        $completed = $true
+        $integrityOk = $true
+        $goodput = 0D
+        foreach ($cycle in $cycles) {
+            $completion = Get-FileTransferCompactObjectProperty -Object $cycle -Name 'completed' -Default $false
+            $integrity = Get-FileTransferCompactObjectProperty -Object $cycle -Name 'integrity_ok' -Default $false
+            $completed = $completed -and ($completion -is [bool] -and $completion)
+            $integrityOk = $integrityOk -and ($integrity -is [bool] -and $integrity)
+            $goodput += [double](Get-FileTransferCompactObjectProperty -Object $cycle -Name 'goodput_bytes_per_second' -Default 0)
+        }
+        $hardFailureCount = 0
+        $regularSummaryPath = Join-Path $ArtifactDir 'filetransfer-live-nkn-summary.json'
+        if (Test-Path -LiteralPath $regularSummaryPath -PathType Leaf) {
+            $regularSummary = Get-Content -LiteralPath $regularSummaryPath -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+            # Preserve an explicit aggregate failure; successful file integrity
+            # must not erase protocol/transport failure evidence.
+            $hardFailureCount = [int]((Get-FileTransferCompactObjectProperty -Object $regularSummary -Name 'verdict') -eq 'FAIL_PROTOCOL_OR_INTEGRITY')
+        }
+        return [pscustomobject]@{
+            completed = $completed
+            integrityOk = $integrityOk
+            goodputBytesPerSecond = $goodput / $cycles.Count
+            hardFailureCount = $hardFailureCount
+        }
     }
     catch {
         return $null

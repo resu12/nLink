@@ -561,7 +561,7 @@ public sealed class FileTransferPhase5SummaryWriterTests : FileTransferAcceptanc
                 Path.Combine(repoRoot, "tools", "Run-FileTransferRouteAcceptance.ps1"),
                 [
                     "-MatrixMode", "phase5-analyzer-gui-acceptance",
-                    "-ScenarioName", "regular-v4-live-activation-off-on-off-256mb",
+                    "-ScenarioName", "live-switch-off-helper-64mb",
                     "-ArtifactRoot", artifactRoot,
                     "-TimeoutSeconds", "30",
                     "-ProgressTimeoutSeconds", "30"
@@ -576,10 +576,10 @@ public sealed class FileTransferPhase5SummaryWriterTests : FileTransferAcceptanc
             Assert.Equal("PASS", summary["verdict"]);
             Assert.Equal("1", summary["run_count"]);
             Assert.Equal("1", summary["expected_run_count"]);
-            Assert.Equal("regular-v4-live-activation-off-on-off-256mb", summary["requested_scenarios"]);
+            Assert.Equal("live-switch-off-helper-64mb", summary["requested_scenarios"]);
             Assert.Equal("0", summary["summary_json_failed"]);
-            Assert.Equal("none", summary["regular-v4-live-activation-off-on-off-256mb.acceptance_failure_class"]);
-            const string scenarioPrefix = "regular-v4-live-activation-off-on-off-256mb.";
+            Assert.Equal("none", summary["live-switch-off-helper-64mb.acceptance_failure_class"]);
+            const string scenarioPrefix = "live-switch-off-helper-64mb.";
             string[] efficiencyTextFields =
             [
                 "efficiency_summary_validation_verdict",
@@ -657,12 +657,12 @@ public sealed class FileTransferPhase5SummaryWriterTests : FileTransferAcceptanc
             Assert.Equal(
                 "0",
                 summary[
-                    "regular-v4-live-activation-off-on-off-256mb." +
+                    "live-switch-off-helper-64mb." +
                     "filetransfer_receive_recovery_completed_unproven_successor_missing_unresolved_count"]);
             Assert.Equal(
                 "0",
                 summary[
-                    "regular-v4-live-activation-off-on-off-256mb." +
+                    "live-switch-off-helper-64mb." +
                     "filetransfer_receive_recovery_completed_proven_successor_missing_unresolved_count"]);
             Assert.Equal("0", summary["regular_v4_frontier_repair_stalled_raw_count"]);
             Assert.Equal("0", summary["regular_v4_frontier_repair_stalled_distinct_count"]);
@@ -672,12 +672,12 @@ public sealed class FileTransferPhase5SummaryWriterTests : FileTransferAcceptanc
             Assert.Equal(
                 "0",
                 summary[
-                    "regular-v4-live-activation-off-on-off-256mb." +
+                    "live-switch-off-helper-64mb." +
                     "regular_v4_frontier_repair_stalled_unresolved_count"]);
             Assert.Equal(
                 "none",
                 summary[
-                    "regular-v4-live-activation-off-on-off-256mb." +
+                    "live-switch-off-helper-64mb." +
                     "regular_v4_frontier_repair_stalled_verdict"]);
             Assert.Equal("0", summary["regular_v4_frontier_repair_missing_range_not_preserved_raw_count"]);
             Assert.Equal("0", summary["regular_v4_frontier_repair_missing_range_not_preserved_distinct_count"]);
@@ -719,61 +719,61 @@ public sealed class FileTransferPhase5SummaryWriterTests : FileTransferAcceptanc
             Assert.Equal("0", summary["runtime_unlock_retry_dispatch_fallback_paired_yield_successor_release_invalid_recovered_count"]);
             Assert.Equal("0", summary["runtime_unlock_retry_dispatch_fallback_paired_yield_successor_release_invalid_unresolved_count"]);
             Assert.Equal("none", summary["runtime_unlock_retry_dispatch_fallback_paired_yield_successor_release_verdict"]);
-            Assert.Equal("1", summary["regular-v4-live-activation-off-on-off-256mb.manifest_present"]);
-            Assert.Equal("pass", summary["regular-v4-live-activation-off-on-off-256mb.cursor_integrity_verdict"]);
-            Assert.Equal("0", summary["regular-v4-live-activation-off-on-off-256mb.current_runtime_proof"]);
-            Assert.Equal("0", summary["regular-v4-live-activation-off-on-off-256mb.filetransfer_bridge_recovery_execution_soft_to_hard_handoff_missing_raw_count"]);
-            Assert.Equal("0", summary["regular-v4-live-activation-off-on-off-256mb.filetransfer_bridge_recovery_execution_soft_to_hard_handoff_missing_distinct_count"]);
-            Assert.Equal("0", summary["regular-v4-live-activation-off-on-off-256mb.filetransfer_bridge_recovery_execution_soft_to_hard_handoff_missing_recovered_count"]);
-            Assert.Equal("0", summary["regular-v4-live-activation-off-on-off-256mb.filetransfer_bridge_recovery_execution_soft_to_hard_handoff_missing_unresolved_count"]);
-            Assert.Equal("none", summary["regular-v4-live-activation-off-on-off-256mb.filetransfer_bridge_recovery_execution_soft_to_hard_handoff_verdict"]);
-            Assert.Equal("0", summary["regular-v4-live-activation-off-on-off-256mb.regular_v4_frontier_repair_missing_range_not_preserved_raw_count"]);
-            Assert.Equal("0", summary["regular-v4-live-activation-off-on-off-256mb.regular_v4_frontier_repair_missing_range_not_preserved_distinct_count"]);
-            Assert.Equal("0", summary["regular-v4-live-activation-off-on-off-256mb.regular_v4_frontier_repair_missing_range_not_preserved_recovered_count"]);
-            Assert.Equal("0", summary["regular-v4-live-activation-off-on-off-256mb.regular_v4_frontier_repair_missing_range_not_preserved_unresolved_count"]);
-            Assert.Equal("none", summary["regular-v4-live-activation-off-on-off-256mb.regular_v4_frontier_repair_missing_range_preservation_verdict"]);
-            Assert.Equal("0", summary["regular-v4-live-activation-off-on-off-256mb.regular_v4_frontier_repair_projection_reauthorization_missing_raw_count"]);
-            Assert.Equal("0", summary["regular-v4-live-activation-off-on-off-256mb.regular_v4_frontier_repair_projection_reauthorization_missing_distinct_count"]);
-            Assert.Equal("0", summary["regular-v4-live-activation-off-on-off-256mb.regular_v4_frontier_repair_projection_reauthorization_missing_recovered_count"]);
-            Assert.Equal("0", summary["regular-v4-live-activation-off-on-off-256mb.regular_v4_frontier_repair_projection_reauthorization_missing_unresolved_count"]);
-            Assert.Equal("none", summary["regular-v4-live-activation-off-on-off-256mb.regular_v4_frontier_repair_projection_reauthorization_verdict"]);
-            Assert.Equal("0", summary["regular-v4-live-activation-off-on-off-256mb.regular_v4_peer_silence_replay_missing_dispatch_range_not_preserved_raw_count"]);
-            Assert.Equal("0", summary["regular-v4-live-activation-off-on-off-256mb.regular_v4_peer_silence_replay_missing_dispatch_range_not_preserved_distinct_count"]);
-            Assert.Equal("0", summary["regular-v4-live-activation-off-on-off-256mb.regular_v4_peer_silence_replay_missing_dispatch_range_not_preserved_recovered_count"]);
-            Assert.Equal("0", summary["regular-v4-live-activation-off-on-off-256mb.regular_v4_peer_silence_replay_missing_dispatch_range_not_preserved_unresolved_count"]);
-            Assert.Equal("none", summary["regular-v4-live-activation-off-on-off-256mb.regular_v4_peer_silence_replay_missing_dispatch_range_preservation_verdict"]);
-            Assert.Equal("0", summary["regular-v4-live-activation-off-on-off-256mb.fallback_receiver_state_churn_warning_count"]);
-            Assert.Equal("none", summary["regular-v4-live-activation-off-on-off-256mb.fallback_receiver_state_churn_efficiency_class"]);
-            Assert.Equal("none", summary["regular-v4-live-activation-off-on-off-256mb.fallback_tail_bridge_recovery_generation_pairing_verdict"]);
-            Assert.Equal("0", summary["regular-v4-live-activation-off-on-off-256mb.fallback_tail_bridge_recovery_generation_mismatch_raw_count"]);
-            Assert.Equal("0", summary["regular-v4-live-activation-off-on-off-256mb.fallback_tail_bridge_recovery_generation_mismatch_distinct_count"]);
-            Assert.Equal("0", summary["regular-v4-live-activation-off-on-off-256mb.fallback_tail_bridge_recovery_generation_mismatch_recovered_count"]);
-            Assert.Equal("0", summary["regular-v4-live-activation-off-on-off-256mb.fallback_tail_bridge_recovery_generation_mismatch_unresolved_count"]);
-            Assert.Equal("0", summary["regular-v4-live-activation-off-on-off-256mb.runtime_unlock_regular_v4_recovery_lease_closure_liveness_not_preserved_raw_count"]);
-            Assert.Equal("0", summary["regular-v4-live-activation-off-on-off-256mb.runtime_unlock_regular_v4_recovery_lease_closure_liveness_not_preserved_distinct_count"]);
-            Assert.Equal("0", summary["regular-v4-live-activation-off-on-off-256mb.runtime_unlock_regular_v4_recovery_lease_closure_liveness_not_preserved_recovered_count"]);
-            Assert.Equal("0", summary["regular-v4-live-activation-off-on-off-256mb.runtime_unlock_regular_v4_recovery_lease_closure_liveness_not_preserved_unresolved_count"]);
-            Assert.Equal("none", summary["regular-v4-live-activation-off-on-off-256mb.runtime_unlock_regular_v4_recovery_lease_closure_liveness_preservation_verdict"]);
-            Assert.Equal("0", summary["regular-v4-live-activation-off-on-off-256mb.runtime_unlock_retry_dispatch_fallback_paired_yield_successor_release_invalid_raw_count"]);
-            Assert.Equal("0", summary["regular-v4-live-activation-off-on-off-256mb.runtime_unlock_retry_dispatch_fallback_paired_yield_successor_release_invalid_distinct_count"]);
-            Assert.Equal("0", summary["regular-v4-live-activation-off-on-off-256mb.runtime_unlock_retry_dispatch_fallback_paired_yield_successor_release_invalid_recovered_count"]);
-            Assert.Equal("0", summary["regular-v4-live-activation-off-on-off-256mb.runtime_unlock_retry_dispatch_fallback_paired_yield_successor_release_invalid_unresolved_count"]);
-            Assert.Equal("none", summary["regular-v4-live-activation-off-on-off-256mb.runtime_unlock_retry_dispatch_fallback_paired_yield_successor_release_verdict"]);
-            Assert.Equal("0", summary["regular-v4-live-activation-off-on-off-256mb.runtime_unlock_initial_activation_receive_recovery_hold_release_delivery_missing_raw_count"]);
-            Assert.Equal("0", summary["regular-v4-live-activation-off-on-off-256mb.runtime_unlock_initial_activation_receive_recovery_hold_release_delivery_missing_distinct_count"]);
-            Assert.Equal("0", summary["regular-v4-live-activation-off-on-off-256mb.runtime_unlock_initial_activation_receive_recovery_hold_release_delivery_missing_recovered_count"]);
-            Assert.Equal("0", summary["regular-v4-live-activation-off-on-off-256mb.runtime_unlock_initial_activation_receive_recovery_hold_release_delivery_missing_unresolved_count"]);
-            Assert.Equal("none", summary["regular-v4-live-activation-off-on-off-256mb.runtime_unlock_initial_activation_receive_recovery_hold_release_delivery_verdict"]);
-            Assert.Equal("0", summary["regular-v4-live-activation-off-on-off-256mb.runtime_unlock_initial_activation_receive_recovery_hold_released_offer_expired_raw_count"]);
-            Assert.Equal("0", summary["regular-v4-live-activation-off-on-off-256mb.runtime_unlock_initial_activation_receive_recovery_hold_released_offer_expired_distinct_count"]);
-            Assert.Equal("0", summary["regular-v4-live-activation-off-on-off-256mb.runtime_unlock_initial_activation_receive_recovery_hold_released_offer_expired_recovered_count"]);
-            Assert.Equal("0", summary["regular-v4-live-activation-off-on-off-256mb.runtime_unlock_initial_activation_receive_recovery_hold_released_offer_expired_unresolved_count"]);
-            Assert.Equal("none", summary["regular-v4-live-activation-off-on-off-256mb.runtime_unlock_initial_activation_receive_recovery_hold_released_offer_expired_verdict"]);
-            Assert.Equal("0", summary["regular-v4-live-activation-off-on-off-256mb.runtime_unlock_initial_activation_receive_recovery_hold_released_path_lease_expired_raw_count"]);
-            Assert.Equal("0", summary["regular-v4-live-activation-off-on-off-256mb.runtime_unlock_initial_activation_receive_recovery_hold_released_path_lease_expired_distinct_count"]);
-            Assert.Equal("0", summary["regular-v4-live-activation-off-on-off-256mb.runtime_unlock_initial_activation_receive_recovery_hold_released_path_lease_expired_recovered_count"]);
-            Assert.Equal("0", summary["regular-v4-live-activation-off-on-off-256mb.runtime_unlock_initial_activation_receive_recovery_hold_released_path_lease_expired_unresolved_count"]);
-            Assert.Equal("none", summary["regular-v4-live-activation-off-on-off-256mb.runtime_unlock_initial_activation_receive_recovery_hold_released_path_lease_expired_verdict"]);
+            Assert.Equal("1", summary["live-switch-off-helper-64mb.manifest_present"]);
+            Assert.Equal("pass", summary["live-switch-off-helper-64mb.cursor_integrity_verdict"]);
+            Assert.Equal("0", summary["live-switch-off-helper-64mb.current_runtime_proof"]);
+            Assert.Equal("0", summary["live-switch-off-helper-64mb.filetransfer_bridge_recovery_execution_soft_to_hard_handoff_missing_raw_count"]);
+            Assert.Equal("0", summary["live-switch-off-helper-64mb.filetransfer_bridge_recovery_execution_soft_to_hard_handoff_missing_distinct_count"]);
+            Assert.Equal("0", summary["live-switch-off-helper-64mb.filetransfer_bridge_recovery_execution_soft_to_hard_handoff_missing_recovered_count"]);
+            Assert.Equal("0", summary["live-switch-off-helper-64mb.filetransfer_bridge_recovery_execution_soft_to_hard_handoff_missing_unresolved_count"]);
+            Assert.Equal("none", summary["live-switch-off-helper-64mb.filetransfer_bridge_recovery_execution_soft_to_hard_handoff_verdict"]);
+            Assert.Equal("0", summary["live-switch-off-helper-64mb.regular_v4_frontier_repair_missing_range_not_preserved_raw_count"]);
+            Assert.Equal("0", summary["live-switch-off-helper-64mb.regular_v4_frontier_repair_missing_range_not_preserved_distinct_count"]);
+            Assert.Equal("0", summary["live-switch-off-helper-64mb.regular_v4_frontier_repair_missing_range_not_preserved_recovered_count"]);
+            Assert.Equal("0", summary["live-switch-off-helper-64mb.regular_v4_frontier_repair_missing_range_not_preserved_unresolved_count"]);
+            Assert.Equal("none", summary["live-switch-off-helper-64mb.regular_v4_frontier_repair_missing_range_preservation_verdict"]);
+            Assert.Equal("0", summary["live-switch-off-helper-64mb.regular_v4_frontier_repair_projection_reauthorization_missing_raw_count"]);
+            Assert.Equal("0", summary["live-switch-off-helper-64mb.regular_v4_frontier_repair_projection_reauthorization_missing_distinct_count"]);
+            Assert.Equal("0", summary["live-switch-off-helper-64mb.regular_v4_frontier_repair_projection_reauthorization_missing_recovered_count"]);
+            Assert.Equal("0", summary["live-switch-off-helper-64mb.regular_v4_frontier_repair_projection_reauthorization_missing_unresolved_count"]);
+            Assert.Equal("none", summary["live-switch-off-helper-64mb.regular_v4_frontier_repair_projection_reauthorization_verdict"]);
+            Assert.Equal("0", summary["live-switch-off-helper-64mb.regular_v4_peer_silence_replay_missing_dispatch_range_not_preserved_raw_count"]);
+            Assert.Equal("0", summary["live-switch-off-helper-64mb.regular_v4_peer_silence_replay_missing_dispatch_range_not_preserved_distinct_count"]);
+            Assert.Equal("0", summary["live-switch-off-helper-64mb.regular_v4_peer_silence_replay_missing_dispatch_range_not_preserved_recovered_count"]);
+            Assert.Equal("0", summary["live-switch-off-helper-64mb.regular_v4_peer_silence_replay_missing_dispatch_range_not_preserved_unresolved_count"]);
+            Assert.Equal("none", summary["live-switch-off-helper-64mb.regular_v4_peer_silence_replay_missing_dispatch_range_preservation_verdict"]);
+            Assert.Equal("0", summary["live-switch-off-helper-64mb.fallback_receiver_state_churn_warning_count"]);
+            Assert.Equal("none", summary["live-switch-off-helper-64mb.fallback_receiver_state_churn_efficiency_class"]);
+            Assert.Equal("none", summary["live-switch-off-helper-64mb.fallback_tail_bridge_recovery_generation_pairing_verdict"]);
+            Assert.Equal("0", summary["live-switch-off-helper-64mb.fallback_tail_bridge_recovery_generation_mismatch_raw_count"]);
+            Assert.Equal("0", summary["live-switch-off-helper-64mb.fallback_tail_bridge_recovery_generation_mismatch_distinct_count"]);
+            Assert.Equal("0", summary["live-switch-off-helper-64mb.fallback_tail_bridge_recovery_generation_mismatch_recovered_count"]);
+            Assert.Equal("0", summary["live-switch-off-helper-64mb.fallback_tail_bridge_recovery_generation_mismatch_unresolved_count"]);
+            Assert.Equal("0", summary["live-switch-off-helper-64mb.runtime_unlock_regular_v4_recovery_lease_closure_liveness_not_preserved_raw_count"]);
+            Assert.Equal("0", summary["live-switch-off-helper-64mb.runtime_unlock_regular_v4_recovery_lease_closure_liveness_not_preserved_distinct_count"]);
+            Assert.Equal("0", summary["live-switch-off-helper-64mb.runtime_unlock_regular_v4_recovery_lease_closure_liveness_not_preserved_recovered_count"]);
+            Assert.Equal("0", summary["live-switch-off-helper-64mb.runtime_unlock_regular_v4_recovery_lease_closure_liveness_not_preserved_unresolved_count"]);
+            Assert.Equal("none", summary["live-switch-off-helper-64mb.runtime_unlock_regular_v4_recovery_lease_closure_liveness_preservation_verdict"]);
+            Assert.Equal("0", summary["live-switch-off-helper-64mb.runtime_unlock_retry_dispatch_fallback_paired_yield_successor_release_invalid_raw_count"]);
+            Assert.Equal("0", summary["live-switch-off-helper-64mb.runtime_unlock_retry_dispatch_fallback_paired_yield_successor_release_invalid_distinct_count"]);
+            Assert.Equal("0", summary["live-switch-off-helper-64mb.runtime_unlock_retry_dispatch_fallback_paired_yield_successor_release_invalid_recovered_count"]);
+            Assert.Equal("0", summary["live-switch-off-helper-64mb.runtime_unlock_retry_dispatch_fallback_paired_yield_successor_release_invalid_unresolved_count"]);
+            Assert.Equal("none", summary["live-switch-off-helper-64mb.runtime_unlock_retry_dispatch_fallback_paired_yield_successor_release_verdict"]);
+            Assert.Equal("0", summary["live-switch-off-helper-64mb.runtime_unlock_initial_activation_receive_recovery_hold_release_delivery_missing_raw_count"]);
+            Assert.Equal("0", summary["live-switch-off-helper-64mb.runtime_unlock_initial_activation_receive_recovery_hold_release_delivery_missing_distinct_count"]);
+            Assert.Equal("0", summary["live-switch-off-helper-64mb.runtime_unlock_initial_activation_receive_recovery_hold_release_delivery_missing_recovered_count"]);
+            Assert.Equal("0", summary["live-switch-off-helper-64mb.runtime_unlock_initial_activation_receive_recovery_hold_release_delivery_missing_unresolved_count"]);
+            Assert.Equal("none", summary["live-switch-off-helper-64mb.runtime_unlock_initial_activation_receive_recovery_hold_release_delivery_verdict"]);
+            Assert.Equal("0", summary["live-switch-off-helper-64mb.runtime_unlock_initial_activation_receive_recovery_hold_released_offer_expired_raw_count"]);
+            Assert.Equal("0", summary["live-switch-off-helper-64mb.runtime_unlock_initial_activation_receive_recovery_hold_released_offer_expired_distinct_count"]);
+            Assert.Equal("0", summary["live-switch-off-helper-64mb.runtime_unlock_initial_activation_receive_recovery_hold_released_offer_expired_recovered_count"]);
+            Assert.Equal("0", summary["live-switch-off-helper-64mb.runtime_unlock_initial_activation_receive_recovery_hold_released_offer_expired_unresolved_count"]);
+            Assert.Equal("none", summary["live-switch-off-helper-64mb.runtime_unlock_initial_activation_receive_recovery_hold_released_offer_expired_verdict"]);
+            Assert.Equal("0", summary["live-switch-off-helper-64mb.runtime_unlock_initial_activation_receive_recovery_hold_released_path_lease_expired_raw_count"]);
+            Assert.Equal("0", summary["live-switch-off-helper-64mb.runtime_unlock_initial_activation_receive_recovery_hold_released_path_lease_expired_distinct_count"]);
+            Assert.Equal("0", summary["live-switch-off-helper-64mb.runtime_unlock_initial_activation_receive_recovery_hold_released_path_lease_expired_recovered_count"]);
+            Assert.Equal("0", summary["live-switch-off-helper-64mb.runtime_unlock_initial_activation_receive_recovery_hold_released_path_lease_expired_unresolved_count"]);
+            Assert.Equal("none", summary["live-switch-off-helper-64mb.runtime_unlock_initial_activation_receive_recovery_hold_released_path_lease_expired_verdict"]);
             var manifestPath = Path.Combine(runRoot, "route-acceptance-run-manifest.json");
             Assert.True(File.Exists(manifestPath), "Expected immutable route-acceptance manifest.");
             await using (var manifestStream = File.OpenRead(manifestPath))
@@ -926,7 +926,7 @@ public sealed class FileTransferPhase5SummaryWriterTests : FileTransferAcceptanc
             Assert.True(File.Exists(Path.Combine(runRoot, "phase5-summary-writer-diagnostics.json")), "Expected Phase 5 summary writer JSON diagnostics.");
 
             var diagnostics = ReadArtifactReport(runRoot, "phase5-summary-writer-diagnostics.txt");
-            Assert.Equal("regular-v4-live-activation-off-on-off-256mb", diagnostics["requested_scenarios"]);
+            Assert.Equal("live-switch-off-helper-64mb", diagnostics["requested_scenarios"]);
             Assert.Equal("1", diagnostics["expected_run_count"]);
             Assert.Equal("1", diagnostics["observed_run_count"]);
             Assert.Equal("0", diagnostics["summary_json_failed"]);

@@ -742,6 +742,7 @@ public sealed class FileTransferAcceptanceWrapperPhase4Tests : FileTransferOpsSc
                 Path.Combine(repoRoot, "tools", "Run-FileTransferRouteAcceptance.ps1"),
                 [
                     "-MatrixMode", "phase4-ab-acceptance",
+                    "-ScenarioName", "active-tuna-v4-64mb",
                     "-ArtifactRoot", artifactRoot,
                     "-TimeoutSeconds", "30",
                     "-ProgressTimeoutSeconds", "30"

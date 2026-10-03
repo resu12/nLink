@@ -1598,6 +1598,7 @@ function New-RouteAcceptanceRunResult {
         baselineGoodputBytesPerSecond = 0D
         goodputRegressionFloorBytesPerSecond = 0D
         goodputRegressionPercent = 0D
+        goodputRegressionWarning = ''
         efficiencySummaryValidationVerdict = 'not_evaluated'
         efficiencyVerdict = 'not_evaluated'
         efficiencyFailureClass = 'none'
@@ -4933,7 +4934,14 @@ function Assert-Phase4ScenarioRun {
     }
     elseif ($baselineGoodput -gt 0) {
         if ($result.goodputBytesPerSecond -lt $result.goodputRegressionFloorBytesPerSecond) {
-            Add-RouteAcceptanceFailure -Result $result -Message ("goodput regression exceeded {0:F1}%: current={1:F3}; floor={2:F3}; baseline={3:F3}" -f $GoodputRegressionTolerancePercent, $result.goodputBytesPerSecond, $result.goodputRegressionFloorBytesPerSecond, $baselineGoodput)
+            $goodputRegressionMessage = "goodput regression exceeded {0:F1}%: current={1:F3}; floor={2:F3}; baseline={3:F3}" -f $GoodputRegressionTolerancePercent, $result.goodputBytesPerSecond, $result.goodputRegressionFloorBytesPerSecond, $baselineGoodput
+            # Switch-off exercises fallback, not sustained Tuna throughput.
+            if ($Scenario.Name -in @('live-switch-off-helpee-64mb', 'live-switch-off-helper-64mb')) {
+                $result.goodputRegressionWarning = $goodputRegressionMessage
+            }
+            else {
+                Add-RouteAcceptanceFailure -Result $result -Message $goodputRegressionMessage
+            }
         }
     }
 
@@ -5554,6 +5562,141 @@ function Write-RouteAcceptanceFakePhase4Run {
     $lines.ToArray() | Set-Content -LiteralPath (Join-Path $ArtifactDir 'filetransfer-retained-log-slice.log') -Encoding UTF8
 
     $liveMode = if ($Scenario.LiveProofMode) { [string]$Scenario.LiveProofMode } else { 'None' }
+    if ($Scenario.Kind -ne 'regular') {
+        $secondTransferNotStarted = $Scenario.Name -eq 'second-transfer-after-reactivation' -and
+            (Test-RouteAcceptanceScenarioEnvEnabled -ScenarioName $scenarioName -Suffix 'SECOND_TRANSFER_NOT_STARTED')
+        $summary = [ordered]@{
+            event = 'filetransfer_tuna_gui_handoff_fallback_summary'
+            routeMode = [string]$Scenario.RouteMode
+            direction = 'helpee-to-helper'
+            payerMode = [string]$Scenario.PayerMode
+            faultMode = [string]$Scenario.Fault
+            transferId = $transferId
+            payloadBytes = $payloadBytes
+            durationMs = [Math]::Round(($payloadBytes / [Math]::Max(1D, $goodput)) * 1000D, 3)
+            goodputBytesPerSecond = $goodput
+            hardFailureCount = if ($hardFailure) { 1 } else { 0 }
+            completed = $completed -and $terminalState -eq 'Completed'
+            integrityOk = $completed -and $terminalState -eq 'Completed'
+            inboundState = $terminalState
+            outboundState = $terminalState
+            inboundErrorCode = $terminalError
+            outboundErrorCode = $terminalError
+            expectedSha256 = 'fake'
+            receivedSha256 = if ($completed) { 'fake' } else { 'mismatch' }
+            savedFileSizeBytes = if ($completed) { $payloadBytes } else { 0 }
+            measuredPhase = [ordered]@{
+                name = [string]$Scenario.Name
+                route = $finalRoute
+                protocolVersion = [int]$metadata.Protocol
+                payloadBytes = $payloadBytes
+                goodputBytesPerSecond = $goodput
+                completed = $completed -and $terminalState -eq 'Completed'
+                integrityOk = $completed -and $terminalState -eq 'Completed'
+                inboundState = $terminalState
+                outboundState = $terminalState
+                inboundErrorCode = $terminalError
+                outboundErrorCode = $terminalError
+            }
+            liveRouteEpochRouteChanges = @($routeChanges | Select-Object -Skip 1)
+            firstTransferTerminalBeforeLiveReactivation = $terminalBeforeLiveReactivation
+            firstTransferTerminalBeforeFallbackSwitchOff = $terminalBeforeFallbackSwitchOff
+            secondTransfer = if ($Scenario.Name -eq 'second-transfer-after-reactivation') {
+                $secondRoute = Get-RouteAcceptanceScenarioEnvValue -ScenarioName $scenarioName -Suffix 'SECOND_ROUTE' -DefaultValue 'file_tuna_v4'
+                $secondMetadata = Get-RouteAcceptanceRouteMetadata -Route $secondRoute
+                if ($secondTransferNotStarted) {
+                    [ordered]@{
+                        secondTransferStarted = $false
+                        route = '(unknown)'
+                        protocolVersion = 0
+                        completed = $false
+                        integrityOk = $false
+                        inboundState = '(not_started)'
+                        outboundState = '(not_started)'
+                        inboundErrorCode = '(not_started)'
+                        outboundErrorCode = '(not_started)'
+                        payloadBytes = 16777216
+                        goodputBytesPerSecond = 0
+                        setupFailurePhase = 'first_transfer'
+                        setupFailureReason = 'first_transfer_reactivation_or_fallback_incomplete'
+                    }
+                }
+                else {
+                    [ordered]@{
+                        secondTransferStarted = $true
+                        route = $secondRoute
+                        protocolVersion = [int]$secondMetadata.Protocol
+                        completed = $completed -and $terminalState -eq 'Completed'
+                        integrityOk = $completed -and $terminalState -eq 'Completed'
+                        inboundState = $terminalState
+                        outboundState = $terminalState
+                        inboundErrorCode = $terminalError
+                        outboundErrorCode = $terminalError
+                        payloadBytes = 16777216
+                        goodputBytesPerSecond = $goodput
+                    }
+                }
+            }
+            else {
+                $null
+            }
+        }
+        $summary | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $ArtifactDir 'filetransfer-tuna-gui-summary.json') -Encoding UTF8
+    }
+    if ($Scenario.Kind -eq 'regular') {
+        $cycle = [ordered]@{
+            cycle_index = 0
+            mode = 'nkn-fast'
+            scenario = 'FILETRANSFER_NKN_SOAK'
+            direction = 'helpee-to-helper'
+            transfer_id = $transferId
+            payload_bytes = $payloadBytes
+            duration_ms = [Math]::Max(1L, [long][Math]::Round(($payloadBytes / [Math]::Max(1D, $goodput)) * 1000D))
+            goodput_bytes_per_second = $goodput
+            completed = $completed
+            integrity_ok = $completed
+            inbound_state = $terminalState
+            outbound_state = $terminalState
+        }
+        $cycle | ConvertTo-Json -Compress -Depth 6 | Set-Content -LiteralPath (Join-Path $ArtifactDir 'filetransfer-live-nkn-cycles.jsonl') -Encoding UTF8
+        $regularSummaryVerdict = if ($progressTimeoutRecoveryStorm) {
+            'INCONCLUSIVE_PROGRESS_TIMEOUT'
+        }
+        elseif ($hardFailure) {
+            'FAIL_PROTOCOL_OR_INTEGRITY'
+        }
+        elseif ($completed -and $terminalState -eq 'Completed') {
+            'PASS'
+        }
+        else {
+            'FAIL_PROTOCOL_OR_INTEGRITY'
+        }
+        $summary = [ordered]@{
+            artifact_kind = 'live-nkn'
+            mode = 'nkn-fast'
+            verdict = $regularSummaryVerdict
+            gate_status = if ($regularSummaryVerdict -eq 'PASS') { 'pass' } elseif ($regularSummaryVerdict -eq 'INCONCLUSIVE_PROGRESS_TIMEOUT') { 'inconclusive' } else { 'fail' }
+            cycles_requested = 1
+            cycles_observed = if ($startupRecoveryStorm -or $startupPeerDisconnect) { 0 } else { 1 }
+            cycles_completed = if ($completed -and $terminalState -eq 'Completed') { 1 } else { 0 }
+            total_payload_bytes = if ($completed -and $terminalState -eq 'Completed') { $payloadBytes } else { 0 }
+            average_goodput_bytes_per_second = ('{0:F3}' -f $goodput)
+            min_goodput_bytes_per_second = ('{0:F3}' -f $goodput)
+            data_protocol_version = [int]$metadata.Protocol
+            v4_feedback_both_failed_count = 0
+            v4_sender_failed_count = if ($startupPeerDisconnect) { 1 } else { 0 }
+            bridge_bulk_send_failure_count = 0
+            bridge_bulk_queue_clear_count = if ($startupPeerDisconnect) { 6 } elseif ($progressTimeoutRecoveryStorm -or $startupRecoveryStorm) { 2 } else { 0 }
+            gui_progress_timeout_count = if ($progressTimeoutRecoveryStorm) { 1 } else { 0 }
+            gui_progress_timeout_reason = if ($progressTimeoutRecoveryStorm) { 'no useful data progress for 180s' } else { '(none)' }
+            last_receiver_next_chunk = if ($progressTimeoutRecoveryStorm) { 1614 } else { -1 }
+            last_receiver_highest_chunk = if ($progressTimeoutRecoveryStorm) { 1613 } else { -1 }
+            last_progress_event_count = if ($progressTimeoutRecoveryStorm) { 23 } else { 0 }
+            terminal_missing_after_progress_timeout = if ($progressTimeoutRecoveryStorm) { 1 } else { 0 }
+        }
+        $summary.GetEnumerator() | ForEach-Object { "{0}={1}" -f $_.Key, $_.Value } | Set-Content -LiteralPath (Join-Path $ArtifactDir 'filetransfer-live-nkn-summary.txt') -Encoding UTF8
+        $summary | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $ArtifactDir 'filetransfer-live-nkn-summary.json') -Encoding UTF8
+    }
     Invoke-RouteAcceptanceRetainedAnalysis -ArtifactDir $ArtifactDir -LiveRouteProofMode $liveMode
 
     if ($terminalBeforeFallbackSwitchOff -and $Scenario.Name -eq 'regular-v4-live-activation-off-on-off-256mb') {
@@ -5674,137 +5817,6 @@ function Write-RouteAcceptanceFakePhase4Run {
         Invoke-RouteAcceptanceRetainedAnalysis -ArtifactDir $secondAnalysisDir
     }
 
-    if ($Scenario.Kind -eq 'regular') {
-        $cycle = [ordered]@{
-            cycle_index = 0
-            mode = 'nkn-fast'
-            scenario = 'FILETRANSFER_NKN_SOAK'
-            direction = 'helpee-to-helper'
-            transfer_id = $transferId
-            payload_bytes = $payloadBytes
-            duration_ms = [Math]::Max(1L, [long][Math]::Round(($payloadBytes / [Math]::Max(1D, $goodput)) * 1000D))
-            goodput_bytes_per_second = $goodput
-            completed = $completed
-            integrity_ok = $completed
-            inbound_state = $terminalState
-            outbound_state = $terminalState
-        }
-        $cycle | ConvertTo-Json -Compress -Depth 6 | Set-Content -LiteralPath (Join-Path $ArtifactDir 'filetransfer-live-nkn-cycles.jsonl') -Encoding UTF8
-        $regularSummaryVerdict = if ($progressTimeoutRecoveryStorm) {
-            'INCONCLUSIVE_PROGRESS_TIMEOUT'
-        }
-        elseif ($completed -and $terminalState -eq 'Completed') {
-            'PASS'
-        }
-        else {
-            'FAIL_PROTOCOL_OR_INTEGRITY'
-        }
-        $summary = [ordered]@{
-            artifact_kind = 'live-nkn'
-            mode = 'nkn-fast'
-            verdict = $regularSummaryVerdict
-            gate_status = if ($regularSummaryVerdict -eq 'PASS') { 'pass' } elseif ($regularSummaryVerdict -eq 'INCONCLUSIVE_PROGRESS_TIMEOUT') { 'inconclusive' } else { 'fail' }
-            cycles_requested = 1
-            cycles_observed = if ($startupRecoveryStorm -or $startupPeerDisconnect) { 0 } else { 1 }
-            cycles_completed = if ($completed -and $terminalState -eq 'Completed') { 1 } else { 0 }
-            total_payload_bytes = if ($completed -and $terminalState -eq 'Completed') { $payloadBytes } else { 0 }
-            average_goodput_bytes_per_second = ('{0:F3}' -f $goodput)
-            min_goodput_bytes_per_second = ('{0:F3}' -f $goodput)
-            data_protocol_version = [int]$metadata.Protocol
-            v4_feedback_both_failed_count = 0
-            v4_sender_failed_count = if ($startupPeerDisconnect) { 1 } else { 0 }
-            bridge_bulk_send_failure_count = 0
-            bridge_bulk_queue_clear_count = if ($startupPeerDisconnect) { 6 } elseif ($progressTimeoutRecoveryStorm -or $startupRecoveryStorm) { 2 } else { 0 }
-            gui_progress_timeout_count = if ($progressTimeoutRecoveryStorm) { 1 } else { 0 }
-            gui_progress_timeout_reason = if ($progressTimeoutRecoveryStorm) { 'no useful data progress for 180s' } else { '(none)' }
-            last_receiver_next_chunk = if ($progressTimeoutRecoveryStorm) { 1614 } else { -1 }
-            last_receiver_highest_chunk = if ($progressTimeoutRecoveryStorm) { 1613 } else { -1 }
-            last_progress_event_count = if ($progressTimeoutRecoveryStorm) { 23 } else { 0 }
-            terminal_missing_after_progress_timeout = if ($progressTimeoutRecoveryStorm) { 1 } else { 0 }
-        }
-        $summary.GetEnumerator() | ForEach-Object { "{0}={1}" -f $_.Key, $_.Value } | Set-Content -LiteralPath (Join-Path $ArtifactDir 'filetransfer-live-nkn-summary.txt') -Encoding UTF8
-        $summary | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $ArtifactDir 'filetransfer-live-nkn-summary.json') -Encoding UTF8
-    }
-    else {
-        $secondTransferNotStarted = $Scenario.Name -eq 'second-transfer-after-reactivation' -and
-            (Test-RouteAcceptanceScenarioEnvEnabled -ScenarioName $scenarioName -Suffix 'SECOND_TRANSFER_NOT_STARTED')
-        $summary = [ordered]@{
-            event = 'filetransfer_tuna_gui_handoff_fallback_summary'
-            routeMode = [string]$Scenario.RouteMode
-            direction = 'helpee-to-helper'
-            payerMode = [string]$Scenario.PayerMode
-            faultMode = [string]$Scenario.Fault
-            transferId = $transferId
-            payloadBytes = $payloadBytes
-            durationMs = [Math]::Round(($payloadBytes / [Math]::Max(1D, $goodput)) * 1000D, 3)
-            goodputBytesPerSecond = $goodput
-            completed = $completed -and $terminalState -eq 'Completed'
-            integrityOk = $completed -and $terminalState -eq 'Completed'
-            inboundState = $terminalState
-            outboundState = $terminalState
-            inboundErrorCode = $terminalError
-            outboundErrorCode = $terminalError
-            expectedSha256 = 'fake'
-            receivedSha256 = if ($completed) { 'fake' } else { 'mismatch' }
-            savedFileSizeBytes = if ($completed) { $payloadBytes } else { 0 }
-            measuredPhase = [ordered]@{
-                name = [string]$Scenario.Name
-                route = $finalRoute
-                protocolVersion = [int]$metadata.Protocol
-                payloadBytes = $payloadBytes
-                goodputBytesPerSecond = $goodput
-                completed = $completed -and $terminalState -eq 'Completed'
-                integrityOk = $completed -and $terminalState -eq 'Completed'
-                inboundState = $terminalState
-                outboundState = $terminalState
-                inboundErrorCode = $terminalError
-                outboundErrorCode = $terminalError
-            }
-            liveRouteEpochRouteChanges = @($routeChanges | Select-Object -Skip 1)
-            firstTransferTerminalBeforeLiveReactivation = $terminalBeforeLiveReactivation
-            firstTransferTerminalBeforeFallbackSwitchOff = $terminalBeforeFallbackSwitchOff
-            secondTransfer = if ($Scenario.Name -eq 'second-transfer-after-reactivation') {
-                $secondRoute = Get-RouteAcceptanceScenarioEnvValue -ScenarioName $scenarioName -Suffix 'SECOND_ROUTE' -DefaultValue 'file_tuna_v4'
-                $secondMetadata = Get-RouteAcceptanceRouteMetadata -Route $secondRoute
-                if ($secondTransferNotStarted) {
-                    [ordered]@{
-                        secondTransferStarted = $false
-                        route = '(unknown)'
-                        protocolVersion = 0
-                        completed = $false
-                        integrityOk = $false
-                        inboundState = '(not_started)'
-                        outboundState = '(not_started)'
-                        inboundErrorCode = '(not_started)'
-                        outboundErrorCode = '(not_started)'
-                        payloadBytes = 16777216
-                        goodputBytesPerSecond = 0
-                        setupFailurePhase = 'first_transfer'
-                        setupFailureReason = 'first_transfer_reactivation_or_fallback_incomplete'
-                    }
-                }
-                else {
-                    [ordered]@{
-                        secondTransferStarted = $true
-                        route = $secondRoute
-                        protocolVersion = [int]$secondMetadata.Protocol
-                        completed = $completed -and $terminalState -eq 'Completed'
-                        integrityOk = $completed -and $terminalState -eq 'Completed'
-                        inboundState = $terminalState
-                        outboundState = $terminalState
-                        inboundErrorCode = $terminalError
-                        outboundErrorCode = $terminalError
-                        payloadBytes = 16777216
-                        goodputBytesPerSecond = $goodput
-                    }
-                }
-            }
-            else {
-                $null
-            }
-        }
-        $summary | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $ArtifactDir 'filetransfer-tuna-gui-summary.json') -Encoding UTF8
-    }
 
     if ($transientSetupFailure) {
         $defaultSetupPhase = if ($scenarioName -eq 'regular-v4-live-activation-off-on-off-256mb') { 'activation_offer_send' } else { 'measured_terminal' }
@@ -11632,6 +11644,7 @@ function New-RouteAcceptanceSummaryRunDto {
         baselineGoodputBytesPerSecond = [double](ConvertTo-RouteAcceptanceDouble -Value $Result.baselineGoodputBytesPerSecond)
         goodputRegressionFloorBytesPerSecond = [double](ConvertTo-RouteAcceptanceDouble -Value $Result.goodputRegressionFloorBytesPerSecond)
         goodputRegressionPercent = [double](ConvertTo-RouteAcceptanceDouble -Value $Result.goodputRegressionPercent)
+        goodputRegressionWarning = [string]$Result.goodputRegressionWarning
         efficiencySummaryValidationVerdict = [string]$Result.efficiencySummaryValidationVerdict
         efficiencyVerdict = [string]$Result.efficiencyVerdict
         efficiencyFailureClass = [string]$Result.efficiencyFailureClass
@@ -12836,6 +12849,9 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
     }
 
     $performanceFailureLines = @($failureLines | Where-Object { Test-Phase4PerformanceFailureLine -Line ([string]$_) })
+    $performanceWarningLines = @($runDtos |
+        Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_.goodputRegressionWarning) } |
+        ForEach-Object { "{0}: {1}" -f $_.name, $_.goodputRegressionWarning })
     $correctnessFailureLines = @($failureLines | Where-Object { -not (Test-Phase4PerformanceFailureLine -Line ([string]$_)) })
     $verdict = if ($AcceptancePhase -eq 'phase5') {
         if ($correctnessFailureLines.Count -eq 0 -and $script:RunResults.Count -eq $expectedRunCount) { 'PASS' } else { 'FAIL' }
@@ -12844,7 +12860,7 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
         if ($failureLines.Count -eq 0 -and $script:RunResults.Count -eq $expectedRunCount) { 'PASS' } else { 'FAIL' }
     }
     $correctnessVerdict = if ($correctnessFailureLines.Count -eq 0 -and $script:RunResults.Count -eq $expectedRunCount) { 'PASS' } else { 'FAIL' }
-    $performanceVerdict = if ($performanceFailureLines.Count -eq 0) { 'PASS' } else { 'FAIL' }
+    $performanceVerdict = if ($performanceFailureLines.Count -gt 0) { 'FAIL' } elseif ($performanceWarningLines.Count -gt 0) { 'WARN' } else { 'PASS' }
     $conclusiveRouteRuntimeEvidence = $runtimeCandidateDtos.Count -gt 0 -and
         (Test-RouteAcceptanceConclusiveRouteRuntimeEvidence -Result $runtimeCandidateDtos[0])
     $selectedRuntimeEvidenceIncomplete = $runtimeCandidateDtos.Count -gt 0 -and
@@ -12872,11 +12888,12 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
         'fail'
     }
     $networkVarianceNote = if ($AcceptancePhase -eq 'phase5') {
-        'Goodput on live transfer paths is classified separately from release correctness after strict route/protocol/SHA/hard-failure/warning proof passes; persistent goodput below the Phase 4 floor still fails performance verdict, but Phase 5 release acceptance is governed by correctness gates.'
+        'Goodput on live transfer paths is classified separately from release correctness after strict route/protocol/SHA/hard-failure/warning proof passes; except for the two advisory switch-off scenarios, persistent goodput below the Phase 4 floor still fails performance verdict, but Phase 5 release acceptance is governed by correctness gates.'
     }
     else {
-        'Goodput on live transfer paths is classified separately from runtime correctness only after strict route/protocol/SHA/hard-failure/warning proof passes; persistent goodput below the Phase 4 floor still fails performance acceptance and remains release-blocking unless a rerun proves environmental noise.'
+        'Goodput on live transfer paths is classified separately from runtime correctness only after strict route/protocol/SHA/hard-failure/warning proof passes; except for the two advisory switch-off scenarios, persistent goodput below the Phase 4 floor still fails performance acceptance and remains release-blocking unless a rerun proves environmental noise.'
     }
+    $networkVarianceNote += ' Goodput shortfalls for live-switch-off-helpee-64mb and live-switch-off-helper-64mb are advisory; route, protocol, SHA, hard-failure, stall and deadline gates remain mandatory.'
     $textLines = @(
         $SummaryTitle,
         ("verdict={0}" -f $verdict),
@@ -13288,6 +13305,7 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
         ("failure_count={0}" -f $failureLines.Count),
         ("correctness_failure_count={0}" -f $correctnessFailureLines.Count),
         ("performance_failure_count={0}" -f $performanceFailureLines.Count),
+        ("performance_warning_count={0}" -f $performanceWarningLines.Count),
         ''
     )
 
@@ -13691,6 +13709,9 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
         $textLines += ("{0}.baseline_goodput_bytes_per_second={1:F3}" -f $prefix, (ConvertTo-RouteAcceptanceDouble -Value $result.baselineGoodputBytesPerSecond))
         $textLines += ("{0}.goodput_floor_bytes_per_second={1:F3}" -f $prefix, (ConvertTo-RouteAcceptanceDouble -Value $result.goodputRegressionFloorBytesPerSecond))
         $textLines += ("{0}.goodput_regression_percent={1:F3}" -f $prefix, (ConvertTo-RouteAcceptanceDouble -Value $result.goodputRegressionPercent))
+        if (-not [string]::IsNullOrWhiteSpace([string]$result.goodputRegressionWarning)) {
+            $textLines += ("{0}.goodput_regression_warning={1}" -f $prefix, $result.goodputRegressionWarning)
+        }
         $textLines += ("{0}.efficiency_summary_validation_verdict={1}" -f $prefix, $result.efficiencySummaryValidationVerdict)
         $textLines += ("{0}.efficiency_verdict={1}" -f $prefix, $result.efficiencyVerdict)
         $textLines += ("{0}.efficiency_failure_class={1}" -f $prefix, $result.efficiencyFailureClass)
@@ -13794,7 +13815,7 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
         ($(if ($AcceptancePhase -eq 'phase5') {
             'A goodput-only miss does not fail Phase 5 release correctness. It remains visible as a performance variance so remediation can avoid unnecessary bridge, wallet, installer, or route-policy changes.'
         } else {
-            'A goodput-only miss does not waive Phase 4 acceptance. It separates performance variance from route/runtime correctness so remediation can avoid unnecessary bridge, wallet, installer, or route-policy changes.'
+            'Outside the two advisory switch-off scenarios, a goodput-only miss does not waive Phase 4 acceptance. It separates performance variance from route/runtime correctness so remediation can avoid unnecessary bridge, wallet, installer, or route-policy changes.'
         })),
         '',
         'Performance failures:'
@@ -13804,6 +13825,14 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
     }
     else {
         $varianceNoteLines += @($performanceFailureLines | ForEach-Object { '- {0}' -f $_ })
+    }
+    $varianceNoteLines += ''
+    $varianceNoteLines += 'Performance warnings:'
+    if ($performanceWarningLines.Count -eq 0) {
+        $varianceNoteLines += '- (none)'
+    }
+    else {
+        $varianceNoteLines += @($performanceWarningLines | ForEach-Object { '- {0}' -f $_ })
     }
     $varianceNoteLines += ''
     $varianceNoteLines += 'Correctness/evidence failures:'
@@ -14301,10 +14330,12 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
         failureCount = $failureLines.Count
         correctnessFailureCount = $correctnessFailureLines.Count
         performanceFailureCount = $performanceFailureLines.Count
+        performanceWarningCount = $performanceWarningLines.Count
         runs = $runDtos
         failures = @($failureLines)
         correctnessFailures = @($correctnessFailureLines)
         performanceFailures = @($performanceFailureLines)
+        performanceWarnings = @($performanceWarningLines)
     }
 
     $jsonStopwatch = [System.Diagnostics.Stopwatch]::StartNew()
