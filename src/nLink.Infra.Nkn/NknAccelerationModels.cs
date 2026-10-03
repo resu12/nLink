@@ -16,12 +16,14 @@ internal sealed class AccelerationStateChangedEventArgs : EventArgs
         bool isAvailable,
         string reason,
         NknAccelerationFailureOrigin? failureOrigin = null,
-        string? sessionPreparationExecutionIdentity = null)
+        string? sessionPreparationExecutionIdentity = null,
+        NknTunaListenerAdoptionSnapshot? listenerFailureSource = null)
     {
         IsAvailable = isAvailable;
         Reason = string.IsNullOrWhiteSpace(reason) ? "unknown" : reason.Trim();
         FailureOrigin = failureOrigin;
         SessionPreparationExecutionIdentity = sessionPreparationExecutionIdentity;
+        ListenerFailureSource = listenerFailureSource;
     }
 
     public bool IsAvailable { get; }
@@ -31,6 +33,8 @@ internal sealed class AccelerationStateChangedEventArgs : EventArgs
     public NknAccelerationFailureOrigin? FailureOrigin { get; }
 
     public string? SessionPreparationExecutionIdentity { get; }
+
+    public NknTunaListenerAdoptionSnapshot? ListenerFailureSource { get; }
 }
 
 internal readonly record struct NknAccelerationFailureOrigin(

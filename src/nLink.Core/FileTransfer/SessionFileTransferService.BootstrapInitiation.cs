@@ -27,9 +27,9 @@ public sealed partial class SessionFileTransferService
         else { return true; }
         if (!UsesBootstrapCorrelation(state)) { return true; }
         if (!ReferenceEquals(transport, bridge) || !bridge.SupportsFallbackBootstrapCorrelation) { return false; }
-        // A current local stop has its own source authority. Let the issue path
+        // A current local initiation carries source evidence for Core validation. Let the issue path
         // retire an older peer binding before it captures this source's hold.
-        if (evaluation.InitiationKind == FileTransferBootstrapInitiationKind.LocalRuntimeDisable)
+        if (evaluation.InitiationKind is FileTransferBootstrapInitiationKind.LocalRuntimeDisable or FileTransferBootstrapInitiationKind.LocalTransportFailure)
         {
             return GetCurrentBootstrapLocalStopStateLocked(evaluation) is not null;
         }
@@ -42,10 +42,10 @@ public sealed partial class SessionFileTransferService
     }
 
     private static bool IsLocalBootstrapStopShapeValid(FileTransferFallbackV6ProofBootstrapEvaluation evaluation)
-        => evaluation.InitiationKind == FileTransferBootstrapInitiationKind.LocalRuntimeDisable &&
-           evaluation.LocalStop is { Scope.Publication: { } publication, Scope.Source: { }, DataSession: { }, ProviderGeneration: > 0 } &&
+        => evaluation.LocalStop is { Scope.Publication: { } publication, Scope.Source: { }, DataSession: { }, ProviderGeneration: > 0 } stop &&
            evaluation.SessionId == publication.SessionId && evaluation.Direction == publication.Direction &&
-           evaluation.Source == "runtime_disabled" && evaluation.ProofKind == "local_runtime_disabled" &&
+           FileTransferCoordinator.IsLocalFallbackBootstrapInitiationShapeValid(evaluation.InitiationKind,
+               evaluation.Source, evaluation.ProofKind, stop.FailureOrigin) &&
            evaluation.ObservationGeneration > 0 && evaluation.FallbackEpoch > 0 && evaluation.ObservedUtcMilliseconds > 0 &&
            evaluation.TriggerTransferId is null && evaluation.TriggerTransportEpoch == 0 &&
            evaluation.TriggerFrameFingerprint is null && evaluation.TriggerDataSession is null &&
@@ -66,8 +66,19 @@ public sealed partial class SessionFileTransferService
         {
             state = CreateCoordinatorStateLocked(inbound);
         }
-        return state is not null && state.CurrentDataSessionGeneration > 0 && !string.IsNullOrEmpty(state.CurrentDataSessionIdentity) &&
-            FileTransferCoordinator.IsFallbackBootstrapLocalStopScopeCurrent(state, stop.Scope) ? state : null;
+        if (state is null || state.CurrentDataSessionGeneration <= 0 || string.IsNullOrEmpty(state.CurrentDataSessionIdentity) ||
+            !FileTransferCoordinator.IsFallbackBootstrapLocalStopScopeCurrent(state, stop.Scope)) { return null; }
+        if (evaluation.InitiationKind == FileTransferBootstrapInitiationKind.LocalTransportFailure)
+        {
+            // After reset, only the exact Coordinator hold may continue this captured failure.
+            var hold = state.PersistentState.FileTransferRouteTransition.BootstrapSourceHold;
+            var held = hold is { Invalidated: false } && FileTransferCoordinator.IsFallbackBootstrapSourceHoldCurrent(state, hold.Command) &&
+                hold.Command.Initiation.InitiationKind == evaluation.InitiationKind && hold.Command.Initiation.Source == evaluation.Source &&
+                hold.Command.Initiation.LocalStop?.Scope == stop.Scope && hold.Command.Initiation.LocalStop?.FailureOrigin == stop.FailureOrigin;
+            if (!held && hold?.Command.Initiation.LocalStop?.FailureOrigin == stop.FailureOrigin) { return null; }
+            if (!held && (transport is not IFileTransferRouteTransitionBridge bridge || !bridge.IsFallbackBootstrapFailureCurrent(stop))) { return null; }
+        }
+        return state;
     }
 
     private static bool MatchesBootstrapLocalStopDataSession(FileTransferFallbackV6ProofBootstrapEvaluation evaluation,
@@ -85,7 +96,8 @@ public sealed partial class SessionFileTransferService
             evaluation.FallbackEpoch, evaluation.Source, evaluation.ProofKind, evaluation.ObservedUtcMilliseconds, checkpoint)
         {
             InitiationKind = evaluation.InitiationKind,
-            LocalStop = state is null ? null : new(evaluation.LocalStop!.Scope, state.CurrentDataSessionIdentity!, state.CurrentDataSessionGeneration),
+            LocalStop = state is null ? null : new(evaluation.LocalStop!.Scope, state.CurrentDataSessionIdentity!, state.CurrentDataSessionGeneration)
+                { FailureOrigin = evaluation.LocalStop.FailureOrigin },
         };
     }
 }

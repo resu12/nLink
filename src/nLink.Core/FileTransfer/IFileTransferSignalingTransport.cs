@@ -503,6 +503,9 @@ internal interface IFileTransferRouteTransitionBridge
 {
     bool SupportsFallbackBootstrapCorrelation => false;
 
+    // Physical evidence only; Core still validates the publication and issues the hold.
+    bool IsFallbackBootstrapFailureCurrent(FileTransferBootstrapLocalStopSource source) => false;
+
     // Local-only application: no callbacks into the service while it publishes terminal state.
     bool ApplyTerminalFallbackProjectionRetirement(FileTransferTerminalFallbackProjectionRetirementCommand command)
         => false;

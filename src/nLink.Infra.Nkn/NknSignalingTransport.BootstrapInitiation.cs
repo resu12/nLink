@@ -15,14 +15,29 @@ public sealed partial class NknSignalingTransport
         // Reserve observation identity without disabling the source lane. Core synchronously
         // validates the copied source and installs its hold before reset changes send eligibility.
         MarkFileTransferFallbackNknProofPending(reason, sessionId, lanes & NknAccelerationLaneKind.File);
-        PublishFallbackBootstrapLocalStops(sources);
+        PublishFallbackBootstrapLocalStops(sources, reason);
         return true;
     }
 
     private FileTransferBootstrapLocalStopSource[] CaptureFallbackBootstrapLocalStopSources(string reason)
     {
-        if (reason is not ("runtime_disabled" or "header_switch_off") ||
-            currentSessionSecurityState.SessionId?.Value is not { } sessionId) { return []; }
+        return reason is "runtime_disabled" or "header_switch_off" ? CaptureFallbackBootstrapLocalSources(null) : [];
+    }
+
+    private FileTransferBootstrapLocalStopSource[] CaptureFallbackBootstrapFailureSources(AccelerationStateChangedEventArgs args)
+    {
+        if (args.IsAvailable || NormalizeAccelerationSidecarResetReason(args.Reason) is not ("sidecar_tuna_write_failed" or "sidecar_tuna_stream_eof") ||
+            args.FailureOrigin is not { IsDefault: false } origin || accelerationLane?.IsFailureOriginCurrent(origin) != true) { return []; }
+        return CaptureFallbackBootstrapLocalSources(new(origin.LaneInstanceId, origin.ClientGeneration, origin.ProcessRunId, origin.FailureGeneration));
+    }
+
+    bool IFileTransferRouteTransitionBridge.IsFallbackBootstrapFailureCurrent(FileTransferBootstrapLocalStopSource source)
+        => source.FailureOrigin is { IsDefault: false } origin && accelerationLane?.IsFailureOriginCurrent(
+            new(origin.LaneInstanceId, origin.ClientGeneration, origin.ProcessRunId, origin.FailureGeneration)) == true;
+
+    private FileTransferBootstrapLocalStopSource[] CaptureFallbackBootstrapLocalSources(FileTransferBootstrapFailureOrigin? origin)
+    {
+        if (currentSessionSecurityState.SessionId?.Value is not { } sessionId) { return []; }
         KeyValuePair<string, FileTransferTransportState>[] selected;
         lock (controlSecureStateGate)
         {
@@ -50,16 +65,18 @@ public sealed partial class NknSignalingTransport
                     new(hint.Token, hint.ProtocolVersion, hint.LiveRouteEpoch, hint.RuntimeGeneration, hint.RoutePublicationGeneration,
                         hint.RouteCommitGeneration ?? 0, hint.TerminalGeneration, hint.PublicationLegGeneration, hint.FallbackTransportEpoch,
                         hint.FallbackBridgeRecoveryGeneration, hint.FallbackCheckpointRequestId ?? "(none)", hint.FallbackCheckpointGeneration)),
-                    session, session.Generation));
+                    session, session.Generation) { FailureOrigin = origin });
             }
         }
         return sources.ToArray();
     }
 
-    private void PublishFallbackBootstrapLocalStops(FileTransferBootstrapLocalStopSource[] sources)
+    private void PublishFallbackBootstrapLocalStops(FileTransferBootstrapLocalStopSource[] sources, string reason)
     {
         foreach (var source in sources)
         {
+            var failure = source.FailureOrigin is not null;
+            if (failure && !((IFileTransferRouteTransitionBridge)this).IsFallbackBootstrapFailureCurrent(source)) { continue; }
             var publication = source.Scope.Publication;
             long observationGeneration;
             lock (fileTransferFallbackProofGate)
@@ -74,9 +91,10 @@ public sealed partial class NknSignalingTransport
                 fallbackEpoch = pending.Epoch;
             }
             var evaluation = new FileTransferFallbackV6ProofBootstrapEvaluation(publication.SessionId, publication.Direction,
-                observationGeneration, fallbackEpoch, "runtime_disabled", "local_runtime_disabled", DateTimeOffset.UtcNow.ToUnixTimeMilliseconds())
+                observationGeneration, fallbackEpoch, failure ? reason : "runtime_disabled",
+                failure ? "local_transport_failure" : "local_runtime_disabled", DateTimeOffset.UtcNow.ToUnixTimeMilliseconds())
             {
-                InitiationKind = FileTransferBootstrapInitiationKind.LocalRuntimeDisable,
+                InitiationKind = failure ? FileTransferBootstrapInitiationKind.LocalTransportFailure : FileTransferBootstrapInitiationKind.LocalRuntimeDisable,
                 LocalStop = source,
             };
             // No legacy session-only coalescing: the Coordinator validates the captured source before idempotence.

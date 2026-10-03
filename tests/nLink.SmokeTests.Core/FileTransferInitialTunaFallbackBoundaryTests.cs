@@ -14,10 +14,17 @@ public sealed partial class FileTransferCoordinatorTests
         FileTransferDirection direction, bool independentGenerations)
         => CreateInitialFallbackExchangeFixture(direction, independentGenerations);
 
+    [Theory]
+    [InlineData(FileTransferDirection.Outbound)]
+    [InlineData(FileTransferDirection.Inbound)]
+    [Trait("FileTransferCoordinatorSuite", "InitialTunaFallbackBoundary")]
+    public void InitialTunaFallback_TransportFailureRequiresSameDrainedSourceHold(FileTransferDirection direction)
+        => CreateInitialFallbackExchangeFixture(direction, true, transportFailure: true);
+
     [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
     private static FileTransferBootstrapExchangeDecision CreateInitialFallbackExchangeFixture(
         FileTransferDirection direction, bool independentGenerations,
-        List<FileTransferCoordinatorTransitionEnvelope>? envelopes = null, bool pairedIssuers = false)
+        List<FileTransferCoordinatorTransitionEnvelope>? envelopes = null, bool pairedIssuers = false, bool transportFailure = false)
     {
         var state = CreateInitialTunaBootstrapSourceFixture(direction, independentGenerations, envelopes, pairedIssuers);
         var source = Assert.IsType<FileTransferBootstrapLocalStopScope>(
@@ -27,10 +34,12 @@ public sealed partial class FileTransferCoordinatorTests
             state.CurrentRoutePublicationToken!.Value, state.TerminalGeneration, leg.Generation, leg.TransportEpochId,
             leg.BridgeRecoveryGeneration, state.CurrentDataSessionGeneration, 1, 0, -1, 1, 1);
         var observation = new FileTransferFallbackV6ProofBootstrapObservation(state.SessionId, state.TransferId, direction,
-            1, 1, "runtime_disabled", "local_runtime_disabled", 10000, checkpoint)
+            1, 1, transportFailure ? "sidecar_tuna_write_failed" : "runtime_disabled",
+            transportFailure ? "local_transport_failure" : "local_runtime_disabled", 10000, checkpoint)
         {
-            InitiationKind = FileTransferBootstrapInitiationKind.LocalRuntimeDisable,
-            LocalStop = new(source, state.CurrentDataSessionIdentity!, state.CurrentDataSessionGeneration),
+            InitiationKind = transportFailure ? FileTransferBootstrapInitiationKind.LocalTransportFailure : FileTransferBootstrapInitiationKind.LocalRuntimeDisable,
+            LocalStop = new(source, state.CurrentDataSessionIdentity!, state.CurrentDataSessionGeneration)
+                { FailureOrigin = transportFailure ? new(Guid.NewGuid(), 1, "initial-listener-run", 1) : null },
         };
         Assert.False(observation.IsDefault);
         Assert.True(FileTransferCoordinator.IsFallbackBootstrapLocalStopScopeCurrent(state, source));

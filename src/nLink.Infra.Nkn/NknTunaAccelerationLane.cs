@@ -115,8 +115,10 @@ internal sealed partial class NknTunaAccelerationLane : INknTunaAccelerationSess
     }
 
     private bool IsFailureOriginCurrentUnsafe(NknAccelerationFailureOrigin origin)
-        => !disposed && !origin.IsDefault && client is null &&
-            dialerProcessOwner is null && currentFailureOrigin == origin;
+        => !disposed && !origin.IsDefault && currentFailureOrigin == origin &&
+            (client is null && dialerProcessOwner is null ||
+             clientRole == ClientRole.Listener && clientGeneration == origin.ClientGeneration &&
+             clientListenerLease?.ProcessRunId == origin.ProcessRunId);
 
     public NknAccelerationLaneDiagnostics GetDiagnosticsSnapshot()
     {
@@ -695,6 +697,7 @@ internal sealed partial class NknTunaAccelerationLane : INknTunaAccelerationSess
                         forwardedEvent = new(e.IsAvailable, e.Reason, e.FailureOrigin, preparationIdentity);
                     if (!e.IsAvailable)
                     {
+                        var alreadyReported = currentFailureOrigin is { } reported && reported.ClientGeneration == clientGeneration;
                         if (currentClientStart?.Preparation == true)
                         {
                             currentClientStart.Revocation.Unregister();
@@ -704,13 +707,14 @@ internal sealed partial class NknTunaAccelerationLane : INknTunaAccelerationSess
                             if (clientListenerLease is { } preparedListener && listenerSupervisor is not null)
                                 listenerSupervisor.TryDetachCurrentListener(preparedListener, out stopPreparedListener);
                         }
-                        if (clientRole == ClientRole.Dialer && clientDialerProcessOwner is { } owner &&
-                            clientGeneration > 0)
+                        var runId = clientRole == ClientRole.Dialer ? clientDialerProcessOwner?.RunId : clientListenerLease?.ProcessRunId;
+                        if (!string.IsNullOrEmpty(runId) && clientGeneration > 0)
                         {
-                            var origin = new NknAccelerationFailureOrigin(
-                                laneInstanceId, clientGeneration, owner.RunId, ++failureGeneration);
+                            var origin = alreadyReported ? currentFailureOrigin!.Value : new NknAccelerationFailureOrigin(
+                                laneInstanceId, clientGeneration, runId, ++failureGeneration);
                             currentFailureOrigin = origin;
                             forwardedEvent = new AccelerationStateChangedEventArgs(false, e.Reason, origin, preparationIdentity);
+                            if (alreadyReported) shouldForward = false;
                         }
                         client = null;
                         clientRole = ClientRole.None;
@@ -743,7 +747,28 @@ internal sealed partial class NknTunaAccelerationLane : INknTunaAccelerationSess
     }
 
     private void OnListenerSupervisorStateChanged(object? sender, AccelerationStateChangedEventArgs e)
-        => StateChanged?.Invoke(this, e);
+    {
+        if (e.IsAvailable || e.SessionPreparationExecutionIdentity is not null)
+        {
+            StateChanged?.Invoke(this, e);
+            return;
+        }
+        if (e.Reason is not ("listener_terminal_tuna_write_failed" or "listener_terminal_tuna_stream_eof"))
+        {
+            StateChanged?.Invoke(this, e);
+            return;
+        }
+        NknAccelerationFailureOrigin origin;
+        lock (gate)
+        {
+            if (disposed || client is null || clientRole != ClientRole.Listener || clientGeneration <= 0 ||
+                e.ListenerFailureSource is not { } source || source != clientListenerLease || source.CurrentRequest != listenerRequest ||
+                currentFailureOrigin is { } prior && prior.ClientGeneration == clientGeneration) { return; }
+            origin = new(laneInstanceId, clientGeneration, source.ProcessRunId, ++failureGeneration);
+            currentFailureOrigin = origin;
+        }
+        StateChanged?.Invoke(this, new(false, e.Reason, origin));
+    }
 
     private void ForwardCurrentClientReadyIfAvailable(NknTunaSidecarClient expectedClient, string reason)
     {

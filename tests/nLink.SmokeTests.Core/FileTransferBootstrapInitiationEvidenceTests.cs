@@ -16,18 +16,23 @@ public sealed partial class FileTransferBootstrapCorrelationEvidenceTests
     }
 
     [Theory]
-    [InlineData(false, false)]
-    [InlineData(false, true)]
-    [InlineData(true, false)]
-    [InlineData(true, true)]
-    public async Task BootstrapInitiation_SourceHoldHasFullCompactGuiParity(bool outbound, bool peerEvidence)
+    [InlineData(false, false, null)]
+    [InlineData(false, true, null)]
+    [InlineData(true, false, null)]
+    [InlineData(true, true, null)]
+    [InlineData(false, false, "sidecar_tuna_write_failed")]
+    [InlineData(true, false, "sidecar_tuna_write_failed")]
+    [InlineData(false, false, "sidecar_tuna_stream_eof")]
+    [InlineData(true, false, "sidecar_tuna_stream_eof")]
+    public async Task BootstrapInitiation_SourceHoldHasFullCompactGuiParity(bool outbound, bool peerEvidence, string? failureReason)
     {
         if (!OperatingSystem.IsWindows()) { return; }
         var directory = Path.Combine(FindRepoRoot(), "artifacts", "validation", "consolidation-bounded-20260907",
             "bootstrap-correlation-implementation", "initiation-evidence-" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(directory);
         var path = Path.Combine(directory, "source-hold.log");
-        await File.WriteAllLinesAsync(path, Emit(FileTransferCoordinatorTests.CreateBootstrapInitiationSnapshotFixture(outbound, peerEvidence)), new UTF8Encoding(false));
+        await File.WriteAllLinesAsync(path, Emit(FileTransferCoordinatorTests.CreateBootstrapInitiationSnapshotFixture(outbound, peerEvidence,
+            failureReason: failureReason)), new UTF8Encoding(false));
         const string script = """
             param([string]$RepoRoot, [string]$InputPath)
             & (Join-Path $RepoRoot 'tests/nLink.SmokeTests.Core/TestData/BootstrapInitiationEvidence.ps1') -RepoRoot $RepoRoot -InputPath $InputPath
@@ -48,7 +53,7 @@ public sealed partial class FileTransferBootstrapCorrelationEvidenceTests
 public sealed partial class FileTransferCoordinatorTests
 {
     internal static IReadOnlyList<FileTransferCoordinatorTransitionEnvelope> CreateBootstrapInitiationSnapshotFixture(bool outbound, bool peerEvidence,
-        bool includeCallback = false)
+        bool includeCallback = false, string? failureReason = null)
     {
         var envelopes = new List<FileTransferCoordinatorTransitionEnvelope>();
         var pair = CreateCorrelatedBootstrapPair(capture: Capture);
@@ -59,12 +64,14 @@ public sealed partial class FileTransferCoordinatorTests
             state.CurrentRoutePublicationToken!.Value, state.TerminalGeneration, leg.Generation, leg.TransportEpochId,
             leg.BridgeRecoveryGeneration, state.CurrentDataSessionGeneration, 3, 4, 6, 128, 2);
         var observation = new FileTransferFallbackV6ProofBootstrapObservation(state.SessionId, state.TransferId, state.Direction,
-            1, 1, peerEvidence ? "correlated_bootstrap_peer_frame" : "runtime_disabled",
+            1, 1, peerEvidence ? "correlated_bootstrap_peer_frame" : failureReason ?? "runtime_disabled",
             peerEvidence ? outbound ? "file_transfer_v6_state_frame_received" : "file_transfer_v6_frontier_request_frame_received"
-                : "local_runtime_disabled", 10000, checkpoint)
+                : failureReason is null ? "local_runtime_disabled" : "local_transport_failure", 10000, checkpoint)
         {
-            InitiationKind = peerEvidence ? FileTransferBootstrapInitiationKind.PeerEvidence : FileTransferBootstrapInitiationKind.LocalRuntimeDisable,
-            LocalStop = peerEvidence ? null : new(BootstrapStopScopeForTests(state), state.CurrentDataSessionIdentity!, state.CurrentDataSessionGeneration),
+            InitiationKind = peerEvidence ? FileTransferBootstrapInitiationKind.PeerEvidence
+                : failureReason is null ? FileTransferBootstrapInitiationKind.LocalRuntimeDisable : FileTransferBootstrapInitiationKind.LocalTransportFailure,
+            LocalStop = peerEvidence ? null : new(BootstrapStopScopeForTests(state), state.CurrentDataSessionIdentity!, state.CurrentDataSessionGeneration)
+                { FailureOrigin = failureReason is null ? null : new(Guid.NewGuid(), 1, "fault-snapshot-run", 1) },
         };
         if (peerEvidence)
         {

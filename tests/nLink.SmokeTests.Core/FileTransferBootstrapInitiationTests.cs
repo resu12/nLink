@@ -26,19 +26,43 @@ public sealed partial class FileTransferCoordinatorTests
         AssertBootstrapInitiationTerminalAndLegacyRejection(state, observation, localState);
     }
 
+    [Theory]
+    [InlineData(false, "sidecar_tuna_write_failed")]
+    [InlineData(true, "sidecar_tuna_write_failed")]
+    [InlineData(false, "sidecar_tuna_stream_eof")]
+    [InlineData(true, "sidecar_tuna_stream_eof")]
+    public void BootstrapInitiation_TransportFailureRejectsMissingOriginAndWrongSource(bool inbound, string reason)
+    {
+        var (state, stop, observation, localState, issued) = CreateBootstrapInitiationOriginFixture(inbound, reason);
+        AssertBootstrapInitiationRejectedOrigins(inbound, state, stop, observation, localState, issued);
+        AssertBootstrapInitiationTerminalAndLegacyRejection(state, observation, localState);
+        foreach (var invalid in new[] {
+            observation with { LocalStop = stop with { FailureOrigin = null } },
+            observation with { LocalStop = stop with { FailureOrigin = stop.FailureOrigin! with { ClientGeneration = 0 } } },
+            observation with { LocalStop = stop with { FailureOrigin = stop.FailureOrigin! with { ProcessRunId = "" } } },
+            observation with { InitiationKind = FileTransferBootstrapInitiationKind.LocalRuntimeDisable } })
+        {
+            var rejected = FileTransferCoordinator.StartFallbackBootstrapExchange(issued.State, invalid, localState);
+            Assert.False(rejected.Accepted);
+            Assert.Equal(issued.State.PersistentState.FileTransferRouteTransition, rejected.State.PersistentState.FileTransferRouteTransition);
+        }
+    }
+
     [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
     private static (FileTransferCoordinatorState State, FileTransferBootstrapLocalStopObservation Stop,
         FileTransferFallbackV6ProofBootstrapObservation Observation, FileTransferFallbackBootstrapStateFrameV6? LocalState,
-        FileTransferBootstrapExchangeDecision Issued) CreateBootstrapInitiationOriginFixture(bool inbound)
+        FileTransferBootstrapExchangeDecision Issued) CreateBootstrapInitiationOriginFixture(bool inbound, string? failureReason = null)
     {
         var pair = CreateCorrelatedBootstrapPair();
         var state = inbound ? pair.Receiver : pair.Sender;
         var template = StartCorrelated(state).Command!;
-        var stop = new FileTransferBootstrapLocalStopObservation(BootstrapStopScopeForTests(state), state.CurrentDataSessionIdentity!, state.CurrentDataSessionGeneration);
+        var stop = new FileTransferBootstrapLocalStopObservation(BootstrapStopScopeForTests(state), state.CurrentDataSessionIdentity!, state.CurrentDataSessionGeneration)
+            { FailureOrigin = failureReason is null ? null : new(Guid.NewGuid(), 1, "exact-failed-run", 1) };
         var observation = template.Bootstrap.Observation with
         {
-            Source = "runtime_disabled", ProofKind = "local_runtime_disabled",
-            InitiationKind = FileTransferBootstrapInitiationKind.LocalRuntimeDisable, LocalStop = stop,
+            Source = failureReason ?? "runtime_disabled", ProofKind = failureReason is null ? "local_runtime_disabled" : "local_transport_failure",
+            InitiationKind = failureReason is null ? FileTransferBootstrapInitiationKind.LocalRuntimeDisable : FileTransferBootstrapInitiationKind.LocalTransportFailure,
+            LocalStop = stop,
         };
         var localState = template.Frame as FileTransferFallbackBootstrapStateFrameV6;
         state = ApplyEmptyBootstrapSourceHoldForTests(state, observation);

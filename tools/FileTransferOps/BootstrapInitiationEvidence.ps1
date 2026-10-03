@@ -89,6 +89,9 @@ function Test-FileTransferCoordinatorBootstrapInitiationOperation {
         }
         if ($p.kind -ceq 'LocalRuntimeDisable') {
             if ($p.source -cne 'runtime_disabled' -or $p.proofKind -cne 'local_runtime_disabled' -or $p.localStopFingerprint -ceq '(none)') { return $false }
+        } elseif ($p.kind -ceq 'LocalTransportFailure') {
+            if ($p.source -cnotin @('sidecar_tuna_write_failed','sidecar_tuna_stream_eof') -or
+                $p.proofKind -cne 'local_transport_failure' -or $p.localStopFingerprint -ceq '(none)') { return $false }
         } elseif ($p.kind -ceq 'PeerEvidence') {
             $proofKind=if ($Envelope.direction -ceq 'outbound') { 'file_transfer_v6_state_frame_received' } else { 'file_transfer_v6_frontier_request_frame_received' }
             if ($p.localStopFingerprint -cne '(none)' -or $p.peerWakeFingerprint -ceq '(none)' -or

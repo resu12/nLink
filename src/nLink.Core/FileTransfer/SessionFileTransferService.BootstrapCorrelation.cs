@@ -287,7 +287,7 @@ public sealed partial class SessionFileTransferService
         FileTransferFallbackBootstrapFrameV6? retained)
     {
         FileTransferBootstrapExchangeDecision decision;
-        if (observation.InitiationKind == FileTransferBootstrapInitiationKind.LocalRuntimeDisable)
+        if (observation.InitiationKind is FileTransferBootstrapInitiationKind.LocalRuntimeDisable or FileTransferBootstrapInitiationKind.LocalTransportFailure)
         {
             decision = FileTransferCoordinator.StartFallbackBootstrapExchange(state, observation, localState,
                 retained as FileTransferFallbackBootstrapRequestFrameV6);

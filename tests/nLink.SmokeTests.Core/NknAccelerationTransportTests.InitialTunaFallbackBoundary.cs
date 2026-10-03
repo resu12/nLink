@@ -55,8 +55,24 @@ public sealed partial class NknAccelerationTransportTests
     public Task PreparedInitialTuna_LocalStopAfterNegotiationResetPreservesSource(bool payerSends)
         => RunPreparedInitialTunaFallbackAsync(false, payerSends, stopMode: 0, resetBeforeStop: true);
 
+    [Theory]
+    [InlineData("listener_terminal_tuna_write_failed")]
+    [InlineData("listener_terminal_tuna_stream_eof")]
+    [Trait("FileTransferInfraSuite", "InitialTunaFallbackBoundary")]
+    public Task PreparedInitialTuna_SpontaneousSidecarFailurePublishesFallbackAndCompletes(string reason)
+        => RunPreparedInitialTunaFallbackAsync(false, true, stopMode: 2, sidecarFailureReason: reason);
+
+    [Theory]
+    [InlineData("service_generation")]
+    [InlineData("user_pause")]
+    [Trait("FileTransferInfraSuite", "InitialTunaFallbackBoundary")]
+    public Task PreparedInitialTuna_FailureWriteDrainCannotOutliveServiceSource(string source)
+        => RunPreparedInitialTunaFallbackAsync(false, true, stopMode: 2, writeSource: source,
+            sidecarFailureReason: "listener_terminal_tuna_write_failed");
+
     private Task RunPreparedInitialTunaFallbackAsync(bool helperPays, bool payerSends, int stopMode = -1,
-        string? writeSource = null, bool pendingCallbacks = false, bool resetBeforeStop = false)
+        string? writeSource = null, bool pendingCallbacks = false, bool resetBeforeStop = false,
+        string? sidecarFailureReason = null)
         => WithPublicPreparationPairAsync(helperPays, async pair =>
         {
             pair.PayerLane.FilePeer = pair.DialerLane;
@@ -68,7 +84,7 @@ public sealed partial class NknAccelerationTransportTests
             var receiver = payerSends ? pair.DialerService : pair.PayerService;
             var reads = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
             var opens = 0;
-            var bytes = new byte[writeSource is null ? 4 : 256 * 1024];
+            var bytes = new byte[writeSource is null && sidecarFailureReason is null ? 4 : 256 * 1024];
             await sender.TryStartSendAsync(new("prepared.bin", bytes.Length, "prepared-admission"),
                 _ => Task.FromResult<Stream>(stopMode >= 0 && Interlocked.Increment(ref opens) > 1
                     ? new JoinedBootstrapReadGate(bytes, reads.Task) : new MemoryStream(bytes)), pair.Token);
@@ -108,8 +124,31 @@ public sealed partial class NknAccelerationTransportTests
                         Assert.False(Assert.IsType<bool>(InvokePrivateMethod(payerSends ? pair.Payer : pair.Dialer,
                             "IsAccelerationNegotiatedAndHealthy")));
                     }
-                    if (stopMode != 1) { await (payerSends ? pair.Payer : pair.Dialer).StopAccelerationAsync("header_switch_off", pair.Token); }
-                    if (stopMode != 0) { await (payerSends ? pair.Dialer : pair.Payer).StopAccelerationAsync("runtime_disabled", pair.Token); }
+                    if (sidecarFailureReason is not null)
+                    {
+                        var before = SessionFileTransferV4SenderTests.CaptureJoinedNknStateForTest(sender, outbound);
+                        var lane = pair.PayerLane.CaptureCurrentLaneLease();
+                        foreach (var stale in new[] { default(NknAccelerationFailureOrigin), new(Guid.NewGuid(), 1, "replaced-run", 1) })
+                        {
+                            InvokePrivateMethod(pair.Payer, "OnAccelerationStateChanged", pair.PayerLane,
+                                new AccelerationStateChangedEventArgs(false, sidecarFailureReason, stale));
+                            var after = SessionFileTransferV4SenderTests.CaptureJoinedNknStateForTest(sender, outbound);
+                            Assert.Equal(before.PersistentState, after.PersistentState);
+                            Assert.Equal(before.CurrentRoutePublicationToken, after.CurrentRoutePublicationToken);
+                            Assert.Equal(lane, pair.PayerLane.CaptureCurrentLaneLease());
+                            Assert.False((bool)GetPrivateField(pair.Payer, "fileTransferFallbackProofPending")!);
+                        }
+                        if (writeSource is not null) { pair.DialerLane.FailRuntime("sidecar_tuna_stream_eof"); }
+                        pair.PayerLane.FailRuntime(sidecarFailureReason);
+                        if (writeSource is null) { pair.DialerLane.FailRuntime("sidecar_tuna_stream_eof"); }
+                        // Let the next physical send expose whether Core installed its source hold.
+                        reads.TrySetResult();
+                    }
+                    else
+                    {
+                        if (stopMode != 1) { await (payerSends ? pair.Payer : pair.Dialer).StopAccelerationAsync("header_switch_off", pair.Token); }
+                        if (stopMode != 0) { await (payerSends ? pair.Dialer : pair.Payer).StopAccelerationAsync("runtime_disabled", pair.Token); }
+                    }
                     callbacks?.AssertCapturedThenSettle();
                     release.TrySetResult();
                     if (writing is not null)
@@ -150,6 +189,17 @@ public sealed partial class NknAccelerationTransportTests
                     callbacks?.AssertRetiredByExactDispositionAndStaleDrainIsInert();
                     AssertRejectedInitialStop(sender, payerSends ? pair.Payer : pair.Dialer, outbound, senderStop);
                     AssertRejectedInitialStop(receiver, payerSends ? pair.Dialer : pair.Payer, inbound, receiverStop);
+                    if (sidecarFailureReason is not null)
+                    {
+                        var observation = SessionFileTransferV4SenderTests.CaptureJoinedNknStateForTest(sender, outbound)
+                            .PersistentState.FileTransferRouteTransition.BootstrapExchange!.Bootstrap.Observation;
+                        Assert.Equal(FileTransferBootstrapInitiationKind.LocalTransportFailure, observation.InitiationKind);
+                        AssertRejectedInitialStop(sender, pair.Payer, outbound, senderStop with
+                        {
+                            InitiationKind = observation.InitiationKind, Source = observation.Source, ProofKind = observation.ProofKind,
+                            LocalStop = senderStop.LocalStop! with { FailureOrigin = observation.LocalStop!.FailureOrigin },
+                        });
+                    }
                     // The write fixture injects a receive batch without the sender's send ledger;
                     // it proves drain/currentness, not end-to-end payload completion.
                     if (writeSource is not null) { return; }
@@ -271,6 +321,12 @@ public sealed partial class NknAccelerationTransportTests
         var evaluation = new FileTransferFallbackV6ProofBootstrapEvaluation(publication.SessionId, publication.Direction,
             1, 1, "runtime_disabled", "local_runtime_disabled", DateTimeOffset.UtcNow.ToUnixTimeMilliseconds())
         { InitiationKind = FileTransferBootstrapInitiationKind.LocalRuntimeDisable, LocalStop = stop };
+        var unboundFailure = stop with { FailureOrigin = new(Guid.NewGuid(), 1, "unbound-run", 1) };
+        AssertRejectedInitialStop(service, transport, context, evaluation with
+        {
+            InitiationKind = FileTransferBootstrapInitiationKind.LocalTransportFailure, Source = "sidecar_tuna_write_failed",
+            ProofKind = "local_transport_failure", LocalStop = unboundFailure,
+        });
         foreach (var changed in new[] {
             evaluation with { LocalStop = null },
             evaluation with { InitiationKind = FileTransferBootstrapInitiationKind.PeerEvidence },
@@ -363,7 +419,9 @@ public sealed partial class NknAccelerationTransportTests
     {
         var state = SessionFileTransferV4SenderTests.CaptureJoinedNknStateForTest(service, context);
         var transition = state.PersistentState.FileTransferRouteTransition;
+        var snapshot = state.Direction == FileTransferDirection.Outbound ? service.Snapshot.Outbound : service.Snapshot.Inbound;
         return System.Text.Json.JsonSerializer.Serialize(new { state.Direction, state.IsTerminal,
+            snapshot?.State, snapshot?.ErrorCode, snapshot?.StatusMessage, snapshot?.BytesTransferred,
             state.RouteSelection, state.CurrentRoutePublicationToken, transition.BootstrapExchange,
             transition.CurrentOperation, transition.LastTerminalOperation });
     }

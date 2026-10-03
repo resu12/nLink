@@ -13238,6 +13238,13 @@ public sealed partial class NknSignalingTransport
             HandleSessionPreparationLaneState(e);
             return;
         }
+        if (!e.IsAvailable && e.FailureOrigin is { } origin &&
+            (origin.IsDefault || accelerationLane?.IsFailureOriginCurrent(origin) != true))
+        {
+            LocalOperationalLog.Info("NKN.Tuna", "event=tuna_acceleration_stale_failure_ignored; authority_effect=none");
+            return;
+        }
+        var bootstrapFailures = CaptureFallbackBootstrapFailureSources(e);
         var reason = SanitizeLogToken(e.Reason);
         if (!e.IsAvailable &&
             string.Equals(
@@ -13307,7 +13314,8 @@ public sealed partial class NknSignalingTransport
                     resetReason,
                     invalidationKind:
                         RuntimeUnlockInitialActivationReceiveRecoveryHoldInvalidationKind
-                            .GenericReset))
+                            .GenericReset,
+                    bootstrapLocalStops: bootstrapFailures))
             {
                 return;
             }
@@ -41242,7 +41250,7 @@ public sealed partial class NknSignalingTransport
 
         if (!bootstrapLocalStopAlreadyPublished && bootstrapLocalStops is not null)
         {
-            PublishFallbackBootstrapLocalStops(bootstrapLocalStops);
+            PublishFallbackBootstrapLocalStops(bootstrapLocalStops, normalizedReason);
         }
         return true;
     }

@@ -6,6 +6,56 @@ namespace NLink.SmokeTests;
 
 public sealed class NknTunaAccelerationLaneOriginTests
 {
+    [Theory]
+    [InlineData("listener_terminal_tuna_write_failed")]
+    [InlineData("listener_terminal_tuna_stream_eof")]
+    public void ListenerFailureOrigin_RequiresExactOwnershipAndReportsOnce(string reason)
+    {
+        using var lane = CreateLane();
+        using var client = CreateClient();
+        var source = new NknTunaListenerAdoptionSnapshot(
+            new("peer", NknAccelerationLaneKind.File, NknTunaListenerLifetimePolicy.CoordinatorAdmittedTransfer, "transfer-owner"),
+            new("test-ipc", "test-tuna"), 1, "listener-run", DateTimeOffset.UtcNow, 2);
+        InstallListener(lane, client, source);
+        var events = new List<AccelerationStateChangedEventArgs>();
+        lane.StateChanged += (_, args) => events.Add(args);
+        foreach (var stale in new[] { null, source with { OwnershipGeneration = 1 }, source with { ProcessRunId = "old-run" },
+            source with { CurrentRequest = source.CurrentRequest with { ExecutionIdentity = "old-transfer" } } })
+            InvokeLane(lane, "OnListenerSupervisorStateChanged", null, new AccelerationStateChangedEventArgs(false, reason, listenerFailureSource: stale));
+        Assert.Empty(events);
+        Assert.True(lane.IsAvailable);
+
+        InvokeLane(lane, "OnListenerSupervisorStateChanged", null, new AccelerationStateChangedEventArgs(false, reason, listenerFailureSource: source));
+        var origin = Assert.IsType<NknAccelerationFailureOrigin>(Assert.Single(events).FailureOrigin);
+        Assert.True(lane.IsFailureOriginCurrent(origin));
+        InvokeLane(lane, "OnListenerSupervisorStateChanged", null, new AccelerationStateChangedEventArgs(false, reason, listenerFailureSource: source));
+        client.MarkUnavailableFromSidecarEvent("sidecar_tuna_stream_eof");
+        Assert.Single(events);
+
+        using var successor = CreateClient();
+        InstallListener(lane, successor, source with { OwnershipGeneration = 3 });
+        Assert.False(lane.IsFailureOriginCurrent(origin));
+        InvokeLane(lane, "OnListenerSupervisorStateChanged", null, new AccelerationStateChangedEventArgs(false, reason, listenerFailureSource: source));
+        Assert.Single(events);
+        Assert.True(lane.IsAvailable);
+    }
+
+    [Fact]
+    public void ListenerFailureOrigin_IpcEofIdentifiesCurrentClient()
+    {
+        using var lane = CreateLane();
+        using var client = CreateClient();
+        var source = new NknTunaListenerAdoptionSnapshot(new("peer", NknAccelerationLaneKind.File),
+            new("ipc", "tuna"), 1, "current-listener-run", DateTimeOffset.UtcNow, 1);
+        InstallListener(lane, client, source);
+        AccelerationStateChangedEventArgs? observed = null;
+        lane.StateChanged += (_, args) => observed = args;
+        client.MarkUnavailableFromSidecarEvent("sidecar_tuna_stream_eof");
+        var origin = Assert.IsType<NknAccelerationFailureOrigin>(observed!.FailureOrigin);
+        Assert.Equal(source.ProcessRunId, origin.ProcessRunId);
+        Assert.True(lane.IsFailureOriginCurrent(origin));
+    }
+
     [Fact]
     [Trait("FileTransferInfraSuite", "InitialActivationReceiverClosure")]
     public void DialerFailureOrigin_IdentifiesExactLaneClientRunAndFailure()
@@ -250,6 +300,16 @@ public sealed class NknTunaAccelerationLaneOriginTests
         var role = typeof(NknTunaAccelerationLane)
             .GetField("clientRole", BindingFlags.Instance | BindingFlags.NonPublic)!.FieldType;
         Assert.True((bool)InvokeLane(lane, "ReplaceClient", client, Enum.Parse(role, "Dialer"), owner)!);
+    }
+
+    private static void InstallListener(NknTunaAccelerationLane lane, NknTunaSidecarClient client, NknTunaListenerAdoptionSnapshot source)
+    {
+        var handler = typeof(NknTunaAccelerationLane).GetMethod("OnClientStateChanged", BindingFlags.Instance | BindingFlags.NonPublic)!;
+        client.StateChanged += (EventHandler<AccelerationStateChangedEventArgs>)Delegate.CreateDelegate(typeof(EventHandler<AccelerationStateChangedEventArgs>), lane, handler);
+        var role = typeof(NknTunaAccelerationLane).GetField("clientRole", BindingFlags.Instance | BindingFlags.NonPublic)!.FieldType;
+        Assert.True((bool)InvokeLane(lane, "ReplaceClient", client, Enum.Parse(role, "Listener"), null)!);
+        typeof(NknTunaAccelerationLane).GetField("listenerRequest", BindingFlags.Instance | BindingFlags.NonPublic)!.SetValue(lane, source.CurrentRequest);
+        typeof(NknTunaAccelerationLane).GetField("clientListenerLease", BindingFlags.Instance | BindingFlags.NonPublic)!.SetValue(lane, source);
     }
 
     private static object? InvokeLane(NknTunaAccelerationLane lane, string method, params object?[] args)

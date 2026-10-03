@@ -394,6 +394,18 @@ public sealed partial class NknAccelerationTransportTests
         public event EventHandler<AccelerationStateChangedEventArgs>? StateChanged;
         public void Emit(bool available, string identity) => StateChanged?.Invoke(this,
             new(available, "remote_closed", sessionPreparationExecutionIdentity: identity));
+        private NknAccelerationFailureOrigin? failureOrigin;
+        private long failureGeneration;
+        public bool IsFailureOriginCurrent(NknAccelerationFailureOrigin origin)
+            => !origin.IsDefault && Current is null && failureOrigin == origin;
+        public void FailRuntime(string reason)
+        {
+            var lease = Assert.IsType<NknTunaLaneLease>(Current);
+            failureOrigin = new(lease.LaneInstanceId, lease.ClientGeneration,
+                lease.DialerOwner?.RunId ?? lease.Listener!.ProcessRunId, ++failureGeneration);
+            Current = null;
+            StateChanged?.Invoke(this, new(false, reason, failureOrigin));
+        }
         public NknAccelerationLaneDiagnostics GetDiagnosticsSnapshot() => NknAccelerationLaneDiagnostics.Empty;
         public async Task<bool> TrySendAsync(NknBridgeChannel lane, byte[] bytes, CancellationToken ct)
         {
@@ -408,13 +420,14 @@ public sealed partial class NknAccelerationTransportTests
         }
         public Task<bool> EnsureListenerSidecarConnectedAsync(string peer, CancellationToken ct) => throw new InvalidOperationException("ordinary_listener_forbidden");
         public Task<bool> StartDialerSidecarAsync(string tuna, string peer, CancellationToken ct) => throw new InvalidOperationException("ordinary_dialer_forbidden");
-        public Task StopAsync(string reason, CancellationToken ct) { GlobalStops++; return Task.CompletedTask; }
+        public Task StopAsync(string reason, CancellationToken ct) { GlobalStops++; failureOrigin = null; return Task.CompletedTask; }
         public NknTunaLaneLease? CaptureCurrentLaneLease() => Current;
         public bool TryTransferPreparationLaneLease(NknTunaLaneLease lease, string identity, bool activate,
             out NknTunaLaneLease? successor)
         {
             successor = null;
             if (Current != lease) return false;
+            failureOrigin = null;
             if (activate) Activations++; else Retains++;
             var listener = lease.Listener is { } prior ? prior with
             {
@@ -434,6 +447,7 @@ public sealed partial class NknAccelerationTransportTests
             Assert.Null(Current);
             Starts++;
             Request = request;
+            failureOrigin = null;
             var listener = request.LocalIsPayer ? new NknTunaListenerAdoptionSnapshot(
                 new(request.ExpectedRemotePeer, NknAccelerationLaneKind.File, NknTunaListenerLifetimePolicy.SessionPreparation, request.ExecutionIdentity),
                 new("test-ipc", LocalTunaAddress!), 1, Guid.NewGuid().ToString("N"), DateTimeOffset.UtcNow, 1) : null;
@@ -445,6 +459,7 @@ public sealed partial class NknAccelerationTransportTests
         {
             if (Current != lease) return false;
             Current = null;
+            failureOrigin = null;
             Interlocked.Increment(ref ExactStops);
             Stopped.TrySetResult();
             return true;

@@ -519,7 +519,13 @@ internal sealed class NknTunaListenerSidecarSupervisor : INknTunaListenerSidecar
         owner?.SetupDiagnostics.ProviderLine(line);
 
         NknTunaListenerStartRequest? request;
-        lock (gate) request = IsCurrentProcessOwner(owner, process) ? currentRequest : null;
+        NknTunaListenerAdoptionSnapshot? source = null;
+        lock (gate)
+        {
+            request = IsCurrentProcessOwner(owner, process) ? currentRequest : null;
+            if (request is not null && endpoint is not null && owner is not null)
+                source = new(request, endpoint, owner.Pid, owner.RunId, owner.StartedUtc, ownershipGeneration);
+        }
         if (request is null)
         {
             LocalOperationalLog.Info(
@@ -528,7 +534,7 @@ internal sealed class NknTunaListenerSidecarSupervisor : INknTunaListenerSidecar
             return;
         }
 
-        HandleStdoutLineCore(line, ready, startupStopwatch, request);
+        HandleStdoutLineCore(line, ready, startupStopwatch, request, source);
     }
 
     private void HandleStdoutLine(
@@ -539,7 +545,7 @@ internal sealed class NknTunaListenerSidecarSupervisor : INknTunaListenerSidecar
 
     private void HandleStdoutLineCore(string line,
         TaskCompletionSource<NknTunaListenerSidecarEndpoint> ready, Stopwatch startupStopwatch,
-        NknTunaListenerStartRequest? request)
+        NknTunaListenerStartRequest? request, NknTunaListenerAdoptionSnapshot? source = null)
     {
         try
         {
@@ -616,7 +622,7 @@ internal sealed class NknTunaListenerSidecarSupervisor : INknTunaListenerSidecar
                     var terminalReason = TryGetString(root, "terminalReason") ?? TryGetString(root, "reason") ?? "unknown";
                     LogBridgeTerminal(root);
                     SetStatus("terminal_" + SanitizeLogToken(terminalReason));
-                    RaiseStateUnavailable("listener_terminal_" + terminalReason, request);
+                    RaiseStateUnavailable("listener_terminal_" + terminalReason, request, source);
                     break;
                 case "tuna_stream_rejected":
                     var rejectReason = string.IsNullOrWhiteSpace(sidecarReason)
@@ -916,7 +922,8 @@ internal sealed class NknTunaListenerSidecarSupervisor : INknTunaListenerSidecar
         }
     }
 
-    private void RaiseStateUnavailable(string reason, NknTunaListenerStartRequest? request)
+    private void RaiseStateUnavailable(string reason, NknTunaListenerStartRequest? request,
+        NknTunaListenerAdoptionSnapshot? source = null)
     {
         try
         {
@@ -926,7 +933,7 @@ internal sealed class NknTunaListenerSidecarSupervisor : INknTunaListenerSidecar
                     isAvailable: false,
                     SanitizeLogToken(reason), sessionPreparationExecutionIdentity:
                         request?.PreparationOnly == true || request?.LifetimePolicy == NknTunaListenerLifetimePolicy.SessionPreparation
-                            ? request.ExecutionIdentity : null));
+                            ? request.ExecutionIdentity : null, listenerFailureSource: source));
         }
         catch
         {

@@ -4,6 +4,14 @@ internal enum FileTransferBootstrapInitiationKind
 {
     PeerEvidence,
     LocalRuntimeDisable,
+    LocalTransportFailure,
+}
+
+internal sealed record FileTransferBootstrapFailureOrigin(
+    Guid LaneInstanceId, long ClientGeneration, string ProcessRunId, long FailureGeneration)
+{
+    public bool IsDefault => LaneInstanceId == Guid.Empty || ClientGeneration <= 0 ||
+        string.IsNullOrWhiteSpace(ProcessRunId) || FailureGeneration <= 0;
 }
 
 // Copied source evidence, not authority. The actual session reference remains at the Service boundary.
@@ -15,12 +23,18 @@ internal sealed record FileTransferBootstrapLocalStopScope(
 internal sealed record FileTransferBootstrapLocalStopSource(
     FileTransferBootstrapLocalStopScope Scope,
     IFileTransferDataSession DataSession,
-    long ProviderGeneration);
+    long ProviderGeneration)
+{
+    public FileTransferBootstrapFailureOrigin? FailureOrigin { get; init; }
+}
 
 internal sealed record FileTransferBootstrapLocalStopObservation(
     FileTransferBootstrapLocalStopScope Scope,
     string DataSessionIdentity,
-    long DataSessionGeneration);
+    long DataSessionGeneration)
+{
+    public FileTransferBootstrapFailureOrigin? FailureOrigin { get; init; }
+}
 
 internal static partial class FileTransferCoordinator
 {
@@ -77,10 +91,23 @@ internal static partial class FileTransferCoordinator
                   ? "file_transfer_v6_state_frame_received" : "file_transfer_v6_frontier_request_frame_received") &&
               observation.SessionId == state.SessionId && observation.TransferId == state.TransferId && observation.Direction == state.Direction &&
               IsBootstrapHoldCheckpointSourceCurrent(state, observation.DurableCheckpoint)
-            : observation.InitiationKind == FileTransferBootstrapInitiationKind.LocalRuntimeDisable &&
-              !observation.IsDefault && observation.Source == "runtime_disabled" && observation.ProofKind == "local_runtime_disabled" &&
+            : !observation.IsDefault &&
+              IsLocalFallbackBootstrapInitiationShapeValid(observation.InitiationKind, observation.Source,
+                  observation.ProofKind, observation.LocalStop?.FailureOrigin) &&
               observation.SessionId == state.SessionId && observation.TransferId == state.TransferId && observation.Direction == state.Direction &&
               observation.LocalStop is { } stop && IsFallbackBootstrapLocalStopScopeCurrent(state, stop.Scope) &&
               stop.DataSessionIdentity == state.CurrentDataSessionIdentity && stop.DataSessionGeneration > 0 &&
               stop.DataSessionGeneration == state.CurrentDataSessionGeneration;
+
+    internal static bool IsLocalFallbackBootstrapInitiationShapeValid(FileTransferBootstrapInitiationKind kind,
+        string source, string proofKind, FileTransferBootstrapFailureOrigin? origin)
+        => kind switch
+        {
+            FileTransferBootstrapInitiationKind.LocalRuntimeDisable
+                => source == "runtime_disabled" && proofKind == "local_runtime_disabled" && origin is null,
+            FileTransferBootstrapInitiationKind.LocalTransportFailure
+                => source is "sidecar_tuna_write_failed" or "sidecar_tuna_stream_eof" &&
+                   proofKind == "local_transport_failure" && origin is { IsDefault: false },
+            _ => false,
+        };
 }
