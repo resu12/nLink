@@ -22728,13 +22728,13 @@ public sealed partial class SessionFileTransferService
         try
         {
             IFileTransferDataSession? dataSession;
-            InboundBootstrapWriteIngress? writeIngress;
+            InboundBootstrapWriteIngress? readerIngress;
             lock (gate)
             {
                 dataSession = ReferenceEquals(inboundTransfer, context) && !context.IsTerminal
                     ? context.DataSession
                     : null;
-                writeIngress = CaptureInboundBootstrapWriteIngress(context, dataSession);
+                readerIngress = CaptureInboundBootstrapWriteIngress(context, dataSession);
                 if (dataSession is not null)
                 {
                     runtimeEvidence = new(dataSession, context.DataSessionGeneration,
@@ -22750,9 +22750,23 @@ public sealed partial class SessionFileTransferService
             }
 
             Task<FileTransferReceivedDataFrame>? pendingReceiveTask = null;
+            InboundBootstrapWriteIngress? writeIngress = null;
             while (!context.LifetimeCts.IsCancellationRequested)
             {
-                pendingReceiveTask ??= dataSession.ReceiveWithMetadataAsync(context.LifetimeCts.Token).AsTask();
+                if (pendingReceiveTask is null)
+                {
+                    lock (gate)
+                    {
+                        writeIngress = readerIngress is not null &&
+                            context.DataSessionGeneration == readerIngress.ServiceGeneration &&
+                            dataSession is IFileTransferDataSessionGenerationProvider provider &&
+                            provider.Generation == readerIngress.ProviderGeneration
+                                ? CaptureInboundBootstrapWriteIngress(context, dataSession)
+                                : null;
+                    }
+
+                    pendingReceiveTask = dataSession.ReceiveWithMetadataAsync(context.LifetimeCts.Token).AsTask();
+                }
                 var completed = await Task.WhenAny(
                     pendingReceiveTask,
                     Task.Delay(PullSessionReceivePollDelayMs, context.LifetimeCts.Token)).ConfigureAwait(false);
