@@ -24989,7 +24989,6 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
         var serviceType = typeof(SessionFileTransferService);
         const string transferId = "transfer_runtime_unlock_precommit_initiator_commits";
         var sessionId = $"session_{transferId}";
-        const string probeId = "runtime-unlock-precommit:1:2:initiator";
         using var transport = new LoopbackFileTransferTransport(sessionId)
         {
             RuntimeUnlockRouteCommitSnapshot = new RuntimeUnlockRouteCommitSnapshot(
@@ -25006,13 +25005,14 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
                 TargetTransport: FileTransferTransportKind.Tuna,
                 TransactionState: RuntimeUnlockTransactionState.AnswerReceived.ToString(),
                 Reason: "test_initiator_commit_after_confirmation_sent",
-                PathProbeId: probeId,
-                PathProbeState: RuntimeUnlockPathProbeState.Started.ToString(),
+                PathProbeState: RuntimeUnlockPathProbeState.None.ToString(),
                 PathProbeTransport: FileTransferTransportKind.Tuna,
                 TunaPathLeaseRequired: true,
                 TunaPathLeaseGeneration: 2,
                 TunaPathLeaseState: RuntimeUnlockTunaPathLeaseState.ListenerReady.ToString(),
-                TunaPathLeaseCurrent: true)
+                TunaPathLeaseListenerRunId: "listener-precommit-initiator-2",
+                TunaPathLeaseCurrent: true,
+                LaunchGeneration: 1)
         };
         service.AttachTransport(transport);
         var context = CreateRegularNknV4OutboundContext(
@@ -25021,6 +25021,8 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
             chunksAcceptedForTransport: 64,
             remoteGrantedUntilExclusive: 128,
             lastGrantReceivedUtc: DateTimeOffset.UtcNow);
+        SetPrivateProperty(context, "V4LastStateEpoch", 1);
+        SetPrivateProperty(context, "V4LastStateDurableHighestChunkIndex", 63);
         SeedCurrentRuntimeOwnerForTest(context, FileTransferDirection.Outbound, "test_initiator_commit_after_confirmation_sent");
         SeedRuntimeUnlockAdmissionForTest(
             context,
@@ -25032,14 +25034,22 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
 
         var dataSession = new RecordingDataSession(sessionId, transferId);
         ReplaceOutboundDataSession(service, context, dataSession);
+        var logStart = GetOperationalLogLength();
+        Assert.True(Assert.IsType<bool>(serviceType
+            .GetMethod("TryStartOutboundRuntimeUnlockPreCommitProbeOrWaitForFallbackWithSnapshotLocked", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(service, [context, "test_initiator_commit_after_confirmation_sent", "runtime_unlock_probe_missing", transport.RuntimeUnlockRouteCommitSnapshot])!));
+        await WaitUntilAsync(
+            () => dataSession.SentFrames.OfType<FileTransferRuntimeUnlockPreCommitProbeFrame>().Any(),
+            timeoutMs: 5000);
+        var probe = Assert.Single(dataSession.SentFrames.OfType<FileTransferRuntimeUnlockPreCommitProbeFrame>());
         var ack = new FileTransferRuntimeUnlockPreCommitProbeAckFrame
         {
             SessionId = sessionId,
             TransferId = transferId,
-            TransactionGeneration = 1,
-            OfferGeneration = 2,
-            TunaPathLeaseGeneration = 2,
-            ProbeId = probeId,
+            TransactionGeneration = probe.TransactionGeneration,
+            OfferGeneration = probe.OfferGeneration,
+            TunaPathLeaseGeneration = probe.TunaPathLeaseGeneration,
+            ProbeId = probe.ProbeId,
             TargetRoute = FileTransferRouteResolver.FileTunaV4Token,
             TargetProtocolVersion = FileTransferProtocol.ProtocolVersionV4,
             TargetTransport = "tuna",
@@ -25049,7 +25059,6 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
             Reason = "precommit_probe_ack",
         };
 
-        var logStart = GetOperationalLogLength();
         var handled = await (Task<bool>)serviceType
             .GetMethod("TryHandleRuntimeUnlockPreCommitProbeDataFrameAsync", BindingFlags.Instance | BindingFlags.NonPublic)!
             .Invoke(
@@ -25068,10 +25077,25 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
         Assert.Equal(2, sentConfirmations.Length);
         Assert.All(sentConfirmations, sent => Assert.Equal("precommit_probe_commit_confirmed", sent.Reason));
 
+        await WaitUntilAsync(
+            () => GetPrivateProperty<FileTransferCoordinatorPersistentState>(context, "CoordinatorPersistentState")
+                .FileTransferRouteTransition.LastTerminalOperation is
+                { State: FileTransferRouteTransitionState.Committed, DispositionReceipt: not null },
+            timeoutMs: 5000);
         var routeSelection = GetPrivateProperty<FileTransferRouteSelection>(context, "RouteSelection");
         Assert.Equal(FileTransferRouteResolver.FileTunaV4Token, routeSelection.TelemetryToken);
-        Assert.Contains("accepted:1:2:precommit_probe_commit_confirmed", transport.RuntimeUnlockRouteCommitResults);
+        var committed = GetPrivateProperty<FileTransferCoordinatorPersistentState>(context, "CoordinatorPersistentState")
+            .FileTransferRouteTransition.LastTerminalOperation!.Value;
+        var commitToken = committed.DispositionCommand!.Value.RouteCommitToken!.Value;
+        var publication = committed.DispositionCommand.Value.RoutePublicationToken!.Value;
+        Assert.Equal(probe.TransactionGeneration, commitToken.TransactionGeneration);
+        Assert.Equal(probe.OfferGeneration, commitToken.OfferGeneration);
+        Assert.Equal(commitToken, GetPrivateProperty<RouteCommitToken>(context, "RuntimeUnlockRouteCommitToken"));
+        Assert.Equal(publication, GetPrivateProperty<RoutePublicationToken>(context, "CurrentRoutePublicationToken"));
 
+        await WaitUntilAsync(
+            () => ReadOperationalLogTail(logStart).Contains("event=filetransfer_route_transition_disposition_applied;", StringComparison.Ordinal),
+            timeoutMs: 5000);
         var log = ReadOperationalLogTail(logStart);
         Assert.Contains("event=runtime_unlock_paired_commit_started; direction=outbound;", log, StringComparison.Ordinal);
         Assert.Contains("event=runtime_unlock_precommit_probe_commit_confirmation_sent; direction=outbound;", log, StringComparison.Ordinal);
@@ -25088,8 +25112,11 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
             actionKind: "RouteCommitPublication");
         Assert.Contains("route=file_tuna_v4", routeTransitionLog, StringComparison.Ordinal);
         Assert.Contains("protocol_version=4", routeTransitionLog, StringComparison.Ordinal);
-        Assert.Contains("coordinator_decision_reason=accepted", routeTransitionLog, StringComparison.Ordinal);
-        Assert.Contains("event=runtime_unlock_paired_commit_confirmed; direction=outbound;", log, StringComparison.Ordinal);
+        Assert.Contains($"coordinator_decision_reason={publication.Reason}", routeTransitionLog, StringComparison.Ordinal);
+        Assert.Contains("event=filetransfer_route_transition_disposition_applied;", log, StringComparison.Ordinal);
+        var confirmationIndex = log.IndexOf("event=runtime_unlock_precommit_probe_commit_confirmation_sent;", StringComparison.Ordinal);
+        var commitIndex = log.IndexOf("event=filetransfer_route_transition_committed;", StringComparison.Ordinal);
+        Assert.True(confirmationIndex >= 0 && commitIndex > confirmationIndex, log);
         Assert.DoesNotContain("event=runtime_unlock_paired_commit_aborted; direction=outbound;", log, StringComparison.Ordinal);
     }
 

@@ -31331,7 +31331,7 @@ public sealed partial class NknAccelerationTransportTests : CoreSmokeTestsBase, 
 
     [Fact]
     [Trait("Category", "Smoke")]
-    public async Task RuntimeUnlockCommittedTunaPublicationIsRetiredByFallbackTerminalCompletion()
+    public async Task RuntimeUnlockCommittedTunaPublicationIsNotRetiredByFallbackCompletionObservation()
     {
         FakeNknClient.ResetNetwork();
         try
@@ -31415,7 +31415,8 @@ public sealed partial class NknAccelerationTransportTests : CoreSmokeTestsBase, 
                 publicationGeneration: 2,
                 runtimeGeneration: 2,
                 legGeneration: 2));
-            Assert.False(accelerationStatus.IsTransportAccelerationActive);
+            // A route hint is not a coordinator transition disposition.
+            Assert.True(accelerationStatus.IsTransportAccelerationActive);
             Assert.False(helper.IsFileTunaActiveForRouteSelection);
 
             var logStart = GetOperationalLogLength();
@@ -31427,7 +31428,7 @@ public sealed partial class NknAccelerationTransportTests : CoreSmokeTestsBase, 
                 FileTransferProtocol.ProtocolVersionV6));
             InvokePrivateMethod(helper, "NotifyTransportAccelerationStateChanged", "post_tuna_fallback_v6_transfer_completed");
 
-            Assert.False(accelerationStatus.IsTransportAccelerationActive);
+            Assert.True(accelerationStatus.IsTransportAccelerationActive);
             Assert.False(helper.IsFileTunaActiveForRouteSelection);
             var logTail = ReadOperationalLogTail(logStart);
             Assert.DoesNotContain("status=paid_listener_active; active=1", logTail, StringComparison.Ordinal);
