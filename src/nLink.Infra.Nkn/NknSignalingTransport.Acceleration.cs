@@ -38416,6 +38416,13 @@ public sealed partial class NknSignalingTransport
         var isUserRequestedDown = IsUserRequestedAccelerationStopReason(down.Reason);
         if (IsAccelerationNegotiatedAndHealthy())
         {
+            // Reset retires the responder convergence before the lane-stop callback.
+            // Preserve only its exact coordinator binding; Core decides settlement.
+            RuntimeUnlockPostFallbackPreCommitProbeFailureObservation? probeFailure = null;
+            if (!isUserRequestedDown && (downLanes & NknAccelerationLaneKind.File) != 0)
+            {
+                TryCaptureRuntimeUnlockPostFallbackPreCommitProbeFailure(down.Reason, out probeFailure);
+            }
             if (!ResetAccelerationNegotiation(
                     downReason,
                     invalidationKind:
@@ -38426,6 +38433,10 @@ public sealed partial class NknSignalingTransport
                                 .GenericReset))
             {
                 return;
+            }
+            if (probeFailure is { Role: RuntimeUnlockPostFallbackPreCommitProbeFailureRole.Responder })
+            {
+                PublishRuntimeUnlockPostFallbackPreCommitProbeFailure(probeFailure);
             }
             if (isUserRequestedDown)
             {

@@ -66,6 +66,8 @@ public sealed partial class SessionFileTransferV4SenderTests
         var logStart = GetOperationalLogLength();
         // Publish the initial receiver frontier through the real Service. The
         // analyzer must not infer this baseline from seeded progress fields.
+        Assert.IsAssignableFrom<Stream>(GetPrivatePropertyValue(inbound, "WriteStream"));
+        Assert.IsType<System.Collections.BitArray>(GetPrivatePropertyValue(inbound, "ReceiverSparseChunksWritten"));
         var publishState = typeof(SessionFileTransferService).GetMethod("SendInboundV6ReceiverStateAsync",
             BindingFlags.Instance | BindingFlags.NonPublic)!;
         Assert.True(await Assert.IsAssignableFrom<Task<bool>>(publishState.Invoke(receiver,

@@ -47,6 +47,20 @@ public sealed partial class NknAccelerationTransportTests
     public Task JoinedFallbackRetry_EofAllowsNextIndependentInstall(string reason)
         => RunJoinedFallbackRetryAsync(false, reason, continueAfterEof: true);
 
+    [Fact]
+    [Trait("FileTransferInfraSuite", "PostFallbackFailureHandoff")]
+    public Task JoinedFallbackRetry_RemoteCloseSettlesResponderPairWithoutLocalEof()
+        => RunJoinedFallbackRetryAsync(false, "remote_closed", continueAfterEof: true,
+            notifyResponderFromPeer: true);
+
+    [Theory]
+    [InlineData("superseded_offer")]
+    [InlineData("retired_core_binding")]
+    [Trait("FileTransferInfraSuite", "PostFallbackFailureHandoff")]
+    public Task JoinedFallbackRetry_RemoteCloseCannotSettleStaleResponderBinding(string control)
+        => RunJoinedFallbackRetryAsync(false, "remote_closed", continueAfterEof: true,
+            notifyResponderFromPeer: true, responderFailureControl: control);
+
     [Theory]
     [InlineData("sidecar_tuna_stream_eof")]
     [InlineData("listener_terminal_tuna_stream_eof")]
@@ -68,7 +82,8 @@ public sealed partial class NknAccelerationTransportTests
 
     private async Task RunJoinedFallbackRetryAsync(bool withStalledRepair, string? sidecarFailureReason = null,
         string? failureControl = null, bool continueAfterEof = false, bool withRecentProgress = false,
-        bool delayReceiverSnapshots = false)
+        bool delayReceiverSnapshots = false, bool notifyResponderFromPeer = false,
+        string? responderFailureControl = null)
     {
         // Initial fallback contexts are an explicit fixture baseline. There is
         // no file-I/O/live acceptance claim. After the baseline, all authority,
@@ -179,10 +194,14 @@ public sealed partial class NknAccelerationTransportTests
             receiver.AttachTransport(helper);
             var senderData = await host.OpenFileTransferDataSessionAsync(sessionId, transferId, timeout.Token);
             var receiverData = await helper.OpenFileTransferDataSessionAsync(sessionId, transferId, timeout.Token);
+            // Retry-only EOF cases begin quiescent, with no unresolved frontier gap.
+            // Stalled-repair cases retain their original sparse progress baseline.
             outbound = await SessionFileTransferV4SenderTests.CreateJoinedNknFallbackContextForTestAsync(
-                sender, senderData, sessionId, transferId, FileTransferDirection.Outbound, withStalledRepair);
+                sender, senderData, sessionId, transferId, FileTransferDirection.Outbound, withStalledRepair,
+                withoutFrontierGap: continueAfterEof);
             inbound = await SessionFileTransferV4SenderTests.CreateJoinedNknFallbackContextForTestAsync(
-                receiver, receiverData, sessionId, transferId, FileTransferDirection.Inbound, withStalledRepair, withRecentProgress);
+                receiver, receiverData, sessionId, transferId, FileTransferDirection.Inbound, withStalledRepair, withRecentProgress,
+                withoutFrontierGap: continueAfterEof);
             var senderInitial = SessionFileTransferV4SenderTests.CaptureJoinedNknStateForTest(sender, outbound);
             var receiverInitial = SessionFileTransferV4SenderTests.CaptureJoinedNknStateForTest(receiver, inbound);
             var initialPublications = new[]
@@ -193,8 +212,9 @@ public sealed partial class NknAccelerationTransportTests
                     Publication: Assert.IsType<RoutePublicationToken>(receiverInitial.CurrentRoutePublicationToken), State: receiverInitial, Data: receiverData),
             };
             var logStart = GetOperationalLogLength();
-            var senderYield = SessionFileTransferV4SenderTests.IssueJoinedNknYieldForTest(sender, outbound, FileTransferDirection.Outbound);
-            var receiverYield = SessionFileTransferV4SenderTests.IssueJoinedNknYieldForTest(receiver, inbound, FileTransferDirection.Inbound);
+            var initialHighest = continueAfterEof ? 99 : 255;
+            var senderYield = SessionFileTransferV4SenderTests.IssueJoinedNknYieldForTest(sender, outbound, FileTransferDirection.Outbound, initialHighest);
+            var receiverYield = SessionFileTransferV4SenderTests.IssueJoinedNknYieldForTest(receiver, inbound, FileTransferDirection.Inbound, initialHighest);
             // Both local issuances precede peer delivery in this fixture. Once
             // released, original frames take the normal peer/service path.
             releaseInitialData.TrySetResult();
@@ -276,9 +296,33 @@ public sealed partial class NknAccelerationTransportTests
             Assert.NotEqual(answerEnvelope.MessageId, ackEnvelope.MessageId);
             if (sidecarFailureReason is not null)
             {
+                var responderFailures = new ConcurrentQueue<RuntimeUnlockPostFallbackPreCommitProbeFailureObservedEventArgs>();
+                ((IRuntimeUnlockRetryDispatchAuthorityBridge)helper).RuntimeUnlockPostFallbackPreCommitProbeFailureObserved +=
+                    (_, args) => responderFailures.Enqueue(args);
+                var responderBefore = SessionFileTransferV4SenderTests.CaptureJoinedNknStateForTest(receiver, inbound);
                 // Hold the physically delivered probe before the receiver can ACK.
                 // Authority and dispatch settlement still come from the real peers.
                 await probeHeld.Task.WaitAsync(timeout.Token);
+                if (notifyResponderFromPeer)
+                {
+                    await WaitUntilAsync(() => GetPrivateField(helper,
+                        "runtimeUnlockResponderAnswerProbeConvergence") is not null,
+                        TimeSpan.FromSeconds(3));
+                    Assert.True(helper.IsAccelerationAvailableForTests,
+                        $"Responder physical negotiation is not healthy: lanes={helper.AccelerationNegotiatedLanesForTests}; available={helperLane.IsAvailable}; session={GetPrivateField(helper, "accelerationSessionId")}; admission={GetPrivateField(helper, "accelerationPreparationAdmission") is not null}");
+                    if (responderFailureControl == "superseded_offer")
+                    {
+                        var transaction = Assert.IsType<RuntimeUnlockTransactionSnapshot>(
+                            GetPrivateField(helper, "runtimeUnlockTransactionState"));
+                        SetPrivateField(helper, "runtimeUnlockTransactionState",
+                            transaction with { OfferGeneration = transaction.OfferGeneration + 1 });
+                    }
+                    else if (responderFailureControl == "retired_core_binding")
+                    {
+                        typeof(SessionFileTransferService).GetField("runtimeUnlockPostFallbackPairedRetryOfferBindingReceipt",
+                            BindingFlags.Instance | BindingFlags.NonPublic)!.SetValue(receiver, null);
+                    }
+                }
                 if (failureControl is "data_session_disposed" or "data_session_replaced" or "service_disposed")
                 {
                     senderProbePumpLifetime.Cancel();
@@ -288,7 +332,31 @@ public sealed partial class NknAccelerationTransportTests
                     installed.InstallReceipt!, sidecarFailureReason, failureControl, timeout.Token);
                 if (continueAfterEof)
                 {
-                    await helperLane.StopAsync(sidecarFailureReason, timeout.Token);
+                    if (notifyResponderFromPeer)
+                    {
+                        var notify = typeof(NknSignalingTransport).GetMethod("SendAccelerationDownAsync",
+                            BindingFlags.Instance | BindingFlags.NonPublic)!;
+                        await Assert.IsAssignableFrom<Task>(notify.Invoke(host,
+                            [sessionId, NknAccelerationLaneKind.File, "remote_closed", timeout.Token]));
+                        await WaitUntilAsync(() => helperLane.LastStopReason == "remote_remote_closed",
+                            TimeSpan.FromSeconds(3));
+                        if (responderFailureControl is not null)
+                        {
+                            Assert.All(responderFailures, failure => Assert.False(failure.Decision.Accepted));
+                            if (responderFailureControl == "superseded_offer") { Assert.Empty(responderFailures); }
+                            else { Assert.Equal(RuntimeUnlockPostFallbackPreCommitProbeFailureStatus.Stale,
+                                Assert.Single(responderFailures).Decision.Status); }
+                            AssertJoinedResponderPairUnchanged(receiver, inbound, responderBefore);
+                            return;
+                        }
+                        var failure = Assert.Single(responderFailures);
+                        Assert.Equal(RuntimeUnlockPostFallbackPreCommitProbeFailureStatus.Accepted, failure.Decision.Status);
+                        Assert.Equal(RuntimeUnlockPostFallbackPreCommitProbeFailureRole.Responder, failure.Observation.Role);
+                    }
+                    else
+                    {
+                        await helperLane.StopAsync(sidecarFailureReason, timeout.Token);
+                    }
                     releaseFailedProbe.TrySetResult();
                     await AssertJoinedIndependentInstallAfterEofAsync(sender, outbound, host,
                         installed.InstallReceipt!.Value, offers, logStart, eof!);
@@ -625,7 +693,7 @@ public sealed partial class SessionFileTransferV4SenderTests
 
     internal static async Task<object> CreateJoinedNknFallbackContextForTestAsync(SessionFileTransferService service,
         IFileTransferDataSession data, string sessionId, string transferId, FileTransferDirection direction,
-        bool withStalledRepair = false, bool withRecentProgress = false)
+        bool withStalledRepair = false, bool withRecentProgress = false, bool withoutFrontierGap = false)
     {
         object context;
         if (direction == FileTransferDirection.Outbound)
@@ -637,7 +705,7 @@ public sealed partial class SessionFileTransferV4SenderTests
                     remoteGrantedUntilExclusive: 256, chunkCount: 256, startCoordinatorSnapshotStream: false)
                 : CreatePostTunaFallbackV6OutboundContext(transferId, startCoordinatorSnapshotStream: false);
             SetPrivateProperty(context, "SessionId", sessionId);
-            SetPrivateProperty(context, "V4LastStateDurableHighestChunkIndex", 255);
+            SetPrivateProperty(context, "V4LastStateDurableHighestChunkIndex", withoutFrontierGap ? 99 : 255);
         }
         else
         {
@@ -653,12 +721,18 @@ public sealed partial class SessionFileTransferV4SenderTests
             SetPrivateProperty(context, "PullManifestReceived", true);
             SetPrivateProperty(context, "ReceiverSparseWriteActive", true);
             SetPrivateProperty(context, "NextChunkIndex", 100);
-            SetPrivateProperty(context, "PullHighestReceivedChunkIndex", 255);
-            SetPrivateProperty(context, "V4LastStateDurableHighestChunkIndex", 255);
+            SetPrivateProperty(context, "PullHighestReceivedChunkIndex", withoutFrontierGap ? 99 : 255);
+            SetPrivateProperty(context, "V4LastStateDurableHighestChunkIndex", withoutFrontierGap ? 99 : 255);
             if (withStalledRepair)
             {
                 var mode = typeof(SessionFileTransferService).GetNestedType("V6ReceiveDestinationMode", BindingFlags.NonPublic)!;
                 SetPrivateProperty(context, "V6DestinationMode", Enum.Parse(mode, "SparseSeekable"));
+                // Model the declared sparse destination before Coordinator history starts.
+                SetPrivateProperty(context, "WriteStream", new MemoryStream(new byte[256 * 21 * 1024], writable: true));
+                var written = new System.Collections.BitArray(256);
+                for (var index = 0; index < 100; index++) { written[index] = true; }
+                written[withoutFrontierGap ? 99 : 255] = true;
+                SetPrivateProperty(context, "ReceiverSparseChunksWritten", written);
             }
             if (withRecentProgress)
             {
@@ -756,17 +830,18 @@ public sealed partial class SessionFileTransferV4SenderTests
         return context;
     }
 
-    internal static FallbackTailYieldDecision IssueJoinedNknYieldForTest(SessionFileTransferService service, object context, FileTransferDirection direction)
+    internal static FallbackTailYieldDecision IssueJoinedNknYieldForTest(SessionFileTransferService service, object context, FileTransferDirection direction,
+        int highestObservedChunkIndex = 255)
     {
         lock (GetServiceGate(service))
         {
             var leg = GetPrivateProperty<FileTransferLeg>(context, "CurrentTransferLeg");
-            object?[] args = [context, leg, leg.TransportEpochId, 100, 255, "joined_nkn_tail_yield", null];
+            object?[] args = [context, leg, leg.TransportEpochId, 100, highestObservedChunkIndex, "joined_nkn_tail_yield", null];
             Assert.True(Assert.IsType<bool>(typeof(SessionFileTransferService).GetMethod($"TryMark{direction}FallbackTailQuiescentWithCoordinatorLocked",
                 BindingFlags.Instance | BindingFlags.NonPublic)!.Invoke(service, args)));
             var decision = Assert.IsType<FallbackTailYieldDecision>(args[^1]);
             Assert.True(Assert.IsType<bool>(typeof(SessionFileTransferService).GetMethod($"Record{direction}FallbackTailLocalYieldLocked",
-                BindingFlags.Instance | BindingFlags.NonPublic)!.Invoke(service, [context, leg, decision, 100, 255, "joined_nkn_tail_yield"])));
+                BindingFlags.Instance | BindingFlags.NonPublic)!.Invoke(service, [context, leg, decision, 100, highestObservedChunkIndex, "joined_nkn_tail_yield"])));
             // Complete the normal Service yield path. Cleanup, not this test,
             // owns both retiring the fallback worker and emitting its effect.
             typeof(SessionFileTransferService).GetMethod($"Clear{direction}FallbackTailRecoveryOwnershipAfterYieldLocked",

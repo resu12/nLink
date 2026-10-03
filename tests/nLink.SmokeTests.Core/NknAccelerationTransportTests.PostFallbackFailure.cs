@@ -12,6 +12,17 @@ public sealed partial class NknAccelerationTransportTests
         => SessionFileTransferV4SenderTests.CaptureJoinedNknStateForTest(service, context)
             .PersistentState.FallbackTailYield.CurrentOperation?.PairedRelease is not null;
 
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static void AssertJoinedResponderPairUnchanged(SessionFileTransferService service, object context,
+        FileTransferCoordinatorState before)
+    {
+        var after = SessionFileTransferV4SenderTests.CaptureJoinedNknStateForTest(service, context);
+        Assert.Equal(before.PersistentState.FallbackTailYield.CurrentOperation,
+            after.PersistentState.FallbackTailYield.CurrentOperation);
+        Assert.Equal(before.CurrentRoutePublicationToken, after.CurrentRoutePublicationToken);
+        Assert.Equal(FileTransferRoute.PostTunaFallbackV6, after.RouteSelection.Route);
+    }
+
     private static async Task<RuntimeUnlockPostFallbackPreCommitProbeFailureObservedEventArgs?> AssertJoinedFallbackEofHandoffAsync(SessionFileTransferService sender, object outbound,
         NknSignalingTransport host, RetryableTunaAccelerationSession lane, IFileTransferDataSession data,
         object installedReceipt, string reason, string? control, CancellationToken token)
