@@ -3093,6 +3093,11 @@ public sealed partial class NknSignalingTransport : IFileTransferControlPlanePhy
         }
 
         LocalOperationalLog.Info("SessionSecurity", receiveMessage);
+        if (ignoredMessage is not null)
+        {
+            LocalOperationalLog.Info("SessionSecurity", ignoredMessage);
+            return;
+        }
         if (hasTunaPayloadAuthority)
         {
             LocalOperationalLog.Info(
@@ -3101,7 +3106,7 @@ public sealed partial class NknSignalingTransport : IFileTransferControlPlanePhy
         }
     }
 
-    private bool ShouldRejectFileTunaV4PayloadReceive(
+    private bool ShouldRejectFileTransferPayloadReceive(
         FileTransferDataFrame frame,
         NknBridgeChannel channel,
         FileTransferTransportKind actualTransport,
@@ -3114,11 +3119,11 @@ public sealed partial class NknSignalingTransport : IFileTransferControlPlanePhy
             return false;
         }
 
-        return ShouldRejectFileTunaV4PayloadReceiveWithAuthority(
+        return ShouldRejectFileTransferPayloadReceiveWithAuthority(
             frame, channel, actualTransport, envelopeEvidence, routeHint, publication);
     }
 
-    private bool ShouldRejectFileTunaV4PayloadReceiveWithAuthority(
+    private bool ShouldRejectFileTransferPayloadReceiveWithAuthority(
         FileTransferDataFrame frame,
         NknBridgeChannel channel,
         FileTransferTransportKind actualTransport,
@@ -3126,10 +3131,17 @@ public sealed partial class NknSignalingTransport : IFileTransferControlPlanePhy
         FileTransferRouteHint routeHint,
         FileTransferRoutePublicationEvidence? publication)
     {
-        if (actualTransport == FileTransferTransportKind.Tuna ||
-            routeHint.Route != FileTransferRoute.FileTunaV4 ||
-            routeHint.ProtocolVersion != FileTransferProtocol.ProtocolVersionV4 ||
-            routeHint.TargetTransport != FileTransferTransportKind.Tuna)
+        var requiresTuna = routeHint.Route == FileTransferRoute.FileTunaV4 &&
+                           routeHint.ProtocolVersion == FileTransferProtocol.ProtocolVersionV4 &&
+                           routeHint.TargetTransport == FileTransferTransportKind.Tuna;
+        // A published fallback owns V6 payloads. Delayed Regular-V4 envelopes
+        // from the retired leg must not consume its queue or count as fallback proof.
+        var retiredV4Payload = routeHint.Route == FileTransferRoute.PostTunaFallbackV6 &&
+                               routeHint.ProtocolVersion == FileTransferProtocol.ProtocolVersionV6 &&
+                               routeHint.TargetTransport == FileTransferTransportKind.RegularNkn &&
+                               actualTransport == FileTransferTransportKind.RegularNkn &&
+                               frame is FileTransferChunkBatchFrameV4 and not FileTransferChunkBatchFrameV6;
+        if (actualTransport == FileTransferTransportKind.Tuna || (!requiresTuna && !retiredV4Payload))
         {
             return false;
         }
@@ -3155,12 +3167,15 @@ public sealed partial class NknSignalingTransport : IFileTransferControlPlanePhy
         };
         var envelopeEvidenceSuffix = FormatFileTransferDataPathEnvelopeEvidenceSuffix(envelopeEvidence);
         var authoritySuffix = FormatFileTransferDataPathAuthoritySuffix(hasAuthority: true, routeHint);
+        var rejectionReason = retiredV4Payload
+            ? "fallback_v6_requires_v6"
+            : "file_tuna_v4_payload_requires_tuna";
         var ignoredMessage =
-            $"event=filetransfer_data_frame_ignored; transport=nkn; transfer_id={SanitizeLogToken(frame.TransferId)}; session_id={SanitizeLogToken(frame.SessionId)}; frame_type={SanitizeLogToken(frameType)}; chunk_index={GetFileTransferDataFrameChunkIndex(frame)}; lane={MapBridgeChannel(channel)}; reason=file_tuna_v4_payload_requires_tuna; actual_transport={FormatFileTransferTransportKindForLog(actualTransport)}{authoritySuffix}{envelopeEvidenceSuffix}; receive_disposition=rejected_before_dispatch; authority_effect=none";
+            $"event=filetransfer_data_frame_ignored; transport=nkn; transfer_id={SanitizeLogToken(frame.TransferId)}; session_id={SanitizeLogToken(frame.SessionId)}; frame_type={SanitizeLogToken(frameType)}; chunk_index={GetFileTransferDataFrameChunkIndex(frame)}; lane={MapBridgeChannel(channel)}; reason={rejectionReason}; actual_transport={FormatFileTransferTransportKindForLog(actualTransport)}{authoritySuffix}{envelopeEvidenceSuffix}; receive_disposition=rejected_before_dispatch; authority_effect=none";
         LogFileTransferDataPathReceiveResult(
             frame, channel, actualTransport, envelopeEvidence,
             "rejected_before_dispatch", hasAuthority: true, routeHint, ignoredMessage);
-        NknRuntimeDiagnostics.SetLastEnvelopeDropReason("file_tuna_v4_payload_requires_tuna");
+        NknRuntimeDiagnostics.SetLastEnvelopeDropReason(rejectionReason);
         return true;
     }
 
@@ -4533,7 +4548,7 @@ public sealed partial class NknSignalingTransport : IFileTransferControlPlanePhy
                     }), usesDedicatedChunkDispatch: true);
                 return true;
             }
-            if (ShouldRejectFileTunaV4PayloadReceive(frame, channel, receivedTransportKind, envelopeEvidence))
+            if (ShouldRejectFileTransferPayloadReceive(frame, channel, receivedTransportKind, envelopeEvidence))
                 return false;
         }
 
@@ -4648,7 +4663,7 @@ public sealed partial class NknSignalingTransport : IFileTransferControlPlanePhy
                 // same dispatch-time capture for the guard and its diagnostics.
                 hasRouteAuthority = TryGetFileTransferDataPathRouteAuthorityWithEvidence(
                     frame.SessionId, frame.TransferId, FileTransferDirection.Inbound, out routeHint, out publication);
-                if (hasRouteAuthority && ShouldRejectFileTunaV4PayloadReceiveWithAuthority(
+                if (hasRouteAuthority && ShouldRejectFileTransferPayloadReceiveWithAuthority(
                         frame, channel, receivedTransportKind, envelopeEvidence, routeHint, publication))
                 {
                     return;

@@ -60,7 +60,8 @@ public sealed partial class NknFileTransferTransportTests
                     TransferPaused = true, TransferPauseReason = "ui_pause" }
                 : PublicationUseFrame(session);
             var encrypted = EncryptWithSecurityEvidence(sender, FileTransferDataFrameCodec.SerializeLegacyV4(frame));
-            var envelope = new Envelope(1, "cutover-route", "cutover-route", MsgType.FileTransferDataFrame, encrypted.Bytes, 0, null);
+            var envelopeId = $"cutover-route-{Guid.NewGuid():N}";
+            var envelope = new Envelope(1, envelopeId, envelopeId, MsgType.FileTransferDataFrame, encrypted.Bytes, 0, null);
             var args = new object?[] { senderClient.ConnectedBulkAddress, NknBridgeChannel.Bulk, envelope, null };
             Publish(0);
             if (mode == "queued")
@@ -113,8 +114,17 @@ public sealed partial class NknFileTransferTransportTests
             Assert.Equal(FileTransferRouteTransitionDispositionApplyStatus.Applied,
                 bridge.ApplyFileTransferRouteTransitionDisposition(final).Status);
             if (mode is "ingress" or "queued")
-                Assert.Equal(((FileTransferChunkBatchFrameV4)frame).DataSegments[0],
-                    Assert.IsType<FileTransferChunkBatchFrameV4>(await inbound.ReceiveAsync(ct)).DataSegments[0]);
+            {
+                // Forwarding releases the hold, not the retired V4 payload.
+                // The dispatch recheck must use the now-published fallback V6 owner.
+                await CoreSmokeTestsBase.WaitUntilAsync(() => DataPathProvenanceRows(
+                    LocalOperationalLog.GetRecentLogText(), DataPathEnvelopeFingerprint(envelope.MessageId))
+                    .Any(row => row.Contains("reason=fallback_v6_requires_v6", StringComparison.Ordinal)),
+                    TimeSpan.FromSeconds(2));
+                Assert.Equal(0, queueCount.GetValue(inbound));
+                Assert.Equal(before, states[transfer]);
+                Assert.True(inbound.IsAvailable);
+            }
             else if (mode is "reset" or "terminal" or "rollback" or "disposed_session")
             {
                 await Task.Delay(50, ct);
@@ -124,12 +134,17 @@ public sealed partial class NknFileTransferTransportTests
             LocalOperationalLog.Info("CutoverPauseTest", end);
             Assert.True(LocalOperationalLog.TryReadRetainedSlice(start, end, out var log));
             var rows = DataPathProvenanceRows(log, DataPathEnvelopeFingerprint(envelope.MessageId));
-            if (mode != "rollback")
+            if (mode is not ("rollback" or "ingress" or "queued"))
                 Assert.DoesNotContain(rows, row => row.Contains("rejected_before_dispatch", StringComparison.Ordinal));
             if (mode is "ingress" or "queued")
             {
-                Assert.NotEmpty(rows);
-                Assert.All(rows, row => AssertDataPathPublication(row, tokens[2]));
+                Assert.Equal(2, rows.Length);
+                Assert.All(rows, row =>
+                {
+                    AssertDataPathPublication(row, tokens[2]);
+                    Assert.Contains("receive_disposition=rejected_before_dispatch", row, StringComparison.Ordinal);
+                    Assert.Contains("authority_effect=none", row, StringComparison.Ordinal);
+                });
             }
             else if (mode == "rollback")
             {

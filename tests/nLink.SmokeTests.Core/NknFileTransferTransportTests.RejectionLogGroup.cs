@@ -41,7 +41,7 @@ public sealed partial class NknFileTransferTransportTests
                     LocalOperationalLog.Info("RejectionGroupTest", "event=rejection_group_competing_write");
                 }, ct).WaitAsync(TimeSpan.FromSeconds(5), ct).GetAwaiter().GetResult();
             }) };
-            Assert.True((bool)SecurityMethod("ShouldRejectFileTunaV4PayloadReceive").Invoke(receiver,
+            Assert.True((bool)SecurityMethod("ShouldRejectFileTransferPayloadReceive").Invoke(receiver,
                 [guardedFrame, NknBridgeChannel.Bulk, FileTransferTransportKind.RegularNkn, evidence])!);
             Assert.Equal(stateCount, states.Count);
             Assert.True(competingWrites > 1);
@@ -72,7 +72,7 @@ public sealed partial class NknFileTransferTransportTests
             var lookup = new object?[] { session, frame.TransferId, FileTransferDirection.Inbound, null, null };
             Assert.True((bool)SecurityMethod("TryGetFileTransferDataPathRouteAuthorityWithEvidence").Invoke(receiver, lookup)!);
             Assert.Equal(cycle[2].Evidence, lookup[4]); // The old guard did not republish its captured route.
-            Assert.False((bool)SecurityMethod("ShouldRejectFileTunaV4PayloadReceive").Invoke(receiver,
+            Assert.True((bool)SecurityMethod("ShouldRejectFileTransferPayloadReceive").Invoke(receiver,
                 [frame, NknBridgeChannel.Bulk, FileTransferTransportKind.RegularNkn, evidence])!);
             await Task.CompletedTask;
         });

@@ -9,11 +9,83 @@ namespace NLink.SmokeTests;
 public sealed partial class NknFileTransferTransportTests
 {
     [Theory]
+    [InlineData(true, false)]
+    [InlineData(false, false)]
+    [InlineData(true, true)]
+    [InlineData(false, true)]
+    [Trait("FileTransferInfraSuite", "PublicationUseEvidence")]
+    public async Task NknTransport_RetiredV4BurstCannotOverflowPublishedFallbackQueue(bool prepareBeforePublication, bool omitEvidence)
+        => await WithSecurityCaptureSession(async (sender, receiver, senderClient, approvalBytes, ct) =>
+        {
+            var session = sender.CurrentSessionSecurityState.SessionId!.Value.Value;
+            const string transfer = "security-transfer";
+            var offered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var accepted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var opened = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            receiver.FileTransferOfferReceived += (_, _) => offered.TrySetResult();
+            sender.FileTransferAcceptReceived += (_, _) => accepted.TrySetResult();
+            receiver.FileTransferSessionOpenReceived += (_, _) => opened.TrySetResult();
+            await sender.SendFileTransferOfferAsync(new FileTransferOfferV2 { SessionId = session, TransferId = transfer,
+                FileName = "retired-v4-burst.bin", FileSizeBytes = 67108864, PreferredDataProtocolVersion = 4 }, ct);
+            await offered.Task.WaitAsync(ct);
+            await receiver.SendFileTransferAcceptAsync(new FileTransferAcceptV1 { SessionId = session,
+                TransferId = transfer, AcceptedDataProtocolVersion = 4 }, ct);
+            await accepted.Task.WaitAsync(ct);
+            await sender.SendFileTransferSessionOpenAsync(new FileTransferSessionOpenV2 { SessionId = session,
+                TransferId = transfer, ProtocolVersion = 4, SessionRole = FileTransferProtocol.SessionRoleSender,
+                ChunkSizeBytes = 1024, InitialPipelineDepth = 8 }, ct);
+            await opened.Task.WaitAsync(ct);
+            using var inbound = await receiver.OpenFileTransferDataSessionAsync(session, transfer, ct);
+            var cycle = FileTransferPublicationUseCaptureTests.CreateCycle(session, transfer, FileTransferDirection.Inbound);
+            PublishPublicationUse(receiver, cycle[0]);
+            if (!prepareBeforePublication) { PublishPublicationUse(receiver, cycle[2], omitEvidence); }
+            var dispatches = new List<Action>();
+            for (var index = 0; index <= NknSignalingTransport.FileTransferDataSessionMaxQueuedFrames; index++)
+            {
+                var frame = PublicationUseFrame(session) with { StartChunkIndex = index };
+                var encrypted = EncryptWithSecurityEvidence(sender, FileTransferDataFrameCodec.SerializeLegacyV4(frame));
+                var envelope = new Envelope(1, $"retired-v4-{index}", $"retired-v4-{index}", MsgType.FileTransferDataFrame, encrypted.Bytes, 0, null);
+                var args = new object?[] { senderClient.ConnectedBulkAddress, NknBridgeChannel.Bulk, envelope, null };
+                var prepared = (bool)SecurityMethod("TryPrepareFileTransferDataFrameDispatch").Invoke(receiver, args)!;
+                Assert.Equal(prepareBeforePublication, prepared);
+                if (prepared) { dispatches.Add(Assert.IsType<Action>(SecurityProperty(args[3]!, "Dispatch"))); }
+            }
+            if (prepareBeforePublication) { PublishPublicationUse(receiver, cycle[2], omitEvidence); }
+            var availabilityEvents = 0;
+            inbound.AvailabilityChanged += (_, _) => Interlocked.Increment(ref availabilityEvents);
+            foreach (var dispatch in dispatches) { dispatch(); }
+            Assert.True(inbound.IsAvailable);
+            Assert.Equal(0, availabilityEvents);
+            Assert.Equal(0, inbound.GetType().GetField("queuedFrameCount", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(inbound));
+            Assert.Equal(0L, inbound.GetType().GetField("queuedBytes", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(inbound));
+
+            // The current V6 data and lifecycle/control path remains usable after the retired burst.
+            foreach (var frame in new FileTransferDataFrame[]
+            {
+                new FileTransferChunkBatchFrameV6 { SessionId = session, TransferId = transfer, StartChunkIndex = 600,
+                    ChunkCount = 1, DataSegments = [new byte[1024]], TransportEpoch = 1 },
+                new FileTransferStateFrameV4 { SessionId = session, TransferId = transfer, TransferPaused = true },
+            })
+            {
+                var encrypted = EncryptWithSecurityEvidence(sender, FileTransferProtocol.IsV6DataFrame(frame)
+                    ? FileTransferDataFrameCodec.Serialize(frame) : FileTransferDataFrameCodec.SerializeLegacyV4(frame));
+                var envelope = new Envelope(1, frame.Type, frame.Type, MsgType.FileTransferDataFrame, encrypted.Bytes, 0, null);
+                var args = new object?[] { senderClient.ConnectedBulkAddress, NknBridgeChannel.Bulk, envelope, null };
+                Assert.True((bool)SecurityMethod("TryPrepareFileTransferDataFrameDispatch").Invoke(receiver, args)!);
+                Assert.IsType<Action>(SecurityProperty(args[3]!, "Dispatch"))();
+                Assert.Equal(frame.GetType(), (await inbound.ReceiveAsync(ct)).GetType());
+            }
+            Assert.True(inbound.IsAvailable);
+        });
+
+    [Theory]
     [InlineData(1, false, false, false)]
     [InlineData(3, false, false, false)]
     [InlineData(3, false, true, false)]
     [InlineData(0, false, false, false)]
     [InlineData(2, false, false, false)]
+    [InlineData(2, false, true, false)]
+    [InlineData(2, false, false, true)]
     [InlineData(3, true, false, false)]
     [InlineData(3, false, false, true)]
     [Trait("FileTransferInfraSuite", "PublicationUseEvidence")]
@@ -107,7 +179,7 @@ public sealed partial class NknFileTransferTransportTests
             LocalOperationalLog.Info("DispatchRouteGuardTest", start);
             dispatch();
             LocalOperationalLog.Info("DispatchRouteGuardTest", end);
-            var reject = publicationIndex is 1 or 3 && !tunaIngress && !controlFrame;
+            var reject = publicationIndex is 1 or 2 or 3 && !tunaIngress && !controlFrame;
             Assert.Equal(beforeEffects, CaptureAuthorityAndSession());
             Assert.Same(inbound, sessions[transfer]);
             Assert.Equal(beforeQueueCount + (reject ? 0 : 1), Assert.IsType<int>(queueCount.GetValue(inbound)));
@@ -126,7 +198,7 @@ public sealed partial class NknFileTransferTransportTests
             }
             Assert.True(LocalOperationalLog.TryReadRetainedSlice(start, end, out var log));
             var rows = DataPathProvenanceRows(log, DataPathEnvelopeFingerprint(envelope.MessageId));
-            Assert.Equal(reject ? 3 : tunaIngress ? 2 : 1, rows.Length);
+            Assert.Equal(reject ? publicationIndex == 2 ? 2 : 3 : tunaIngress ? 2 : 1, rows.Length);
             Assert.All(rows, row =>
             {
                 AssertDataPathPublication(row, cycle[publicationIndex].Token);
@@ -144,7 +216,7 @@ public sealed partial class NknFileTransferTransportTests
                 Assert.Equal(0L, Assert.IsType<long>(inbound.GetType()
                     .GetField("queuedBytes", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(inbound)));
                 Assert.All(rows, row => Assert.Contains("authority_effect=none", row, StringComparison.Ordinal));
-                Assert.Contains("event=filetransfer_data_frame_ignored;", rows[2], StringComparison.Ordinal);
+                Assert.Contains("event=filetransfer_data_frame_ignored;", rows[^1], StringComparison.Ordinal);
                 var sequence = long.Parse(SecurityEvidenceValue(rows[0], "log_writer_sequence"));
                 for (var i = 0; i < rows.Length; i++) { Assert.Equal(sequence + i, long.Parse(SecurityEvidenceValue(rows[i], "log_writer_sequence"))); }
                 Assert.DoesNotContain("event=filetransfer_data_frame_dispatched;", log, StringComparison.Ordinal);
