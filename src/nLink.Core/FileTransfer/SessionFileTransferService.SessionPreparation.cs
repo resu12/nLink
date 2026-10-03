@@ -169,14 +169,49 @@ public sealed partial class SessionFileTransferService : IFileTransferSessionPre
 
     FileTransferSessionPreparationDecision IFileTransferSessionPreparationAuthority.Begin(
         FileTransferSessionPreparationAttachment attachment, FileTransferSessionPreparationSecurityEpoch epoch,
-        string nonce, long payerDecisionId, bool localIsPayer, DateTimeOffset deadlineUtc)
+        string nonce, long payerDecisionId, bool localIsPayer, DateTimeOffset deadlineUtc, bool listenerStartup)
     {
         lock (gate)
         {
             return DecidePreparationLocked(attachment, epoch, () =>
                 EnsurePreparationScopeLocked(attachment, epoch)
                     ? FileTransferCoordinator.BeginSessionPreparation(sessionPreparation, sessionPreparation.Scope!,
-                        nonce, payerDecisionId, localIsPayer, deadlineUtc, DateTimeOffset.UtcNow)
+                        nonce, payerDecisionId, localIsPayer, deadlineUtc, DateTimeOffset.UtcNow, listenerStartup)
+                    : PreparationUnavailable());
+        }
+    }
+
+    FileTransferSessionPreparationDecision IFileTransferSessionPreparationAuthority.BeginHandshake(
+        FileTransferSessionPreparationAttachment attachment, FileTransferSessionPreparationSecurityEpoch epoch,
+        FileTransferSessionPreparationPermit permit)
+    {
+        FileTransferSessionPreparationState captured;
+        IFileTransferSessionPreparationLeaseProvider provider;
+        lock (gate)
+        {
+            if (!IsPreparationAttachmentCurrentLocked(attachment, epoch) || !IsPreparationResourceCurrentLocked() ||
+                !ReferenceEquals(sessionPreparation.Permit, permit)) return PreparationUnavailable();
+            if (sessionPreparation.Phase == FileTransferSessionPreparationPhase.Pending)
+                return DecidePreparationLocked(attachment, epoch, () =>
+                    FileTransferCoordinator.BeginSessionPreparationHandshake(sessionPreparation, permit, null, DateTimeOffset.UtcNow));
+            if (sessionPreparation.Phase != FileTransferSessionPreparationPhase.Starting ||
+                CurrentPreparationExecutionLocked() is not { AllowsPreparation: true } execution ||
+                !ReferenceEquals(execution.Permit, permit) ||
+                transport is not IFileTransferSessionPreparationLeaseProvider currentProvider) return PreparationUnavailable();
+            captured = sessionPreparation;
+            provider = currentProvider;
+        }
+        var requestedUtc = DateTimeOffset.UtcNow;
+        if (!provider.TryObserveSessionPreparationLease(permit.Scope, permit.Generation, out var lease) ||
+            lease is null || lease.ObservedUtc < requestedUtc)
+        {
+            lock (gate) return PreparationUnavailable();
+        }
+        lock (gate)
+        {
+            return DecidePreparationLocked(attachment, epoch, () =>
+                ReferenceEquals(captured, sessionPreparation) && IsPreparationResourceCurrentLocked()
+                    ? FileTransferCoordinator.BeginSessionPreparationHandshake(sessionPreparation, permit, lease, DateTimeOffset.UtcNow)
                     : PreparationUnavailable());
         }
     }
@@ -239,7 +274,7 @@ public sealed partial class SessionFileTransferService : IFileTransferSessionPre
                 }
                 // Completed synthetic evidence cannot manufacture an execution
                 // owner after the fact; bind while the exact episode is pending.
-                if (sessionPreparation.Phase != FileTransferSessionPreparationPhase.Pending) return;
+                if (sessionPreparation.Phase is not (FileTransferSessionPreparationPhase.Starting or FileTransferSessionPreparationPhase.Pending)) return;
                 var candidate = new FileTransferSessionPreparationExecution(permit);
                 if (!attachment.BindExecution(candidate) || !epoch.BindExecution(candidate))
                 {
@@ -354,7 +389,7 @@ public sealed partial class SessionFileTransferService : IFileTransferSessionPre
             // slot. A later status notification cannot pretend there was no admission.
             preparationBlockedThroughGeneration = Math.Max(preparationBlockedThroughGeneration, epoch.Generation);
             if (!registered) return;
-            var wasPreparation = sessionPreparation.Phase is FileTransferSessionPreparationPhase.Pending or FileTransferSessionPreparationPhase.Ready;
+            var wasPreparation = sessionPreparation.Phase is FileTransferSessionPreparationPhase.Starting or FileTransferSessionPreparationPhase.Pending or FileTransferSessionPreparationPhase.Ready;
             var decision = FileTransferCoordinator.ReserveSessionPreparationAdmission(sessionPreparation,
                 sessionPreparation.Scope!, transferId, direction, DateTimeOffset.UtcNow);
             sessionPreparation = decision.State;

@@ -2,7 +2,7 @@ using NLink.Core.SessionSecurity;
 
 namespace NLink.Core.FileTransfer;
 
-internal enum FileTransferSessionPreparationPhase { Unavailable, Eligible, Pending, Ready, AdmissionReserved, Revoked }
+internal enum FileTransferSessionPreparationPhase { Unavailable, Eligible, Pending, Ready, AdmissionReserved, Revoked, Starting }
 internal enum FileTransferSessionPreparationStatus { Accepted, Idempotent, Rejected, Stale }
 internal enum FileTransferAccelerationRequestPurpose { Unavailable, SessionPreparation, TransferActivation }
 internal sealed record FileTransferAccelerationRequestSelection(FileTransferAccelerationRequestPurpose Purpose,
@@ -33,6 +33,10 @@ internal sealed record FileTransferSessionPreparationLeaseObservation(
     string ListenerRunId, bool LeaseCurrent, bool ListenerReady, bool FileLaneNegotiated,
     DateTimeOffset ObservedUtc);
 
+internal sealed record FileTransferSessionPreparationHandshake(
+    FileTransferSessionPreparationPermit Permit, DateTimeOffset IssuedUtc, DateTimeOffset DeadlineUtc,
+    FileTransferSessionPreparationLeaseObservation? ListenerLease = null);
+
 internal sealed record FileTransferSessionPreparationAdmission(
     FileTransferSessionPreparationScope Scope, long Generation, string TransferId,
     FileTransferDirection Direction, DateTimeOffset ReservedUtc,
@@ -49,6 +53,7 @@ internal sealed record FileTransferSessionPreparationState(Guid ServiceInstanceI
     public FileTransferSessionPreparationPhase Phase { get; init; }
     public FileTransferSessionPreparationScope? Scope { get; init; }
     public FileTransferSessionPreparationPermit? Permit { get; init; }
+    public FileTransferSessionPreparationHandshake? Handshake { get; init; }
     public FileTransferSessionPreparationReadiness? Readiness { get; init; }
     public FileTransferSessionPreparationAdmission? Admission { get; init; }
     public FileTransferInitialTunaReadinessEvidence? ClaimedEvidence { get; init; }
@@ -74,6 +79,8 @@ internal static partial class FileTransferCoordinator
 {
     // Match existing runtime-unlock handshake and initial-readiness bounds.
     private static readonly TimeSpan SessionPreparationHandshakeLifetime = TimeSpan.FromSeconds(60);
+    // The existing paid listener readiness bound; it must not consume the wire handshake lifetime.
+    internal static readonly TimeSpan SessionPreparationListenerStartupLifetime = TimeSpan.FromSeconds(120);
     private static readonly TimeSpan SessionPreparationReadinessLifetime = TimeSpan.FromMinutes(5);
 
     internal static FileTransferAccelerationRequestSelection SelectSessionPreparationRequest(
@@ -138,7 +145,7 @@ internal static partial class FileTransferCoordinator
             attachmentGeneration, securityGeneration, securityIncarnation, session.Value,
             helpee.Value, helper.Value, expires);
         if (scope == state.Scope && state.Phase is FileTransferSessionPreparationPhase.Eligible or
-                FileTransferSessionPreparationPhase.Pending or FileTransferSessionPreparationPhase.Ready)
+                FileTransferSessionPreparationPhase.Starting or FileTransferSessionPreparationPhase.Pending or FileTransferSessionPreparationPhase.Ready)
         {
             return new(state, FileTransferSessionPreparationStatus.Idempotent, "preparation_scope_current");
         }
@@ -161,7 +168,7 @@ internal static partial class FileTransferCoordinator
     internal static FileTransferSessionPreparationDecision BeginSessionPreparation(
         FileTransferSessionPreparationState state, FileTransferSessionPreparationScope scope,
         string nonce, long payerDecisionId, bool localIsPayer, DateTimeOffset deadlineUtc,
-        DateTimeOffset now)
+        DateTimeOffset now, bool listenerStartup = false)
     {
         if (!IsPreparationScopeCurrent(state, scope, now) || string.IsNullOrWhiteSpace(nonce) ||
             payerDecisionId <= 0)
@@ -169,7 +176,7 @@ internal static partial class FileTransferCoordinator
             return PreparationRejected(state, "preparation_request_invalid");
         }
         if (state.Permit is { } current && state.Phase is
-            FileTransferSessionPreparationPhase.Pending or FileTransferSessionPreparationPhase.Ready)
+            FileTransferSessionPreparationPhase.Starting or FileTransferSessionPreparationPhase.Pending or FileTransferSessionPreparationPhase.Ready)
         {
             var exact = current.Nonce == nonce && current.PayerDecisionId == payerDecisionId &&
                 current.LocalIsPayer == localIsPayer && current.DeadlineUtc == deadlineUtc;
@@ -179,7 +186,8 @@ internal static partial class FileTransferCoordinator
                 : PreparationRejected(state, "preparation_episode_already_exists");
         }
         if (state.Phase != FileTransferSessionPreparationPhase.Eligible ||
-            deadlineUtc <= now || deadlineUtc > now + SessionPreparationHandshakeLifetime ||
+            listenerStartup && !localIsPayer ||
+            deadlineUtc <= now || deadlineUtc > now + (listenerStartup ? SessionPreparationListenerStartupLifetime : SessionPreparationHandshakeLifetime) ||
             deadlineUtc > scope.ApprovalExpiresUtc)
         {
             return PreparationRejected(state, "preparation_not_eligible");
@@ -191,8 +199,34 @@ internal static partial class FileTransferCoordinator
         {
             LastPreparationGeneration = permit.Generation,
             Permit = permit,
-            Phase = FileTransferSessionPreparationPhase.Pending,
+            Phase = listenerStartup ? FileTransferSessionPreparationPhase.Starting : FileTransferSessionPreparationPhase.Pending,
+            Handshake = listenerStartup ? null : new(permit, now, deadlineUtc),
         }, FileTransferSessionPreparationStatus.Accepted, "preparation_permitted", permit);
+    }
+
+    internal static FileTransferSessionPreparationDecision BeginSessionPreparationHandshake(
+        FileTransferSessionPreparationState state, FileTransferSessionPreparationPermit permit,
+        FileTransferSessionPreparationLeaseObservation? lease, DateTimeOffset now)
+    {
+        if (!IsSessionPreparationPermitCurrent(state, permit, now))
+            return PreparationRejected(state, "preparation_callback_stale", stale: true);
+        if (state.Phase == FileTransferSessionPreparationPhase.Pending && state.Handshake is not null)
+            return new(state, FileTransferSessionPreparationStatus.Idempotent, "preparation_handshake_current", permit);
+        if (state.Phase != FileTransferSessionPreparationPhase.Starting || !permit.LocalIsPayer ||
+            lease is null || lease.Scope != permit.Scope || lease.SnapshotGeneration != permit.Generation ||
+            lease.LeaseGeneration <= 0 || string.IsNullOrWhiteSpace(lease.ListenerRunId) ||
+            !lease.LeaseCurrent || !lease.ListenerReady || !lease.FileLaneNegotiated ||
+            lease.ObservedUtc < permit.IssuedUtc || lease.ObservedUtc > now)
+            return PreparationRejected(state, "preparation_listener_not_current");
+        var deadline = now + SessionPreparationHandshakeLifetime;
+        if (deadline > permit.Scope.ApprovalExpiresUtc) deadline = permit.Scope.ApprovalExpiresUtc;
+        deadline = DateTimeOffset.FromUnixTimeMilliseconds(deadline.ToUnixTimeMilliseconds());
+        if (deadline <= now) return PreparationRejected(state, "preparation_handshake_expired", stale: true);
+        return new(state with
+        {
+            Phase = FileTransferSessionPreparationPhase.Pending,
+            Handshake = new(permit, now, deadline, lease),
+        }, FileTransferSessionPreparationStatus.Accepted, "preparation_handshake_permitted", permit);
     }
 
     internal static FileTransferSessionPreparationDecision CompleteSessionPreparation(
@@ -209,11 +243,14 @@ internal static partial class FileTransferCoordinator
                 ? new(state, FileTransferSessionPreparationStatus.Idempotent, "preparation_completion_coalesced", permit)
                 : PreparationRejected(state, "preparation_completion_changed", stale: true);
         }
-        if (state.Phase != FileTransferSessionPreparationPhase.Pending || now >= permit.DeadlineUtc ||
+        if (state.Phase != FileTransferSessionPreparationPhase.Pending || state.Handshake is not { } handshake ||
+            !ReferenceEquals(handshake.Permit, permit) || now >= handshake.DeadlineUtc ||
             proof.Nonce != permit.Nonce || proof.PayerDecisionId != permit.PayerDecisionId ||
             proof.OfferGeneration <= 0 || proof.SnapshotGeneration <= 0 || proof.LeaseGeneration <= 0 ||
             string.IsNullOrWhiteSpace(proof.ListenerRunId) || !proof.LeaseCurrent || !proof.ListenerReady ||
-            !proof.FileLaneNegotiated || proof.ObservedUtc < permit.IssuedUtc || proof.ObservedUtc > now ||
+            !proof.FileLaneNegotiated || proof.ObservedUtc < handshake.IssuedUtc || proof.ObservedUtc > now ||
+            handshake.ListenerLease is { } listener && (proof.SnapshotGeneration != listener.SnapshotGeneration ||
+                proof.LeaseGeneration != listener.LeaseGeneration || proof.ListenerRunId != listener.ListenerRunId) ||
             (permit.LocalIsPayer ? !proof.AnswerReceived || !proof.AnswerAckDispatched : !proof.AnswerAckReceived))
         {
             return PreparationRejected(state, "preparation_handshake_incomplete");
@@ -231,7 +268,7 @@ internal static partial class FileTransferCoordinator
         FileTransferSessionPreparationState state, FileTransferSessionPreparationPermit permit)
     {
         if (!ReferenceEquals(state.Permit, permit) || state.Phase is not
-            (FileTransferSessionPreparationPhase.Pending or FileTransferSessionPreparationPhase.Ready))
+            (FileTransferSessionPreparationPhase.Starting or FileTransferSessionPreparationPhase.Pending or FileTransferSessionPreparationPhase.Ready))
         {
             return PreparationRejected(state, "preparation_retirement_stale", stale: true);
         }
@@ -323,7 +360,9 @@ internal static partial class FileTransferCoordinator
         FileTransferSessionPreparationPermit permit, DateTimeOffset now)
         => IsPreparationScopeCurrent(state, permit.Scope, now) && ReferenceEquals(state.Permit, permit) &&
             permit.AdmissionGeneration == state.AdmissionGeneration && now >= permit.IssuedUtc &&
-            (state.Phase == FileTransferSessionPreparationPhase.Pending && now < permit.DeadlineUtc ||
+            (state.Phase == FileTransferSessionPreparationPhase.Starting && now < permit.DeadlineUtc ||
+             state.Phase == FileTransferSessionPreparationPhase.Pending && state.Handshake is { } handshake &&
+             ReferenceEquals(handshake.Permit, permit) && now >= handshake.IssuedUtc && now < handshake.DeadlineUtc ||
              state.Phase == FileTransferSessionPreparationPhase.Ready && state.Readiness is { } ready &&
              now >= ready.Proof.ObservedUtc && now < ready.ExpiresUtc);
 
@@ -346,7 +385,7 @@ internal static partial class FileTransferCoordinator
         => direction is FileTransferDirection.Inbound or FileTransferDirection.Outbound;
 
     private static FileTransferSessionPreparationState ClearSessionPreparation(FileTransferSessionPreparationState state)
-        => state with { Permit = null, Readiness = null, Admission = null, ClaimedEvidence = null };
+        => state with { Permit = null, Handshake = null, Readiness = null, Admission = null, ClaimedEvidence = null };
 
     private static FileTransferSessionPreparationDecision PreparationRejected(
         FileTransferSessionPreparationState state, string reason, bool stale = false)

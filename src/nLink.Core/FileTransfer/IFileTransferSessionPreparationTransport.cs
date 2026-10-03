@@ -31,7 +31,9 @@ internal interface IFileTransferSessionPreparationAuthority
         => new(FileTransferAccelerationRequestPurpose.Unavailable, "preparation_selection_unsupported");
     FileTransferSessionPreparationDecision Begin(FileTransferSessionPreparationAttachment attachment,
         FileTransferSessionPreparationSecurityEpoch epoch, string nonce, long payerDecisionId,
-        bool localIsPayer, DateTimeOffset deadlineUtc);
+        bool localIsPayer, DateTimeOffset deadlineUtc, bool listenerStartup = false);
+    FileTransferSessionPreparationDecision BeginHandshake(FileTransferSessionPreparationAttachment attachment,
+        FileTransferSessionPreparationSecurityEpoch epoch, FileTransferSessionPreparationPermit permit);
     FileTransferSessionPreparationDecision Complete(FileTransferSessionPreparationAttachment attachment,
         FileTransferSessionPreparationSecurityEpoch epoch, FileTransferSessionPreparationPermit permit,
         FileTransferSessionPreparationProof proof);

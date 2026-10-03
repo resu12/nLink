@@ -82,9 +82,15 @@ A preparation permit binds all of the following:
   session establishment/replacement, not arbitrary status notifications.
 - A monotonic preparation generation, the current file-admission generation,
   the selected payer and exact handshake episode/nonce once allocated.
-- Its phase deadline and the applicable approval expiry. Pending negotiation
-  keeps the existing handshake deadline. Completed evidence keeps the existing
-  initial-readiness lifetime; this work does not extend either timeout.
+- Its phase deadline and the applicable approval expiry. The 2026-10-03 approved
+  lifetime split puts payer listener startup in `Starting`, bounded by the
+  existing 120-second listener readiness limit. Only a Core decision on a fresh,
+  exact current execution/lease observation enters `Pending` and issues the
+  existing 60-second wire-handshake deadline. Duplicate requests renew neither
+  phase; both remain approval-bound. Startup alone supplies no readiness or
+  route authority. Completed evidence keeps the existing initial-readiness
+  lifetime. GUI acceptance deadlines, provider requirements and route proofs
+  are unchanged.
 
 The permit contains no file route or runtime authority. A transport cannot
 issue it to itself. The remote peer independently obtains its own Core permit;

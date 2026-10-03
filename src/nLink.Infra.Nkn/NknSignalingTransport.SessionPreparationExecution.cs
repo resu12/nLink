@@ -27,6 +27,7 @@ public sealed partial class NknSignalingTransport
         public readonly TaskCompletionSource<SessionPreparationInbound> Reply = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public readonly TaskCompletionSource<bool> Handshake = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public bool HandshakeStarted;
+        public FileTransferSessionPreparationHandshake? HandshakePermit;
         public string Identity => $"preparation:{Execution.Permit.Scope.SecurityIncarnation:N}:{Execution.Permit.Generation}:{Execution.Permit.Nonce}";
     }
 

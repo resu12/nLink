@@ -39,10 +39,10 @@ internal sealed class FileTransferSessionPreparationExecution
         {
             if (cancellation.IsCancellationRequested) return;
             if (ReferenceEquals(state.Permit, Permit) && state.Phase is
-                FileTransferSessionPreparationPhase.Pending or FileTransferSessionPreparationPhase.Ready)
+                FileTransferSessionPreparationPhase.Starting or FileTransferSessionPreparationPhase.Pending or FileTransferSessionPreparationPhase.Ready)
             {
                 readiness = state.Readiness;
-                expiresUtc = readiness?.ExpiresUtc ?? Permit.DeadlineUtc;
+                expiresUtc = readiness?.ExpiresUtc ?? state.Handshake?.DeadlineUtc ?? Permit.DeadlineUtc;
             }
             else if (state.Phase == FileTransferSessionPreparationPhase.AdmissionReserved &&
                 readiness is not null && ReferenceEquals(state.Admission?.Readiness, readiness))

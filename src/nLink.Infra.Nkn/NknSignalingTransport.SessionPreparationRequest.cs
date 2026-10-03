@@ -48,12 +48,12 @@ public sealed partial class NknSignalingTransport
                 CaptureRuntimeUnlockPostFallbackSchedulingBoundary(epoch.SessionId).Kind != RuntimeUnlockPostFallbackSchedulingBoundaryKind.NoFallback)
                 return;
             var existing = selected.Permit;
-            var deadline = DateTimeOffset.UtcNow.AddSeconds(60);
+            var deadline = DateTimeOffset.UtcNow + FileTransferCoordinator.SessionPreparationListenerStartupLifetime;
             if (deadline > epoch.Security!.ApprovalExpiresAt!.Value) deadline = epoch.Security.ApprovalExpiresAt.Value;
             deadline = DateTimeOffset.FromUnixTimeMilliseconds(deadline.ToUnixTimeMilliseconds());
             var decision = attachment.Authority.Begin(attachment, epoch, existing?.Nonce ?? Guid.NewGuid().ToString("N"),
                 existing?.PayerDecisionId ?? ResolvePayerDecisionIdForNegotiation("runtime_unlock"), true,
-                existing?.DeadlineUtc ?? deadline);
+                existing?.DeadlineUtc ?? deadline, listenerStartup: true);
             if (decision.Permit is not { LocalIsPayer: true } permit) return;
             ownedPermit = permit;
             started = await StartSessionPreparationHandshakeAsync(permit, null, ct).ConfigureAwait(false);

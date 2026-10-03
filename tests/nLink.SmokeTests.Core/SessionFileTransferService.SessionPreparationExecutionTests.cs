@@ -8,6 +8,59 @@ namespace NLink.SmokeTests;
 public sealed partial class SessionFileTransferServicePreparationTests
 {
     [Theory]
+    [InlineData("ready")]
+    [InlineData("missing_lease")]
+    [InlineData("missing_execution")]
+    [InlineData("reset_during_capture")]
+    [InlineData("canceled_during_capture")]
+    [InlineData("admission")]
+    [Trait("FileTransferCoordinatorSuite", "SessionPreparationExecution")]
+    public async Task ExecutionBinding_StartupTransitionRechecksLifetimeAndQueuedTimer(string outcome)
+    {
+        using var transport = new PreparationTransport();
+        using var service = new SessionFileTransferService();
+        service.AttachTransport(transport);
+        transport.Install();
+        var attachment = transport.SessionPreparationLifecycle.Attachment!;
+        var epoch = transport.SessionPreparationLifecycle.Current!;
+        var permit = attachment.Authority.Begin(attachment, epoch, "cold", 1, true,
+            DateTimeOffset.UtcNow.AddMilliseconds(500), listenerStartup: true).Permit!;
+        if (outcome == "missing_execution")
+        {
+            Assert.NotEqual(FileTransferSessionPreparationStatus.Accepted, attachment.Authority.BeginHandshake(attachment, epoch, permit).Status);
+            Assert.Equal(0, transport.LeaseReads);
+            return;
+        }
+        var execution = Assert.IsType<FileTransferSessionPreparationExecution>(attachment.Authority.BindExecution(attachment, epoch, permit));
+        if (outcome == "missing_lease") transport.LeaseAvailable = false;
+        if (outcome == "reset_during_capture") transport.BeforeLeaseRead = service.ResetSessionState;
+        if (outcome == "canceled_during_capture") transport.BeforeLeaseRead = execution.Retire;
+        if (outcome == "admission") await Start(service);
+        var decision = attachment.Authority.BeginHandshake(attachment, epoch, permit);
+        if (outcome != "ready")
+        {
+            Assert.NotEqual(FileTransferSessionPreparationStatus.Accepted, decision.Status);
+            Assert.Null(decision.State.Readiness);
+            return;
+        }
+        Assert.Equal(FileTransferSessionPreparationStatus.Accepted, decision.Status);
+        typeof(FileTransferSessionPreparationExecution).GetMethod("Expire", BindingFlags.Instance | BindingFlags.NonPublic)!.Invoke(execution, null);
+        Assert.True(execution.AllowsPreparation);
+        Assert.Equal(decision.State.Handshake!.DeadlineUtc,
+            typeof(FileTransferSessionPreparationExecution).GetField("expiresUtc", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(execution));
+        var duplicate = attachment.Authority.BeginHandshake(attachment, epoch, permit);
+        Assert.Equal(FileTransferSessionPreparationStatus.Idempotent, duplicate.Status);
+        Assert.Same(decision.State, duplicate.State);
+        await Task.Delay(600);
+        Assert.True(execution.AllowsPreparation); // The old startup deadline has passed; only Core's handshake deadline applies.
+        Assert.Equal(FileTransferSessionPreparationStatus.Accepted,
+            attachment.Authority.Complete(attachment, epoch, permit, Proof(permit)).Status);
+        service.ResetSessionState();
+        Assert.True(execution.Cancellation.IsCancellationRequested);
+        Assert.NotEqual(FileTransferSessionPreparationStatus.Accepted, attachment.Authority.BeginHandshake(attachment, epoch, permit).Status);
+    }
+
+    [Theory]
     [InlineData("reset")]
     [InlineData("detach")]
     [InlineData("dispose")]

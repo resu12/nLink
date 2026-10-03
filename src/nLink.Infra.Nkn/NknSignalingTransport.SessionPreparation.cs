@@ -110,10 +110,22 @@ public sealed partial class NknSignalingTransport : IFileTransferSessionPreparat
     {
         // No Core callback under accelerationGate. This is a current-state
         // decision only; lane/network effects still require their own fence.
+        PreparationLaneWork? work;
+        lock (preparationExecutionGate) work = preparationLaneWork;
+        DateTimeOffset deadline;
+        if (work is not null && ReferenceEquals(work.Execution.Permit, permit))
+        {
+            lock (work.Gate)
+            {
+                if (work.HandshakePermit is not { } handshake) return false;
+                deadline = handshake.DeadlineUtc;
+            }
+        }
+        else deadline = permit.DeadlineUtc;
         return message.Type == (permit.LocalIsPayer
                 ? MsgType.SessionPreparationAnswer : MsgType.SessionPreparationAnswerAck) &&
             message.Accepted && message.Nonce == permit.Nonce && message.PayerDecisionId == permit.PayerDecisionId &&
-            message.DeadlineUtc.ToUnixTimeMilliseconds() == permit.DeadlineUtc.ToUnixTimeMilliseconds() &&
+            message.DeadlineUtc.ToUnixTimeMilliseconds() == deadline.ToUnixTimeMilliseconds() &&
             message.Epoch.Id == permit.Scope.SecurityIncarnation && message.Epoch.SessionId == permit.Scope.SessionId &&
             IsSessionPreparationInputLifetimeCurrent(message.Attachment, message.Epoch) &&
             message.Attachment.Authority.IsCurrent(message.Attachment, message.Epoch, permit);

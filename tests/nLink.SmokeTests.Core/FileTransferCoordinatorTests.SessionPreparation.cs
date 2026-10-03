@@ -7,6 +7,132 @@ namespace NLink.SmokeTests;
 public sealed partial class FileTransferCoordinatorTests
 {
     [Theory]
+    [InlineData(58)]
+    [InlineData(119)]
+    [Trait("FileTransferCoordinatorSuite", "SessionPreparation")]
+    public void SessionPreparation_ColdStartupGetsOneSeparateHandshakeDeadline(int startupSeconds)
+    {
+        var f = CreateSessionPreparationFixture();
+        var eligible = FileTransferCoordinator.RetireSessionPreparationEpisode(f.State, f.Permit).State;
+        var startup = FileTransferCoordinator.BeginSessionPreparation(eligible, f.Permit.Scope, "cold", 2, true,
+            f.Now.AddSeconds(120), f.Now, listenerStartup: true);
+        var permit = startup.Permit!;
+        Assert.Equal(FileTransferSessionPreparationPhase.Starting, startup.State.Phase);
+        Assert.Null(startup.State.Handshake);
+        Assert.Null(FileTransferCoordinator.CompleteSessionPreparation(startup.State, permit, f.Proof, f.Now).State.Readiness);
+        var startupDuplicate = FileTransferCoordinator.BeginSessionPreparation(startup.State, permit.Scope,
+            permit.Nonce, permit.PayerDecisionId, true, permit.DeadlineUtc, f.Now.AddSeconds(1), listenerStartup: true);
+        Assert.Equal(FileTransferSessionPreparationStatus.Idempotent, startupDuplicate.Status);
+        Assert.Same(startup.State, startupDuplicate.State);
+        var now = f.Now.AddSeconds(startupSeconds);
+        var lease = f.Lease with { SnapshotGeneration = permit.Generation, ObservedUtc = now };
+        var handshake = FileTransferCoordinator.BeginSessionPreparationHandshake(startup.State, permit, lease, now);
+        Assert.Equal(FileTransferSessionPreparationStatus.Accepted, handshake.Status);
+        Assert.Same(permit, handshake.State.Handshake!.Permit);
+        Assert.InRange((handshake.State.Handshake.DeadlineUtc - now).TotalSeconds, 59.999, 60);
+        Assert.Null(handshake.State.Readiness);
+        Assert.Null(handshake.State.ClaimedEvidence);
+        var duplicate = FileTransferCoordinator.BeginSessionPreparationHandshake(handshake.State, permit, lease, now.AddSeconds(1));
+        Assert.Equal(FileTransferSessionPreparationStatus.Idempotent, duplicate.Status);
+        Assert.Same(handshake.State, duplicate.State);
+        var proof = f.Proof with { Nonce = permit.Nonce, PayerDecisionId = permit.PayerDecisionId,
+            SnapshotGeneration = permit.Generation, ObservedUtc = now.AddSeconds(20) };
+        var ready = FileTransferCoordinator.CompleteSessionPreparation(handshake.State, permit, proof, proof.ObservedUtc);
+        Assert.Equal(FileTransferSessionPreparationStatus.Accepted, ready.Status);
+        Assert.Null(ready.State.ClaimedEvidence);
+        Assert.False(FileTransferCoordinator.IsSessionPreparationPermitCurrent(handshake.State, permit, handshake.State.Handshake.DeadlineUtc));
+        Assert.NotEqual(FileTransferSessionPreparationStatus.Accepted,
+            FileTransferCoordinator.BeginSessionPreparationHandshake(handshake.State, permit, lease, handshake.State.Handshake.DeadlineUtc).Status);
+    }
+
+    [Theory]
+    [InlineData("copied_permit")]
+    [InlineData("expired")]
+    [InlineData("revoked")]
+    [InlineData("admission")]
+    [InlineData("missing_lease")]
+    [InlineData("scope")]
+    [InlineData("snapshot")]
+    [InlineData("generation")]
+    [InlineData("run")]
+    [InlineData("lease_lost")]
+    [InlineData("listener_unready")]
+    [InlineData("no_file_lane")]
+    [InlineData("old_capture")]
+    [InlineData("future_capture")]
+    [Trait("FileTransferCoordinatorSuite", "SessionPreparation")]
+    public void SessionPreparation_StartupCannotBorrowOrRenewHandshake(string mutation)
+    {
+        var f = CreateSessionPreparationFixture();
+        var eligible = FileTransferCoordinator.RetireSessionPreparationEpisode(f.State, f.Permit).State;
+        var startup = FileTransferCoordinator.BeginSessionPreparation(eligible, f.Permit.Scope, "cold", 2, true,
+            f.Now.AddSeconds(120), f.Now, listenerStartup: true);
+        var permit = startup.Permit!;
+        var now = f.Now.AddSeconds(58);
+        var lease = f.Lease with { SnapshotGeneration = permit.Generation, ObservedUtc = now };
+        lease = mutation switch
+        {
+            "scope" => lease with { Scope = lease.Scope with { SessionId = "wrong" } },
+            "snapshot" => lease with { SnapshotGeneration = 0 },
+            "generation" => lease with { LeaseGeneration = 0 },
+            "run" => lease with { ListenerRunId = "" },
+            "lease_lost" => lease with { LeaseCurrent = false },
+            "listener_unready" => lease with { ListenerReady = false },
+            "no_file_lane" => lease with { FileLaneNegotiated = false },
+            "old_capture" => lease with { ObservedUtc = f.Now.AddTicks(-1) },
+            "future_capture" => lease with { ObservedUtc = now.AddTicks(1) },
+            _ => lease,
+        };
+        var state = mutation switch
+        {
+            "revoked" => FileTransferCoordinator.RevokeSessionPreparationScope(startup.State, permit.Scope).State,
+            "admission" => FileTransferCoordinator.ReserveSessionPreparationAdmission(startup.State, permit.Scope,
+                "real-transfer", FileTransferDirection.Outbound, now).State,
+            _ => startup.State,
+        };
+        var rejected = FileTransferCoordinator.BeginSessionPreparationHandshake(state,
+            mutation == "copied_permit" ? permit with { } : permit, mutation == "missing_lease" ? null : lease,
+            mutation == "expired" ? permit.DeadlineUtc : now);
+        Assert.NotEqual(FileTransferSessionPreparationStatus.Accepted, rejected.Status);
+        Assert.Same(state, rejected.State);
+        Assert.Null(rejected.State.Handshake);
+        Assert.Null(rejected.State.Readiness);
+    }
+
+    [Fact]
+    [Trait("FileTransferCoordinatorSuite", "SessionPreparation")]
+    public void SessionPreparation_StartupAndHandshakeRemainApprovalBoundAndLeaseBound()
+    {
+        var f = CreateSessionPreparationFixture();
+        var eligible = FileTransferCoordinator.RetireSessionPreparationEpisode(f.State, f.Permit).State;
+        var scope = eligible.Scope! with { ApprovalExpiresUtc = f.Now.AddSeconds(130) };
+        eligible = eligible with { Scope = scope };
+        Assert.Null(FileTransferCoordinator.BeginSessionPreparation(eligible, scope, "cold", 2, false,
+            f.Now.AddSeconds(120), f.Now, listenerStartup: true).Permit);
+        Assert.Null(FileTransferCoordinator.BeginSessionPreparation(eligible, scope, "cold", 2, true,
+            f.Now.AddSeconds(121), f.Now, listenerStartup: true).Permit);
+        var startup = FileTransferCoordinator.BeginSessionPreparation(eligible, scope, "cold", 2, true,
+            f.Now.AddSeconds(120), f.Now, listenerStartup: true);
+        var permit = startup.Permit!;
+        var now = f.Now.AddSeconds(119);
+        var handshake = FileTransferCoordinator.BeginSessionPreparationHandshake(startup.State, permit,
+            f.Lease with { Scope = scope, SnapshotGeneration = permit.Generation, ObservedUtc = now }, now);
+        Assert.Equal(scope.ApprovalExpiresUtc.ToUnixTimeMilliseconds(), handshake.State.Handshake!.DeadlineUtc.ToUnixTimeMilliseconds());
+        var completedProof = f.Proof with { ObservedUtc = now.AddSeconds(1) };
+        foreach (var proof in new[]
+        {
+            completedProof with { ListenerRunId = "replacement" },
+            completedProof with { LeaseGeneration = 2 },
+            completedProof with { ObservedUtc = now.AddTicks(-1) },
+        })
+        {
+            Assert.Null(FileTransferCoordinator.CompleteSessionPreparation(handshake.State, permit,
+                proof with { Nonce = permit.Nonce, PayerDecisionId = permit.PayerDecisionId, SnapshotGeneration = permit.Generation },
+                now.AddSeconds(1)).State.Readiness);
+        }
+    }
+
+    [Theory]
     [InlineData("eligible", true)]
     [InlineData("pending", true)]
     [InlineData("ready", true)]

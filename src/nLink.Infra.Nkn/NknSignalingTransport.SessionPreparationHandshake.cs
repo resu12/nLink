@@ -65,12 +65,21 @@ public sealed partial class NknSignalingTransport
         PreparationLaneWork? work;
         lock (preparationExecutionGate) work = preparationLaneWork;
         if (work is null || !ReferenceEquals(work.Execution.Permit, permit) || !IsPreparationLaneWorkCurrent(work)) return false;
+        if (!IsPreparationLeaseCurrent(work, lease)) return false;
+        bool alreadyStarted;
+        lock (work.Gate) alreadyStarted = work.HandshakeStarted;
+        if (alreadyStarted) return await work.Handshake.Task.ConfigureAwait(false);
+        var decision = work.Attachment.Authority.BeginHandshake(work.Attachment, work.Epoch, permit);
+        if (decision.Status is not (FileTransferSessionPreparationStatus.Accepted or FileTransferSessionPreparationStatus.Idempotent) ||
+            decision.State.Handshake is not { } handshake || !ReferenceEquals(handshake.Permit, permit) ||
+            !IsPreparationLeaseCurrent(work, lease)) return false;
         var start = false;
         lock (work.Gate)
         {
             if (!work.HandshakeStarted)
             {
                 work.HandshakeStarted = true;
+                work.HandshakePermit = handshake;
                 start = true;
             }
         }
@@ -85,6 +94,7 @@ public sealed partial class NknSignalingTransport
         try
         {
             var permit = work.Execution.Permit;
+            var deadline = work.HandshakePermit!.DeadlineUtc;
             if (!IsPreparationLeaseCurrent(work, lease)) return;
             if (permit.LocalIsPayer)
             {
@@ -94,7 +104,7 @@ public sealed partial class NknSignalingTransport
                     new TransportAccelerationOfferPayload
                     {
                         SessionId = permit.Scope.SessionId, Nonce = permit.Nonce, PayerDecisionId = permit.PayerDecisionId,
-                        ExpiresAtUnixMs = permit.DeadlineUtc.ToUnixTimeMilliseconds(), SentAtUnixMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+                        ExpiresAtUnixMs = deadline.ToUnixTimeMilliseconds(), SentAtUnixMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
                         SenderRole = ResolveLocalSessionRole(), Trigger = "session_preparation", TunaAddress = address,
                         SidecarProtocolVersion = TunaSidecarProtocolVersion, SupportedLanes = ["file"],
                     }).ConfigureAwait(false)) return;
@@ -103,7 +113,7 @@ public sealed partial class NknSignalingTransport
                 new TransportAccelerationAnswerPayload
                 {
                     SessionId = permit.Scope.SessionId, Nonce = permit.Nonce, PayerDecisionId = permit.PayerDecisionId,
-                    ExpiresAtUnixMs = permit.DeadlineUtc.ToUnixTimeMilliseconds(), Accepted = true,
+                    ExpiresAtUnixMs = deadline.ToUnixTimeMilliseconds(), Accepted = true,
                     SidecarProtocolVersion = TunaSidecarProtocolVersion, SupportedLanes = ["file"],
                 }).ConfigureAwait(false)) return;
 
@@ -113,7 +123,7 @@ public sealed partial class NknSignalingTransport
                 new TransportAccelerationAnswerAckPayload
                 {
                     SessionId = permit.Scope.SessionId, Nonce = permit.Nonce, PayerDecisionId = permit.PayerDecisionId,
-                    ExpiresAtUnixMs = permit.DeadlineUtc.ToUnixTimeMilliseconds(), SentAtUnixMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+                    ExpiresAtUnixMs = deadline.ToUnixTimeMilliseconds(), SentAtUnixMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
                     Accepted = true, SidecarProtocolVersion = TunaSidecarProtocolVersion, SupportedLanes = ["file"],
                 }).ConfigureAwait(false)) return;
 

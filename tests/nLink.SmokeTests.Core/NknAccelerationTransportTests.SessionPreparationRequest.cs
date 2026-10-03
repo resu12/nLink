@@ -9,6 +9,43 @@ public sealed partial class NknAccelerationTransportTests
     [InlineData(false)]
     [InlineData(true)]
     [Trait("FileTransferInfraSuite", "SessionPreparationRequest")]
+    public Task PreparationRequest_ColdListenerStartupDoesNotSpendHandshakeLifetime(bool helperPays)
+        => WithPublicPreparationPairAsync(helperPays, async pair =>
+        {
+            var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            pair.Payer.SessionPreparationBeforeLaneStartForTests = () => { entered.TrySetResult(); return release.Task; };
+            await pair.Payer.RequestAccelerationNegotiationAsync("runtime_unlock", pair.Token);
+            try
+            {
+                await entered.Task.WaitAsync(pair.Token);
+                var state = pair.State(pair.PayerService);
+                Assert.Equal("Starting", state.Phase.ToString());
+                Assert.InRange((state.Permit!.DeadlineUtc - state.Permit.IssuedUtc).TotalSeconds, 119, 120);
+                Assert.Null(state.Readiness);
+                Assert.Empty(pair.Sent);
+                var lifecycle = ((IFileTransferSessionPreparationTransport)pair.Payer).SessionPreparationLifecycle;
+                Assert.False(pair.Payer.IsSessionPreparationReplyCurrent(new(MsgType.SessionPreparationAnswer,
+                    lifecycle.Attachment!, lifecycle.Current!, state.Permit.Nonce, state.Permit.PayerDecisionId,
+                    state.Permit.DeadlineUtc, true, null, null), state.Permit));
+                pair.AssertNoFileEffects();
+            }
+            finally { release.TrySetResult(); }
+            await pair.WaitReady();
+            await WaitPreparationRequestIdle(pair);
+            var ready = pair.State(pair.PayerService);
+            var current = ((IFileTransferSessionPreparationTransport)pair.Payer).SessionPreparationLifecycle;
+            var reply = new SessionPreparationInbound(MsgType.SessionPreparationAnswer, current.Attachment!, current.Current!,
+                ready.Permit!.Nonce, ready.Permit.PayerDecisionId, ready.Handshake!.DeadlineUtc, true, null, null);
+            Assert.True(pair.Payer.IsSessionPreparationReplyCurrent(reply, ready.Permit));
+            Assert.False(pair.Payer.IsSessionPreparationReplyCurrent(reply with { DeadlineUtc = ready.Permit.DeadlineUtc }, ready.Permit));
+            Assert.False(pair.Payer.IsSessionPreparationReplyCurrent(reply, ready.Permit with { }));
+        });
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    [Trait("FileTransferInfraSuite", "SessionPreparationRequest")]
     public Task PreparationRequest_PublicUnlockCompletesReadinessThenActualAdmission(bool helperPays)
         => WithPublicPreparationPairAsync(helperPays, async pair =>
         {
