@@ -1,4 +1,4 @@
-param([string]$RepoRoot, [string]$SourcePath, [switch]$WatchdogOnly)
+param([string]$RepoRoot, [string]$SourcePath, [switch]$WatchdogOnly, [switch]$DecisionClockOnly)
 $ErrorActionPreference = 'Stop'
 . (Join-Path $RepoRoot 'tools/FileTransferSoak/LogParsing.ps1')
 . (Join-Path $RepoRoot 'tools/FileTransferSoak/ArtifactWriters.ps1')
@@ -129,6 +129,13 @@ if ($WatchdogOnly) {
     $cases += @($scopeChanges | Where-Object { $_ -notin @('committed_progress_utc', 'wake_deadline_utc',
         'decision_status', 'decision_reason') } | ForEach-Object { "watchdog_scope_$_" })
 }
+if ($DecisionClockOnly) {
+    $cases = @('decision_timely_receipt_late', 'decision_timely_receipt_at_deadline', 'decision_root_only',
+        'decision_at_deadline', 'decision_after_deadline', 'decision_before_progress', 'decision_after_receipt',
+        'decision_regressed', 'decision_missing_root', 'decision_missing_middle', 'decision_invalid', 'decision_blank',
+        'decision_source_changed', 'decision_conflicting_copy', 'decision_stale_only', 'decision_no_publication',
+        'decision_publication_at_deadline')
+}
 function CopyEvent($event) { $copy = $event.PSObject.Copy(); $copy.Fields = $event.Fields.Clone(); return $copy }
 function Boundary($result) {
     $records = @(foreach ($record in $result.CandidateRecords) { [ordered]@{
@@ -138,15 +145,40 @@ function Boundary($result) {
         recovered=$result.RecoveredCount;unresolved=$result.UnresolvedCount;records=$records}) -Depth 8 -Compress
 }
 foreach ($case in $cases) {
-    $items = @(Fixture ($case.StartsWith('chain_') -or ($WatchdogOnly -and $case -ne 'watchdog_exact') -or
+    $items = @(Fixture (($DecisionClockOnly -and $case -ne 'decision_root_only') -or $case.StartsWith('chain_') -or ($WatchdogOnly -and $case -ne 'watchdog_exact') -or
         $case -in @('rearm_only', 'live_ordering')) ($case -in @('late_only', 'live_ordering', 'watchdog_late')))
     $recheck = @($items | Where-Object { $_.EventName -eq 'filetransfer_v6_frontier_recent_progress_grace_recheck_decided' -and $_.Fields.decision_status -eq 'rechecked' })[0]
     $arms = @($items | Where-Object EventName -eq 'filetransfer_v6_frontier_recent_progress_grace_deferred')
     $stall = @($items | Where-Object EventName -eq 'filetransfer_v6_frontier_request_deferred')[0]
+    if ($DecisionClockOnly) {
+        foreach ($arm in $arms) {
+            $arm.Fields.arm_decision_utc = [DateTimeOffset]::new([long]$arm.Fields.log_writer_attempt_utc_ticks, [TimeSpan]::Zero).ToString('o')
+        }
+        if ($case -ne 'decision_root_only') {
+            $arms[-1].Fields.arm_decision_utc = $origin.AddMilliseconds(1099).ToString('o')
+            $arms[-1].Fields.log_writer_attempt_utc_ticks = [string]$origin.AddMilliseconds(1103).UtcTicks
+            $arms[-1].TimestampUtc = $origin.AddMilliseconds(1103)
+        }
+    }
     if ($case.StartsWith('chain_scope_')) { $arms[1].Fields[$case.Substring('chain_scope_'.Length)] = 'other' }
     if ($WatchdogOnly) { $stall.Fields.reason = 'frontier_stall_repair_due' }
     if ($case.StartsWith('watchdog_scope_')) { $stall.Fields[$case.Substring('watchdog_scope_'.Length)] = 'other' }
     switch ($case) {
+        'decision_timely_receipt_at_deadline' { $arms[-1].Fields.log_writer_attempt_utc_ticks = [string]$origin.AddMilliseconds(1100).UtcTicks }
+        'decision_at_deadline' { $arms[-1].Fields.arm_decision_utc = $origin.AddMilliseconds(1100).ToString('o') }
+        'decision_after_deadline' { $arms[-1].Fields.arm_decision_utc = $origin.AddMilliseconds(1101).ToString('o') }
+        'decision_before_progress' { $arms[0].Fields.arm_decision_utc = $origin.AddMilliseconds(99).ToString('o') }
+        'decision_after_receipt' { $arms[1].Fields.arm_decision_utc = $origin.AddMilliseconds(501).ToString('o') }
+        'decision_regressed' { $arms[-1].Fields.arm_decision_utc = $origin.AddMilliseconds(499).ToString('o') }
+        'decision_missing_root' { $arms[0].Fields.Remove('arm_decision_utc') }
+        'decision_missing_middle' { $arms[1].Fields.Remove('arm_decision_utc') }
+        'decision_invalid' { $arms[-1].Fields.arm_decision_utc = 'invalid' }
+        'decision_blank' { $arms[-1].Fields.arm_decision_utc = '' }
+        'decision_source_changed' { $arms[-1].Fields.route_publication_generation = '999' }
+        'decision_conflicting_copy' { $copy = CopyEvent $arms[-1]; $copy.LineNumber++; $copy.Fields.arm_decision_utc = $origin.AddMilliseconds(1098).ToString('o'); $items += $copy }
+        'decision_stale_only' { $recheck.Fields.decision_status = 'stale'; $recheck.Fields.decision_reason = 'wake_generation_replaced' }
+        'decision_no_publication' { $items = @($items | Where-Object { $_.EventName -ne 'filetransfer_v6_receiver_state_sent' -or $_.Sequence -lt 100 }) }
+        'decision_publication_at_deadline' { @($items | Where-Object EventName -eq 'filetransfer_v6_receiver_state_sent')[-1].Fields.log_writer_attempt_utc_ticks = [string]$origin.AddMilliseconds(1855).UtcTicks }
         'watchdog_duplicate' { $items += (CopyEvent $stall) }
         'watchdog_close_publication' {
             $state = @($items | Where-Object EventName -eq 'filetransfer_v6_receiver_state_sent')[-1]
@@ -292,7 +324,8 @@ foreach ($case in $cases) {
     $items = @($items | Sort-Object Sequence, LineNumber)
     $expected = $case -in @('exact', 'rearm_only', 'chain_duplicate', 'chain_no_stale', 'chain_family_same', 'chain_earlier_root',
         'chain_unrelated_transfer_conflict', 'watchdog_exact', 'watchdog_rearm', 'watchdog_duplicate',
-        'watchdog_close_publication', 'watchdog_zero_write')
+        'watchdog_close_publication', 'watchdog_zero_write', 'decision_timely_receipt_late',
+        'decision_timely_receipt_at_deadline', 'decision_root_only')
     $plain = & $script:FileTransferFallbackFrontierRecentProgressGraceLegacyCorrelation -Events $items
     $index = New-FileTransferFallbackFrontierGraceCorrelationIndex $items
     $indexed = Get-FileTransferFallbackFrontierRecentProgressGraceRecheckCorrelation -Events $items -Index $index

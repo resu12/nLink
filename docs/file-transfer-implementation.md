@@ -268,6 +268,18 @@ The first retained-analysis file to read is `filetransfer-operator-verdict.txt`.
 
 Route-aware logs must include `filetransfer_route_selected`. Route/protocol/runtime/bridge-policy mismatches are hard failures. Legacy no-route logs can still be classified as legacy compatibility evidence, but V5 and `file_tuna_v6` evidence are obsolete-protocol failures.
 
+For the recent-progress grace recheck, the one-second deadline constrains the
+runtime arm decision, not delivery of its diagnostic log. New
+`filetransfer_v6_frontier_recent_progress_grace_deferred` records include
+`arm_decision_utc`, the clock used by that arm guard. The exact owner/source,
+data-session, frontier, consecutive wake generation and unchanged deadline must
+still match. Each decision must be before the deadline, no earlier than the
+preceding recorded boundary, and no later than its own writer receipt. Missing,
+invalid, mixed-clock or contradictory decision evidence cannot close the chain.
+Records without this field retain the historical writer-receipt deadline check;
+old captures are not retroactively accepted. Stall rechecks and forward receiver
+publication still require their original deadlines and Coordinator authority.
+
 ## Current Limits
 
 - Single-file transfers only.

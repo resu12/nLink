@@ -1415,6 +1415,12 @@ function Get-FileTransferRecentProgressGraceStallProgressClosure {
         if (-not [DateTimeOffset]::TryParse((Field $Event $Name), [ref]$value)) { return 0L }
         return $value.UtcTicks
     }
+    function ArmTicks($Event) {
+        # New records bind the clock used by the runtime arm guard to this exact
+        # source/wake. Historical records retain the stricter writer-time rule.
+        if ($Event.Fields.ContainsKey('arm_decision_utc')) { return Ticks $Event 'arm_decision_utc' }
+        return Number $Event 'log_writer_attempt_utc_ticks'
+    }
     function Equal($Left, $Right, [string[]]$Names) {
         foreach ($name in $Names) {
             $value = Field $Left $name
@@ -1476,7 +1482,10 @@ function Get-FileTransferRecentProgressGraceStallProgressClosure {
         (Field $_ 'decision_status') -cin @('held', 'rearmed') -and (Field $_ 'authority_effect') -ceq 'none' -and
         (Number $_ 'highest_received_chunk_index') -ge (Number $Episode.Event 'highest_received_chunk_index') -and
         (Number $_ 'highest_received_chunk_index') -le (Number $recheck 'highest_received_chunk_index') -and
-        (Number $Episode.Event 'log_writer_attempt_utc_ticks') -lt (Ticks $_ 'wake_deadline_utc')
+        (Number $Episode.Event 'log_writer_attempt_utc_ticks') -lt (Ticks $_ 'wake_deadline_utc') -and
+        (ArmTicks $_) -ge (Ticks $_ 'committed_progress_utc') -and
+        (ArmTicks $_) -le (Number $_ 'log_writer_attempt_utc_ticks') -and
+        (ArmTicks $_) -lt (Ticks $_ 'wake_deadline_utc')
     })
     if ($arms.Count -gt 1) { return $null }
     $recentArms = @(Named 'filetransfer_v6_frontier_recent_progress_grace_deferred' | Where-Object {
@@ -1493,6 +1502,8 @@ function Get-FileTransferRecentProgressGraceStallProgressClosure {
         $recentDeadline = Ticks $recheck 'wake_deadline_utc'
         $candidateTicks = Number $Episode.Event 'log_writer_attempt_utc_ticks'
         $rootTicks = Number $root 'log_writer_attempt_utc_ticks'
+        $rootDecisionTicks = ArmTicks $root
+        $decisionClock = $root.Fields.ContainsKey('arm_decision_utc')
         $generation = Number $root 'wake_generation'
         $highest = Number $root 'highest_received_chunk_index'
         if (-not (Equal $root $recheck $chainScope) -or
@@ -1501,6 +1512,8 @@ function Get-FileTransferRecentProgressGraceStallProgressClosure {
             $highest -lt (Number $Episode.Event 'highest_received_chunk_index') -or
             $highest -gt (Number $recheck 'highest_received_chunk_index') -or
             $rootTicks -lt (Ticks $root 'committed_progress_utc') -or $rootTicks -gt $candidateTicks -or
+            $rootDecisionTicks -lt (Ticks $root 'committed_progress_utc') -or
+            $rootDecisionTicks -gt $rootTicks -or $rootDecisionTicks -ge $recentDeadline -or
             $candidateTicks -ge $recentDeadline) { return $null }
         if ($links.Count -eq 0) { return $null }
         $previousTicks = $candidateTicks
@@ -1508,11 +1521,14 @@ function Get-FileTransferRecentProgressGraceStallProgressClosure {
             $nextGeneration = Number $link 'wake_generation'
             $nextHighest = Number $link 'highest_received_chunk_index'
             $nextTicks = Number $link 'log_writer_attempt_utc_ticks'
+            $nextDecisionTicks = ArmTicks $link
             if (-not (Equal $link $root $chainScope) -or
                 (Field $link 'decision_status') -cne 'rearmed' -or
                 (Field $link 'decision_reason') -cne 'highest_received_advanced' -or (Field $link 'authority_effect') -cne 'none' -or
                 $nextGeneration -le 0 -or ($nextGeneration - $generation) -ne 1 -or $nextHighest -le $highest -or
-                $nextTicks -lt $previousTicks -or $nextTicks -ge $recentDeadline) { return $null }
+                $link.Fields.ContainsKey('arm_decision_utc') -ne $decisionClock -or
+                $nextTicks -lt $previousTicks -or $nextDecisionTicks -lt $previousTicks -or
+                $nextDecisionTicks -gt $nextTicks -or $nextDecisionTicks -ge $recentDeadline) { return $null }
             $generation = $nextGeneration
             $highest = $nextHighest
             $previousTicks = $nextTicks

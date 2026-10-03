@@ -5601,7 +5601,7 @@ public sealed partial class SessionFileTransferService
                         out fallbackV6ProofBootstrapRecheckResult);
             }
 
-            ArmOrClearInboundV6FrontierRecentProgressGraceWakeLocked(context, progressUtc);
+            ArmOrClearInboundV6FrontierRecentProgressGraceWakeLocked(context, DateTimeOffset.UtcNow);
             frontierStallGraceWakeRefreshed = RefreshInboundV6FrontierStallGraceWakeForHighestProgressLocked(context);
 
             snapshot = CreateSnapshotLocked();
@@ -8357,7 +8357,8 @@ public sealed partial class SessionFileTransferService
         LogInboundV6FrontierRecentProgressGraceDeferred(
             wake,
             current is null ? "held" : "rearmed",
-            current is null ? "recent_progress_grace_current" : "highest_received_advanced");
+            current is null ? "recent_progress_grace_current" : "highest_received_advanced",
+            now);
     }
 
     private void SchedulePendingInboundV6FrontierRecentProgressGraceWake(InboundTransferContext context)
@@ -8618,10 +8619,12 @@ public sealed partial class SessionFileTransferService
     private static void LogInboundV6FrontierRecentProgressGraceDeferred(
         InboundV6FrontierRecentProgressGraceWake wake,
         string status,
-        string reason)
+        string reason,
+        DateTimeOffset decisionUtc)
         => LocalOperationalLog.Info(
             "FileTransferService",
-            $"event=filetransfer_v6_frontier_recent_progress_grace_deferred; {FileTransferDiagnosticScopeEvidence.FormatDataSession(wake.DataSessionIdentity)}{FileTransferDiagnosticScopeEvidence.Format(wake.SessionId, wake.TransferId)}authority_effect=none; decision_status={FormatProtocolLogValue(status)}; decision_reason={FormatProtocolLogValue(reason)}; direction=inbound; transfer_id={FormatProtocolLogValue(wake.TransferId)}; session_id={FormatProtocolLogValue(wake.SessionId)}; route={FormatProtocolLogValue(wake.RouteToken)}; protocol_version={wake.ProtocolVersion}; live_route_epoch={wake.LiveRouteEpoch}; runtime_generation={wake.RuntimeGeneration}; terminal_generation={wake.TerminalGeneration}; leg_generation={wake.LegGeneration}; transport_epoch={wake.TransportEpoch}; bridge_recovery_generation={wake.BridgeRecoveryGeneration}; bridge_decision_generation={wake.BridgeDecisionGeneration}; checkpoint_request_id={FormatProtocolLogValue(wake.CheckpointRequestId)}; checkpoint_generation={wake.CheckpointGeneration}; route_publication_generation={wake.RoutePublicationGeneration}; route_commit_generation={wake.RouteCommitGeneration}; data_session_identity={FormatProtocolLogValue(wake.DataSessionIdentity)}; data_session_generation={wake.DataSessionGeneration}; frontier_chunk_index={wake.FrontierChunkIndex}; highest_received_chunk_index={wake.HighestReceivedChunkIndex}; committed_progress_utc={FormatProtocolLogValue(wake.CommittedProgressUtc.ToString("O"))}; wake_generation={wake.WakeGeneration}; wake_deadline_utc={FormatProtocolLogValue(wake.DueUtc.ToString("O"))}");
+            $"event=filetransfer_v6_frontier_recent_progress_grace_deferred; arm_decision_utc={FormatProtocolLogValue(decisionUtc.ToString("O"))}; " +
+            $"{FileTransferDiagnosticScopeEvidence.FormatDataSession(wake.DataSessionIdentity)}{FileTransferDiagnosticScopeEvidence.Format(wake.SessionId, wake.TransferId)}authority_effect=none; decision_status={FormatProtocolLogValue(status)}; decision_reason={FormatProtocolLogValue(reason)}; direction=inbound; transfer_id={FormatProtocolLogValue(wake.TransferId)}; session_id={FormatProtocolLogValue(wake.SessionId)}; route={FormatProtocolLogValue(wake.RouteToken)}; protocol_version={wake.ProtocolVersion}; live_route_epoch={wake.LiveRouteEpoch}; runtime_generation={wake.RuntimeGeneration}; terminal_generation={wake.TerminalGeneration}; leg_generation={wake.LegGeneration}; transport_epoch={wake.TransportEpoch}; bridge_recovery_generation={wake.BridgeRecoveryGeneration}; bridge_decision_generation={wake.BridgeDecisionGeneration}; checkpoint_request_id={FormatProtocolLogValue(wake.CheckpointRequestId)}; checkpoint_generation={wake.CheckpointGeneration}; route_publication_generation={wake.RoutePublicationGeneration}; route_commit_generation={wake.RouteCommitGeneration}; data_session_identity={FormatProtocolLogValue(wake.DataSessionIdentity)}; data_session_generation={wake.DataSessionGeneration}; frontier_chunk_index={wake.FrontierChunkIndex}; highest_received_chunk_index={wake.HighestReceivedChunkIndex}; committed_progress_utc={FormatProtocolLogValue(wake.CommittedProgressUtc.ToString("O"))}; wake_generation={wake.WakeGeneration}; wake_deadline_utc={FormatProtocolLogValue(wake.DueUtc.ToString("O"))}");
 
     private static void LogInboundV6FrontierRecentProgressGraceRecheckDecision(
         InboundV6FrontierRecentProgressGraceWake wake,
