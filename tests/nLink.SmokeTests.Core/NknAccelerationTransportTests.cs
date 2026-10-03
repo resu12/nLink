@@ -3560,6 +3560,11 @@ public sealed partial class NknAccelerationTransportTests : CoreSmokeTestsBase, 
     [InlineData("sidecar_tuna_stream_eof", "sidecar_tuna_stream_eof", true)]
     [InlineData("remote_closed", "sidecar_remote_closed", true)]
     [InlineData("sidecar_remote_closed", "sidecar_remote_closed", true)]
+    [InlineData("listener_terminal_tuna_write_failed", "sidecar_tuna_write_failed", true)]
+    [InlineData("sidecar_listener_terminal_tuna_write_failed", "sidecar_tuna_write_failed", true)]
+    [InlineData("listener_terminal_tuna_stream_eof", "sidecar_tuna_stream_eof", true)]
+    [InlineData("sidecar_listener_terminal_tuna_stream_eof", "sidecar_tuna_stream_eof", true)]
+    [InlineData("listener_terminal_unknown", "sidecar_listener_terminal_unknown", false)]
     [Trait("Category", "Smoke")]
     public void TunaFallbackProof_SidecarResetReasonNormalizerDoesNotDoublePrefix(
         string reason,
@@ -30009,10 +30014,12 @@ public sealed partial class NknAccelerationTransportTests : CoreSmokeTestsBase, 
     }
 
     [Theory]
-    [InlineData("byte_cap_reached")]
-    [InlineData("remote_byte_cap_reached")]
+    [InlineData("byte_cap_reached", "sidecar_byte_cap_reached")]
+    [InlineData("remote_byte_cap_reached", "sidecar_remote_byte_cap_reached")]
+    [InlineData("listener_terminal_tuna_write_failed", "sidecar_tuna_write_failed")]
+    [InlineData("listener_terminal_tuna_stream_eof", "sidecar_tuna_stream_eof")]
     [Trait("Category", "Smoke")]
-    public async Task FileTransferByteCapFallback_WaitsForBulkReceiveProof(string reason)
+    public async Task FileTransferSidecarDropFallback_WaitsForBulkReceiveProof(string reason, string expectedReason)
     {
         FakeNknClient.ResetNetwork();
         try
@@ -30056,7 +30063,7 @@ public sealed partial class NknAccelerationTransportTests : CoreSmokeTestsBase, 
             Assert.True(dataSession.IsAvailable);
             var logTail = ReadOperationalLogTail(logStart);
             Assert.Contains("event=filetransfer_fallback_nkn_probe_started;", logTail, StringComparison.Ordinal);
-            Assert.Contains($"reason=sidecar_{reason}", logTail, StringComparison.Ordinal);
+            Assert.Contains($"reason={expectedReason}", logTail, StringComparison.Ordinal);
             Assert.Contains("trigger=cap_handoff_immediate", logTail, StringComparison.Ordinal);
             Assert.Contains("delay_ms=0", logTail, StringComparison.Ordinal);
             Assert.Contains("event=filetransfer_fallback_nkn_proof_pending;", logTail, StringComparison.Ordinal);

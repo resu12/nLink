@@ -13146,7 +13146,14 @@ public sealed partial class NknSignalingTransport
 
     internal static string NormalizeAccelerationSidecarResetReason(string? reason)
     {
-        var normalized = SanitizeLogToken(reason);
+        var normalized = SanitizeLogToken(reason) switch
+        {
+            "listener_terminal_tuna_write_failed" or "sidecar_listener_terminal_tuna_write_failed"
+                => "sidecar_tuna_write_failed",
+            "listener_terminal_tuna_stream_eof" or "sidecar_listener_terminal_tuna_stream_eof"
+                => "sidecar_tuna_stream_eof",
+            var other => other,
+        };
         return normalized.StartsWith("sidecar_", StringComparison.Ordinal)
             ? normalized
             : $"sidecar_{normalized}";

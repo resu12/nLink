@@ -361,7 +361,7 @@ public sealed partial class SessionFileTransferV4SenderTests
             .Invoke(service, [dataSession]);
         StartCoordinatorSnapshotStreamForTest(context);
         Assert.NotNull(typeof(SessionFileTransferService).GetMethod("EnsureOutboundTransferLegLocked", BindingFlags.Instance | BindingFlags.NonPublic)!
-            .Invoke(service, [context, "initial_activation_test_start", null, null]));
+            .Invoke(service, [context, "initial_activation_test_start", null, null, null, false]));
         var publish = typeof(SessionFileTransferService).GetMethods(BindingFlags.Instance | BindingFlags.NonPublic)
             .Single(method => method.Name == "TryPublishRouteSelectedIfAuthorizedLocked" &&
                 method.GetParameters()[0].ParameterType == context.GetType() && method.GetParameters()[4].ParameterType.IsByRef);
