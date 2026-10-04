@@ -853,6 +853,8 @@ public sealed partial class SessionFileTransferService
 
     private bool TryPauseOutboundTransportLocked(OutboundTransferContext context, string reason, bool requiresResumeRequest)
     {
+        // A same-source availability notification cannot replace the Coordinator's current hold.
+        if (context.BootstrapSourceHoldExecution is { } hold && IsBootstrapSourceHoldExecutionCurrentLocked(hold)) { return false; }
         if (HasBootstrapSourceHoldLocked(context)) { InvalidatePendingBootstrapCorrelationLocked(CreateCoordinatorStateLocked(context), "bootstrap_transport_paused"); }
         if (context.IsTerminal)
         {

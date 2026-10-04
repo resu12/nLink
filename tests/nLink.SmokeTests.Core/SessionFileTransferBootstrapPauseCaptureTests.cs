@@ -67,11 +67,9 @@ public sealed partial class SessionFileTransferV4SenderTests
             release.TrySetResult();
             await WaitUntilAsync(() => ((IDictionary)GetPrivatePropertyValue(context, "ActiveBootstrapSourceCallbacks")!).Count == 0,
                 timeoutMs: 5000);
-            // Callback completion is diagnostic-only. A fresh delivery of the
-            // same exact peer proof, not that callback, requests the next hold.
-            Assert.Empty(bridge.Executions);
+            // Callback completion is diagnostic-only. The current supervisor
+            // independently reevaluates the retained exact peer proof.
             Assert.Equal(4, GetPrivateProperty<int>(context, "ChunksAcceptedForTransport"));
-            ObservePeerWake();
             await WaitUntilAsync(() => bridge.Executions.Count == 1, timeoutMs: 5000);
             var hold = PhysicalSourceHoldForTest(context);
             Assert.False(hold.Invalidated);

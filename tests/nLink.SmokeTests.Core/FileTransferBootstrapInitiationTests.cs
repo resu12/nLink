@@ -31,6 +31,8 @@ public sealed partial class FileTransferCoordinatorTests
     [InlineData(true, "sidecar_tuna_write_failed")]
     [InlineData(false, "sidecar_tuna_stream_eof")]
     [InlineData(true, "sidecar_tuna_stream_eof")]
+    [InlineData(false, "sidecar_remote_closed")]
+    [InlineData(true, "sidecar_remote_closed")]
     public void BootstrapInitiation_TransportFailureRejectsMissingOriginAndWrongSource(bool inbound, string reason)
     {
         var (state, stop, observation, localState, issued) = CreateBootstrapInitiationOriginFixture(inbound, reason);

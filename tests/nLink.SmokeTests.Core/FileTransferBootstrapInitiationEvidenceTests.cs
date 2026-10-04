@@ -24,6 +24,8 @@ public sealed partial class FileTransferBootstrapCorrelationEvidenceTests
     [InlineData(true, false, "sidecar_tuna_write_failed")]
     [InlineData(false, false, "sidecar_tuna_stream_eof")]
     [InlineData(true, false, "sidecar_tuna_stream_eof")]
+    [InlineData(false, false, "sidecar_remote_closed")]
+    [InlineData(true, false, "sidecar_remote_closed")]
     public async Task BootstrapInitiation_SourceHoldHasFullCompactGuiParity(bool outbound, bool peerEvidence, string? failureReason)
     {
         if (!OperatingSystem.IsWindows()) { return; }

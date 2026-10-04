@@ -425,7 +425,7 @@ public sealed partial class NknAccelerationTransportTests
             throw new InvalidOperationException("ordinary_listener_forbidden");
         }
         public Task<bool> StartDialerSidecarAsync(string tuna, string peer, CancellationToken ct) => throw new InvalidOperationException("ordinary_dialer_forbidden");
-        public Task StopAsync(string reason, CancellationToken ct) { GlobalStops++; failureOrigin = null; return Task.CompletedTask; }
+        public Task StopAsync(string reason, CancellationToken ct) { GlobalStops++; Current = null; failureOrigin = null; return Task.CompletedTask; }
         public NknTunaLaneLease? CaptureCurrentLaneLease() => Current;
         public bool TryTransferPreparationLaneLease(NknTunaLaneLease lease, string identity, bool activate,
             out NknTunaLaneLease? successor)

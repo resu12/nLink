@@ -19,8 +19,21 @@ public sealed partial class SessionFileTransferV4SenderTests
     [InlineData(false, "wrong-session")] [InlineData(true, "wrong-session")]
     [InlineData(false, "local-stop-stale-peer")] [InlineData(true, "local-stop-stale-peer")]
     [InlineData(false, "stale-stop-stale-peer")] [InlineData(true, "stale-stop-stale-peer")]
+    [InlineData(false, "recheck-current")]
+    [InlineData(false, "recheck-user-pause")]
+    [InlineData(false, "recheck-peer-pause")]
+    [InlineData(false, "recheck-cancel")]
+    [InlineData(false, "recheck-terminal")]
+    [InlineData(false, "recheck-provider")]
+    [InlineData(false, "recheck-session")]
+    [InlineData(false, "recheck-checkpoint")]
+    [InlineData(false, "recheck-replaced-frame")]
+    [InlineData(false, "recheck-missing-wake")]
+    [InlineData(false, "recheck-active-callback")]
     public async Task BootstrapPeerAdmission_ServiceRequiresExactStagedWakeBeforeHold(bool inbound, string variant)
     {
+        var recheck = variant.StartsWith("recheck-", StringComparison.Ordinal);
+        if (recheck) { variant = variant["recheck-".Length..]; }
         const string transferId = "bootstrap_peer_admission";
         using var service = new SessionFileTransferService();
         using var session = new InitialBootstrapRecordingDataSession($"session_{transferId}", transferId);
@@ -82,6 +95,19 @@ public sealed partial class SessionFileTransferV4SenderTests
         if (variant == "provider") { session.Generation++; }
         if (variant == "session") { SetPrivateProperty(context, "DataSessionGeneration", state.CurrentDataSessionGeneration + 1); }
         if (variant == "checkpoint") { state.CurrentLeg!.CheckpointGeneration++; }
+        if (variant == "user-pause") { SetPrivateProperty(context, "UserPaused", true); }
+        if (variant == "peer-pause") { SetPrivateProperty(context, "PeerPaused", true); }
+        if (variant == "cancel") { GetPrivateProperty<CancellationTokenSource>(context, "LifetimeCts").Cancel(); }
+        if (variant == "terminal") { SetPrivateProperty(context, "State", FileTransferTransferState.Canceled); }
+        if (variant == "active-callback")
+        {
+            var authority = FileTransferCoordinator.IssueFallbackBootstrapSourceCallback(state, 71, session.Generation, false, 0)!;
+            var callback = Activator.CreateInstance(typeof(SessionFileTransferService).GetNestedType("OutboundBootstrapSourceCallback",
+                BindingFlags.NonPublic)!, authority, session)!;
+            ((System.Collections.IDictionary)GetPrivatePropertyValue(context, "ActiveBootstrapSourceCallbacks")!).Add(71L, callback);
+            SetPrivateProperty(context, "PullTransportPaused", true);
+            SetPrivateProperty(context, "PullTransportPausedSinceUtc", DateTimeOffset.UtcNow);
+        }
         if (variant is "local-stop-stale-peer" or "stale-stop-stale-peer")
         {
             SetPrivateProperty(context, "PendingFallbackV6ProofBootstrapPeerFrameBinding",
@@ -101,7 +127,15 @@ public sealed partial class SessionFileTransferV4SenderTests
         var retainedBinding = GetPrivatePropertyValue(context, "PendingFallbackV6ProofBootstrapPeerFrameBinding");
         try
         {
-            await ProcessInitialPeerFirstBootstrapEvaluationAsync(service, variant == "other-bridge" ? otherBridge : bridge, evaluation);
+            if (recheck)
+            {
+                typeof(SessionFileTransferService).GetMethod("ReevaluateRetainedOutboundBootstrapPeerFrame",
+                    BindingFlags.Instance | BindingFlags.NonPublic)!.Invoke(service, [context]);
+            }
+            else
+            {
+                await ProcessInitialPeerFirstBootstrapEvaluationAsync(service, variant == "other-bridge" ? otherBridge : bridge, evaluation);
+            }
             var after = CreateCoordinatorStateForTest(context);
             if (variant is "current" or "local-stop-stale-peer")
             {

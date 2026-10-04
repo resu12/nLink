@@ -2908,6 +2908,7 @@ public sealed partial class SessionFileTransferService
                 var pendingInstallInvalidated = false;
                 var pendingReceiveInvalidated = false;
                 var pendingReceiveRejectionReason = "receive_install_replaced";
+                ReevaluateRetainedOutboundBootstrapPeerFrame(context);
                 lock (gate)
                 {
                     if (!ReferenceEquals(outboundTransfer, context) || context.IsTerminal)

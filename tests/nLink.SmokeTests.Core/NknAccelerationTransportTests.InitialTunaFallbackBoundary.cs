@@ -63,6 +63,24 @@ public sealed partial class NknAccelerationTransportTests
         => RunPreparedInitialTunaFallbackAsync(false, true, stopMode: 2, sidecarFailureReason: reason);
 
     [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    [Trait("FileTransferInfraSuite", "InitialTunaFallbackBoundary")]
+    public Task PreparedInitialTuna_RemoteClosePublishesFallbackAndCompletes(bool helperPays)
+        => RunPreparedInitialTunaFallbackAsync(helperPays, true, stopMode: 2,
+            sidecarFailureReason: "remote_closed", dialerFailsFirst: true);
+
+    [Theory]
+    [InlineData(false, false)]
+    [InlineData(false, true)]
+    [InlineData(true, false)]
+    [InlineData(true, true)]
+    [Trait("FileTransferInfraSuite", "InitialTunaFallbackBoundary")]
+    public Task PreparedInitialTuna_RemoteCloseOrderingPreservesFallback(bool helperPays, bool peerDownFirst)
+        => RunPreparedInitialTunaFallbackAsync(helperPays, true, stopMode: 2,
+            sidecarFailureReason: "remote_closed", dialerFailsFirst: true, peerDownBeforeLocalFailure: peerDownFirst);
+
+    [Theory]
     [InlineData("service_generation")]
     [InlineData("user_pause")]
     [Trait("FileTransferInfraSuite", "InitialTunaFallbackBoundary")]
@@ -72,7 +90,7 @@ public sealed partial class NknAccelerationTransportTests
 
     private Task RunPreparedInitialTunaFallbackAsync(bool helperPays, bool payerSends, int stopMode = -1,
         string? writeSource = null, bool pendingCallbacks = false, bool resetBeforeStop = false,
-        string? sidecarFailureReason = null)
+        string? sidecarFailureReason = null, bool dialerFailsFirst = false, bool? peerDownBeforeLocalFailure = null)
         => WithPublicPreparationPairAsync(helperPays, async pair =>
         {
             pair.PayerLane.FilePeer = pair.DialerLane;
@@ -83,16 +101,23 @@ public sealed partial class NknAccelerationTransportTests
             var sender = payerSends ? pair.PayerService : pair.DialerService;
             var receiver = payerSends ? pair.DialerService : pair.PayerService;
             var reads = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var fallbackReads = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
             var opens = 0;
             var bytes = new byte[writeSource is null && sidecarFailureReason is null ? 4 : 256 * 1024];
             await sender.TryStartSendAsync(new("prepared.bin", bytes.Length, "prepared-admission"),
                 _ => Task.FromResult<Stream>(stopMode >= 0 && Interlocked.Increment(ref opens) > 1
-                    ? new JoinedBootstrapReadGate(bytes, reads.Task) : new MemoryStream(bytes)), pair.Token);
+                    ? new JoinedBootstrapReadGate(bytes, sidecarFailureReason is not null &&
+                        sender.Snapshot.Outbound?.RouteToken == "post_tuna_fallback_v6" ? fallbackReads.Task : reads.Task)
+                    : new MemoryStream(bytes)), pair.Token);
             await WaitUntilAsync(() => receiver.Snapshot.Inbound?.State == FileTransferTransferState.PendingDecision,
                 TimeSpan.FromSeconds(3));
             using var destination = new InitialFallbackWriteGate(writeSource is not null);
             var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
             var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var downEntered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var downRelease = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var proofRelease = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var priorDelivery = pair.DialerClient.ShouldDeliverSendAsync;
             var prior = SessionFileTransferService.BootstrapFeedbackBeforeSubmissionForTests;
             SessionFileTransferService.BootstrapFeedbackBeforeSubmissionForTests = id =>
             {
@@ -138,9 +163,47 @@ public sealed partial class NknAccelerationTransportTests
                             Assert.Equal(lane, pair.PayerLane.CaptureCurrentLaneLease());
                             Assert.False((bool)GetPrivateField(pair.Payer, "fileTransferFallbackProofPending")!);
                         }
-                        if (writeSource is not null) { pair.DialerLane.FailRuntime("sidecar_tuna_stream_eof"); }
-                        pair.PayerLane.FailRuntime(sidecarFailureReason);
-                        if (writeSource is null) { pair.DialerLane.FailRuntime("sidecar_tuna_stream_eof"); }
+                        var peerFailureReason = dialerFailsFirst ? "remote_closed" : "sidecar_tuna_stream_eof";
+                        var payerLease = pair.PayerLane.CaptureCurrentLaneLease();
+                        if (peerDownBeforeLocalFailure is not null)
+                        {
+                            pair.DialerClient.ShouldDeliverSendAsync = async (_, payload, _) =>
+                            {
+                                if (EnvelopeCodec.TryDeserialize(payload, out var envelope))
+                                {
+                                    if (envelope.Type == MsgType.TransportAccelerationDown)
+                                    {
+                                        downEntered.TrySetResult();
+                                        await downRelease.Task;
+                                    }
+                                    else if (envelope.Type == MsgType.FileTransferDataFrame) { await proofRelease.Task; }
+                                }
+                                return true;
+                            };
+                        }
+                        if (writeSource is not null || dialerFailsFirst) { pair.DialerLane.FailRuntime(peerFailureReason); }
+                        if (peerDownBeforeLocalFailure is not null) { await downEntered.Task.WaitAsync(TimeSpan.FromSeconds(3)); }
+                        if (peerDownBeforeLocalFailure == true)
+                        {
+                            downRelease.TrySetResult();
+                            await WaitUntilAsync(() => pair.PayerLane.Current is null && pair.PayerLane.GlobalStops > 0,
+                                TimeSpan.FromSeconds(3));
+                            var retired = Assert.IsType<NknTunaLaneLease>(payerLease);
+                            var beforeLateFailure = SessionFileTransferV4SenderTests.CaptureJoinedNknStateForTest(sender, outbound);
+                            InvokePrivateMethod(pair.Payer, "OnAccelerationStateChanged", pair.PayerLane,
+                                new AccelerationStateChangedEventArgs(false, sidecarFailureReason,
+                                    new(retired.LaneInstanceId, retired.ClientGeneration,
+                                        retired.DialerOwner?.RunId ?? retired.Listener!.ProcessRunId, 1)));
+                            var afterLateFailure = SessionFileTransferV4SenderTests.CaptureJoinedNknStateForTest(sender, outbound);
+                            Assert.Equal(beforeLateFailure.PersistentState, afterLateFailure.PersistentState);
+                            Assert.Equal(beforeLateFailure.CurrentRoutePublicationToken, afterLateFailure.CurrentRoutePublicationToken);
+                        }
+                        else if (pair.PayerLane.Current is not null) { pair.PayerLane.FailRuntime(sidecarFailureReason); }
+                        else { Assert.True(pair.PayerLane.GlobalStops > 0); }
+                        if (writeSource is null && !dialerFailsFirst && pair.DialerLane.Current is not null)
+                            pair.DialerLane.FailRuntime(peerFailureReason);
+                        downRelease.TrySetResult();
+                        proofRelease.TrySetResult();
                         // Let the next physical send expose whether Core installed its source hold.
                         reads.TrySetResult();
                     }
@@ -191,18 +254,29 @@ public sealed partial class NknAccelerationTransportTests
                     AssertRejectedInitialStop(receiver, payerSends ? pair.Dialer : pair.Payer, inbound, receiverStop);
                     if (sidecarFailureReason is not null)
                     {
-                        var observation = SessionFileTransferV4SenderTests.CaptureJoinedNknStateForTest(sender, outbound)
+                        var failureSide = (Service: sender, Transport: pair.Payer, Context: outbound, Stop: senderStop);
+                        var observation = SessionFileTransferV4SenderTests.CaptureJoinedNknStateForTest(failureSide.Service, failureSide.Context)
                             .PersistentState.FileTransferRouteTransition.BootstrapExchange!.Bootstrap.Observation;
+                        // A dialer-first failure can establish the sender's hold through exact peer evidence.
+                        if (dialerFailsFirst && observation.InitiationKind == FileTransferBootstrapInitiationKind.PeerEvidence)
+                        {
+                            failureSide = (receiver, pair.Dialer, inbound, receiverStop);
+                            observation = SessionFileTransferV4SenderTests.CaptureJoinedNknStateForTest(failureSide.Service, failureSide.Context)
+                                .PersistentState.FileTransferRouteTransition.BootstrapExchange!.Bootstrap.Observation;
+                        }
                         Assert.Equal(FileTransferBootstrapInitiationKind.LocalTransportFailure, observation.InitiationKind);
-                        AssertRejectedInitialStop(sender, pair.Payer, outbound, senderStop with
+                        if (dialerFailsFirst) { Assert.Equal("sidecar_remote_closed", observation.Source); }
+                        AssertRejectedInitialStop(failureSide.Service, failureSide.Transport, failureSide.Context, failureSide.Stop with
                         {
                             InitiationKind = observation.InitiationKind, Source = observation.Source, ProofKind = observation.ProofKind,
-                            LocalStop = senderStop.LocalStop! with { FailureOrigin = observation.LocalStop!.FailureOrigin },
+                            LocalStop = failureSide.Stop.LocalStop! with { FailureOrigin = observation.LocalStop!.FailureOrigin },
                         });
                     }
                     // The write fixture injects a receive batch without the sender's send ledger;
                     // it proves drain/currentness, not end-to-end payload completion.
                     if (writeSource is not null) { return; }
+                    // Observe exact live publication/disposition receipts before terminal cleanup can retire them.
+                    fallbackReads.TrySetResult();
                     reads.TrySetResult();
                     await WaitUntilAsync(() => sender.Snapshot.Outbound?.State == FileTransferTransferState.Completed &&
                         receiver.Snapshot.Inbound?.State == FileTransferTransferState.Completed, TimeSpan.FromSeconds(8));
@@ -215,8 +289,12 @@ public sealed partial class NknAccelerationTransportTests
             {
                 // Retire the held source before letting its feedback continuation run.
                 receiver.ResetSessionState();
+                downRelease.TrySetResult();
+                proofRelease.TrySetResult();
+                pair.DialerClient.ShouldDeliverSendAsync = priorDelivery;
                 release.TrySetResult();
                 reads.TrySetResult();
+                fallbackReads.TrySetResult();
                 destination.Release.TrySetResult();
                 SessionFileTransferService.BootstrapFeedbackBeforeSubmissionForTests = prior;
                 await sender.CancelTransferAsync("prepared-admission", "test_complete", pair.Token);

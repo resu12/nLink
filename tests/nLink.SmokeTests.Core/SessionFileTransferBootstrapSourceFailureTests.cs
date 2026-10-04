@@ -35,6 +35,12 @@ public sealed partial class SessionFileTransferV4SenderTests
     [InlineData(true, "receive-gap")]
     [InlineData(true, "install-commit")]
     [InlineData(true, "install-reopen")]
+    [InlineData(false, "redundant-pause-before")]
+    [InlineData(true, "redundant-pause-before")]
+    [InlineData(false, "redundant-pause-after")]
+    [InlineData(true, "redundant-pause-after")]
+    [InlineData(true, "redundant-pause-session")]
+    [InlineData(true, "redundant-pause-provider")]
     public async Task BootstrapSourceFailure_HoldAfterEligibilityCannotTerminalize(bool physicalAlreadySettled, string boundary)
     {
         var transferId = "bootstrap_source_failure_" + physicalAlreadySettled + "_" + boundary;
@@ -201,12 +207,26 @@ public sealed partial class SessionFileTransferV4SenderTests
                 Assert.Equal(1, sourceOpenCount);
             }
             lock (GetServiceGate(service)) { MutateSourceFailureScopeForTest(context, session, boundary); }
+            if (boundary is "redundant-pause-session" or "redundant-pause-provider")
+            {
+                lock (GetServiceGate(service))
+                {
+                    Assert.False(Assert.IsType<bool>(typeof(SessionFileTransferService)
+                        .GetMethod("TryPauseOutboundTransportLocked", BindingFlags.Instance | BindingFlags.NonPublic)!
+                        .Invoke(service, [context, "remote_remote_closed", true])));
+                    Assert.True(PhysicalSourceHoldForTest(context).Invalidated);
+                    Assert.Null(GetPrivatePropertyValue(context, "PendingFallbackV6ProofBootstrapPeerFrameEvidence"));
+                    Assert.Null(GetPrivatePropertyValue(context, "PendingFallbackV6ProofBootstrapPeerFrameBinding"));
+                }
+            }
+            if (boundary == "redundant-pause-before") { AssertRedundantOutboundPausePreservesHoldForTest(service, context); }
             var before = SourceFailureEffectsForTest(context);
             release.TrySetResult();
             await CoreSmokeTestsBase.WaitUntilAsync(() => GetPrivateProperty<bool>(context, "IsTerminal") ||
                 GetPrivatePropertyValue(context, "ActiveBootstrapSourceCallbacks") is System.Collections.IDictionary { Count: 0 },
                 TimeSpan.FromSeconds(3));
             Assert.False(GetPrivateProperty<bool>(context, "IsTerminal"));
+            if (boundary == "redundant-pause-after") { AssertRedundantOutboundPausePreservesHoldForTest(service, context); }
             Assert.Equal(before, SourceFailureEffectsForTest(context));
             Assert.Equal("Stale", typeof(SessionFileTransferService).GetMethod("ResolveBootstrapSourceCallbackLocked",
                 BindingFlags.Instance | BindingFlags.NonPublic)!.Invoke(service, [context, callback])!.ToString());
@@ -231,11 +251,37 @@ public sealed partial class SessionFileTransferV4SenderTests
         }
     }
 
+    private static void AssertRedundantOutboundPausePreservesHoldForTest(SessionFileTransferService service, object context)
+    {
+        lock (GetServiceGate(service))
+        {
+            var before = CreateCoordinatorStateForTest(context);
+            var hold = PhysicalSourceHoldForTest(context);
+            Assert.True(FileTransferCoordinator.IsFallbackBootstrapSourceHoldCurrent(before, hold.Command));
+            var execution = GetPrivatePropertyValue(context, "BootstrapSourceHoldExecution");
+            var frame = GetPrivatePropertyValue(context, "PendingFallbackV6ProofBootstrapPeerFrameEvidence");
+            var binding = GetPrivatePropertyValue(context, "PendingFallbackV6ProofBootstrapPeerFrameBinding");
+            Assert.NotNull(frame);
+            Assert.NotNull(binding);
+            var effects = SourceFailureEffectsForTest(context);
+            Assert.False(Assert.IsType<bool>(typeof(SessionFileTransferService)
+                .GetMethod("TryPauseOutboundTransportLocked", BindingFlags.Instance | BindingFlags.NonPublic)!
+                .Invoke(service, [context, "remote_remote_closed", true])));
+            var after = CreateCoordinatorStateForTest(context);
+            Assert.True(FileTransferCoordinator.IsFallbackBootstrapSourceHoldCurrent(after, hold.Command));
+            Assert.Equal(before.PersistentState.FileTransferRouteTransition, after.PersistentState.FileTransferRouteTransition);
+            Assert.Same(execution, GetPrivatePropertyValue(context, "BootstrapSourceHoldExecution"));
+            Assert.Same(frame, GetPrivatePropertyValue(context, "PendingFallbackV6ProofBootstrapPeerFrameEvidence"));
+            Assert.Same(binding, GetPrivatePropertyValue(context, "PendingFallbackV6ProofBootstrapPeerFrameBinding"));
+            Assert.Equal(effects, SourceFailureEffectsForTest(context));
+        }
+    }
+
     [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
     private static void MutateSourceFailureScopeForTest(object context, SourceFailureDataSession session, string boundary)
     {
-        if (boundary == "terminal-provider") { session.Generation++; }
-        if (boundary == "terminal-session") { SetPrivateProperty(context, "DataSessionGeneration", 18L); }
+        if (boundary is "terminal-provider" or "redundant-pause-provider") { session.Generation++; }
+        if (boundary is "terminal-session" or "redundant-pause-session") { SetPrivateProperty(context, "DataSessionGeneration", 18L); }
         if (boundary == "terminal-pause")
         { SetPrivateProperty(context, "PullTransportPausedSinceUtc", GetPrivateProperty<DateTimeOffset>(context, "PullTransportPausedSinceUtc").AddTicks(1)); }
         if (boundary == "terminal-owner")

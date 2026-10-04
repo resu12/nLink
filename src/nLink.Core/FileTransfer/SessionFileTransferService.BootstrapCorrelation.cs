@@ -282,6 +282,32 @@ public sealed partial class SessionFileTransferService
         return true;
     }
 
+    private void ReevaluateRetainedOutboundBootstrapPeerFrame(OutboundTransferContext context)
+    {
+        IFileTransferRouteTransitionBridge bridge;
+        FileTransferFallbackV6ProofBootstrapEvaluation evaluation;
+        lock (gate)
+        {
+            if (!ReferenceEquals(outboundTransfer, context) || context.IsTerminal || context.UserPaused || context.PeerPaused ||
+                context.LifetimeCts.IsCancellationRequested || context.ActiveBootstrapSourceCallbacks.Count != 0 ||
+                context.BootstrapSourceHoldExecution is not null ||
+                transport is not IFileTransferRouteTransitionBridge { SupportsFallbackBootstrapCorrelation: true } currentBridge ||
+                context.DataSession is not { } session ||
+                context.PendingFallbackV6ProofBootstrapPeerFrameEvidence is not FileTransferFallbackBootstrapFrameV6 frame ||
+                context.PendingFallbackV6ProofBootstrapPeerFrameBinding is not { } binding) { return; }
+            var state = GetBootstrapCorrelationStateLocked(FileTransferDirection.Outbound, session, frame, out var current);
+            if (state is null || !UsesBootstrapCorrelation(state) ||
+                binding.FrameIdentity != current.FrameIdentity ||
+                !MatchesFallbackV6ProofBootstrapPeerFrameBinding(binding, current) ||
+                !FileTransferCoordinator.IsFallbackBootstrapWakeFrameCurrent(state, frame)) { return; }
+            bridge = currentBridge;
+            evaluation = CreateBootstrapCorrelationWakeEvaluation(state, current);
+        }
+        // The current supervisor retries retained peer evidence after source callbacks settle.
+        // Callback retirement itself remains diagnostic-only; admission is validated again in Core.
+        _ = ProcessFallbackV6ProofBootstrapEvaluationAsync(bridge, evaluation);
+    }
+
     private FileTransferBootstrapPhaseCommand? IssueBootstrapCorrelationPhaseLocked(FileTransferCoordinatorState state,
         FileTransferFallbackV6ProofBootstrapObservation observation, FileTransferFallbackBootstrapStateFrameV6? localState,
         FileTransferFallbackBootstrapFrameV6? retained)

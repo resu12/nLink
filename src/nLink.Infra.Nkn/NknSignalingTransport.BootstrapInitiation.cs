@@ -26,7 +26,7 @@ public sealed partial class NknSignalingTransport
 
     private FileTransferBootstrapLocalStopSource[] CaptureFallbackBootstrapFailureSources(AccelerationStateChangedEventArgs args)
     {
-        if (args.IsAvailable || NormalizeAccelerationSidecarResetReason(args.Reason) is not ("sidecar_tuna_write_failed" or "sidecar_tuna_stream_eof") ||
+        if (args.IsAvailable || NormalizeAccelerationSidecarResetReason(args.Reason) is not ("sidecar_tuna_write_failed" or "sidecar_tuna_stream_eof" or "sidecar_remote_closed") ||
             args.FailureOrigin is not { IsDefault: false } origin || accelerationLane?.IsFailureOriginCurrent(origin) != true) { return []; }
         return CaptureFallbackBootstrapLocalSources(new(origin.LaneInstanceId, origin.ClientGeneration, origin.ProcessRunId, origin.FailureGeneration));
     }

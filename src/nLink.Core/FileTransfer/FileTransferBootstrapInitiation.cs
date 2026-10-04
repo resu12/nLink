@@ -106,7 +106,7 @@ internal static partial class FileTransferCoordinator
             FileTransferBootstrapInitiationKind.LocalRuntimeDisable
                 => source == "runtime_disabled" && proofKind == "local_runtime_disabled" && origin is null,
             FileTransferBootstrapInitiationKind.LocalTransportFailure
-                => source is "sidecar_tuna_write_failed" or "sidecar_tuna_stream_eof" &&
+                => source is "sidecar_tuna_write_failed" or "sidecar_tuna_stream_eof" or "sidecar_remote_closed" &&
                    proofKind == "local_transport_failure" && origin is { IsDefault: false },
             _ => false,
         };
