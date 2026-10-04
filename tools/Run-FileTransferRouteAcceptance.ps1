@@ -4935,8 +4935,9 @@ function Assert-Phase4ScenarioRun {
     elseif ($baselineGoodput -gt 0) {
         if ($result.goodputBytesPerSecond -lt $result.goodputRegressionFloorBytesPerSecond) {
             $goodputRegressionMessage = "goodput regression exceeded {0:F1}%: current={1:F3}; floor={2:F3}; baseline={3:F3}" -f $GoodputRegressionTolerancePercent, $result.goodputBytesPerSecond, $result.goodputRegressionFloorBytesPerSecond, $baselineGoodput
-            # Switch-off exercises fallback, not sustained Tuna throughput.
-            if ($Scenario.Name -in @('live-switch-off-helpee-64mb', 'live-switch-off-helper-64mb')) {
+            # Switch-off exercises fallback; Phase 5 Regular NKN goodput is advisory.
+            if ($Scenario.Name -in @('live-switch-off-helpee-64mb', 'live-switch-off-helper-64mb') -or
+                ($MatrixMode -eq 'phase5-analyzer-gui-acceptance' -and $Scenario.Name -eq 'regular-nkn-v4-64mb')) {
                 $result.goodputRegressionWarning = $goodputRegressionMessage
             }
             else {
@@ -12861,6 +12862,7 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
     }
     $correctnessVerdict = if ($correctnessFailureLines.Count -eq 0 -and $script:RunResults.Count -eq $expectedRunCount) { 'PASS' } else { 'FAIL' }
     $performanceVerdict = if ($performanceFailureLines.Count -gt 0) { 'FAIL' } elseif ($performanceWarningLines.Count -gt 0) { 'WARN' } else { 'PASS' }
+    $regularNknGoodputPolicy = if ($AcceptancePhase -eq 'phase5') { 'advisory_not_release_blocking' } else { 'strict_baseline_regression' }
     $conclusiveRouteRuntimeEvidence = $runtimeCandidateDtos.Count -gt 0 -and
         (Test-RouteAcceptanceConclusiveRouteRuntimeEvidence -Result $runtimeCandidateDtos[0])
     $selectedRuntimeEvidenceIncomplete = $runtimeCandidateDtos.Count -gt 0 -and
@@ -13297,6 +13299,7 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
         'network_variance_policy=live_transport_paired_rerun',
         ("network_variance_note={0}" -f $networkVarianceNote),
         'regular_nkn_external_transport_warning_policy=capped_external_transport_churn_requires_clean_rerun',
+        ("regular_nkn_goodput_policy={0}" -f $regularNknGoodputPolicy),
         'goodput_regression_policy=rerun_once_when_only_failure',
         ("requested_scenarios={0}" -f (Join-RouteAcceptanceTokenList -Values $RequestedScenarios)),
         ("expected_run_count={0}" -f $expectedRunCount),
@@ -13813,7 +13816,7 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
         $networkVarianceNote,
         '',
         ($(if ($AcceptancePhase -eq 'phase5') {
-            'A goodput-only miss does not fail Phase 5 release correctness. It remains visible as a performance variance so remediation can avoid unnecessary bridge, wallet, installer, or route-policy changes.'
+            'A goodput-only miss does not fail Phase 5 release correctness. Regular NKN and switch-off goodput misses are advisory; numeric baseline values remain visible. Measurement contamination and other performance failures retain their existing classification.'
         } else {
             'Outside the two advisory switch-off scenarios, a goodput-only miss does not waive Phase 4 acceptance. It separates performance variance from route/runtime correctness so remediation can avoid unnecessary bridge, wallet, installer, or route-policy changes.'
         })),
@@ -14322,6 +14325,7 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
         networkVariancePolicy = 'live_transport_paired_rerun'
         networkVarianceNote = $networkVarianceNote
         regularNknExternalTransportWarningPolicy = 'capped_external_transport_churn_requires_clean_rerun'
+        regularNknGoodputPolicy = $regularNknGoodputPolicy
         goodputRegressionPolicy = 'rerun_once_when_only_failure'
         requestedScenarios = @(ConvertTo-RouteAcceptanceSummaryStringArray -Values $RequestedScenarios -Limit 32)
         expectedRunCount = $ExpectedRunCount

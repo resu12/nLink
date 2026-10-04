@@ -16,11 +16,17 @@ public sealed class FileTransferFallbackGoodputAcceptanceTests : FileTransferAcc
     [InlineData("phase5", "live-switch-off-helpee-64mb", "SHA_FAIL", "FAIL", "WARN")]
     [InlineData("phase5", "live-switch-off-helper-64mb", "MISSING_LIVE_PROOF", "FAIL", "WARN")]
     [InlineData("phase5", "live-switch-off-helper-64mb", "HARD_FAILURE", "FAIL", "WARN")]
+    [InlineData("phase5", "regular-nkn-v4-64mb", "", "PASS", "WARN")]
+    [InlineData("phase5", "regular-nkn-v4-64mb", "SHA_FAIL", "FAIL", "WARN")]
+    [InlineData("phase5", "regular-nkn-v4-64mb", "HARD_FAILURE", "FAIL", "WARN")]
+    [InlineData("phase5", "regular-nkn-v4-64mb", "TERMINAL_ERROR", "FAIL", "WARN")]
+    [InlineData("phase5", "regular-nkn-v4-64mb", "WARNING", "PASS", "FAIL")]
+    [InlineData("phase5", "active-tuna-v4-64mb", "", "PASS", "FAIL")]
     [InlineData("phase4", "active-tuna-v4-64mb", "", "PASS", "FAIL")]
     [InlineData("phase4", "regular-nkn-v4-64mb", "", "PASS", "FAIL")]
     [InlineData("phase4", "regular-nkn-v4-64mb", "HARD_FAILURE", "FAIL", "FAIL")]
     [InlineData("phase4", "live-multi-toggle-off-on-off-64mb", "", "PASS", "FAIL")]
-    public async Task RunFileTransferRouteAcceptance_SwitchOffGoodputIsAdvisoryOnly(
+    public async Task RunFileTransferRouteAcceptance_GoodputAdvisoryDoesNotRelaxCorrectness(
         string phase, string scenario, string fault, string correctness, string performance)
     {
         if (!OperatingSystem.IsWindows()) { return; }
@@ -61,6 +67,9 @@ public sealed class FileTransferFallbackGoodputAcceptanceTests : FileTransferAcc
             Assert.Equal(performance == "FAIL" ? "1" : "0", summary["performance_failure_count"]);
             Assert.Equal(performance, root.GetProperty("performanceVerdict").GetString());
             Assert.Equal(performance == "WARN" ? 1 : 0, root.GetProperty("performanceWarnings").GetArrayLength());
+            var regularGoodputPolicy = phase == "phase5" ? "advisory_not_release_blocking" : "strict_baseline_regression";
+            Assert.Equal(regularGoodputPolicy, summary["regular_nkn_goodput_policy"]);
+            Assert.Equal(regularGoodputPolicy, root.GetProperty("regularNknGoodputPolicy").GetString());
             if (performance == "WARN")
             {
                 var warning = summary[scenario + ".goodput_regression_warning"];
@@ -70,6 +79,10 @@ public sealed class FileTransferFallbackGoodputAcceptanceTests : FileTransferAcc
                 var note = File.ReadAllText(Path.Combine(runRoot, phase + "-network-variance-note.md"));
                 Assert.Contains("Performance warnings:", note, StringComparison.Ordinal);
                 Assert.Contains(warning, note, StringComparison.Ordinal);
+                if (phase == "phase5" && scenario == "regular-nkn-v4-64mb")
+                {
+                    Assert.Contains("Regular NKN and switch-off goodput misses are advisory", note, StringComparison.Ordinal);
+                }
             }
             if (correctness == "FAIL")
             {
