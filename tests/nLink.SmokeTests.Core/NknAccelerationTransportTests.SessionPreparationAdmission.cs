@@ -12,6 +12,69 @@ public sealed partial class NknAccelerationTransportTests
     [InlineData(true, false)]
     [InlineData(true, true)]
     [Trait("FileTransferInfraSuite", "SessionPreparationAdmission")]
+    public Task PreparationAdmission_JoinedPayloadSurvivesPreparationRetirement(bool helperPays, bool payerSends)
+        => WithPreparationHandshakePairAsync(helperPays, async pair =>
+        {
+            pair.PayerLane.FilePeer = pair.DialerLane;
+            pair.DialerLane.FilePeer = pair.PayerLane;
+            Assert.True(await pair.Start().WaitAsync(pair.Token));
+            await pair.WaitReady();
+            var sender = payerSends ? pair.PayerService : pair.DialerService;
+            var receiver = payerSends ? pair.DialerService : pair.PayerService;
+            var senderLane = payerSends ? pair.PayerLane : pair.DialerLane;
+            var receiverLane = payerSends ? pair.DialerLane : pair.PayerLane;
+            var payload = Enumerable.Range(0, 256 * 1024).Select(i => (byte)(i % 251)).ToArray();
+            var payloadFrames = 0;
+            senderLane.ForwardBytesForTests = (lane, bytes, ct) =>
+            {
+                ct.ThrowIfCancellationRequested();
+                Assert.Equal(NknBridgeChannel.Bulk, lane);
+                if (bytes.Length > 1024) Interlocked.Increment(ref payloadFrames);
+                receiverLane.ReceivePeerBytesForTests(lane, bytes);
+                return Task.FromResult(true);
+            };
+            Assert.Equal("file_tuna_v4", (await sender.TryStartSendAsync(
+                new("prepared.bin", payload.Length, "prepared-admission"),
+                _ => Task.FromResult<Stream>(new MemoryStream(payload, writable: false)), pair.Token))!.RouteToken);
+            await WaitUntilAsync(() => receiver.Snapshot.Inbound?.State == FileTransferTransferState.PendingDecision,
+                TimeSpan.FromSeconds(3));
+            foreach (var (transport, service, contextName) in new[]
+            {
+                (payerSends ? pair.Payer : pair.Dialer, sender, "outboundTransfer"),
+                (payerSends ? pair.Dialer : pair.Payer, receiver, "inboundTransfer"),
+            })
+            {
+                var admission = AdmissionLease(service);
+                Assert.True(admission.IsAdopted);
+                Assert.True(admission.Execution.Cancellation.IsCancellationRequested);
+                InvokePrivateMethod(admission.Execution, "Expire");
+                var state = SessionFileTransferV4SenderTests.CaptureJoinedNknStateForTest(service,
+                    GetPrivateField(service, contextName)!);
+                var publication = Assert.IsType<RoutePublicationToken>(state.CurrentRoutePublicationToken);
+                Assert.Equal((FileTransferRoute.FileTunaV4, 4), (publication.Route, publication.ProtocolVersion));
+                Assert.True(FileTransferCoordinator.IsRoutePublicationTokenCurrent(state, publication, out _));
+                Assert.True(transport.IsAccelerationAvailableForTests);
+            }
+            using var destination = new MemoryStream();
+            Assert.NotNull(await receiver.AcceptIncomingTransferAsync("prepared-admission",
+                (_, _) => Task.FromResult<Stream>(destination), pair.Token));
+            await WaitUntilAsync(() => sender.Snapshot.Outbound?.State == FileTransferTransferState.Completed &&
+                receiver.Snapshot.Inbound?.State == FileTransferTransferState.Completed, TimeSpan.FromSeconds(8));
+            Assert.True(Volatile.Read(ref payloadFrames) > 1);
+            Assert.Equal(payload.Length, destination.ToArray().Length);
+            Assert.Equal(System.Security.Cryptography.SHA256.HashData(payload),
+                System.Security.Cryptography.SHA256.HashData(destination.ToArray()));
+            Assert.Equal("file_tuna_v4", sender.Snapshot.Outbound!.RouteToken);
+            Assert.Equal("file_tuna_v4", receiver.Snapshot.Inbound!.RouteToken);
+            Assert.Equal(0, pair.PayerLane.GlobalStops + pair.DialerLane.GlobalStops);
+        });
+
+    [Theory]
+    [InlineData(false, false)]
+    [InlineData(false, true)]
+    [InlineData(true, false)]
+    [InlineData(true, true)]
+    [Trait("FileTransferInfraSuite", "SessionPreparationAdmission")]
     public Task PreparationAdmission_BothRolesAndDirectionsAdoptOnlyRealCoordinatorPublication(bool helperPays, bool payerSends)
         => WithPreparationHandshakePairAsync(helperPays, async pair =>
         {

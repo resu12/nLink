@@ -558,6 +558,18 @@ public sealed class NknTunaLaneOwnershipTests
             Assert.True(current.ClientGeneration > original.ClientGeneration);
             revocation.Cancel();
             Assert.True(lane.IsAvailable);
+            for (var i = 0; i < 3; i++)
+            {
+                var payload = Enumerable.Repeat((byte)(i + 1), 64 * 1024).ToArray();
+                Assert.True(await lane.TrySendAsync(NknBridgeChannel.Bulk, payload, lifetime.Token));
+                var frame = await NknTunaSidecarFrameProtocol.ReadFrameAsync(connection.GetStream(), lifetime.Token);
+                if (frame.Type == NknTunaSidecarFrameType.Ping)
+                    frame = await NknTunaSidecarFrameProtocol.ReadFrameAsync(connection.GetStream(), lifetime.Token);
+                Assert.Equal(NknTunaSidecarFrameType.Data, frame.Type);
+                Assert.Equal(NknTunaSidecarLane.Bulk, frame.Lane);
+                Assert.Equal(payload, frame.Payload);
+                Assert.Equal(current, lane.CaptureCurrentLaneLease());
+            }
             var received = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
             lane.MessageReceived += (_, _) => received.TrySetResult();
             await NknTunaSidecarFrameProtocol.WriteFrameAsync(connection.GetStream(), NknTunaSidecarFrameType.Data,
