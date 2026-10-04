@@ -22293,7 +22293,8 @@ public sealed partial class NknSignalingTransport
                             command.Reason);
                         runtimeUnlockRetryDispatchPendingInstallFollowUp = null;
                         runtimeUnlockRetryDispatchLastConfirmedInstallReceipt = null;
-                        if (command.Reason == FileTransferCoordinator.PostFallbackProbeRollbackRetryRetirementReason &&
+                        if ((command.Reason is FileTransferCoordinator.PostFallbackProbeRollbackRetryRetirementReason or
+                                FileTransferCoordinator.PostFallbackDialFailureRetryRetirementReason) &&
                             runtimeUnlockRetryPhysicalSendScope is { IsCompleted: false } physicalSend &&
                             physicalSend.InstallReceipt == command.InstalledAttempt?.InstallReceipt)
                         {
@@ -22417,7 +22418,8 @@ public sealed partial class NknSignalingTransport
                 "retry_dispatch_inbound_transfer_terminal" or
                 "retry_dispatch_stage_expired" or
                 "retry_dispatch_runtime_scope_replaced" or
-                FileTransferCoordinator.PostFallbackProbeRollbackRetryRetirementReason))
+                FileTransferCoordinator.PostFallbackProbeRollbackRetryRetirementReason or
+                FileTransferCoordinator.PostFallbackDialFailureRetryRetirementReason))
         {
             rejectionReason =
                 command.IsDefault ||
@@ -22429,7 +22431,8 @@ public sealed partial class NknSignalingTransport
             return false;
         }
 
-        if (command.Reason == FileTransferCoordinator.PostFallbackProbeRollbackRetryRetirementReason &&
+        if ((command.Reason is FileTransferCoordinator.PostFallbackProbeRollbackRetryRetirementReason or
+                FileTransferCoordinator.PostFallbackDialFailureRetryRetirementReason) &&
             (command.Kind != RuntimeUnlockRetryDispatchScopeInvalidationKind.FullScope ||
              command.PendingAttempt is not null || command.RetainedPredecessor is not null ||
              command.BoundedClosure is not null || command.InstalledAttempt is not
@@ -30154,6 +30157,15 @@ public sealed partial class NknSignalingTransport
                 "runtime_unlock_tuna_dial_failed",
                 StringComparison.Ordinal);
 
+        if (bindFailedDialAnswerShadow && pairedRetryScope is { IsDefault: false } failedPair &&
+            TryRecaptureInboundPostFallbackPairedRetryOfferScope(offer, failedPair, out _))
+        {
+            PublishPostFallbackDialFailure(new(
+                new(failedPair.PublicationAuthority, failedPair.TransportEpoch, failedPair.BridgeRecoveryGeneration,
+                    failedPair.CheckpointRequestId, failedPair.DataSessionIdentity, failedPair.DataSessionGeneration),
+                dialAttemptGeneration, offer.Nonce, offer.PayerDecisionId, BindingReceipt: failedPair.BindingReceipt));
+        }
+
         if (!accepted)
         {
             NotifyTransportAccelerationStateChanged(rejectReason ?? "sidecar_unavailable");
@@ -37270,6 +37282,13 @@ public sealed partial class NknSignalingTransport
             var retryPeerStopAfterUnlock =
                 isRuntimeUnlockOffer &&
                 ShouldRetryPeerUserStoppedAfterRuntimeUnlock(effectiveRejectReason);
+            if (isRuntimeUnlockOffer && effectiveRejectReason == "runtime_unlock_tuna_dial_failed" &&
+                expectedOfferAuthorityBoundary?.Mode == RuntimeUnlockOfferAuthorityMode.InstalledRetry &&
+                expectedInstallReceipt is { } failedInstall &&
+                TryRecoverPostFallbackDialFailure(failedInstall, answerNonce, expectedOfferGeneration, expectedPayerDecisionId))
+            {
+                return;
+            }
             var retryRuntimeUnlockAfterRejectedAnswer =
                 isRuntimeUnlockOffer &&
                 ShouldRetryRuntimeUnlockAfterRejectedAnswer(effectiveRejectReason);

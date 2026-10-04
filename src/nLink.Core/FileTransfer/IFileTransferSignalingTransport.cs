@@ -2374,6 +2374,16 @@ internal sealed class RuntimeUnlockPostFallbackPreCommitProbeFailureObservedEven
 
 internal interface IRuntimeUnlockRetryDispatchAuthorityBridge
 {
+    event EventHandler<RuntimeUnlockPostFallbackDialFailureObservedEventArgs>?
+        RuntimeUnlockPostFallbackDialFailureObserved
+    {
+        add { }
+        remove { }
+    }
+
+    bool IsRuntimeUnlockPostFallbackDialFailureCurrent(
+        RuntimeUnlockPostFallbackDialFailureObservation observation) => false;
+
     event EventHandler<RuntimeUnlockInitialActivationPreCommitProbeFailureObservedEventArgs>?
         RuntimeUnlockInitialActivationPreCommitProbeFailureObserved
     {

@@ -806,6 +806,8 @@ public sealed partial class SessionFileTransferService :
             retryDispatchBridge
                     .RuntimeUnlockPostFallbackPreCommitProbeFailureObserved +=
                 OnRuntimeUnlockPostFallbackPreCommitProbeFailureObserved;
+            retryDispatchBridge.RuntimeUnlockPostFallbackDialFailureObserved +=
+                OnRuntimeUnlockPostFallbackDialFailureObserved;
             retryDispatchBridge.RuntimeUnlockRetryDispatchInitialEvaluationRequested +=
                 OnRuntimeUnlockRetryDispatchInitialEvaluationRequested;
             retryDispatchBridge.RuntimeUnlockRetryDispatchAuthorityRequested +=

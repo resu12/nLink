@@ -18,6 +18,11 @@ public sealed partial class NknAccelerationTransportTests
         => await RunJoinedFallbackRetryAsync(withStalledRepair: false);
 
     [Fact]
+    [Trait("FileTransferInfraSuite", "PostFallbackDialFailureHandoff")]
+    public Task JoinedFallbackRetry_DialFailureBeforeProbeAllowsFreshCoordinatorOwnedActivation()
+        => RunJoinedFallbackRetryAsync(false, dialFailureBeforeProbe: true);
+
+    [Fact]
     [Trait("FileTransferInfraSuite", "RuntimeUnlockResponderPeerProbe")]
     [Trait("FileTransferRuntimeSuite", "CrossPeerFallbackOverlap")]
     public async Task JoinedFallbackRetry_StalledRepairAndOldSourceReplayRemainUnresolvedAcrossPeerHandoff()
@@ -83,7 +88,7 @@ public sealed partial class NknAccelerationTransportTests
     private async Task RunJoinedFallbackRetryAsync(bool withStalledRepair, string? sidecarFailureReason = null,
         string? failureControl = null, bool continueAfterEof = false, bool withRecentProgress = false,
         bool delayReceiverSnapshots = false, bool notifyResponderFromPeer = false,
-        string? responderFailureControl = null)
+        string? responderFailureControl = null, bool dialFailureBeforeProbe = false)
     {
         // Initial fallback contexts are an explicit fixture baseline. There is
         // no file-I/O/live acceptance claim. After the baseline, all authority,
@@ -102,6 +107,9 @@ public sealed partial class NknAccelerationTransportTests
         var answerAckSent = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var probeHeld = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var releaseFailedProbe = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var firstDial = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var nextDial = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        nextDial.SetResult(true);
         var previousPriority = NknSignalingTransport.HelperPaidOfferHelpeePriorityDelayOverrideForTests;
         var previousSendBarrier = SessionFileTransferService.OutboundRegularV4PhysicalSendPreReservationBarrierForTests;
         NknSignalingTransport.HelperPaidOfferHelpeePriorityDelayOverrideForTests = TimeSpan.Zero;
@@ -115,7 +123,8 @@ public sealed partial class NknAccelerationTransportTests
             var hostClient = new FakeNknClient("host.joined-retry-continuation.address");
             var helperClient = new FakeNknClient("helper.joined-retry-continuation.address");
             var hostLane = new RetryableTunaAccelerationSession(true, 0, supportedLanes: NknAccelerationLaneKind.File);
-            var helperLane = new RetryableTunaAccelerationSession(false, 0, supportedLanes: NknAccelerationLaneKind.File);
+            var helperLane = new RetryableTunaAccelerationSession(false, 0, supportedLanes: NknAccelerationLaneKind.File,
+                dialAttemptOutcomes: dialFailureBeforeProbe ? [firstDial, nextDial] : null);
             var forwarded = new ConcurrentQueue<(string Sender, NknBridgeChannel Lane, byte[] Bytes)>();
             var offers = new ConcurrentQueue<Envelope>();
             var answers = new ConcurrentQueue<Envelope>();
@@ -154,6 +163,10 @@ public sealed partial class NknAccelerationTransportTests
                 new NknIdentity("helper-joined-retry", helperClient.Address), NknTunaAccelerationOptions.Disabled, helperLane);
             var sessionId = await ApproveNknSessionAsync(host, helper, timeout.Token,
                 InviteCapabilities.Chat | InviteCapabilities.FileTransfer, suppressAutomaticAccelerationNegotiation: true);
+            if (dialFailureBeforeProbe)
+            {
+                await helper.SendChatMessageAsync(new byte[] { 1 }, timeout.Token);
+            }
             const string transferId = "transfer_joined_retry_continuation";
             // Register the real protocol transfer on both transports before
             // attaching Services to the seeded, already-open fallback baseline.
@@ -192,16 +205,24 @@ public sealed partial class NknAccelerationTransportTests
             }
             sender.AttachTransport(host);
             receiver.AttachTransport(helper);
+            var dialFailures = new ConcurrentQueue<(RuntimeUnlockPostFallbackDialFailureObservedEventArgs Args, FileTransferCoordinatorState State)>();
+            if (dialFailureBeforeProbe)
+            {
+                ((IRuntimeUnlockRetryDispatchAuthorityBridge)host).RuntimeUnlockPostFallbackDialFailureObserved +=
+                    (_, args) => dialFailures.Enqueue((args, SessionFileTransferV4SenderTests.CaptureJoinedNknStateForTest(sender, outbound!)));
+                ((IRuntimeUnlockRetryDispatchAuthorityBridge)helper).RuntimeUnlockPostFallbackDialFailureObserved +=
+                    (_, args) => dialFailures.Enqueue((args, SessionFileTransferV4SenderTests.CaptureJoinedNknStateForTest(receiver, inbound!)));
+            }
             var senderData = await host.OpenFileTransferDataSessionAsync(sessionId, transferId, timeout.Token);
             var receiverData = await helper.OpenFileTransferDataSessionAsync(sessionId, transferId, timeout.Token);
             // Retry-only EOF cases begin quiescent, with no unresolved frontier gap.
             // Stalled-repair cases retain their original sparse progress baseline.
             outbound = await SessionFileTransferV4SenderTests.CreateJoinedNknFallbackContextForTestAsync(
                 sender, senderData, sessionId, transferId, FileTransferDirection.Outbound, withStalledRepair,
-                withoutFrontierGap: continueAfterEof);
+                withoutFrontierGap: continueAfterEof || dialFailureBeforeProbe);
             inbound = await SessionFileTransferV4SenderTests.CreateJoinedNknFallbackContextForTestAsync(
                 receiver, receiverData, sessionId, transferId, FileTransferDirection.Inbound, withStalledRepair, withRecentProgress,
-                withoutFrontierGap: continueAfterEof);
+                withoutFrontierGap: continueAfterEof || dialFailureBeforeProbe);
             var senderInitial = SessionFileTransferV4SenderTests.CaptureJoinedNknStateForTest(sender, outbound);
             var receiverInitial = SessionFileTransferV4SenderTests.CaptureJoinedNknStateForTest(receiver, inbound);
             var initialPublications = new[]
@@ -212,7 +233,7 @@ public sealed partial class NknAccelerationTransportTests
                     Publication: Assert.IsType<RoutePublicationToken>(receiverInitial.CurrentRoutePublicationToken), State: receiverInitial, Data: receiverData),
             };
             var logStart = GetOperationalLogLength();
-            var initialHighest = continueAfterEof ? 99 : 255;
+            var initialHighest = continueAfterEof || dialFailureBeforeProbe ? 99 : 255;
             var senderYield = SessionFileTransferV4SenderTests.IssueJoinedNknYieldForTest(sender, outbound, FileTransferDirection.Outbound, initialHighest);
             var receiverYield = SessionFileTransferV4SenderTests.IssueJoinedNknYieldForTest(receiver, inbound, FileTransferDirection.Inbound, initialHighest);
             // Both local issuances precede peer delivery in this fixture. Once
@@ -279,8 +300,59 @@ public sealed partial class NknAccelerationTransportTests
             pumps = [Pump(sender, senderData, FileTransferDirection.Outbound), Pump(receiver, receiverData, FileTransferDirection.Inbound)];
             releaseOffer.TrySetResult();
             releaseInitialData.TrySetResult();
-            await Task.WhenAll(answerSent.Task, answerAckSent.Task).WaitAsync(timeout.Token);
-            var answerEnvelope = ExactMessage(answers);
+            if (dialFailureBeforeProbe)
+            {
+                try
+                {
+                    await WaitUntilAsync(() => SessionFileTransferV4SenderTests.CaptureJoinedNknStateForTest(sender, outbound)
+                        .PersistentState.RuntimeUnlockRetryLifecycle.LastTerminalAttempt?.Settlement?.Outcome ==
+                        RuntimeUnlockRetryDispatchSettlementOutcome.DispatchObserved, TimeSpan.FromSeconds(12));
+                }
+                catch (TimeoutException)
+                {
+                    var state = SessionFileTransferV4SenderTests.CaptureJoinedNknStateForTest(sender, outbound);
+                    var events = ReadOperationalLogTail(logStart).Split('\n').Where(line => line.Contains("event=tuna_acceleration_control_", StringComparison.Ordinal))
+                        .Select(line => string.Join("; ", System.Text.RegularExpressions.Regex.Matches(line,
+                            @"(?:event|reason|observed_lane|decision_reason)=([^;]+)").Select(match => match.Value)));
+                    throw new TimeoutException($"Dispatch fixture: installed={state.PersistentState.RuntimeUnlockRetryLifecycle.InstalledAttempt?.State}; terminal={state.PersistentState.RuntimeUnlockRetryLifecycle.LastTerminalAttempt?.Settlement?.Outcome}; {string.Join("\n", events)}");
+                }
+                firstDial.SetResult(false);
+            }
+            try { await Task.WhenAll(answerSent.Task, answerAckSent.Task).WaitAsync(timeout.Token); }
+            catch (OperationCanceledException) when (dialFailureBeforeProbe)
+            {
+                var failures = dialFailures.Select(value =>
+                {
+                    var obs = value.Args.Observation;
+                    var state = value.State;
+                    var pair = state.PersistentState.FallbackTailYield.CurrentOperation;
+                    var lifecycle = state.PersistentState.RuntimeUnlockRetryLifecycle;
+                    return $"{state.Direction}: accepted={value.Args.Accepted}; data={state.CurrentDataSessionIdentity}/{obs.SourceScope.DataSessionIdentity}; dataGeneration={state.CurrentDataSessionGeneration}/{obs.SourceScope.DataSessionGeneration}; pair={pair?.PairingState}; scopeEpoch={pair?.Scope.TransportEpoch}/{obs.SourceScope.TransportEpoch}; terminal={lifecycle.LastTerminalAttempt?.Settlement?.Outcome}; transaction={obs.FailedTransaction?.State}; transactionTransfer={obs.FailedTransaction?.TransferId}; failure={obs.FailedTransaction?.FailureReason}; lastFailure={lifecycle.LastPostFallbackDialFailure is not null}";
+                });
+                throw new TimeoutException(string.Join("\n", failures));
+            }
+            if (dialFailureBeforeProbe)
+            {
+                var rejected = JsonSerializer.Deserialize<TransportAccelerationAnswerPayload>(
+                    DecodeControl(host, helper, answers.First(), "transport_acceleration_answer").Plaintext, json)!;
+                Assert.False(rejected.Accepted);
+                Assert.Equal("runtime_unlock_tuna_dial_failed", rejected.RejectReason);
+                var fresh = GetLastCommittedRuntimeUnlockRetryDispatchInstallReceipt(host)!.Value;
+                Assert.NotEqual(installed.InstallReceipt, fresh);
+                Assert.True(fresh.Authority.AuthorityGeneration > installed.Authority.AuthorityGeneration);
+                Assert.Null(fresh.Authority.PredecessorAuthorityId);
+                Assert.Equal(installed.Authority.SourcePublicationAuthority, fresh.Authority.SourcePublicationAuthority);
+                var retry = GetPrivateField(host, "runtimeUnlockRecoveryRetryState")!;
+                contract = Assert.IsType<RuntimeUnlockRetryDispatchContract>(retry.GetType().GetProperty("DispatchContract")!.GetValue(retry));
+                installedOfferGeneration = contract.OfferGeneration;
+                installedOfferNonce = contract.OfferNonce;
+                offerEnvelope = offers.Last();
+                offer = JsonSerializer.Deserialize<TransportAccelerationOfferPayload>(
+                    DecodeControl(helper, host, offerEnvelope, "transport_acceleration_offer").Plaintext, json)!;
+                Assert.Equal(installedOfferNonce, offer.Nonce);
+                Assert.True(offers.Select(value => value.MessageId).Distinct().Count() >= 2);
+            }
+            var answerEnvelope = dialFailureBeforeProbe ? answers.Last() : ExactMessage(answers);
             var ackEnvelope = ExactMessage(answerAcks);
             var secureAnswer = DecodeControl(host, helper, answerEnvelope, "transport_acceleration_answer");
             var secureAck = DecodeControl(helper, host, ackEnvelope, "transport_acceleration_answer_ack");
@@ -531,6 +603,17 @@ public sealed partial class NknAccelerationTransportTests
             {
                 throw new TimeoutException($"Joined route disposition predicate: {lastRoutePredicate}", error);
             }
+            if (dialFailureBeforeProbe)
+            {
+                Assert.Equal(2, dialFailures.Count);
+                Assert.All(dialFailures, failure => Assert.True(failure.Args.Accepted));
+                foreach (var failure in dialFailures)
+                {
+                    var isSender = failure.State.Direction == FileTransferDirection.Outbound;
+                    AssertPostFallbackDialFailureReplayIsInert(isSender ? sender : receiver,
+                        isSender ? outbound! : inbound!, isSender ? host : helper, failure.Args.Observation);
+                }
+            }
             if (repairLineage is not null)
             {
                 releaseReceiverSnapshots?.Invoke();
@@ -667,6 +750,24 @@ public sealed partial class NknAccelerationTransportTests
                 Assert.IsType<byte[]>(GetPrivateField(recipient, "controlSessionSharedKey")), envelope.Payload,
                 new SessionSecureEnvelopeExpectation(SessionSecureMessageFamily.RemoteControl, type,
                     sender.CurrentSessionSecurityState.SessionId, new PeerAddress(sender.LocalPeerAddress)));
+    }
+
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private static void AssertPostFallbackDialFailureReplayIsInert(SessionFileTransferService service,
+        object context, NknSignalingTransport transport, RuntimeUnlockPostFallbackDialFailureObservation observation)
+    {
+        var before = SessionFileTransferV4SenderTests.CaptureJoinedNknStateForTest(service, context);
+        var replay = new RuntimeUnlockPostFallbackDialFailureObservedEventArgs(observation);
+        Assert.False(((IRuntimeUnlockRetryDispatchAuthorityBridge)transport)
+            .IsRuntimeUnlockPostFallbackDialFailureCurrent(observation));
+        InvokePrivateMethod(service, "OnRuntimeUnlockPostFallbackDialFailureObserved", transport, replay);
+        Assert.False(replay.Accepted);
+        var after = SessionFileTransferV4SenderTests.CaptureJoinedNknStateForTest(service, context);
+        Assert.Equal(before.PersistentState.SnapshotStateGeneration, after.PersistentState.SnapshotStateGeneration);
+        Assert.Equal(before.PersistentState.SnapshotStateFingerprint, after.PersistentState.SnapshotStateFingerprint);
+        Assert.Same(before.PersistentState.RuntimeUnlockRetryLifecycle, after.PersistentState.RuntimeUnlockRetryLifecycle);
+        Assert.Same(before.PersistentState.FallbackTailYield, after.PersistentState.FallbackTailYield);
+        Assert.Equal(before.CurrentRoutePublicationToken, after.CurrentRoutePublicationToken);
     }
 }
 

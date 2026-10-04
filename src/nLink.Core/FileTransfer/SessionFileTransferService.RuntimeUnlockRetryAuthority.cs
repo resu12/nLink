@@ -1127,7 +1127,8 @@ public sealed partial class SessionFileTransferService
 
     private bool TryInvalidateRuntimeUnlockRetryLifecycleForScopeReplacementLocked(
         OutboundTransferContext context,
-        string reason)
+        string reason,
+        RuntimeUnlockRetryLifecycleScopeInvalidationDecision? preparedDecision = null)
     {
         if (!TryResumePendingRuntimeUnlockRetryDispatchStageExpiryLocked(context))
         {
@@ -1138,7 +1139,7 @@ public sealed partial class SessionFileTransferService
         var previous =
             FileTransferCoordinator.GetRuntimeUnlockRetryLifecycle(state);
         var authority = previous.CurrentAuthorizedAuthority;
-        var prepared =
+        var prepared = preparedDecision ??
             FileTransferCoordinator
                 .PrepareRuntimeUnlockRetryLifecycleScopeInvalidation(
                     state,

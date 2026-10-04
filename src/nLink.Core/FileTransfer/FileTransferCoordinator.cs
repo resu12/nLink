@@ -1618,7 +1618,8 @@ internal sealed record RuntimeUnlockRetryLifecycleSubstate(
     RuntimeUnlockRetryDispatchScopeInvalidationReceipt?
         LastScopeInvalidationReceipt = null,
     long LastScopeInvalidationGeneration = 0,
-    ImmutableArray<RuntimeUnlockRetryLifecycleAttemptSnapshot> AttemptHistory = default)
+    ImmutableArray<RuntimeUnlockRetryLifecycleAttemptSnapshot> AttemptHistory = default,
+    RuntimeUnlockPostFallbackDialFailureObservation? LastPostFallbackDialFailure = null)
 {
     internal static RuntimeUnlockRetryLifecycleSubstate Empty { get; } = new();
 
@@ -4873,6 +4874,13 @@ internal static partial class FileTransferCoordinator
         PrepareRuntimeUnlockRetryLifecycleScopeInvalidation(
             FileTransferCoordinatorState state,
             string reason)
+        => PrepareRuntimeUnlockRetryLifecycleScopeInvalidationCore(state, reason, state);
+
+    private static RuntimeUnlockRetryLifecycleScopeInvalidationDecision
+        PrepareRuntimeUnlockRetryLifecycleScopeInvalidationCore(
+            FileTransferCoordinatorState state,
+            string reason,
+            FileTransferCoordinatorState snapshotBefore)
     {
         RuntimeUnlockRetryLifecycleScopeInvalidationDecision Decision(
             RuntimeUnlockRetryLifecycleTransitionStatus status,
@@ -4880,13 +4888,14 @@ internal static partial class FileTransferCoordinator
             RuntimeUnlockRetryDispatchScopeInvalidationCommand? command = null,
             FileTransferCoordinatorState? nextState = null)
             => FinalizeRuntimeUnlockRetrySnapshot(
-                state,
+                snapshotBefore,
                 new RuntimeUnlockRetryLifecycleScopeInvalidationDecision(
                     status,
                     decisionReason,
                     command)
             {
-                State = nextState ?? state,
+                State = status == RuntimeUnlockRetryLifecycleTransitionStatus.Rejected
+                    ? snapshotBefore : nextState ?? state,
             },
                 nameof(PrepareRuntimeUnlockRetryLifecycleScopeInvalidation),
                 (object?)command ?? reason);
@@ -4904,6 +4913,13 @@ internal static partial class FileTransferCoordinator
         {
             return Decision(RuntimeUnlockRetryLifecycleTransitionStatus.Rejected,
                 "retry_dispatch_probe_rollback_retirement_not_current");
+        }
+
+        if (normalizedReason == PostFallbackDialFailureRetryRetirementReason &&
+            !IsPostFallbackDialFailureRetryRetirementCurrent(state))
+        {
+            return Decision(RuntimeUnlockRetryLifecycleTransitionStatus.Rejected,
+                "retry_dispatch_dial_failure_retirement_not_current");
         }
 
         var lifecycle = GetRuntimeUnlockRetryLifecycle(state);
@@ -5015,6 +5031,13 @@ internal static partial class FileTransferCoordinator
         {
             return Decision(RuntimeUnlockRetryLifecycleTransitionStatus.Rejected,
                 "retry_dispatch_probe_rollback_retirement_not_current");
+        }
+
+        if (receipt.Command.Reason == PostFallbackDialFailureRetryRetirementReason &&
+            !IsPostFallbackDialFailureRetryRetirementCurrent(state))
+        {
+            return Decision(RuntimeUnlockRetryLifecycleTransitionStatus.Rejected,
+                "retry_dispatch_dial_failure_retirement_not_current");
         }
 
         if (lifecycle.PendingScopeInvalidationCommand is null &&
@@ -13386,6 +13409,8 @@ internal static partial class FileTransferCoordinator
                 string.Equals(
                     invalidationReason,
                     "sidecar_failed_precommit_probe_rollback",
+                    StringComparison.Ordinal) ||
+                string.Equals(invalidationReason, PostFallbackDialFailureRetryRetirementReason,
                     StringComparison.Ordinal));
     }
 
