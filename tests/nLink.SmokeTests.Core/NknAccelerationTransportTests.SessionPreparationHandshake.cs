@@ -375,12 +375,13 @@ public sealed partial class NknAccelerationTransportTests
             .GetConstructors(BindingFlags.Instance | BindingFlags.NonPublic).Single().Invoke(new object?[] { "dialer", new Process(), null });
         public NknTunaLaneLease? Current;
         public NknTunaLanePreparationRequest? Request;
-        public int Starts, ExactStops, GlobalStops;
+        public int Starts, ExactStops, GlobalStops, OrdinaryStarts;
         public int Retains, Activations;
         public bool IsAvailable => Current is not null;
         public bool CanListen = true;
         public bool CanOfferListener => CanListen;
-        public NknAccelerationLaneKind ConfiguredLanes => NknAccelerationLaneKind.File;
+        public NknAccelerationLaneKind Configuration = NknAccelerationLaneKind.File;
+        public NknAccelerationLaneKind ConfiguredLanes => Configuration;
         public NknAccelerationLaneKind SupportedLanes => NknAccelerationLaneKind.File;
         public string? LocalTunaAddress => "preparation-listener";
         public bool IsLocalPaidListenerActive => Request?.LocalIsPayer == true && IsAvailable;
@@ -418,7 +419,11 @@ public sealed partial class NknAccelerationTransportTests
                 bridgeIngressObservedUtcMs: DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()));
             return true;
         }
-        public Task<bool> EnsureListenerSidecarConnectedAsync(string peer, CancellationToken ct) => throw new InvalidOperationException("ordinary_listener_forbidden");
+        public Task<bool> EnsureListenerSidecarConnectedAsync(string peer, CancellationToken ct)
+        {
+            Interlocked.Increment(ref OrdinaryStarts);
+            throw new InvalidOperationException("ordinary_listener_forbidden");
+        }
         public Task<bool> StartDialerSidecarAsync(string tuna, string peer, CancellationToken ct) => throw new InvalidOperationException("ordinary_dialer_forbidden");
         public Task StopAsync(string reason, CancellationToken ct) { GlobalStops++; failureOrigin = null; return Task.CompletedTask; }
         public NknTunaLaneLease? CaptureCurrentLaneLease() => Current;

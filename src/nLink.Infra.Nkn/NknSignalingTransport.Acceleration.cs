@@ -14534,6 +14534,17 @@ public sealed partial class NknSignalingTransport
             return;
         }
 
+        // Automatic File-only startup must use the same coordinator-owned
+        // preparation as unlock, rather than occupy its lane with generic work.
+        if (!runtimeUnlockActivation &&
+            Volatile.Read(ref accelerationNegotiationScheduled) == 0 &&
+            accelerationLane is INknTunaAccelerationSession { ConfiguredLanes: NknAccelerationLaneKind.File } &&
+            SelectSessionPreparationRequest().Purpose == FileTransferAccelerationRequestPurpose.SessionPreparation)
+        {
+            _ = RequestSessionPreparationAsync(CancellationToken.None);
+            return;
+        }
+
         if (HasPendingOutboundAccelerationOffer() || HasPendingAccelerationAnswerAck())
         {
             if (runtimeUnlockActivation &&

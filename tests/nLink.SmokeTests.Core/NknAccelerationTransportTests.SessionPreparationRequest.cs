@@ -9,6 +9,63 @@ public sealed partial class NknAccelerationTransportTests
     [InlineData(false)]
     [InlineData(true)]
     [Trait("FileTransferInfraSuite", "SessionPreparationRequest")]
+    public Task PreparationRequest_AutomaticFileOnlySchedulingUsesCoordinatorBeforePublicUnlock(bool helperPays)
+        => WithPublicPreparationPairAsync(helperPays, async pair =>
+        {
+            InvokePrivateMethod(pair.Payer, "ScheduleAccelerationNegotiationIfEligible",
+                "session_security_state_ready", null, false, false, 0L);
+            await pair.WaitReady();
+            await WaitPreparationRequestIdle(pair);
+            var payer = pair.State(pair.PayerService);
+            var dialer = pair.State(pair.DialerService);
+            await pair.Payer.RequestAccelerationNegotiationAsync("runtime_unlock", pair.Token);
+            await WaitPreparationRequestIdle(pair);
+            Assert.Same(payer, pair.State(pair.PayerService));
+            Assert.Same(dialer, pair.State(pair.DialerService));
+            Assert.Equal(1, pair.PayerLane.Starts);
+            Assert.Equal(1, pair.DialerLane.Starts);
+            Assert.Equal(3, pair.Sent.Count);
+            pair.AssertNoFileEffects();
+            Assert.Equal("file_tuna_v4", (await StartPreparedAdmission(pair.PayerService, pair.Token))!.RouteToken);
+            await WaitUntilAsync(() => pair.DialerService.Snapshot.Inbound?.RouteToken == "file_tuna_v4", TimeSpan.FromSeconds(3));
+        });
+
+    [Fact]
+    [Trait("FileTransferInfraSuite", "SessionPreparationRequest")]
+    public Task PreparationRequest_AutomaticSchedulingHonorsExistingScheduledWork()
+        => WithPublicPreparationPairAsync(false, pair =>
+        {
+            var before = pair.State(pair.PayerService);
+            SetPrivateField(pair.Payer, "accelerationNegotiationScheduled", 1);
+            InvokePrivateMethod(pair.Payer, "ScheduleAccelerationNegotiationIfEligible",
+                "session_security_state_ready", null, false, false, 0L);
+            Assert.Same(before, pair.State(pair.PayerService));
+            Assert.Equal(0, pair.PayerLane.Starts);
+            Assert.Equal(0, pair.PayerLane.OrdinaryStarts);
+            SetPrivateField(pair.Payer, "accelerationNegotiationScheduled", 0);
+            return Task.CompletedTask;
+        });
+
+    [Fact]
+    [Trait("FileTransferInfraSuite", "SessionPreparationRequest")]
+    public Task PreparationRequest_AutomaticMixedLaneSchedulingKeepsGenericPath()
+        => WithPublicPreparationPairAsync(false, async pair =>
+        {
+            pair.PayerLane.Configuration = NknAccelerationLaneKind.File | NknAccelerationLaneKind.Screen;
+            InvokePrivateMethod(pair.Payer, "ScheduleAccelerationNegotiationIfEligible",
+                "session_security_state_ready", null, false, false, 0L);
+            await WaitUntilAsync(() => pair.PayerLane.OrdinaryStarts > 0, TimeSpan.FromSeconds(3));
+            await WaitPreparationRequestIdle(pair);
+            Assert.Equal(0, pair.PayerLane.Starts);
+            Assert.Null(pair.State(pair.PayerService).Permit);
+            Assert.Null(pair.State(pair.PayerService).Readiness);
+            pair.AssertNoFileEffects();
+        });
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    [Trait("FileTransferInfraSuite", "SessionPreparationRequest")]
     public Task PreparationRequest_ColdListenerStartupDoesNotSpendHandshakeLifetime(bool helperPays)
         => WithPublicPreparationPairAsync(helperPays, async pair =>
         {
