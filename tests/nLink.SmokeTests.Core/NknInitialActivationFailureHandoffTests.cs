@@ -22,6 +22,27 @@ public sealed partial class NknAccelerationTransportTests
         => RunInitialActivationSidecarFailureAsync(checkMalformedObservations,
             sidecarReason: "listener_terminal_tuna_stream_eof");
 
+    [Fact]
+    [Trait("FileTransferInfraSuite", "InitialActivationFailureHandoff")]
+    public Task InitialActivationSidecarFailure_OverlappingListenerErrorStillRollsBackExactSender()
+        => RunInitialActivationSidecarFailureAsync(false, sidecarReason: "remote_closed",
+            interleaveListenerError: true);
+
+    [Fact]
+    [Trait("FileTransferInfraSuite", "InitialActivationFailureHandoff")]
+    public Task InitialActivationSidecarFailure_OverlappingListenerErrorCompletesJoinedPayload()
+        => RunInitialActivationSidecarFailureAsync(false, sidecarReason: "remote_closed",
+            interleaveListenerError: true, joinedPayload: true);
+
+    [Theory]
+    [InlineData("service_disposed")]
+    [InlineData("data_session_replaced")]
+    [InlineData("data_session_generation_aba")]
+    [Trait("FileTransferInfraSuite", "InitialActivationFailureHandoff")]
+    public Task InitialActivationSidecarFailure_OverlappingListenerErrorCannotReviveStaleSource(string lifecycleChange)
+        => RunInitialActivationSidecarFailureAsync(false, lifecycleChange, "remote_closed",
+            interleaveListenerError: true);
+
     [Theory]
     [InlineData("data_session_disposed")]
     [InlineData("service_disposed")]
@@ -49,7 +70,8 @@ public sealed partial class NknAccelerationTransportTests
         => RunInitialActivationSidecarFailureAsync(false, lifecycleChange, "listener_terminal_tuna_stream_eof");
 
     private async Task RunInitialActivationSidecarFailureAsync(bool checkMalformedObservations,
-        string? lifecycleChange = null, string sidecarReason = "sidecar_tuna_stream_eof")
+        string? lifecycleChange = null, string sidecarReason = "sidecar_tuna_stream_eof",
+        bool interleaveListenerError = false, bool joinedPayload = false)
     {
         using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(20));
         // Independent cases must not share the invite-validation throttle key.
@@ -65,7 +87,12 @@ public sealed partial class NknAccelerationTransportTests
             InviteCapabilities.Chat | InviteCapabilities.FileTransfer, suppressAutomaticAccelerationNegotiation: true);
         const string transferId = "initial_activation_failure_handoff";
         using var service = new SessionFileTransferService();
-        using var wrongDataSession = await peer.OpenFileTransferDataSessionAsync(sessionId, transferId, cts.Token);
+        using var receiver = new SessionFileTransferService();
+        using var destination = new MemoryStream();
+        var payload = joinedPayload ? Enumerable.Range(0, 256 * 1024).Select(i => (byte)(i % 251)).ToArray() : [];
+        var releasePayload = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        using var wrongDataSession = await peer.OpenFileTransferDataSessionAsync(sessionId,
+            joinedPayload ? "unused_wrong_session" : transferId, cts.Token);
         object? context = null;
         var observations = new List<RuntimeUnlockInitialActivationPreCommitProbeFailureObservation>();
         RuntimeUnlockInitialActivationPreCommitProbeFailureObservedEventArgs? delivered = null;
@@ -142,9 +169,31 @@ public sealed partial class NknAccelerationTransportTests
             rejectedCases.Add("null_observation");
         };
         service.AttachTransport(transport);
-        var dataSession = await transport.OpenFileTransferDataSessionAsync(sessionId, transferId, cts.Token);
-        context = SessionFileTransferV4SenderTests.CreateInitialActivationNknSenderForTest(
-            service, transport, dataSession, sessionId, transferId);
+        IFileTransferDataSession dataSession;
+        if (joinedPayload)
+        {
+            receiver.AttachTransport(peer);
+            var opens = 0;
+            Assert.NotNull(await service.TryStartSendAsync(new("recovery.bin", payload.Length, transferId),
+                _ => Task.FromResult<Stream>(Interlocked.Increment(ref opens) == 1
+                    ? new MemoryStream(payload, writable: false)
+                    : new InitialActivationPayloadReadGate(payload, releasePayload.Task)), cts.Token));
+            await WaitUntilAsync(() => receiver.Snapshot.Inbound?.State == FileTransferTransferState.PendingDecision,
+                TimeSpan.FromSeconds(3));
+            Assert.NotNull(await receiver.AcceptIncomingTransferAsync(transferId,
+                (_, _) => Task.FromResult<Stream>(destination), cts.Token));
+            await WaitUntilAsync(() => Volatile.Read(ref opens) >= 2, TimeSpan.FromSeconds(3));
+            context = GetPrivateField(service, "outboundTransfer")!;
+            dataSession = Assert.IsAssignableFrom<IFileTransferDataSession>(ContextValue(context, "DataSession"));
+            await WaitUntilAsync(() => Assert.IsType<int>(ContextValue(context, "V4LastStateEpoch")) >= 0,
+                TimeSpan.FromSeconds(3));
+        }
+        else
+        {
+            dataSession = await transport.OpenFileTransferDataSessionAsync(sessionId, transferId, cts.Token);
+            context = SessionFileTransferV4SenderTests.CreateInitialActivationNknSenderForTest(
+                service, transport, dataSession, sessionId, transferId);
+        }
         var original = SessionFileTransferV4SenderTests.CaptureInitialActivationNknSenderForTest(context);
         transport.SeedRuntimeUnlockOfferCriticalSectionForTests(sessionId, "initial-failure-offer", 17, 11,
             observedSend: true, observedLane: "nkn", peerReceived: true);
@@ -237,7 +286,28 @@ public sealed partial class NknAccelerationTransportTests
 
         // This is the real subscribed sidecar-down callback, not the downstream
         // service logging helper. The probe is already Started before the EOF.
+        var listenerErrors = 0;
+        if (interleaveListenerError)
+        {
+            // Ensure reset emits its ordinary status notification even though
+            // the probe's pending-route status itself has not changed.
+            SetPrivateField(transport, "transportAccelerationStatusReason", "test_before_reset");
+            var failureThread = Environment.CurrentManagedThreadId;
+            transport.TransportAccelerationStateChanged += (_, args) =>
+            {
+                if (Environment.CurrentManagedThreadId == failureThread && Interlocked.Exchange(ref listenerErrors, 1) == 0)
+                {
+                    Assert.Equal(RuntimeUnlockPathProbeState.Started,
+                        Assert.IsType<RuntimeUnlockTransactionSnapshot>(GetPrivateField(transport, "runtimeUnlockTransactionState")).PathProbeState);
+                    // The remote-close callback has captured the exact Started
+                    // probe but has not failed it yet. The supervisor can win
+                    // that transition before the first callback continues.
+                    lane.SetAvailable(false, "listener_sidecar_error");
+                }
+            };
+        }
         lane.SetAvailable(false, sidecarReason);
+        Assert.Equal(interleaveListenerError ? 1 : 0, listenerErrors);
         if (sidecarReason == "listener_terminal_tuna_stream_eof")
         {
             // Reproduce terminal EOF followed by remote_closed; the later
@@ -291,6 +361,38 @@ public sealed partial class NknAccelerationTransportTests
         var duplicate = SessionFileTransferV4SenderTests.CaptureInitialActivationNknSenderForTest(context);
         Assert.Equal(SnapshotIdentity(afterFailure), SnapshotIdentity(duplicate));
         Assert.DoesNotContain("event=filetransfer_route_selected; route=file_tuna_v4", ReadOperationalLogTail(logStart), StringComparison.Ordinal);
+        if (joinedPayload)
+        {
+            foreach (var (owner, contextName) in new[] { (service, "outboundTransfer"), (receiver, "inboundTransfer") })
+            {
+                var state = SessionFileTransferV4SenderTests.CaptureJoinedNknStateForTest(owner, GetPrivateField(owner, contextName)!);
+                var publication = Assert.IsType<RoutePublicationToken>(state.CurrentRoutePublicationToken);
+                Assert.Equal((FileTransferRoute.RegularNknV4Fast, 4), (publication.Route, publication.ProtocolVersion));
+                Assert.True(FileTransferCoordinator.IsRoutePublicationTokenCurrent(state, publication, out _));
+            }
+            releasePayload.TrySetResult();
+            await WaitUntilAsync(() => service.Snapshot.Outbound?.State == FileTransferTransferState.Completed &&
+                receiver.Snapshot.Inbound?.State == FileTransferTransferState.Completed, TimeSpan.FromSeconds(8));
+            Assert.Equal(payload, destination.ToArray());
+            Assert.Equal(System.Security.Cryptography.SHA256.HashData(payload),
+                System.Security.Cryptography.SHA256.HashData(destination.ToArray()));
+            Assert.Equal("regular_nkn_v4_fast", service.Snapshot.Outbound!.RouteToken);
+            Assert.Equal("regular_nkn_v4_fast", receiver.Snapshot.Inbound!.RouteToken);
+        }
+    }
+
+    private sealed class InitialActivationPayloadReadGate(byte[] bytes, Task release) : MemoryStream(bytes, writable: false)
+    {
+        public override async ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken ct = default)
+        {
+            const int prefixBytes = 64 * 1024;
+            if (Position >= prefixBytes) { await release.WaitAsync(ct); }
+            else { buffer = buffer[..Math.Min(buffer.Length, prefixBytes - (int)Position)]; }
+            return await base.ReadAsync(buffer, ct);
+        }
+
+        public override Task<int> ReadAsync(byte[] buffer, int offset, int count, CancellationToken ct)
+            => ReadAsync(buffer.AsMemory(offset, count), ct).AsTask();
     }
 
     private static object? ContextValue(object value, string name)

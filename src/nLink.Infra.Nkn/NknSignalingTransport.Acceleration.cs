@@ -10024,10 +10024,8 @@ public sealed partial class NknSignalingTransport
 
     private bool FailRuntimeUnlockTunaPathProbeForSidecarDropIfActive(
         string? sessionId,
-        string sidecarReason,
-        out RuntimeUnlockRouteCommitSnapshot? failedStartedProbe)
+        string sidecarReason)
     {
-        failedStartedProbe = null;
         var normalizedSessionId = string.IsNullOrWhiteSpace(sessionId) ? string.Empty : sessionId.Trim();
         var normalizedSidecarReason = SanitizeLogToken(sidecarReason);
         RuntimeUnlockTransactionSnapshot? previous = null;
@@ -10045,9 +10043,6 @@ public sealed partial class NknSignalingTransport
             }
 
             previous = current;
-            var started = runtimeUnlockPreCommitProbeStartedSnapshot;
-            var exactStarted = started is not null &&
-                RuntimeUnlockInitialActivationFailureProbeMatchesTransactionUnsafe(started, failed: false);
             decision = ApplyRuntimeUnlockTransactionUnsafe(
                 RuntimeUnlockTransactionEventKind.PathProbeFailed,
                 current.SessionId,
@@ -10058,11 +10053,6 @@ public sealed partial class NknSignalingTransport
                 pathProbeTransport: current.PathProbeTransport == FileTransferTransportKind.Unknown
                     ? FileTransferTransportKind.Tuna
                     : current.PathProbeTransport);
-            if (exactStarted &&
-                RuntimeUnlockInitialActivationFailureProbeMatchesTransactionUnsafe(started!, failed: true))
-            {
-                failedStartedProbe = started;
-            }
         }
 
         if (previous is null || decision is null)
@@ -13327,10 +13317,12 @@ public sealed partial class NknSignalingTransport
                 failTransaction: false);
             FailRuntimeUnlockTunaPathProbeForSidecarDropIfActive(
                 currentSessionSecurityState.SessionId?.Value,
-                resetReason,
-                out var failedStartedProbe);
-            if (initialProbeFailure is not null && failedStartedProbe == initialProbeFailure.Probe)
+                resetReason);
+            if (initialProbeFailure is not null)
             {
+                // Another current sidecar callback may have failed this probe
+                // during reset. Publication still revalidates the exact failed
+                // probe, pause binding and source lifetime before notifying Core.
                 PublishRuntimeUnlockInitialActivationPreCommitProbeFailure(initialProbeFailure);
             }
             if (postFallbackProbeFailure is not null)
