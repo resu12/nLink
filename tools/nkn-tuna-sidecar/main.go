@@ -1259,6 +1259,29 @@ doneCollectingBridgeResults:
 	return err
 }
 
+// Retry polling timeouts within Read so readFrame retains a partially consumed
+// header or payload. Starting a new frame after a timeout discards those bytes.
+type bridgeFrameReader struct {
+	ctx  context.Context
+	conn net.Conn
+}
+
+func (r bridgeFrameReader) Read(p []byte) (int, error) {
+	for {
+		if err := r.ctx.Err(); err != nil {
+			return 0, err
+		}
+		n, err := r.conn.Read(p)
+		if !isTimeout(err) {
+			return n, err
+		}
+		_ = r.conn.SetReadDeadline(time.Now().Add(time.Second))
+		if n > 0 {
+			return n, nil
+		}
+	}
+}
+
 func bridgeDirection(
 	ctx context.Context,
 	role string,
@@ -1284,6 +1307,7 @@ func bridgeDirection(
 	var maxIdleGapMs int64
 	var lastReadAt time.Time
 	sequenceTracker := &bridgeSequenceTracker{}
+	reader := bridgeFrameReader{ctx: ctx, conn: src}
 	finish := func(stage string, err error, frame sidecarFrame) {
 		trace.record(direction, "direction_end", bridgeTerminalReason(direction, stage, err), nil)
 		laneSummaries := bridgeLaneSequenceSummaries(sequenceTracker.laneStats)
@@ -1325,14 +1349,15 @@ func bridgeDirection(
 		}
 		_ = src.SetReadDeadline(time.Now().Add(time.Second))
 		readStarted := time.Now()
-		frame, err := readFrame(src)
+		frame, err := readFrame(reader)
 		readMs := time.Since(readStarted).Milliseconds()
 		if readMs > maxReadMs {
 			maxReadMs = readMs
 		}
 		if err != nil {
-			if isTimeout(err) {
-				continue
+			if ctx.Err() != nil {
+				finish("context", ctx.Err(), lastFrame)
+				return
 			}
 			finish("read", err, lastFrame)
 			return
