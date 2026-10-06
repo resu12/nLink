@@ -4,6 +4,7 @@ namespace NLink.SmokeTests;
 
 [Trait("OpsSuite", "CoordinatorSnapshots")]
 [Collection(FakeNknNetworkCollection.Name)]
+[Trait("Area", "Core")]
 public sealed class FileTransferProbeRollbackRetryRetirementEvidenceTests : FileTransferOpsScriptsTestBase
 {
     [Fact]

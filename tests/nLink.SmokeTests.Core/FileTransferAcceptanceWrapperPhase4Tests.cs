@@ -41,6 +41,9 @@ public sealed class FileTransferAcceptanceWrapperPhase4Tests : FileTransferOpsSc
 
         try
         {
+            var environment = BuildFakeRouteAcceptanceEnvironment("phase4-pass");
+            environment["NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_ROUTE_CYCLE_SOURCE"] =
+                await GenerateRouteCycleSourceAsync(repoRoot, Path.Combine(artifactRoot, "peers"), "independent_pairs");
             var result = await RunPowerShellFileAsync(
                 repoRoot,
                 Path.Combine(repoRoot, "tools", "Run-FileTransferRouteAcceptance.ps1"),
@@ -50,7 +53,7 @@ public sealed class FileTransferAcceptanceWrapperPhase4Tests : FileTransferOpsSc
                     "-TimeoutSeconds", "30",
                     "-ProgressTimeoutSeconds", "30"
                 ],
-                BuildFakeRouteAcceptanceEnvironment("phase4-pass"));
+                environment);
 
             Assert.True(
                 result.ExitCode == 0,
@@ -258,6 +261,8 @@ public sealed class FileTransferAcceptanceWrapperPhase4Tests : FileTransferOpsSc
         try
         {
             var environment = BuildFakeRouteAcceptanceEnvironment("phase4-goodput-rerun-pass");
+            environment["NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_ROUTE_CYCLE_SOURCE"] =
+                await GenerateRouteCycleSourceAsync(repoRoot, Path.Combine(artifactRoot, "peers"), "independent_pairs");
             environment["NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_PHASE4_REGULAR_NKN_V4_64MB_GOODPUT_BPS"] = "1000";
             environment["NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_PHASE4_REGULAR_NKN_V4_64MB_RERUN_GOODPUT_BPS"] = "1872542.416";
 
@@ -357,6 +362,8 @@ public sealed class FileTransferAcceptanceWrapperPhase4Tests : FileTransferOpsSc
         try
         {
             var environment = BuildFakeRouteAcceptanceEnvironment("phase4-regular-network-variance-rerun-pass");
+            environment["NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_ROUTE_CYCLE_SOURCE"] =
+                await GenerateRouteCycleSourceAsync(repoRoot, Path.Combine(artifactRoot, "peers"), "independent_pairs");
             environment["NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_PHASE4_REGULAR_NKN_V4_64MB_WARNING"] = "1";
 
             var result = await RunPowerShellFileAsync(
@@ -405,6 +412,8 @@ public sealed class FileTransferAcceptanceWrapperPhase4Tests : FileTransferOpsSc
         try
         {
             var environment = BuildFakeRouteAcceptanceEnvironment("phase4-regular-progress-timeout-recovery-storm-rerun-pass");
+            environment["NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_ROUTE_CYCLE_SOURCE"] =
+                await GenerateRouteCycleSourceAsync(repoRoot, Path.Combine(artifactRoot, "peers"), "independent_pairs");
             environment["NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_PHASE4_REGULAR_NKN_V4_64MB_PROGRESS_TIMEOUT_RECOVERY_STORM"] = "1";
 
             var result = await RunPowerShellFileAsync(
@@ -483,7 +492,7 @@ public sealed class FileTransferAcceptanceWrapperPhase4Tests : FileTransferOpsSc
 
     [Fact]
     [Trait("Category", "Smoke")]
-    public async Task RunFileTransferRouteAcceptance_Phase4RegularStartupRecoveryStormRerunsAsNetworkVariance()
+    public async Task RunFileTransferRouteAcceptance_Phase4StartupRecoveryIncompleteProofIsNotRetried()
     {
         if (!OperatingSystem.IsWindows())
         {
@@ -497,6 +506,8 @@ public sealed class FileTransferAcceptanceWrapperPhase4Tests : FileTransferOpsSc
         try
         {
             var environment = BuildFakeRouteAcceptanceEnvironment("phase4-regular-startup-recovery-storm-rerun-pass");
+            environment["NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_ROUTE_CYCLE_SOURCE"] =
+                await GenerateRouteCycleSourceAsync(repoRoot, Path.Combine(artifactRoot, "peers"), "independent_pairs");
             environment["NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_PHASE4_REGULAR_NKN_V4_64MB_STARTUP_RECOVERY_STORM"] = "1";
 
             var result = await RunPowerShellFileAsync(
@@ -504,22 +515,28 @@ public sealed class FileTransferAcceptanceWrapperPhase4Tests : FileTransferOpsSc
                 Path.Combine(repoRoot, "tools", "Run-FileTransferRouteAcceptance.ps1"),
                 [
                     "-MatrixMode", "phase4-ab-acceptance",
+                    "-ScenarioName", "regular-nkn-v4-64mb",
                     "-ArtifactRoot", artifactRoot,
                     "-TimeoutSeconds", "30",
                     "-ProgressTimeoutSeconds", "30"
                 ],
                 environment);
 
-            Assert.True(
-                result.ExitCode == 0,
-                $"Expected regular-NKN startup recovery storm to require and pass a clean rerun.{Environment.NewLine}STDOUT:{Environment.NewLine}{result.Stdout}{Environment.NewLine}STDERR:{Environment.NewLine}{result.Stderr}");
+            // The raw fixture fails strict proof admission before post-artifact policy hooks.
+            // Environmental classification is covered independently by RecoveryRetryPolicyTests.
+            Assert.NotEqual(0, result.ExitCode);
+            var summaryText = File.ReadAllText(Path.Combine(runRoot, "phase4-ab-acceptance-summary.txt"));
             var summary = ReadArtifactReport(runRoot, "phase4-ab-acceptance-summary.txt");
-            Assert.Equal("PASS", summary["verdict"]);
-            Assert.Equal("1", summary["regular-nkn-v4-64mb.retry_used"]);
-            Assert.Equal("2", summary["regular-nkn-v4-64mb.selected_attempt"]);
-            Assert.Contains("regular_v4_transport_recovery_storm", summary["regular-nkn-v4-64mb.first_failure_reason"], StringComparison.Ordinal);
-            Assert.Equal("(none)", summary["regular-nkn-v4-64mb.environmental_classification"]);
-            Assert.True(Directory.Exists(Path.Combine(runRoot, "regular-nkn-v4-64mb-rerun-1")));
+            Assert.Equal("FAIL", summary["verdict"]);
+            Assert.Equal("0", summary["regular-nkn-v4-64mb.retry_used"]);
+            Assert.Contains("without complete proof artifacts", summaryText, StringComparison.Ordinal);
+            Assert.DoesNotContain("Injected fake Phase 4 scenario execution failure after artifacts", summaryText, StringComparison.Ordinal);
+            Assert.False(Directory.Exists(Path.Combine(runRoot, "regular-nkn-v4-64mb-rerun-1")));
+            using var receipt = System.Text.Json.JsonDocument.Parse(await File.ReadAllTextAsync(Path.Combine(
+                runRoot, "regular-nkn-v4-64mb", "filetransfer-retained-analysis-attempt-receipt.json")));
+            Assert.Equal("proof_incomplete", receipt.RootElement.GetProperty("status").GetString());
+            Assert.Equal(0, receipt.RootElement.GetProperty("exitCode").GetInt32());
+            Assert.False(receipt.RootElement.GetProperty("completedProofArtifacts").GetBoolean());
         }
         finally
         {
@@ -529,7 +546,7 @@ public sealed class FileTransferAcceptanceWrapperPhase4Tests : FileTransferOpsSc
 
     [Fact]
     [Trait("Category", "Smoke")]
-    public async Task RunFileTransferRouteAcceptance_Phase4RegularStartupRecoveryStormExecutionFailureStillReruns()
+    public async Task RunFileTransferRouteAcceptance_Phase4StartupRecoveryIncompleteProofPrecedesPostArtifactFault()
     {
         if (!OperatingSystem.IsWindows())
         {
@@ -543,6 +560,8 @@ public sealed class FileTransferAcceptanceWrapperPhase4Tests : FileTransferOpsSc
         try
         {
             var environment = BuildFakeRouteAcceptanceEnvironment("phase4-regular-startup-recovery-storm-execution-failure-rerun-pass");
+            environment["NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_ROUTE_CYCLE_SOURCE"] =
+                await GenerateRouteCycleSourceAsync(repoRoot, Path.Combine(artifactRoot, "peers"), "independent_pairs");
             environment["NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_PHASE4_REGULAR_NKN_V4_64MB_STARTUP_RECOVERY_STORM"] = "1";
             environment["NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_PHASE4_REGULAR_NKN_V4_64MB_POST_ARTIFACT_EXECUTION_FAIL"] = "1";
 
@@ -551,23 +570,28 @@ public sealed class FileTransferAcceptanceWrapperPhase4Tests : FileTransferOpsSc
                 Path.Combine(repoRoot, "tools", "Run-FileTransferRouteAcceptance.ps1"),
                 [
                     "-MatrixMode", "phase4-ab-acceptance",
+                    "-ScenarioName", "regular-nkn-v4-64mb",
                     "-ArtifactRoot", artifactRoot,
                     "-TimeoutSeconds", "30",
                     "-ProgressTimeoutSeconds", "30"
                 ],
                 environment);
 
-            Assert.True(
-                result.ExitCode == 0,
-                $"Expected classified regular-NKN startup recovery storm with a post-artifact wrapper failure to require and pass a clean rerun.{Environment.NewLine}STDOUT:{Environment.NewLine}{result.Stdout}{Environment.NewLine}STDERR:{Environment.NewLine}{result.Stderr}");
+            // The raw fixture fails strict proof admission before post-artifact policy hooks.
+            // Environmental classification is covered independently by RecoveryRetryPolicyTests.
+            Assert.NotEqual(0, result.ExitCode);
             var summaryText = File.ReadAllText(Path.Combine(runRoot, "phase4-ab-acceptance-summary.txt"));
             var summary = ReadArtifactReport(runRoot, "phase4-ab-acceptance-summary.txt");
-            Assert.Equal("PASS", summary["verdict"]);
-            Assert.Equal("1", summary["regular-nkn-v4-64mb.retry_used"]);
-            Assert.Equal("2", summary["regular-nkn-v4-64mb.selected_attempt"]);
-            Assert.Contains("regular_v4_transport_recovery_storm", summary["regular-nkn-v4-64mb.first_failure_reason"], StringComparison.Ordinal);
-            Assert.DoesNotContain("regular-nkn-v4-64mb: scenario execution failed", summaryText, StringComparison.Ordinal);
-            Assert.True(Directory.Exists(Path.Combine(runRoot, "regular-nkn-v4-64mb-rerun-1")));
+            Assert.Equal("FAIL", summary["verdict"]);
+            Assert.Equal("0", summary["regular-nkn-v4-64mb.retry_used"]);
+            Assert.Contains("without complete proof artifacts", summaryText, StringComparison.Ordinal);
+            Assert.DoesNotContain("Injected fake Phase 4 scenario execution failure after artifacts", summaryText, StringComparison.Ordinal);
+            Assert.False(Directory.Exists(Path.Combine(runRoot, "regular-nkn-v4-64mb-rerun-1")));
+            using var receipt = System.Text.Json.JsonDocument.Parse(await File.ReadAllTextAsync(Path.Combine(
+                runRoot, "regular-nkn-v4-64mb", "filetransfer-retained-analysis-attempt-receipt.json")));
+            Assert.Equal("proof_incomplete", receipt.RootElement.GetProperty("status").GetString());
+            Assert.Equal(0, receipt.RootElement.GetProperty("exitCode").GetInt32());
+            Assert.False(receipt.RootElement.GetProperty("completedProofArtifacts").GetBoolean());
         }
         finally
         {
@@ -577,7 +601,7 @@ public sealed class FileTransferAcceptanceWrapperPhase4Tests : FileTransferOpsSc
 
     [Fact]
     [Trait("Category", "Smoke")]
-    public async Task RunFileTransferRouteAcceptance_Phase4PersistentRegularStartupRecoveryStormFailsAsEnvironmental()
+    public async Task RunFileTransferRouteAcceptance_Phase4PersistentStartupRecoveryIncompleteProofIsNotRetried()
     {
         if (!OperatingSystem.IsWindows())
         {
@@ -599,21 +623,28 @@ public sealed class FileTransferAcceptanceWrapperPhase4Tests : FileTransferOpsSc
                 Path.Combine(repoRoot, "tools", "Run-FileTransferRouteAcceptance.ps1"),
                 [
                     "-MatrixMode", "phase4-ab-acceptance",
+                    "-ScenarioName", "regular-nkn-v4-64mb",
                     "-ArtifactRoot", artifactRoot,
                     "-TimeoutSeconds", "30",
                     "-ProgressTimeoutSeconds", "30"
                 ],
                 environment);
 
+            // The raw fixture fails strict proof admission before post-artifact policy hooks.
+            // Environmental classification is covered independently by RecoveryRetryPolicyTests.
             Assert.NotEqual(0, result.ExitCode);
             var summaryText = File.ReadAllText(Path.Combine(runRoot, "phase4-ab-acceptance-summary.txt"));
             var summary = ReadArtifactReport(runRoot, "phase4-ab-acceptance-summary.txt");
             Assert.Equal("FAIL", summary["verdict"]);
-            Assert.Equal("1", summary["regular-nkn-v4-64mb.retry_used"]);
-            Assert.Equal("0", summary["regular-nkn-v4-64mb.selected_attempt"]);
-            Assert.Equal("1", summary["regular-nkn-v4-64mb.measurement_contaminated"]);
-            Assert.Equal("regular_v4_transport_recovery_storm", summary["regular-nkn-v4-64mb.environmental_classification"]);
-            Assert.Contains("regular_v4_transport_recovery_storm", summaryText, StringComparison.Ordinal);
+            Assert.Equal("0", summary["regular-nkn-v4-64mb.retry_used"]);
+            Assert.Contains("without complete proof artifacts", summaryText, StringComparison.Ordinal);
+            Assert.DoesNotContain("Injected fake Phase 4 scenario execution failure after artifacts", summaryText, StringComparison.Ordinal);
+            Assert.False(Directory.Exists(Path.Combine(runRoot, "regular-nkn-v4-64mb-rerun-1")));
+            using var receipt = System.Text.Json.JsonDocument.Parse(await File.ReadAllTextAsync(Path.Combine(
+                runRoot, "regular-nkn-v4-64mb", "filetransfer-retained-analysis-attempt-receipt.json")));
+            Assert.Equal("proof_incomplete", receipt.RootElement.GetProperty("status").GetString());
+            Assert.Equal(0, receipt.RootElement.GetProperty("exitCode").GetInt32());
+            Assert.False(receipt.RootElement.GetProperty("completedProofArtifacts").GetBoolean());
         }
         finally
         {
@@ -683,6 +714,8 @@ public sealed class FileTransferAcceptanceWrapperPhase4Tests : FileTransferOpsSc
         try
         {
             var environment = BuildFakeRouteAcceptanceEnvironment("phase4-contaminated-rerun-pass");
+            environment["NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_ROUTE_CYCLE_SOURCE"] =
+                await GenerateRouteCycleSourceAsync(repoRoot, Path.Combine(artifactRoot, "peers"), "independent_pairs");
             environment["NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_PHASE4_ACTIVE_TUNA_V4_64MB_CONTAMINATED_MEASUREMENT"] = "1";
             environment["NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_PHASE4_ACTIVE_TUNA_V4_64MB_GOODPUT_BPS"] = "1000";
             environment["NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_PHASE4_ACTIVE_TUNA_V4_64MB_RERUN_GOODPUT_BPS"] = "5442738.550";
@@ -786,6 +819,8 @@ public sealed class FileTransferAcceptanceWrapperPhase4Tests : FileTransferOpsSc
         try
         {
             var environment = BuildFakeRouteAcceptanceEnvironment("phase4-second-transfer-second-slice-clean");
+            environment["NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_ROUTE_CYCLE_SOURCE"] =
+                await GenerateRouteCycleSourceAsync(repoRoot, Path.Combine(artifactRoot, "peers"), "independent_pairs");
             environment["NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_PHASE4_SECOND_TRANSFER_AFTER_REACTIVATION_CONTAMINATED_MEASUREMENT"] = "1";
 
             var result = await RunPowerShellFileAsync(
@@ -875,6 +910,8 @@ public sealed class FileTransferAcceptanceWrapperPhase4Tests : FileTransferOpsSc
         try
         {
             var environment = BuildFakeRouteAcceptanceEnvironment("phase4-goodput-rerun-fail");
+            environment["NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_ROUTE_CYCLE_SOURCE"] =
+                await GenerateRouteCycleSourceAsync(repoRoot, Path.Combine(artifactRoot, "peers"), "independent_pairs");
             environment["NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_PHASE4_REGULAR_NKN_V4_64MB_GOODPUT_BPS"] = "1000";
 
             var result = await RunPowerShellFileAsync(

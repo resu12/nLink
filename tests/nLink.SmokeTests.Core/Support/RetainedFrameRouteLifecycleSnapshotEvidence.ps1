@@ -47,16 +47,40 @@ function Assert-Parity([string[]]$lines, [bool]$failing, [string]$context) {
     $path = Join-Path $OutputRoot 'retained-route-compact.log'
     [IO.File]::WriteAllLines($path,$compactLines)
     $gui = Get-TunaGuiFileTransferSetupFailureClassification -Bookmark 0 -ErrorMessage 'fixture' -RouteMode 'regular-v4-live-activation-off-on-off-256mb' -ImmutableEvidencePaths @($path)
-    if (-not $failing) {
-        if ($null -ne $gui) { throw "GUI invented a boundary ($context)." }
+    $boundary = $full.FirstUnresolvedBoundary
+    if ($full.ArtifactEvidenceVerdict -ceq 'pass') {
+        # This focused stream starts on established Tuna and first publishes
+        # fallback generation 3. It cannot prove the omitted route prefix.
+        $route = Get-FileTransferCoordinatorSnapshotRouteConsistency -Evaluation $full
+        $compactRoute = Get-FileTransferCoordinatorSnapshotRouteConsistency -Evaluation $compact
+        $publications = @($full.Boundaries | Where-Object {
+            @($_.operations | Where-Object { $_.family -ceq 'route_runtime' -and $_.operationRole -ceq 'route_publication' -and
+                $_.beforeState -ceq 'None' -and $_.afterState -ceq 'Published' -and $_.operationGeneration -eq 3 }).Count -eq 1
+        })
+        $scope = "$($first.coordinatorInstanceId)|fixture-writer|$($first.sessionId)|$($first.transferId)|$($first.direction)"
+        $expectedFindings = @("snapshot route publication generation is not contiguous: scope=$scope; generation=3")
+        $origin = if ($failing) { $boundary } else { $publications[0] }
+        if ($failing) {
+            if ($boundary.taxonomyClass -cne 'filetransfer_route_transition_incomplete') { throw "Unexpected retained-route failure ($context)." }
+            $expectedFindings = @("snapshot route authority boundary is unresolved: class=$($boundary.taxonomyClass); transition_id=$($boundary.boundaryId)") + $expectedFindings
+        }
+        if ((Compare-FileTransferCoordinatorSnapshotRouteConsistency $route $compactRoute).Verdict -cne 'pass' -or
+            $route.Verdict -cne 'fail' -or $publications.Count -ne 1 -or
+            (ConvertTo-Json -InputObject @($route.Findings) -Compress) -cne (ConvertTo-Json -InputObject $expectedFindings -Compress) -or
+            $route.FirstUnresolvedBoundary.boundaryId -cne $origin.boundaryId -or
+            $route.FirstUnresolvedBoundary.boundaryHash -cne $origin.boundaryHash -or
+            $gui.ClassificationSource -cne 'coordinator_snapshot_authority_v1_route_consistency') { throw "Unexpected partial-route rejection ($context)." }
+        $boundary = $route.FirstUnresolvedBoundary
     }
+    if ($null -eq $gui -or $null -eq $boundary) { throw "Missing GUI boundary ($context)." }
     else {
-        $boundary = $full.FirstUnresolvedBoundary
         if ($gui.CoordinatorBoundaryId -cne $boundary.boundaryId -or $gui.CoordinatorBoundaryHash -cne $boundary.boundaryHash -or
             $gui.FailureClass -cne $boundary.taxonomyClass -or $gui.CoordinatorWriter -cne $boundary.writer -or
             $gui.CoordinatorWriterSequence -ne $boundary.writerSequence -or $gui.CoordinatorRawCount -ne $boundary.rawCount -or
             $gui.CoordinatorDistinctCount -ne $boundary.distinctCount -or $gui.CoordinatorRecoveredCount -ne $boundary.recoveredCount -or
-            $gui.CoordinatorUnresolvedCount -ne $boundary.unresolvedCount) { throw "GUI boundary differs ($context)." }
+            $gui.CoordinatorUnresolvedCount -ne $boundary.unresolvedCount) {
+            throw "GUI boundary differs ($context): expected=$($boundary | Select-Object boundaryId,boundaryHash,taxonomyClass,writerSequence | ConvertTo-Json -Compress); gui=$($gui | Select-Object FailureClass,CoordinatorBoundaryId,CoordinatorBoundaryHash,CoordinatorWriterSequence | ConvertTo-Json -Compress)"
+        }
     }
 }
 $commit = Decision $envelopes 'CommitFileTransferRouteTransition'

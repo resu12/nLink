@@ -2797,6 +2797,7 @@ public sealed partial class NknFileTransferTransportTests : CoreSmokeTestsBase
                     NknBridgeChannel.Bulk,
                     FileTransferTransportKind.RegularNkn,
                     helperClient.ConnectedBulkAddress,
+                    null,
                 ]);
             deliverMethod.Invoke(
                 inboundSession,
@@ -2805,6 +2806,7 @@ public sealed partial class NknFileTransferTransportTests : CoreSmokeTestsBase
                     NknBridgeChannel.Bulk,
                     FileTransferTransportKind.Tuna,
                     helperClient.ConnectedBulkAddress,
+                    null,
                 ]);
 
             FileTransferReceivedDataFrame first = await inboundSession.ReceiveWithMetadataAsync(cts.Token);
@@ -2890,6 +2892,7 @@ public sealed partial class NknFileTransferTransportTests : CoreSmokeTestsBase
                     NknBridgeChannel.Bulk,
                     FileTransferTransportKind.Tuna,
                     helperClient.ConnectedBulkAddress,
+                    null,
                 ]);
 
             FileTransferReceivedDataFrame received = await receivedAuthorityFrame.Task.WaitAsync(TimeSpan.FromSeconds(3), cts.Token);
@@ -4896,9 +4899,12 @@ public sealed partial class NknFileTransferTransportTests : CoreSmokeTestsBase
             FileTransferChunkBatchFrameV6 receivedBatch = Assert.IsType<FileTransferChunkBatchFrameV6>(receivedFrame);
             Assert.Equal(batchFrame.StartChunkIndex, receivedBatch.StartChunkIndex);
             Assert.Equal(batchFrame.DataSegments.Count, receivedBatch.DataSegments.Count);
-            Assert.Contains("event=filetransfer_data_session_removed; transport=nkn; transfer_id=transfer_nkn_disposed_data_session", logTail, StringComparison.Ordinal);
-            Assert.Contains("event=filetransfer_data_frame_dispatched; transport=nkn; transfer_id=transfer_nkn_disposed_data_session", logTail, StringComparison.Ordinal);
-            Assert.DoesNotContain("event=filetransfer_data_frame_ignored; transport=nkn; transfer_id=transfer_nkn_disposed_data_session", logTail, StringComparison.Ordinal);
+            var transferLogRows = logTail.Split('\n').Where(row =>
+                row.Contains($"; transfer_id={transferId};", StringComparison.Ordinal) &&
+                row.Contains("; transport=nkn;", StringComparison.Ordinal)).ToArray();
+            Assert.Contains(transferLogRows, row => row.Contains("event=filetransfer_data_session_removed;", StringComparison.Ordinal));
+            Assert.Contains(transferLogRows, row => row.Contains("event=filetransfer_data_frame_dispatched;", StringComparison.Ordinal));
+            Assert.DoesNotContain(transferLogRows, row => row.Contains("event=filetransfer_data_frame_ignored;", StringComparison.Ordinal));
         }
         finally
         {

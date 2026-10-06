@@ -7,6 +7,7 @@ namespace NLink.SmokeTests;
 
 [Collection(FakeNknNetworkCollection.Name)]
 [Trait("FileTransferRuntimeSuite", "OfflineTerminalIntegrity")]
+[Trait("Area", "Core")]
 public sealed partial class FileTransferTerminalIntegrityEvidenceTests : SessionFileTransferServiceTestBase
 {
     private const int PayloadBytes = 256 * 1024;

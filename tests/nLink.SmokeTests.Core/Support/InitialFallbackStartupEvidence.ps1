@@ -8,10 +8,12 @@ $records = @(for ($i = 0; $i -lt $lines.Count; $i++) { [pscustomobject]@{ Line=$
 $compact = Get-FileTransferCoordinatorSnapshotEvaluation -SnapshotRecords $records
 $route = Get-FileTransferCoordinatorSnapshotRouteConsistency -Evaluation $full
 $compactRoute = Get-FileTransferCoordinatorSnapshotRouteConsistency -Evaluation $compact
-$catalog = Get-FileTransferCoordinatorEarlyCheckpointProofCatalog
+$catalog = Get-FileTransferCoordinatorFallbackRepairHandoffCatalog
+$checkpointCatalog = Get-FileTransferCoordinatorEarlyCheckpointProofCatalog
 $bindingCatalog = Get-FileTransferCoordinatorInitialDataSessionCatalog
 $parent = Get-FileTransferCoordinatorReceiverPreAdmissionCatalog
-if ($catalog.ParentCatalogHash -cne $bindingCatalog.Hash -or $bindingCatalog.ParentCatalogHash -cne $parent.Hash -or
+if ($catalog.ParentCatalogHash -cne $checkpointCatalog.Hash -or
+    $checkpointCatalog.ParentCatalogHash -cne $bindingCatalog.Hash -or $bindingCatalog.ParentCatalogHash -cne $parent.Hash -or
     $parent.Hash -cne '17196929ff74bd92c4866ccb8da33de05eb5b22d5436f56488f3a7fd2f4d086b' -or
     $full.CatalogHash -cne $catalog.Hash) { throw 'Binding profile lost its pinned parent or emitted catalog.' }
 if ($full.ArtifactEvidenceVerdict -cne 'pass' -or -not $full.StreamComplete -or

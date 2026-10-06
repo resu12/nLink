@@ -42,6 +42,7 @@ public sealed class DiagnosticsAndLoggingTests : CoreSmokeTestsBase
     [Fact]
     public async Task Diagnostics_CopyExport_IncludesRuntimeBasics_AndNoPayloadOrChatHistory()
     {
+        using var safeReleaseMode = DisableUnsafeDeveloperModeForTests();
         var previousTransport = Environment.GetEnvironmentVariable("NLINK_TRANSPORT");
         var previousInviteMode = Environment.GetEnvironmentVariable(InviteTokenServiceFactory.InviteModeEnvVar);
         var previousLegacyModeOverride = Environment.GetEnvironmentVariable(InviteTokenServiceFactory.AllowInsecureLegacyInviteModeEnvVar);
@@ -934,21 +935,29 @@ public void TunaRuntimeProviderReadiness_DefaultsStrictWithDiagnosticDegradedOve
 }
 
 [Fact]
-public void TunaFallback_FileTransferWaitsForReceiveProofBeforeResume()
+public void TunaFallback_SourceContractKeepsPendingProofAndCoordinatorAuthorityGates()
 {
     var accelerationPath = FindFileUpwards(Path.Combine("src", "nLink.Infra.Nkn", "NknSignalingTransport.Acceleration.cs"));
     var transportPath = FindFileUpwards(Path.Combine("src", "nLink.Infra.Nkn", "NknSignalingTransport.cs"));
     var accelerationSource = File.ReadAllText(accelerationPath);
     var transportSource = File.ReadAllText(transportPath);
 
-    Assert.Contains("event=tuna_disable_handoff_nkn_pending", accelerationSource, StringComparison.Ordinal);
+    Assert.Contains("event=tuna_fallback_filetransfer_evidence_requested", accelerationSource, StringComparison.Ordinal);
+    Assert.Contains("event=filetransfer_fallback_nkn_proof_pending", accelerationSource, StringComparison.Ordinal);
     Assert.DoesNotContain("reason: \"tuna_fallback_to_nkn\"", accelerationSource, StringComparison.Ordinal);
     Assert.Contains("CompleteFileTransferFallbackNknProofIfPending", accelerationSource, StringComparison.Ordinal);
     Assert.Contains("reason: \"transport_recovered\"", accelerationSource, StringComparison.Ordinal);
-    Assert.Contains("event=filetransfer_fallback_nkn_ready_unproven", transportSource, StringComparison.Ordinal);
-    Assert.Contains("isAvailable: false", transportSource, StringComparison.Ordinal);
-    Assert.Contains("reason: \"transport_recovered_unproven\"", transportSource, StringComparison.Ordinal);
-    Assert.Contains("ScheduleFileTransferFallbackNknProbeIfPending(\"bridge_ready_unproven\")", transportSource, StringComparison.Ordinal);
+    Assert.Contains("pendingLogEvent: \"filetransfer_fallback_nkn_ready_unproven\"", transportSource, StringComparison.Ordinal);
+    Assert.Contains("probeTrigger: \"bridge_ready_unproven\"", transportSource, StringComparison.Ordinal);
+    var recoveredSource = transportSource[
+        transportSource.IndexOf("    private void HandleFileTransferBridgeRecovered(", StringComparison.Ordinal)..
+        transportSource.IndexOf("    private void RaiseBridgeReceiveStallSessionLivenessProof(", StringComparison.Ordinal)];
+    var pendingProofSource = recoveredSource[..recoveredSource.IndexOf("            return;", StringComparison.Ordinal)];
+    Assert.Contains("if (IsFileTransferFallbackNknProofPending())", pendingProofSource, StringComparison.Ordinal);
+    Assert.Contains("isAvailable: false", pendingProofSource, StringComparison.Ordinal);
+    Assert.Contains("reason: \"transport_recovered_unproven\"", pendingProofSource, StringComparison.Ordinal);
+    Assert.Contains("ScheduleFileTransferFallbackNknProbeIfPending(probeTrigger)", pendingProofSource, StringComparison.Ordinal);
+    Assert.DoesNotContain("isAvailable: true", pendingProofSource, StringComparison.Ordinal);
     Assert.Contains("event=filetransfer_fallback_nkn_probe_scheduled", accelerationSource, StringComparison.Ordinal);
     Assert.Contains("event=filetransfer_fallback_nkn_probe_started", accelerationSource, StringComparison.Ordinal);
     Assert.Contains("filetransfer_fallback_nkn_proof_unconfirmed", accelerationSource, StringComparison.Ordinal);
@@ -956,7 +965,11 @@ public void TunaFallback_FileTransferWaitsForReceiveProofBeforeResume()
     Assert.Contains("requires_v6_epoch_recovery={(requiresV6EpochRecovery ? 1 : 0)}", accelerationSource, StringComparison.Ordinal);
     Assert.Contains("file_transfer_v6_state_frame_received", accelerationSource, StringComparison.Ordinal);
     Assert.Contains("tuna_acceleration_retry_blocked_fallback_control_unproven", accelerationSource, StringComparison.Ordinal);
-    Assert.Contains("event=filetransfer_fallback_nkn_receive_resumed_unproven", transportSource, StringComparison.Ordinal);
+    Assert.Contains("decision_reason=coordinator_fallback_route_and_install_receipt_required", accelerationSource, StringComparison.Ordinal);
+    Assert.Contains("if (coordinatorFileFallbackEvidenceOnly)", accelerationSource, StringComparison.Ordinal);
+    Assert.Contains("if (postTunaFallbackHandoffEvidence is not null ||", accelerationSource, StringComparison.Ordinal);
+    Assert.Contains("uncommittedProofBoundary is not null)", accelerationSource, StringComparison.Ordinal);
+    Assert.Contains("pendingLogEvent: \"filetransfer_fallback_nkn_receive_resumed_unproven\"", transportSource, StringComparison.Ordinal);
     Assert.DoesNotContain("reason: \"transport_probe_unproven\"", accelerationSource, StringComparison.Ordinal);
 }
 
@@ -1045,6 +1058,7 @@ public void HangReport_WritesScreenshareEvidenceText()
 
             Assert.NotNull(copied);
             Assert.Contains("security_relevant_overrides:", copied!, StringComparison.Ordinal);
+            Assert.Contains("unsafe_developer_mode=on", copied!, StringComparison.Ordinal);
             Assert.Contains("remote_control_seq_gate=off", copied!, StringComparison.Ordinal);
             Assert.Contains("nkn_preflight_rpc=on", copied!, StringComparison.Ordinal);
             Assert.Contains("screenshare_capture_scale=0.6", copied!, StringComparison.Ordinal);

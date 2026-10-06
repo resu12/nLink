@@ -6,6 +6,7 @@ using NLink.Core.Logging;
 
 namespace NLink.SmokeTests;
 
+[Trait("Area", "Core")]
 public sealed class FileTransferDiagnosticScopeEvidenceTests : FileTransferOpsScriptsTestBase
 {
     [Theory]
@@ -53,7 +54,7 @@ public sealed class FileTransferDiagnosticScopeEvidenceTests : FileTransferOpsSc
             ["filetransfer_v6_frontier_recent_progress_grace_deferred"] = "wake.DataSessionIdentity",
             ["filetransfer_v6_frontier_recent_progress_grace_recheck_decided"] = "wake.DataSessionIdentity",
         };
-        var lines = source.Split('\n').Where(line => line.Contains("FileTransferDiagnosticScopeEvidence.FormatDataSession(", StringComparison.Ordinal)).ToArray();
+        var lines = GetEmitterSourceLines(source).Where(line => line.Contains("FileTransferDiagnosticScopeEvidence.FormatDataSession(", StringComparison.Ordinal)).ToArray();
         Assert.Equal(sites.Count, lines.Length);
         foreach (var (name, argument) in sites)
         {
@@ -119,7 +120,7 @@ public sealed class FileTransferDiagnosticScopeEvidenceTests : FileTransferOpsSc
         var actual = new Dictionary<string, int>();
         foreach (var file in sites.Select(s => s.Path).Distinct())
         {
-            foreach (var line in File.ReadLines(Path.Combine(root, file)))
+            foreach (var line in GetEmitterSourceLines(File.ReadAllText(Path.Combine(root, file))))
             {
                 if (!line.Contains("FileTransferDiagnosticScopeEvidence.Format(", StringComparison.Ordinal)) continue;
                 var call = Regex.Match(line, @"\{FileTransferDiagnosticScopeEvidence\.Format\((?<args>.*?)\)\}");
@@ -131,6 +132,25 @@ public sealed class FileTransferDiagnosticScopeEvidenceTests : FileTransferOpsSc
         }
         Assert.Equal(expected.OrderBy(p => p.Key), actual.OrderBy(p => p.Key));
     }
+
+    [Theory]
+    [InlineData("\n")]
+    [InlineData("\r\n")]
+    public void EmitterSourceInspection_JoinsConcatenatedStringsButNotSeparateStatements(string newline)
+    {
+        const string prefix = "$\"event=scope; \"";
+        const string suffix = "$\"{FileTransferDiagnosticScopeEvidence.Format(session, transfer)}\"";
+        var joined = Assert.Single(GetEmitterSourceLines(prefix + " +" + newline + "    " + suffix));
+        Assert.Equal("$\"event=scope; {FileTransferDiagnosticScopeEvidence.Format(session, transfer)}\"", joined);
+
+        var separate = GetEmitterSourceLines(prefix + ";" + newline + suffix);
+        Assert.Equal(2, separate.Length);
+        Assert.DoesNotContain("FileTransferDiagnosticScopeEvidence.Format(", separate[0], StringComparison.Ordinal);
+        Assert.DoesNotContain("event=scope;", separate[1], StringComparison.Ordinal);
+    }
+
+    private static string[] GetEmitterSourceLines(string source)
+        => Regex.Replace(source, "\"[ \\t]*\\+[ \\t]*\\r?\\n[ \\t]*\\$\"", string.Empty).Split('\n');
 
     private sealed record EmitterSite(string Path, string Event, string Arguments);
 }

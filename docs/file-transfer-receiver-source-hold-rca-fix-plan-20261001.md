@@ -37,12 +37,12 @@ Run: `20261001T081928Z`, scenario
 `regular-v4-live-activation-off-on-off-256mb`, one attempt, strict preflight and
 isolation passed. Run source commit equals the investigated HEAD. All 106
 original artifact pins in the
-[post-run review](<C:/Users/Juraj/Desktop/Remote help/artifacts/live-checkpoint-39748e18-20261001/20261001T081928Z/post-run-review.json>)
+[post-run review](<../artifacts/live-checkpoint-39748e18-20261001/20261001T081928Z/post-run-review.json>)
 were rechecked: zero size or SHA-256 mismatches.
 
-The [full coordinator snapshot summary](<C:/Users/Juraj/Desktop/Remote help/artifacts/live-checkpoint-39748e18-20261001/20261001T081928Z/regular-v4-live-activation-off-on-off-256mb/filetransfer-coordinator-snapshot-full-summary.json>)
+The [full coordinator snapshot summary](<../artifacts/live-checkpoint-39748e18-20261001/20261001T081928Z/regular-v4-live-activation-off-on-off-256mb/filetransfer-coordinator-snapshot-full-summary.json>)
 records the following boundaries. Line numbers refer to its `evidenceLineIndex`
-in the [retained log slice](<C:/Users/Juraj/Desktop/Remote help/artifacts/live-checkpoint-39748e18-20261001/20261001T081928Z/regular-v4-live-activation-off-on-off-256mb/filetransfer-retained-log-slice.log>).
+in the [retained log slice](<../artifacts/live-checkpoint-39748e18-20261001/20261001T081928Z/regular-v4-live-activation-off-on-off-256mb/filetransfer-retained-log-slice.log>).
 
 | UTC | Side | Decision / reason | Line | Writer sequence |
 | --- | --- | --- | ---: | ---: |
@@ -73,8 +73,8 @@ This corrects two hypotheses in the historical post-run review:
   `currentRuntimeProof=false` is expected for GUI exit 1 and an incomplete,
   non-integrity-success summary. The selected-attempt failure follows that
   negative acceptance result; it is not evidence of lost log writes. See the
-  [manifest](<C:/Users/Juraj/Desktop/Remote help/artifacts/live-checkpoint-39748e18-20261001/20261001T081928Z/regular-v4-live-activation-off-on-off-256mb/filetransfer-tuna-gui-evidence-manifest.json>)
-  and [manifest predicates](<C:/Users/Juraj/Desktop/Remote help/tools/Run-FileTransferTunaGuiSmoke.ps1:2351>).
+  [manifest](<../artifacts/live-checkpoint-39748e18-20261001/20261001T081928Z/regular-v4-live-activation-off-on-off-256mb/filetransfer-tuna-gui-evidence-manifest.json>)
+  and [manifest predicates](<../tools/Run-FileTransferTunaGuiSmoke.ps1#L2351>).
 
 The analyzer's later `file_tuna_data_path_mismatch` candidate at retained line
 16908 concerns a Regular packet rejected before dispatch with
@@ -86,14 +86,14 @@ new artifact/acceptance exception belong in this fix.
 
 ## Reproduced mechanism
 
-The [offline probe](<C:/Users/Juraj/Desktop/Remote help/artifacts/receiver-source-hold-rca-20261001/probe/Program.cs>)
+The [offline probe](<../artifacts/receiver-source-hold-rca-20261001/probe/Program.cs>)
 uses the existing committed-Tuna receiver fixture, normal chunk handling,
 independently controlled delivery/physical-completion tasks, and the production
 hold path. It does not modify production methods, fabricate a coordinator hold,
 or perform live network I/O. Local-stop initiation exercises the shared receiver
 capture path; it does not reproduce the live peer exchange end to end.
 
-The [retained result](<C:/Users/Juraj/Desktop/Remote help/artifacts/receiver-source-hold-rca-20261001/capture/probe-results.json>)
+The [retained result](<../artifacts/receiver-source-hold-rca-20261001/capture/probe-results.json>)
 shows:
 
 | Case | Active writes / feedback at hold | Result |
@@ -109,20 +109,20 @@ desired behavior or live acceptance. Result SHA-256:
 
 The code sequence explains the difference:
 
-1. [State feedback submission](<C:/Users/Juraj/Desktop/Remote help/src/nLink.Core/FileTransfer/SessionFileTransferService.PullTransferSessionV4.cs:24810>)
+1. [State feedback submission](<../src/nLink.Core/FileTransfer/SessionFileTransferService.PullTransferSessionV4.cs#L24810>)
    retains `WriteSource` and awaits delivery. Its finalizer starts feedback
    retirement without awaiting physical completion.
-2. [Feedback retirement](<C:/Users/Juraj/Desktop/Remote help/src/nLink.Core/FileTransfer/SessionFileTransferService.BootstrapFeedbackTracking.cs:63>)
+2. [Feedback retirement](<../src/nLink.Core/FileTransfer/SessionFileTransferService.BootstrapFeedbackTracking.cs#L63>)
    correctly retains that operation until physical completion. Meanwhile the
-   [write finalizer](<C:/Users/Juraj/Desktop/Remote help/src/nLink.Core/FileTransfer/SessionFileTransferService.BootstrapWriteTracking.cs:94>)
+   [write finalizer](<../src/nLink.Core/FileTransfer/SessionFileTransferService.BootstrapWriteTracking.cs#L94>)
    removes the parent from `ActiveBootstrapWriteOperations` and settles it.
-3. [Feedback currentness](<C:/Users/Juraj/Desktop/Remote help/src/nLink.Core/FileTransfer/SessionFileTransferService.BootstrapFeedbackTracking.cs:42>)
+3. [Feedback currentness](<../src/nLink.Core/FileTransfer/SessionFileTransferService.BootstrapFeedbackTracking.cs#L42>)
    calls the write currentness check, which includes active-operation membership.
    The completed parent therefore rejects otherwise source-bound drain work.
-4. [Receiver capture](<C:/Users/Juraj/Desktop/Remote help/src/nLink.Core/FileTransfer/SessionFileTransferService.BootstrapSourceHold.cs:101>)
+4. [Receiver capture](<../src/nLink.Core/FileTransfer/SessionFileTransferService.BootstrapSourceHold.cs#L101>)
    prepares the coordinator hold before checking writes, feedback, queued chunks
    and pending-write ownership. Any failure invalidates the prepared hold.
-5. [Coordinator preparation](<C:/Users/Juraj/Desktop/Remote help/src/nLink.Core/FileTransfer/FileTransferBootstrapSourceHold.cs:61>)
+5. [Coordinator preparation](<../src/nLink.Core/FileTransfer/FileTransferBootstrapSourceHold.cs#L61>)
    rejects another hold for that same source when the prior hold is invalidated.
    Physical settlement does not clear that state. The probe confirms the trap.
 
@@ -220,13 +220,13 @@ coordinator-accepted hold execution. Rejected work creates neither an invalidate
 hold nor a retained pending-write wake that blocks the next valid peer request.
 
 Production edits are limited to
-[feedback tracking](<C:/Users/Juraj/Desktop/Remote help/src/nLink.Core/FileTransfer/SessionFileTransferService.BootstrapFeedbackTracking.cs:50>),
-[source-hold capture](<C:/Users/Juraj/Desktop/Remote help/src/nLink.Core/FileTransfer/SessionFileTransferService.BootstrapSourceHold.cs:81>)
-and the [bootstrap caller](<C:/Users/Juraj/Desktop/Remote help/src/nLink.Core/FileTransfer/SessionFileTransferService.FallbackV6ProofBootstrap.cs:536>).
+[feedback tracking](<../src/nLink.Core/FileTransfer/SessionFileTransferService.BootstrapFeedbackTracking.cs#L50>),
+[source-hold capture](<../src/nLink.Core/FileTransfer/SessionFileTransferService.BootstrapSourceHold.cs#L81>)
+and the [bootstrap caller](<../src/nLink.Core/FileTransfer/SessionFileTransferService.FallbackV6ProofBootstrap.cs#L536>).
 No coordinator decision, wire contract, analyzer acceptance rule, timing limit
 or throughput setting changed.
 
-The [new regression tests](<C:/Users/Juraj/Desktop/Remote help/tests/nLink.SmokeTests.Core/SessionFileTransferBootstrapReceiverHoldTests.cs>)
+The [new regression tests](<../tests/nLink.SmokeTests.Core/SessionFileTransferBootstrapReceiverHoldTests.cs>)
 cover 42 cases: local and exact peer initiation, duplicate wakes, settled and
 standalone controls, delayed physical success/failure, pre-capture and
 post-capture source replacement, and rejection without poisoning later requests.
@@ -235,7 +235,7 @@ write/feedback lifecycle over `FakeNknClient`, proving that the peer response
 waits for the secondary copy to settle. Their bootstrap phase recorder observes
 issuance; they are not live network or full GUI acceptance tests.
 
-The [verification index](<C:/Users/Juraj/Desktop/Remote help/artifacts/receiver-hold-fix-20261001/verification.json>)
+The [verification index](<../artifacts/receiver-hold-fix-20261001/verification.json>)
 records source hashes, retained TRX hashes, the expected baseline failures and
 the latest result for the focused selections. Across the runs, 151 distinct
 cases have passing latest results and no unresolved failures. This includes

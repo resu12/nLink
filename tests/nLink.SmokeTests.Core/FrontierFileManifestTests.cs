@@ -3,6 +3,7 @@ using Manifest = NLink.Tools.LocalFrontierFileManifest;
 
 namespace NLink.SmokeTests;
 
+[Trait("Area", "Core")]
 public sealed class FrontierFileManifestTests
 {
     [Theory]

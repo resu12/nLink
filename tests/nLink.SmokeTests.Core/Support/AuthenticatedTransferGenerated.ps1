@@ -1,7 +1,9 @@
 param([string]$RepoRoot,[string]$Directory,[string]$RunId,[string]$ScenarioId)
 $ErrorActionPreference='Stop'; Set-StrictMode -Version Latest
 $foreignControl=$env:NLINK_PUBLICATION_SAME_TRANSFER_FIXTURE -ceq 'authenticated-foreign'
-$null=& (Join-Path $PSScriptRoot 'SelectedNativeWriterGenerated.ps1') -RepoRoot $RepoRoot -Directory $Directory -RunId $RunId -ScenarioId $ScenarioId -ExpectWriterBudgetOmission:$foreignControl
+# This fixture proves one authenticated transfer and rejection of a seeded
+# transport fault, not a two-activation route cycle. Live acceptance is unchanged.
+$null=& (Join-Path $PSScriptRoot 'SelectedNativeWriterGenerated.ps1') -RepoRoot $RepoRoot -Directory $Directory -RunId $RunId -ScenarioId $ScenarioId -ExpectWriterBudgetOmission:$foreignControl -LiveRouteProofMode None
 $output=Join-Path $Directory ('selected-native-'+$PSVersionTable.PSVersion.Major)
 $producer=Get-Content (Join-Path $Directory 'authenticated-producer.json') -Raw|ConvertFrom-Json
 $terminal=Get-Content (Join-Path $Directory 'authenticated-terminals.json') -Raw|ConvertFrom-Json
@@ -16,6 +18,7 @@ if($producer.Status -cne 'verified_offline_authenticated_transfer_producer' -or 
     $terminal.Status -cne 'verified_offline_source_terminal_binding' -or $producer.PayloadBytes -ne 262144 -or
     $producer.ForeignControl -ne $foreignControl -or $selected -cne $producer.Seeded.RawLine -or $original.Evaluations -ne 3 -or
     -not $selected.Contains('security_context_status=captured;') -or
+    $null -ne $summary.file_tuna_route_cycle_acceptance -or $summary.first_proof_chain_failure_class -cne 'file_tuna_data_path_mismatch' -or
     $summary.verdict -cne 'FAIL_PROTOCOL_OR_INTEGRITY' -or $summary.gate_status -cne 'fail') {throw 'authenticated_transfer_contract'}
 foreach($row in $terminal.TerminalRows) {
     if(-not $row.RawLine.Contains('terminal_session_id='+$producer.Publication.SessionId+';') -or
@@ -30,4 +33,4 @@ if($foreignControl) {
 }
 'authenticated-transfer='+([ordered]@{ForeignControl=$producer.ForeignControl;ActualEncryptedEnvelope=$true;SameServicePublication=$true
     OriginalWitnessAndCompletion=(-not $foreignControl);OriginalEvaluations=3;TerminalConsumerEnabled=$false;SeededObservation=$true
-    AcceptanceChanged=$false;Live=$false}|ConvertTo-Json -Compress)
+    AcceptanceChanged=$false;RouteCycleProven=$false;Live=$false}|ConvertTo-Json -Compress)

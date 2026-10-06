@@ -6,6 +6,7 @@ using NLink.Core.Logging;
 namespace NLink.SmokeTests;
 
 [Collection(FakeNknNetworkCollection.Name)]
+[Trait("Area", "Core")]
 public sealed class FrontierCleanupAdoptionTests : FileTransferOpsScriptsTestBase
 {
     public static IEnumerable<object[]> Cases =>

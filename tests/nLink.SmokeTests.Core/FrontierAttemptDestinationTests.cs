@@ -11,6 +11,7 @@ using NLink.Tools;
 namespace NLink.SmokeTests;
 
 [Collection(FakeNknNetworkCollection.Name)]
+[Trait("Area", "Core")]
 public sealed class FrontierAttemptDestinationTests : FileTransferOpsScriptsTestBase
 {
     public static IEnumerable<object[]> Cases =>

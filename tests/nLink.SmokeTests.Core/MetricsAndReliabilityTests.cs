@@ -1511,6 +1511,8 @@ public sealed class MetricsAndReliabilityTests : CoreSmokeTestsBase
     [Fact]
     public async Task ResourceBenchmarkRunner_LeakCheck_ShortRun_LeavesActiveCountersAtZero_AndWritesArtifacts()
     {
+        using var strictReleasePolicy = DisableUnsafeDeveloperModeForTests();
+        using var inviteMode = new EnvironmentOverride(InviteTokenServiceFactory.InviteModeEnvVar, InviteTokenServiceFactory.InviteModeIssuedSecret);
         var tempRoot = Path.Combine(Path.GetTempPath(), "nlink-resource-smoke-" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(tempRoot);
         var previousCwd = Environment.CurrentDirectory;
@@ -1528,18 +1530,21 @@ public sealed class MetricsAndReliabilityTests : CoreSmokeTestsBase
                     "--cycles", "50",
                     "--transport", "devlocal",
                     "--bridge-reuse-mode", "persession",
-                    "--delay-ms", "0",
+                    // Reuse the same peers without exceeding the 12-validations/10-second security window.
+                    "--delay-ms", "1000",
                     "--leak-growth-fail-percent", "1000"
                 },
                 stdout,
                 stderr,
                 CancellationToken.None);
 
-            Assert.Equal(0, exitCode);
+            Assert.True(exitCode == 0, stderr.ToString());
 
             var resourcesDir = Path.Combine(tempRoot, "artifacts", "resources");
             Assert.True(Directory.Exists(resourcesDir));
-            Assert.NotEmpty(Directory.GetFiles(resourcesDir, "leak-check-*.json", SearchOption.TopDirectoryOnly));
+            var reportPath = Assert.Single(Directory.GetFiles(resourcesDir, "leak-check-*.json", SearchOption.TopDirectoryOnly));
+            using var report = JsonDocument.Parse(await File.ReadAllTextAsync(reportPath));
+            Assert.Contains(report.RootElement.GetProperty("Notes").EnumerateArray(), note => note.GetString() == "cycles_succeeded=50");
             Assert.True(File.Exists(Path.Combine(resourcesDir, "leak-check-summary.txt")));
 
             var counters = ActiveRuntimeCounters.Snapshot();
@@ -1574,5 +1579,103 @@ public sealed class MetricsAndReliabilityTests : CoreSmokeTestsBase
             ActiveRuntimeCounters.ResetForTests();
         }
     }
+
+[Trait("Category", "LegacySmoke")]
+    [Fact]
+    public async Task ResourceBenchmarkRunner_DevLocalBenchmark_CompletesWithStrictHelperBinding()
+    {
+        using var strictReleasePolicy = DisableUnsafeDeveloperModeForTests();
+        using var inviteMode = new EnvironmentOverride(InviteTokenServiceFactory.InviteModeEnvVar, InviteTokenServiceFactory.InviteModeIssuedSecret);
+        var tempRoot = Path.Combine(Path.GetTempPath(), "nlink-resource-binding-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(tempRoot);
+        var previousCwd = Environment.CurrentDirectory;
+        try
+        {
+            Environment.CurrentDirectory = tempRoot;
+            var stdout = new StringWriter();
+            var stderr = new StringWriter();
+            var exitCode = await ResourceBenchmarkRunner.RunAsync(
+                new[] { "--resource-bench", "--transport", "devlocal", "--idle-seconds", "0", "--connected-idle-seconds", "0", "--final-idle-seconds", "0" },
+                stdout, stderr, CancellationToken.None);
+
+            Assert.True(exitCode == 0, stderr.ToString());
+            Assert.Contains("[resources] disconnecting", stdout.ToString(), StringComparison.Ordinal);
+            Assert.Contains("checkpoint=final_idle_end", stdout.ToString(), StringComparison.Ordinal);
+            Assert.Single(Directory.GetFiles(Path.Combine(tempRoot, "artifacts", "resources"), "resource-run-*.json"));
+        }
+        finally
+        {
+            Environment.CurrentDirectory = previousCwd;
+            Directory.Delete(tempRoot, recursive: true);
+            ActiveRuntimeCounters.ResetForTests();
+        }
+    }
+
+[Trait("Category", "LegacySmoke")]
+    [Theory]
+    [InlineData("matching", true)]
+    [InlineData("mismatched", false)]
+#if !DEBUG
+    [InlineData("missing", false)]
+#endif
+    public async Task ResourceBenchmarkRunner_Cycle_RequiresActualHelperBinding(string binding, bool expectedSuccess)
+    {
+        using var strictReleasePolicy = DisableUnsafeDeveloperModeForTests();
+        using var inviteMode = new EnvironmentOverride(InviteTokenServiceFactory.InviteModeEnvVar, InviteTokenServiceFactory.InviteModeIssuedSecret);
+        var helperAddress = new PeerAddress($"resource.helper.{Guid.NewGuid():N}");
+        using var helpee = new SessionRuntime(() => new DevLocalTransport($"resource.helpee.{Guid.NewGuid():N}"));
+        using var helper = new SessionRuntime(() => new DevLocalTransport(helperAddress.Value));
+        PeerAddress? boundHelperAddress = binding switch
+        {
+            "matching" => helperAddress,
+            "mismatched" => new PeerAddress("resource.helper.someone-else"),
+            _ => null
+        };
+        var helperConnected = false;
+        var helpeeConnected = false;
+        helper.StateChanged += (_, e) => helperConnected |= e.State == SessionRuntimeState.Connected;
+        helpee.StateChanged += (_, e) => helpeeConnected |= e.State == SessionRuntimeState.Connected;
+
+        var succeeded = await ResourceBenchmarkRunner.TryRunCycleAsync(helpee, helper, boundHelperAddress, CancellationToken.None);
+
+        Assert.Equal(expectedSuccess, succeeded);
+        Assert.Equal(expectedSuccess, helperConnected);
+        Assert.Equal(expectedSuccess, helpeeConnected);
+    }
+
+#if !DEBUG
+[Trait("Category", "LegacySmoke")]
+    [Fact]
+    public async Task ResourceBenchmarkRunner_LeakCheck_FailedCycleCannotProducePassingArtifact()
+    {
+        // A forbidden legacy configuration deterministically fails transport creation inside the cycle.
+        using var unsafeMode = EnableUnsafeDeveloperModeForTests();
+        using var inviteMode = new EnvironmentOverride(InviteTokenServiceFactory.InviteModeEnvVar, InviteTokenServiceFactory.InviteModeLegacySigned);
+        using var legacyOptIn = new EnvironmentOverride(InviteTokenServiceFactory.AllowInsecureLegacyInviteModeEnvVar, "0");
+        var tempRoot = Path.Combine(Path.GetTempPath(), "nlink-resource-failed-cycle-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(tempRoot);
+        var previousCwd = Environment.CurrentDirectory;
+        try
+        {
+            Environment.CurrentDirectory = tempRoot;
+            var stdout = new StringWriter();
+            var stderr = new StringWriter();
+            var exitCode = await ResourceBenchmarkRunner.RunAsync(
+                new[] { "--leak-check", "--cycles", "2", "--transport", "devlocal", "--delay-ms", "0", "--leak-growth-fail-percent", "1000" },
+                stdout, stderr, CancellationToken.None);
+
+            Assert.Equal(1, exitCode);
+            Assert.Contains("Leak check cycle 1 of 2 failed", stderr.ToString(), StringComparison.Ordinal);
+            Assert.DoesNotContain("checkpoint 2 captured", stdout.ToString(), StringComparison.Ordinal);
+            Assert.Empty(Directory.GetFiles(Path.Combine(tempRoot, "artifacts", "resources"), "leak-check*"));
+        }
+        finally
+        {
+            Environment.CurrentDirectory = previousCwd;
+            Directory.Delete(tempRoot, recursive: true);
+            ActiveRuntimeCounters.ResetForTests();
+        }
+    }
+#endif
 
 }

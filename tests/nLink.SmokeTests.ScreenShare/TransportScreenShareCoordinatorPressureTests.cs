@@ -32,6 +32,7 @@ public sealed class TransportScreenShareCoordinatorPressureTests : ScreenShareCo
     public async Task TransportScreenShareCoordinator_AdvisoryBridgeHealth_DoesNotBlockPromotionToNormal()
     {
         using var autoTuneFlag = new EnvironmentOverride("NLINK_FEATURE_SCREENCAP_TRANSPORT_AUTOTUNE", "1");
+        using var transportMaxFps = new EnvironmentOverride("NLINK_FEATURE_SCREENCAP_TRANSPORT_MAX_FPS", "8");
         var fakeSource = new AdaptiveFakeScreenCaptureSource
         {
             CaptureMetadata = new ScreenCaptureMetadata(
@@ -1075,6 +1076,7 @@ public sealed class TransportScreenShareCoordinatorPressureTests : ScreenShareCo
     [Trait("Category", "Smoke")]
     public async Task TransportScreenShareCoordinator_FileTransferDegradedHint_StaysStickyBeforeExiting()
     {
+        using var transportMaxFps = new EnvironmentOverride("NLINK_FEATURE_SCREENCAP_TRANSPORT_MAX_FPS", "8");
         var fakeSource = new AdaptiveFakeScreenCaptureSource();
         var clock = new FakeScreenShareClock(new DateTimeOffset(2026, 3, 15, 10, 0, 0, TimeSpan.Zero));
         await using var coordinator = new TransportScreenShareCoordinator(
@@ -1127,6 +1129,7 @@ public sealed class TransportScreenShareCoordinatorPressureTests : ScreenShareCo
     [Trait("Category", "Smoke")]
     public async Task TransportScreenShareCoordinator_FileTransferCatchUpOnlyHint_KeepsSenderDegradedUntilReleased()
     {
+        using var transportMaxFps = new EnvironmentOverride("NLINK_FEATURE_SCREENCAP_TRANSPORT_MAX_FPS", "8");
         var fakeSource = new AdaptiveFakeScreenCaptureSource();
         var clock = new FakeScreenShareClock(new DateTimeOffset(2026, 3, 15, 11, 0, 0, TimeSpan.Zero));
         await using var coordinator = new TransportScreenShareCoordinator(

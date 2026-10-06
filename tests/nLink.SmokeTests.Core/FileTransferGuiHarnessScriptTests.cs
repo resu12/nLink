@@ -14,6 +14,101 @@ namespace NLink.SmokeTests;
 [Collection(FakeNknNetworkCollection.Name)]
 public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTestBase
 {
+    private static readonly Dictionary<string, Dictionary<string, string[]>> GuiFunctionBodies = new(StringComparer.Ordinal);
+
+    private static new string ExtractPowerShellFunctionBody(string scriptText, string functionName, string nextFunctionName)
+    {
+        // Keep the existing call signature, but neighboring names no longer delimit a body.
+        if (!GuiFunctionBodies.TryGetValue(scriptText, out var bodies))
+        {
+            var encoded = Convert.ToBase64String(Encoding.UTF8.GetBytes(scriptText));
+            var parserScript = $$"""
+                $ErrorActionPreference='Stop'
+                $source=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('{{encoded}}'))
+                $tokens=$null; $errors=$null
+                $ast=[Management.Automation.Language.Parser]::ParseInput($source,[ref]$tokens,[ref]$errors)
+                if($errors.Count) {throw ($errors | Out-String)}
+                $bodies=[Collections.Generic.List[object]]::new()
+                foreach($definition in $ast.FindAll({param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst]},$true)) {
+                    $owner=$definition.Parent
+                    while($null -ne $owner -and $owner -isnot [Management.Automation.Language.FunctionDefinitionAst]) {$owner=$owner.Parent}
+                    # This fixture uses top-level functions and direct classifier helpers,
+                    # not same-named helpers nested within another classifier predicate.
+                    if($null -ne $owner -and $owner.Name -cne 'Get-TunaGuiFileTransferSetupFailureClassification') {continue}
+                    $text=$definition.Body.Extent.Text
+                    $bodies.Add([pscustomobject]@{Name=$definition.Name;Body=$text.Substring(1,$text.Length-2)})
+                }
+                ConvertTo-Json -InputObject $bodies.ToArray() -Depth 3 -Compress
+                """;
+            var result = Task.Run(() => RunPowerShellScriptTextAsync(parserScript, Array.Empty<string>())).GetAwaiter().GetResult();
+            Assert.True(result.ExitCode == 0, result.Stdout + Environment.NewLine + result.Stderr);
+            var parsed = System.Text.Json.JsonSerializer.Deserialize<GuiFunctionBody[]>(result.Stdout);
+            Assert.NotNull(parsed);
+            bodies = parsed.GroupBy(item => item.Name, StringComparer.Ordinal)
+                .ToDictionary(group => group.Key, group => group.Select(item => item.Body).ToArray(), StringComparer.Ordinal);
+            GuiFunctionBodies.Add(scriptText, bodies);
+        }
+        Assert.True(bodies.TryGetValue(functionName, out var matches), $"Could not find PowerShell function {functionName} in the GUI fixture scope.");
+        Assert.True(matches.Length == 1, $"Ambiguous PowerShell function {functionName} in the GUI fixture scope.");
+        return matches[0];
+    }
+
+    private sealed record GuiFunctionBody(string Name, string Body);
+
+    [Theory]
+    [InlineData("powershell")]
+    [InlineData("pwsh")]
+    public async Task GuiFunctionExtraction_UsesExactBodyAndContainingScope(string host)
+    {
+        var source = """
+            function Get-TunaGuiFileTransferSetupFailureClassification {
+            function Get-TunaGuiLogLineFieldValue {
+            param([string]$Line)
+            return 'intended-helper'
+            }
+            throw 'neighbor-classifier-executed'
+            function Get-TunaGuiFallbackFrontierStallGraceRecheckFailure {
+            function Get-TunaGuiLogLineFieldValue {
+            return 'wrong-nested-helper'
+            }
+            }
+            }
+            function NextFunction {
+            throw 'next-function-executed'
+            }
+            """;
+        var body = ExtractPowerShellFunctionBody(source, "Get-TunaGuiLogLineFieldValue", "NextFunction");
+        Assert.Contains("return 'intended-helper'", body, StringComparison.Ordinal);
+        Assert.DoesNotContain("neighbor-classifier-executed", body, StringComparison.Ordinal);
+        Assert.DoesNotContain("wrong-nested-helper", body, StringComparison.Ordinal);
+        Assert.DoesNotContain("next-function-executed", body, StringComparison.Ordinal);
+        var result = await RunPowerShellScriptTextAsync($$"""
+            $ErrorActionPreference='Stop'
+            function Read-SelectedHelper { {{body}} }
+            if((Read-SelectedHelper -Line 'test') -cne 'intended-helper') {throw 'wrong helper selected'}
+            'exact-gui-function-ok'
+            """, Array.Empty<string>(), host);
+        Assert.True(result.ExitCode == 0, result.Stdout + Environment.NewLine + result.Stderr);
+        Assert.Contains("exact-gui-function-ok", result.Stdout, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void GuiFunctionExtraction_RejectsAmbiguousBodies()
+    {
+        var source = """
+            function DuplicateHelper {
+            return 'first'
+            }
+            function DuplicateHelper {
+            return 'second'
+            }
+            function NextFunction {}
+            """;
+        var error = Record.Exception(() => ExtractPowerShellFunctionBody(source, "DuplicateHelper", "NextFunction"));
+        Assert.NotNull(error);
+        Assert.Contains("Ambiguous PowerShell function", error.Message, StringComparison.Ordinal);
+    }
+
     [Fact]
     public async Task GuiSmokeSemanticCatalog_IncludesTerminalFrontierClosureEvents()
     {
@@ -3655,6 +3750,8 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
             Set-StrictMode -Version Latest
             function New-TunaGuiFileTransferFailureClassificationResult { {{resultBody}} }
             function Get-TunaGuiExplicitFailureClassification { {{explicitBody}} }
+            . '{{Path.Combine(FindRepoRoot(), "tools", "FileTransferOps", "CoordinatorSnapshotEvidence.ps1").Replace("'", "''", StringComparison.Ordinal)}}'
+            . '{{Path.Combine(FindRepoRoot(), "tools", "FileTransferFrontierGraceHandoff.ps1").Replace("'", "''", StringComparison.Ordinal)}}'
             function Get-TunaGuiFileTransferSetupFailureClassification { {{classifierBody}} }
             function Get-AppLogLinesAfterBookmark { throw 'live ledger was read' }
             function Read-GuiSmokeProcessOutputLinesSnapshot { throw 'process output was read' }
@@ -3764,6 +3861,8 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
             $ErrorActionPreference = 'Stop'
             function New-TunaGuiFileTransferFailureClassificationResult { {{resultBody}} }
             function Get-TunaGuiExplicitFailureClassification { {{explicitBody}} }
+            . '{{Path.Combine(FindRepoRoot(), "tools", "FileTransferOps", "CoordinatorSnapshotEvidence.ps1").Replace("'", "''", StringComparison.Ordinal)}}'
+            . '{{Path.Combine(FindRepoRoot(), "tools", "FileTransferFrontierGraceHandoff.ps1").Replace("'", "''", StringComparison.Ordinal)}}'
             function Get-TunaGuiFileTransferSetupFailureClassification { {{classifierBody}} }
             function Get-AppLogLinesAfterBookmark { throw 'live ledger was read' }
             function Read-GuiSmokeProcessOutputLinesSnapshot { throw 'process output was read' }
@@ -3846,6 +3945,8 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
             $ErrorActionPreference = 'Stop'
             function New-TunaGuiFileTransferFailureClassificationResult { {{resultBody}} }
             function Get-TunaGuiExplicitFailureClassification { {{explicitBody}} }
+            . '{{Path.Combine(FindRepoRoot(), "tools", "FileTransferOps", "CoordinatorSnapshotEvidence.ps1").Replace("'", "''", StringComparison.Ordinal)}}'
+            . '{{Path.Combine(FindRepoRoot(), "tools", "FileTransferFrontierGraceHandoff.ps1").Replace("'", "''", StringComparison.Ordinal)}}'
             function Get-TunaGuiFileTransferSetupFailureClassification { {{classifierBody}} }
             function Get-AppLogLinesAfterBookmark { throw 'live ledger was read' }
             function Read-GuiSmokeProcessOutputLinesSnapshot { throw 'process output was read' }
@@ -4177,6 +4278,8 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
             $ErrorActionPreference = 'Stop'
             function New-TunaGuiFileTransferFailureClassificationResult { {{resultBody}} }
             function Get-TunaGuiExplicitFailureClassification { {{explicitBody}} }
+            . '{{Path.Combine(FindRepoRoot(), "tools", "FileTransferOps", "CoordinatorSnapshotEvidence.ps1").Replace("'", "''", StringComparison.Ordinal)}}'
+            . '{{Path.Combine(FindRepoRoot(), "tools", "FileTransferFrontierGraceHandoff.ps1").Replace("'", "''", StringComparison.Ordinal)}}'
             function Get-TunaGuiFileTransferSetupFailureClassification { {{classifierBody}} }
             function Get-AppLogLinesAfterBookmark { throw 'live ledger was read' }
             function Read-GuiSmokeProcessOutputLinesSnapshot { throw 'process output was read' }
@@ -4311,6 +4414,8 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
             $ErrorActionPreference = 'Stop'
             function New-TunaGuiFileTransferFailureClassificationResult { {{resultBody}} }
             function Get-TunaGuiExplicitFailureClassification { {{explicitBody}} }
+            . '{{Path.Combine(FindRepoRoot(), "tools", "FileTransferOps", "CoordinatorSnapshotEvidence.ps1").Replace("'", "''", StringComparison.Ordinal)}}'
+            . '{{Path.Combine(FindRepoRoot(), "tools", "FileTransferFrontierGraceHandoff.ps1").Replace("'", "''", StringComparison.Ordinal)}}'
             function Get-TunaGuiFileTransferSetupFailureClassification { {{classifierBody}} }
             function Get-AppLogLinesAfterBookmark { throw 'live ledger was read' }
             function Read-GuiSmokeProcessOutputLinesSnapshot { throw 'process output was read' }
@@ -4386,6 +4491,8 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
             $ErrorActionPreference = 'Stop'
             function New-TunaGuiFileTransferFailureClassificationResult { {{resultBody}} }
             function Get-TunaGuiExplicitFailureClassification { {{explicitBody}} }
+            . '{{Path.Combine(FindRepoRoot(), "tools", "FileTransferOps", "CoordinatorSnapshotEvidence.ps1").Replace("'", "''", StringComparison.Ordinal)}}'
+            . '{{Path.Combine(FindRepoRoot(), "tools", "FileTransferFrontierGraceHandoff.ps1").Replace("'", "''", StringComparison.Ordinal)}}'
             function Get-TunaGuiFileTransferSetupFailureClassification { {{classifierBody}} }
             function Get-AppLogLinesAfterBookmark { throw 'live ledger was read' }
             function Read-GuiSmokeProcessOutputLinesSnapshot { throw 'process output was read' }
@@ -4468,6 +4575,8 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
             $ErrorActionPreference = 'Stop'
             function New-TunaGuiFileTransferFailureClassificationResult { {{resultBody}} }
             function Get-TunaGuiExplicitFailureClassification { {{explicitBody}} }
+            . '{{Path.Combine(FindRepoRoot(), "tools", "FileTransferOps", "CoordinatorSnapshotEvidence.ps1").Replace("'", "''", StringComparison.Ordinal)}}'
+            . '{{Path.Combine(FindRepoRoot(), "tools", "FileTransferFrontierGraceHandoff.ps1").Replace("'", "''", StringComparison.Ordinal)}}'
             function Get-TunaGuiFileTransferSetupFailureClassification { {{classifierBody}} }
             function Get-AppLogLinesAfterBookmark { throw 'live ledger was read' }
             function Read-GuiSmokeProcessOutputLinesSnapshot { throw 'process output was read' }
@@ -4545,6 +4654,8 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
             $ErrorActionPreference = 'Stop'
             function New-TunaGuiFileTransferFailureClassificationResult { {{resultBody}} }
             function Get-TunaGuiExplicitFailureClassification { {{explicitBody}} }
+            . '{{Path.Combine(FindRepoRoot(), "tools", "FileTransferOps", "CoordinatorSnapshotEvidence.ps1").Replace("'", "''", StringComparison.Ordinal)}}'
+            . '{{Path.Combine(FindRepoRoot(), "tools", "FileTransferFrontierGraceHandoff.ps1").Replace("'", "''", StringComparison.Ordinal)}}'
             function Get-TunaGuiFileTransferSetupFailureClassification { {{classifierBody}} }
             function Get-AppLogLinesAfterBookmark { throw 'live ledger was read' }
             function Read-GuiSmokeProcessOutputLinesSnapshot { throw 'process output was read' }
@@ -4683,6 +4794,8 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
             $ErrorActionPreference = 'Stop'
             function New-TunaGuiFileTransferFailureClassificationResult { {{resultBody}} }
             function Get-TunaGuiExplicitFailureClassification { {{explicitBody}} }
+            . '{{Path.Combine(FindRepoRoot(), "tools", "FileTransferOps", "CoordinatorSnapshotEvidence.ps1").Replace("'", "''", StringComparison.Ordinal)}}'
+            . '{{Path.Combine(FindRepoRoot(), "tools", "FileTransferFrontierGraceHandoff.ps1").Replace("'", "''", StringComparison.Ordinal)}}'
             function Get-TunaGuiFileTransferSetupFailureClassification { {{classifierBody}} }
             function Get-AppLogLinesAfterBookmark { throw 'live ledger was read' }
             function Read-GuiSmokeProcessOutputLinesSnapshot { throw 'process output was read' }
@@ -4744,6 +4857,8 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
             Set-StrictMode -Version Latest
             function New-TunaGuiFileTransferFailureClassificationResult { {{resultBody}} }
             function Get-TunaGuiExplicitFailureClassification { {{explicitBody}} }
+            . '{{Path.Combine(FindRepoRoot(), "tools", "FileTransferOps", "CoordinatorSnapshotEvidence.ps1").Replace("'", "''", StringComparison.Ordinal)}}'
+            . '{{Path.Combine(FindRepoRoot(), "tools", "FileTransferFrontierGraceHandoff.ps1").Replace("'", "''", StringComparison.Ordinal)}}'
             function Get-TunaGuiFileTransferSetupFailureClassification { {{classifierBody}} }
             function Get-AppLogLinesAfterBookmark { throw 'live ledger was read' }
             function Read-GuiSmokeProcessOutputLinesSnapshot { throw 'process output was read' }
@@ -4819,6 +4934,8 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
             Set-StrictMode -Version Latest
             function New-TunaGuiFileTransferFailureClassificationResult { {{resultBody}} }
             function Get-TunaGuiExplicitFailureClassification { {{explicitBody}} }
+            . '{{Path.Combine(FindRepoRoot(), "tools", "FileTransferOps", "CoordinatorSnapshotEvidence.ps1").Replace("'", "''", StringComparison.Ordinal)}}'
+            . '{{Path.Combine(FindRepoRoot(), "tools", "FileTransferFrontierGraceHandoff.ps1").Replace("'", "''", StringComparison.Ordinal)}}'
             function Get-TunaGuiFileTransferSetupFailureClassification { {{classifierBody}} }
             function Get-AppLogLinesAfterBookmark { throw 'live ledger was read' }
             function Read-GuiSmokeProcessOutputLinesSnapshot { throw 'process output was read' }
@@ -4878,6 +4995,8 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
             Set-StrictMode -Version Latest
             function New-TunaGuiFileTransferFailureClassificationResult { {{resultBody}} }
             function Get-TunaGuiExplicitFailureClassification { {{explicitBody}} }
+            . '{{Path.Combine(FindRepoRoot(), "tools", "FileTransferOps", "CoordinatorSnapshotEvidence.ps1").Replace("'", "''", StringComparison.Ordinal)}}'
+            . '{{Path.Combine(FindRepoRoot(), "tools", "FileTransferFrontierGraceHandoff.ps1").Replace("'", "''", StringComparison.Ordinal)}}'
             function Get-TunaGuiFileTransferSetupFailureClassification { {{classifierBody}} }
             function Get-AppLogLinesAfterBookmark { throw 'live ledger was read' }
             function Read-GuiSmokeProcessOutputLinesSnapshot { throw 'process output was read' }
@@ -4941,6 +5060,8 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
             $ErrorActionPreference = 'Stop'
             function New-TunaGuiFileTransferFailureClassificationResult { {{resultBody}} }
             function Get-TunaGuiExplicitFailureClassification { {{explicitBody}} }
+            . '{{Path.Combine(FindRepoRoot(), "tools", "FileTransferOps", "CoordinatorSnapshotEvidence.ps1").Replace("'", "''", StringComparison.Ordinal)}}'
+            . '{{Path.Combine(FindRepoRoot(), "tools", "FileTransferFrontierGraceHandoff.ps1").Replace("'", "''", StringComparison.Ordinal)}}'
             function Get-TunaGuiFileTransferSetupFailureClassification { {{classifierBody}} }
             function Get-AppLogLinesAfterBookmark { throw 'live ledger was read' }
             function Read-GuiSmokeProcessOutputLinesSnapshot { throw 'process output was read' }
@@ -5283,6 +5404,8 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
             $ErrorActionPreference = 'Stop'
             function New-TunaGuiFileTransferFailureClassificationResult { {{resultBody}} }
             function Get-TunaGuiExplicitFailureClassification { {{explicitBody}} }
+            . '{{Path.Combine(FindRepoRoot(), "tools", "FileTransferOps", "CoordinatorSnapshotEvidence.ps1").Replace("'", "''", StringComparison.Ordinal)}}'
+            . '{{Path.Combine(FindRepoRoot(), "tools", "FileTransferFrontierGraceHandoff.ps1").Replace("'", "''", StringComparison.Ordinal)}}'
             function Get-TunaGuiFileTransferSetupFailureClassification { {{classifierBody}} }
             function Get-AppLogLinesAfterBookmark { throw 'live ledger was read' }
             function Read-GuiSmokeProcessOutputLinesSnapshot { throw 'process output was read' }
@@ -5841,6 +5964,8 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
             $ErrorActionPreference = 'Stop'
             function New-TunaGuiFileTransferFailureClassificationResult { {{resultBody}} }
             function Get-TunaGuiExplicitFailureClassification { {{explicitBody}} }
+            . '{{Path.Combine(FindRepoRoot(), "tools", "FileTransferOps", "CoordinatorSnapshotEvidence.ps1").Replace("'", "''", StringComparison.Ordinal)}}'
+            . '{{Path.Combine(FindRepoRoot(), "tools", "FileTransferFrontierGraceHandoff.ps1").Replace("'", "''", StringComparison.Ordinal)}}'
             function Get-TunaGuiFileTransferSetupFailureClassification { {{classifierBody}} }
             function Get-AppLogLinesAfterBookmark { throw 'live ledger was read' }
             function Read-GuiSmokeProcessOutputLinesSnapshot { throw 'process output was read' }
@@ -6243,6 +6368,8 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
             $ErrorActionPreference = 'Stop'
             function New-TunaGuiFileTransferFailureClassificationResult { {{resultBody}} }
             function Get-TunaGuiExplicitFailureClassification { {{explicitBody}} }
+            . '{{Path.Combine(FindRepoRoot(), "tools", "FileTransferOps", "CoordinatorSnapshotEvidence.ps1").Replace("'", "''", StringComparison.Ordinal)}}'
+            . '{{Path.Combine(FindRepoRoot(), "tools", "FileTransferFrontierGraceHandoff.ps1").Replace("'", "''", StringComparison.Ordinal)}}'
             function Get-TunaGuiFileTransferSetupFailureClassification { {{classifierBody}} }
             function Get-AppLogLinesAfterBookmark { throw 'live ledger was read' }
             function Read-GuiSmokeProcessOutputLinesSnapshot { throw 'process output was read' }
@@ -6311,6 +6438,8 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
             $ErrorActionPreference = 'Stop'
             function New-TunaGuiFileTransferFailureClassificationResult { {{resultBody}} }
             function Get-TunaGuiExplicitFailureClassification { {{explicitBody}} }
+            . '{{Path.Combine(FindRepoRoot(), "tools", "FileTransferOps", "CoordinatorSnapshotEvidence.ps1").Replace("'", "''", StringComparison.Ordinal)}}'
+            . '{{Path.Combine(FindRepoRoot(), "tools", "FileTransferFrontierGraceHandoff.ps1").Replace("'", "''", StringComparison.Ordinal)}}'
             function Get-TunaGuiFileTransferSetupFailureClassification { {{classifierBody}} }
             function Get-AppLogLinesAfterBookmark { throw 'live ledger was read' }
             function Read-GuiSmokeProcessOutputLinesSnapshot { throw 'process output was read' }
@@ -6383,6 +6512,8 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
             $ErrorActionPreference = 'Stop'
             function New-TunaGuiFileTransferFailureClassificationResult { {{resultBody}} }
             function Get-TunaGuiExplicitFailureClassification { {{explicitBody}} }
+            . '{{Path.Combine(FindRepoRoot(), "tools", "FileTransferOps", "CoordinatorSnapshotEvidence.ps1").Replace("'", "''", StringComparison.Ordinal)}}'
+            . '{{Path.Combine(FindRepoRoot(), "tools", "FileTransferFrontierGraceHandoff.ps1").Replace("'", "''", StringComparison.Ordinal)}}'
             function Get-TunaGuiFileTransferSetupFailureClassification { {{classifierBody}} }
             function Get-AppLogLinesAfterBookmark { throw 'live ledger was read' }
             function Read-GuiSmokeProcessOutputLinesSnapshot { throw 'process output was read' }
@@ -6451,6 +6582,8 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
             $ErrorActionPreference = 'Stop'
             function New-TunaGuiFileTransferFailureClassificationResult { {{resultBody}} }
             function Get-TunaGuiExplicitFailureClassification { {{explicitBody}} }
+            . '{{Path.Combine(FindRepoRoot(), "tools", "FileTransferOps", "CoordinatorSnapshotEvidence.ps1").Replace("'", "''", StringComparison.Ordinal)}}'
+            . '{{Path.Combine(FindRepoRoot(), "tools", "FileTransferFrontierGraceHandoff.ps1").Replace("'", "''", StringComparison.Ordinal)}}'
             function Get-TunaGuiFileTransferSetupFailureClassification { {{classifierBody}} }
             function Get-AppLogLinesAfterBookmark { throw 'live ledger was read' }
             function Read-GuiSmokeProcessOutputLinesSnapshot { throw 'process output was read' }
@@ -6793,6 +6926,8 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
             $ErrorActionPreference = 'Stop'
             function New-TunaGuiFileTransferFailureClassificationResult { {{resultBody}} }
             function Get-TunaGuiExplicitFailureClassification { {{explicitBody}} }
+            . '{{Path.Combine(FindRepoRoot(), "tools", "FileTransferOps", "CoordinatorSnapshotEvidence.ps1").Replace("'", "''", StringComparison.Ordinal)}}'
+            . '{{Path.Combine(FindRepoRoot(), "tools", "FileTransferFrontierGraceHandoff.ps1").Replace("'", "''", StringComparison.Ordinal)}}'
             function Get-TunaGuiFileTransferSetupFailureClassification { {{classifierBody}} }
             function Get-AppLogLinesAfterBookmark { throw 'live ledger was read' }
             function Read-GuiSmokeProcessOutputLinesSnapshot { throw 'process output was read' }
@@ -6944,6 +7079,8 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
             $ErrorActionPreference = 'Stop'
             function New-TunaGuiFileTransferFailureClassificationResult { {{resultBody}} }
             function Get-TunaGuiExplicitFailureClassification { {{explicitBody}} }
+            . '{{Path.Combine(FindRepoRoot(), "tools", "FileTransferOps", "CoordinatorSnapshotEvidence.ps1").Replace("'", "''", StringComparison.Ordinal)}}'
+            . '{{Path.Combine(FindRepoRoot(), "tools", "FileTransferFrontierGraceHandoff.ps1").Replace("'", "''", StringComparison.Ordinal)}}'
             function Get-TunaGuiFileTransferSetupFailureClassification { {{classifierBody}} }
             function Get-AppLogLinesAfterBookmark { throw 'live ledger was read' }
             function Read-GuiSmokeProcessOutputLinesSnapshot { throw 'process output was read' }
@@ -7003,6 +7140,8 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
             $ErrorActionPreference = 'Stop'
             function New-TunaGuiFileTransferFailureClassificationResult { {{resultBody}} }
             function Get-TunaGuiExplicitFailureClassification { {{explicitBody}} }
+            . '{{Path.Combine(FindRepoRoot(), "tools", "FileTransferOps", "CoordinatorSnapshotEvidence.ps1").Replace("'", "''", StringComparison.Ordinal)}}'
+            . '{{Path.Combine(FindRepoRoot(), "tools", "FileTransferFrontierGraceHandoff.ps1").Replace("'", "''", StringComparison.Ordinal)}}'
             function Get-TunaGuiFileTransferSetupFailureClassification { {{classifierBody}} }
             function Get-AppLogLinesAfterBookmark { throw 'live ledger was read' }
             function Read-GuiSmokeProcessOutputLinesSnapshot { throw 'process output was read' }
@@ -7066,6 +7205,8 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
             $ErrorActionPreference = 'Stop'
             function New-TunaGuiFileTransferFailureClassificationResult { {{resultBody}} }
             function Get-TunaGuiExplicitFailureClassification { {{explicitBody}} }
+            . '{{Path.Combine(FindRepoRoot(), "tools", "FileTransferOps", "CoordinatorSnapshotEvidence.ps1").Replace("'", "''", StringComparison.Ordinal)}}'
+            . '{{Path.Combine(FindRepoRoot(), "tools", "FileTransferFrontierGraceHandoff.ps1").Replace("'", "''", StringComparison.Ordinal)}}'
             function Get-TunaGuiFileTransferSetupFailureClassification { {{classifierBody}} }
             function Get-AppLogLinesAfterBookmark { throw 'live ledger was read' }
             function Read-GuiSmokeProcessOutputLinesSnapshot { throw 'process output was read' }
@@ -7147,6 +7288,8 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
             $ErrorActionPreference = 'Stop'
             function New-TunaGuiFileTransferFailureClassificationResult { {{resultBody}} }
             function Get-TunaGuiExplicitFailureClassification { {{explicitBody}} }
+            . '{{Path.Combine(FindRepoRoot(), "tools", "FileTransferOps", "CoordinatorSnapshotEvidence.ps1").Replace("'", "''", StringComparison.Ordinal)}}'
+            . '{{Path.Combine(FindRepoRoot(), "tools", "FileTransferFrontierGraceHandoff.ps1").Replace("'", "''", StringComparison.Ordinal)}}'
             function Get-TunaGuiFileTransferSetupFailureClassification { {{classifierBody}} }
             function Get-AppLogLinesAfterBookmark { throw 'live ledger was read' }
             function Read-GuiSmokeProcessOutputLinesSnapshot { throw 'process output was read' }
@@ -7385,6 +7528,8 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
             $ErrorActionPreference = 'Stop'
             function New-TunaGuiFileTransferFailureClassificationResult { {{resultBody}} }
             function Get-TunaGuiExplicitFailureClassification { {{explicitBody}} }
+            . '{{Path.Combine(FindRepoRoot(), "tools", "FileTransferOps", "CoordinatorSnapshotEvidence.ps1").Replace("'", "''", StringComparison.Ordinal)}}'
+            . '{{Path.Combine(FindRepoRoot(), "tools", "FileTransferFrontierGraceHandoff.ps1").Replace("'", "''", StringComparison.Ordinal)}}'
             function Get-TunaGuiFileTransferSetupFailureClassification { {{classifierBody}} }
             function Get-AppLogLinesAfterBookmark { throw 'live ledger was read' }
             function Read-GuiSmokeProcessOutputLinesSnapshot { throw 'process output was read' }
@@ -7456,6 +7601,8 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
             $ErrorActionPreference = 'Stop'
             function New-TunaGuiFileTransferFailureClassificationResult { {{resultBody}} }
             function Get-TunaGuiExplicitFailureClassification { {{explicitBody}} }
+            . '{{Path.Combine(FindRepoRoot(), "tools", "FileTransferOps", "CoordinatorSnapshotEvidence.ps1").Replace("'", "''", StringComparison.Ordinal)}}'
+            . '{{Path.Combine(FindRepoRoot(), "tools", "FileTransferFrontierGraceHandoff.ps1").Replace("'", "''", StringComparison.Ordinal)}}'
             function Get-TunaGuiFileTransferSetupFailureClassification { {{classifierBody}} }
             function Get-AppLogLinesAfterBookmark { throw 'live ledger was read' }
             function Read-GuiSmokeProcessOutputLinesSnapshot { throw 'process output was read' }
@@ -7538,6 +7685,8 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
             $ErrorActionPreference = 'Stop'
             function New-TunaGuiFileTransferFailureClassificationResult { {{resultBody}} }
             function Get-TunaGuiExplicitFailureClassification { {{explicitBody}} }
+            . '{{Path.Combine(FindRepoRoot(), "tools", "FileTransferOps", "CoordinatorSnapshotEvidence.ps1").Replace("'", "''", StringComparison.Ordinal)}}'
+            . '{{Path.Combine(FindRepoRoot(), "tools", "FileTransferFrontierGraceHandoff.ps1").Replace("'", "''", StringComparison.Ordinal)}}'
             function Get-TunaGuiFileTransferSetupFailureClassification { {{classifierBody}} }
             function Get-AppLogLinesAfterBookmark { throw 'live ledger was read' }
             function Read-GuiSmokeProcessOutputLinesSnapshot { throw 'process output was read' }
@@ -7702,6 +7851,8 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
             $ErrorActionPreference = 'Stop'
             function New-TunaGuiFileTransferFailureClassificationResult { {{resultBody}} }
             function Get-TunaGuiExplicitFailureClassification { {{explicitBody}} }
+            . '{{Path.Combine(FindRepoRoot(), "tools", "FileTransferOps", "CoordinatorSnapshotEvidence.ps1").Replace("'", "''", StringComparison.Ordinal)}}'
+            . '{{Path.Combine(FindRepoRoot(), "tools", "FileTransferFrontierGraceHandoff.ps1").Replace("'", "''", StringComparison.Ordinal)}}'
             function Get-TunaGuiFileTransferSetupFailureClassification { {{classifierBody}} }
             function Get-AppLogLinesAfterBookmark { throw 'live ledger was read' }
             function Read-GuiSmokeProcessOutputLinesSnapshot { throw 'process output was read' }
@@ -7817,6 +7968,8 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
             $ErrorActionPreference = 'Stop'
             function New-TunaGuiFileTransferFailureClassificationResult { {{resultBody}} }
             function Get-TunaGuiExplicitFailureClassification { {{explicitBody}} }
+            . '{{Path.Combine(FindRepoRoot(), "tools", "FileTransferOps", "CoordinatorSnapshotEvidence.ps1").Replace("'", "''", StringComparison.Ordinal)}}'
+            . '{{Path.Combine(FindRepoRoot(), "tools", "FileTransferFrontierGraceHandoff.ps1").Replace("'", "''", StringComparison.Ordinal)}}'
             function Get-TunaGuiFileTransferSetupFailureClassification { {{classifierBody}} }
             function Get-AppLogLinesAfterBookmark { throw 'live ledger was read' }
             function Read-GuiSmokeProcessOutputLinesSnapshot { throw 'process output was read' }
@@ -8581,33 +8734,15 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
     public async Task GuiSmokeFailureClassification_CorrelatesInitialActivationReceiveRecoveryHoldExhaustion()
     {
         var guiText = File.ReadAllText(Path.Combine(FindRepoRoot(), "tools", "GuiSmoke-Windows.ps1"));
-        static string ExtractNestedFunction(
-            string scriptText,
-            string functionName,
-            string nextFunctionName)
-        {
-            var pattern =
-                @"(?s)function\s+" +
-                Regex.Escape(functionName) +
-                @"\s*\{(?<body>.*?)\r?\n\s*\}\s*\r?\n\s*function\s+" +
-                Regex.Escape(nextFunctionName) +
-                @"\b";
-            var match = Regex.Match(scriptText, pattern);
-            Assert.True(
-                match.Success,
-                $"Could not find nested PowerShell function body for {functionName}.");
-            return match.Groups["body"].Value;
-        }
-
-        var fieldBody = ExtractNestedFunction(
+        var fieldBody = ExtractPowerShellFunctionBody(
             guiText,
             "Get-TunaGuiLogLineFieldValue",
             "Test-TunaGuiLogLineHasEvent");
-        var eventBody = ExtractNestedFunction(
+        var eventBody = ExtractPowerShellFunctionBody(
             guiText,
             "Test-TunaGuiLogLineHasEvent",
             "Test-TunaGuiLogLineFieldMatch");
-        var correlationBody = ExtractNestedFunction(
+        var correlationBody = ExtractPowerShellFunctionBody(
             guiText,
             "Test-TunaGuiInitialActivationReceiveRecoveryHoldNotPreserved",
             "Test-TunaGuiReceiveRecoveryCompletedUnprovenSuccessorMissing");
@@ -11158,12 +11293,15 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
     }
 
     [Theory]
-    [InlineData("Run-FileTransferTunaGuiSmoke.ps1", "TunaGui", "Invoke-TunaGuiRetainedAnalysisBestEffort")]
-    [InlineData("Run-FileTransferRouteAcceptance.ps1", "RouteAcceptance", "Select-RouteAcceptanceMeasuredFallbackLogSlice")]
-    public void RetainedAnalysis_DefaultWatchdogIs1800SecondsAndTimeoutRemainsFailClosed(
+    [InlineData("Run-FileTransferTunaGuiSmoke.ps1", "TunaGui", "Invoke-TunaGuiRetainedAnalysisBestEffort", "powershell")]
+    [InlineData("Run-FileTransferRouteAcceptance.ps1", "RouteAcceptance", "Select-RouteAcceptanceMeasuredFallbackLogSlice", "powershell")]
+    [InlineData("Run-FileTransferTunaGuiSmoke.ps1", "TunaGui", "Invoke-TunaGuiRetainedAnalysisBestEffort", "pwsh")]
+    [InlineData("Run-FileTransferRouteAcceptance.ps1", "RouteAcceptance", "Select-RouteAcceptanceMeasuredFallbackLogSlice", "pwsh")]
+    public async Task RetainedAnalysis_DefaultWatchdogIs1800SecondsAndTimeoutRemainsFailClosed(
         string scriptName,
         string scope,
-        string nextFunctionName)
+        string nextFunctionName,
+        string host)
     {
         var scriptText = File.ReadAllText(Path.Combine(FindRepoRoot(), "tools", scriptName));
         var body = ExtractPowerShellFunctionBody(scriptText, $"Invoke-{scope}RetainedAnalysis", nextFunctionName);
@@ -11172,13 +11310,13 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
         Assert.Single(Regex.Matches(body, @"\$analysisTimeoutSeconds\s*="));
         Assert.Contains("$deadlineUtc = $startedUtc.AddSeconds($analysisTimeoutSeconds)", body, StringComparison.Ordinal);
         Assert.Contains("while (-not $process.WaitForExit(5000))", body, StringComparison.Ordinal);
-        Assert.Matches(@"if \(\[DateTimeOffset\]::UtcNow -lt \$deadlineUtc\)\s*\{\s*continue\s*\}", body);
+        Assert.Contains("if ([DateTimeOffset]::UtcNow -lt $deadlineUtc)", body, StringComparison.Ordinal);
 
         var deadlineIndex = body.IndexOf("$deadlineUtc =", StringComparison.Ordinal);
         var waitIndex = body.IndexOf("while (-not $process.WaitForExit(5000))", StringComparison.Ordinal);
-        var stopIndex = body.IndexOf($"Stop-{scope}RetainedAnalysisProcess -Process $process", StringComparison.Ordinal);
+        var stopIndex = body.IndexOf($"Stop-{scope}RetainedAnalysisProcess -Process $process", waitIndex, StringComparison.Ordinal);
         Assert.True(deadlineIndex >= 0 && waitIndex > deadlineIndex && stopIndex > waitIndex);
-        var timeoutReceiptIndex = body.IndexOf("Write-FileTransferRetainedAnalysisAttemptReceipt", StringComparison.Ordinal);
+        var timeoutReceiptIndex = body.IndexOf("Write-FileTransferRetainedAnalysisAttemptReceipt", stopIndex, StringComparison.Ordinal);
         var timeoutThrowIndex = body.IndexOf("            throw \"", stopIndex, StringComparison.Ordinal);
         var completedOutputIndex = body.IndexOf("$stdout = $stdoutTask.GetAwaiter().GetResult()", StringComparison.Ordinal);
         Assert.True(timeoutReceiptIndex > stopIndex && timeoutThrowIndex > timeoutReceiptIndex && completedOutputIndex > timeoutThrowIndex);
@@ -11204,6 +11342,68 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
         Assert.Contains("-CompletedProofArtifacts $completedProofArtifacts", completedBody, StringComparison.Ordinal);
         Assert.Matches(@"if \(\$process.ExitCode -ne 0\)\s*\{\s*throw ", completedBody);
         Assert.Matches(@"if \(-not \$completedProofArtifacts\)\s*\{\s*throw ", completedBody);
+
+        if (!OperatingSystem.IsWindows()) { return; }
+        var encoded = Convert.ToBase64String(Encoding.UTF8.GetBytes(body));
+        var result = await RunPowerShellScriptTextAsync($$"""
+            Set-StrictMode -Version Latest
+            $ErrorActionPreference = 'Stop'
+            $source = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('{{encoded}}'))
+            $errors = $null
+            $ast = [Management.Automation.Language.Parser]::ParseInput($source, [ref]$null, [ref]$errors)
+            if ($errors.Count) { throw 'watchdog body parse failed' }
+            $loops = @($ast.FindAll({ param($node)
+                $node -is [Management.Automation.Language.WhileStatementAst] -and
+                $node.Condition.Extent.Text -ceq '-not $process.WaitForExit(5000)'
+            }, $true))
+            if ($loops.Count -ne 1) { throw 'expected one retained-analysis watchdog loop' }
+            $exercise = [scriptblock]::Create($loops[0].Extent.Text)
+            function Stop-{{scope}}RetainedAnalysisProcess {
+                param($Process)
+                $script:stopCalls++
+                throw 'fixture_watchdog_stopped'
+            }
+            foreach ($deadline in @('before', 'at', 'after')) {
+                foreach ($diagnostic in @('absent', 'ready', 'throw')) {
+                    $script:pollCalls = 0; $script:stopCalls = 0; $script:adoptCalls = 0
+                    $process = [pscustomobject]@{}
+                    $process | Add-Member ScriptMethod WaitForExit {
+                        param($Milliseconds)
+                        if ($Milliseconds -ne 5000) { throw 'poll interval changed' }
+                        $script:pollCalls++
+                        return $script:pollCalls -gt 1
+                    }
+                    $private:frontierReports = $null
+                    if ($diagnostic -cne 'absent') {
+                        $receiver = [pscustomobject]@{}
+                        $receiver | Add-Member ScriptMethod TryAdoptIfOffered {
+                            $script:adoptCalls++
+                            if ($diagnostic -ceq 'throw') { throw 'optional diagnostic failed' }
+                        }
+                        $private:frontierReports = [pscustomobject]@{ DiagnosticReceiver = $receiver }
+                    }
+                    $deadlineUtc = [DateTimeOffset]::UtcNow.AddSeconds($(switch ($deadline) {
+                        'before' { 60 }; 'at' { 0 }; 'after' { -60 }
+                    }))
+                    $originalDeadline = $deadlineUtc
+                    $failure = ''
+                    try { . $exercise } catch { $failure = $_.Exception.Message }
+                    if ($deadlineUtc -ne $originalDeadline) { throw 'diagnostics extended the deadline' }
+                    if ($deadline -ceq 'before') {
+                        $expectedAdopts = if ($diagnostic -ceq 'absent') { 0 } else { 1 }
+                        if ($failure -cne '' -or $script:stopCalls -ne 0 -or $script:pollCalls -ne 2 -or
+                            $script:adoptCalls -ne $expectedAdopts) { throw "before-deadline control failed: $diagnostic/$failure" }
+                    }
+                    elseif ($failure -cne 'fixture_watchdog_stopped' -or $script:stopCalls -ne 1 -or
+                        $script:pollCalls -ne 1 -or $script:adoptCalls -ne 0) {
+                        throw "expired-deadline control failed: $deadline/$diagnostic/$failure"
+                    }
+                }
+            }
+            'retained-watchdog-controls-ok cases=9'
+            """, Array.Empty<string>(), host);
+        Assert.True(result.ExitCode == 0, result.Stdout + Environment.NewLine + result.Stderr);
+        Assert.Contains("retained-watchdog-controls-ok cases=9", result.Stdout, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -12068,8 +12268,10 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
         Assert.DoesNotContain("$combined += $existingText", scriptText, StringComparison.Ordinal);
     }
 
-    [Fact]
-    public void RunFileTransferTunaGuiSmoke_ControlledFallbackFailureStillWritesMeasuredAnalysis()
+    [Theory]
+    [InlineData("powershell")]
+    [InlineData("pwsh")]
+    public async Task RunFileTransferTunaGuiSmoke_ControlledFallbackCheckpointsFailureAndRespectsAnalysisOwner(string host)
     {
         var repoRoot = FindRepoRoot();
         var scriptPath = Path.Combine(repoRoot, "tools", "Run-FileTransferTunaGuiSmoke.ps1");
@@ -12099,24 +12301,85 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
         Assert.Contains("frame_type=filetransfer.cancel.v4", scriptText, StringComparison.Ordinal);
         Assert.Contains("Invoke-TunaGuiRetainedAnalysis -RepoRoot $repoRoot -AnalysisDir $resolvedArtifactDir", scriptText, StringComparison.Ordinal);
 
-        var failureAnalysisIndex = scriptText.IndexOf("Invoke-TunaGuiMeasuredFallbackRetainedAnalysisBestEffort", StringComparison.Ordinal);
-        var guiFailureBranchIndex = scriptText.IndexOf("if ($guiSmokeExitCode -ne 0)", StringComparison.Ordinal);
-        var guiFailureThrowIndex = scriptText.IndexOf("GUI smoke failed with exit code", StringComparison.Ordinal);
-        var missingSummaryBranchIndex = scriptText.IndexOf("if (-not (Test-Path -LiteralPath $summaryPath -PathType Leaf))", StringComparison.Ordinal);
-        var missingSummaryThrowIndex = scriptText.IndexOf("GUI smoke did not write file-transfer Tuna summary", StringComparison.Ordinal);
-        Assert.True(failureAnalysisIndex >= 0, "Expected best-effort measured fallback analysis helper.");
-        Assert.True(guiFailureBranchIndex >= 0, "Expected GUI failure branch.");
-        Assert.True(guiFailureThrowIndex > guiFailureBranchIndex, "Expected GUI failure throw.");
-        Assert.Contains(
-            "Invoke-TunaGuiMeasuredFallbackRetainedAnalysisBestEffort",
-            scriptText[guiFailureBranchIndex..guiFailureThrowIndex],
-            StringComparison.Ordinal);
-        Assert.True(missingSummaryBranchIndex >= 0, "Expected missing-summary branch.");
-        Assert.True(missingSummaryThrowIndex > missingSummaryBranchIndex, "Expected missing-summary throw.");
-        Assert.Contains(
-            "Invoke-TunaGuiMeasuredFallbackRetainedAnalysisBestEffort",
-            scriptText[missingSummaryBranchIndex..missingSummaryThrowIndex],
-            StringComparison.Ordinal);
+        if (!OperatingSystem.IsWindows()) { return; }
+        var result = await RunPowerShellScriptTextAsync($$"""
+            Set-StrictMode -Version Latest
+            $ErrorActionPreference = 'Stop'
+            $errors = $null
+            $ast = [Management.Automation.Language.Parser]::ParseFile(
+                '{{scriptPath.Replace("'", "''", StringComparison.Ordinal)}}', [ref]$null, [ref]$errors)
+            if ($errors.Count) { throw 'wrapper parse failed' }
+            $main = @($ast.EndBlock.Statements | Where-Object {
+                $_ -is [Management.Automation.Language.TryStatementAst] -and
+                $_.Body.Extent.Text.Contains('$guiSmokeResult = Invoke-TunaGuiSmokeWithHardDeadline')
+            })
+            if ($main.Count -ne 1) { throw 'expected one wrapper main try block' }
+            $statements = @($main[0].Body.Statements)
+            $start = -1; $controlled = -1
+            for ($i = 0; $i -lt $statements.Count; $i++) {
+                if ($statements[$i].Extent.Text -ceq '$summary = $null') { $start = $i }
+                if ($statements[$i] -is [Management.Automation.Language.IfStatementAst] -and
+                    $statements[$i].Clauses[0].Item1.Extent.Text -ceq "`$RouteMode -eq 'v4-restart-v6-fallback'") {
+                    $controlled = $i
+                }
+            }
+            if ($start -lt 0 -or $controlled -le $start) { throw 'failure/controlled-fallback boundary missing' }
+            $clause = $statements[$controlled].Clauses[0]
+            $exercise = [scriptblock]::Create(
+                (($statements[$start..($controlled - 1)] | ForEach-Object { $_.Extent.Text }) -join "`n") +
+                "`nif (" + $clause.Item1.Extent.Text + ') ' + $clause.Item2.Extent.Text)
+            function Test-Path { param($LiteralPath, $PathType); return $capture -cne 'missing' }
+            function Get-Content {
+                param($LiteralPath, [switch]$Raw)
+                if ($capture -ceq 'malformed') { return '{invalid-json' }
+                return '{"completed":true,"integrityOk":true}'
+            }
+            function Test-TunaGuiCurrentSummary { param($Summary, $RouteMode); return $capture -cne 'invalid' }
+            function Write-TunaGuiDirectEvidenceManifest {
+                param($RepoRoot, $ArtifactDir, $ExePath, $GuiExitCode, $GuiExitCodeAvailable)
+                if ($GuiExitCode -ne $guiSmokeExitCode -or -not $GuiExitCodeAvailable) { throw 'manifest lost GUI outcome' }
+                $events.Add('checkpoint')
+            }
+            function Select-TunaGuiControlledRestartLogSlices {
+                param($ArtifactDir)
+                $events.Add('slice')
+                return [pscustomobject]@{ SetupPath = 'setup-source'; MeasuredPath = 'measured-source'; FilteredSetupCleanupLineCount = 0 }
+            }
+            function Invoke-TunaGuiRetainedAnalysisBestEffort { param($RepoRoot, $AnalysisDir, $LogPath); $events.Add('setup-analysis') }
+            function Invoke-TunaGuiMeasuredFallbackRetainedAnalysis { param($RepoRoot, $ArtifactDir, $LogPath); $events.Add('measured-analysis') }
+            function Invoke-TunaGuiMeasuredFallbackRetainedAnalysisBestEffort { param($RepoRoot, $ArtifactDir); $events.Add('unexpected-failure-analysis') }
+            function Update-TunaGuiControlledRestartSummary { param($ArtifactDir, $FilteredSetupCleanupLineCount); $events.Add('update') }
+            $repoRoot = 'fixture-repo'; $resolvedArtifactDir = 'fixture-artifacts'; $resolvedExe = 'fixture-exe'
+            $summaryPath = 'fixture-summary'; $RouteMode = 'v4-restart-v6-fallback'
+            $guiSmokeExitCodeAvailable = $true; $guiSmokeResult = [pscustomobject]@{ TimedOut = $false }
+            foreach ($RetainedAnalysisOwner in @('Wrapper', 'RouteAcceptance')) {
+                foreach ($capture in @('gui-failed', 'missing', 'malformed', 'invalid', 'valid')) {
+                    $events = [Collections.Generic.List[string]]::new()
+                    $guiSmokeExitCode = if ($capture -ceq 'gui-failed') { 9 } else { 0 }
+                    $failure = ''
+                    try { . $exercise } catch { $failure = $_.Exception.Message }
+                    if ($capture -ceq 'valid') {
+                        $expected = if ($RetainedAnalysisOwner -ceq 'Wrapper') {
+                            'checkpoint,slice,setup-analysis,measured-analysis,update'
+                        } else { 'checkpoint,slice,update' }
+                        if ($failure -cne '' -or ($events -join ',') -cne $expected) {
+                            throw "valid capture violated analysis ownership: $RetainedAnalysisOwner/$failure/$events"
+                        }
+                    }
+                    else {
+                        $expectedFailure = if ($capture -ceq 'gui-failed') {
+                            'GUI smoke failed with exit code 9. Artifacts: fixture-artifacts'
+                        } else { 'GUI smoke did not write file-transfer Tuna summary. Artifacts: fixture-artifacts' }
+                        if ($failure -cne $expectedFailure -or ($events -join ',') -cne 'checkpoint') {
+                            throw "failed capture lost checkpoint or changed failure: $RetainedAnalysisOwner/$capture/$failure/$events"
+                        }
+                    }
+                }
+            }
+            'controlled-fallback-owner-controls-ok cases=10'
+            """, Array.Empty<string>(), host);
+        Assert.True(result.ExitCode == 0, result.Stdout + Environment.NewLine + result.Stderr);
+        Assert.Contains("controlled-fallback-owner-controls-ok cases=10", result.Stdout, StringComparison.Ordinal);
     }
 
     [Fact]

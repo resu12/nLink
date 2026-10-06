@@ -10,6 +10,16 @@ if ($catalog.Hash -cne '17b5e4a90a18a5f4173ebd1b2081aeee1db48773b0213f1bb45549e0
 }
 # Direct assignment preserves JSON arrays in Windows PowerShell 5.1.
 $envelopes = Get-Content -LiteralPath $FixturePath -Raw | ConvertFrom-Json
+$retryOperations = @($envelopes.aggregate.operations | Where-Object {
+    $null -ne (Get-FileTransferCoordinatorSnapshotObjectProperty $_.routeTransition 'activationRetryBinding')
+})
+if ($retryOperations.Count -gt 0) {
+    foreach ($operation in $retryOperations) {
+        if (Test-FileTransferActivationRetryOperation $operation $catalog) { throw 'Base catalog accepted unsupported activation retry.' }
+    }
+    $catalog = Get-FileTransferCoordinatorActivationRetryCatalog
+    if ($catalog.Hash -cne '6f8667e92dae781e679bbe6f59fbd4f3d6284cd893ad2f643a9e47a21d451b00') { throw 'Frozen activation-retry catalog changed.' }
+}
 foreach ($source in @(
     @{ Path='tests/nLink.SmokeTests.Core/Support/PeerFirstFailedYieldSnapshotEvidence.ps1'; Names=@('Copy-Value','Subject','Convert-Envelope') },
     @{ Path='tests/nLink.SmokeTests.Core/Support/FileTunaPressureSettlementSnapshotEvidence.ps1'; Names=@('New-Effect','New-Lines') },

@@ -1,6 +1,7 @@
 namespace NLink.SmokeTests;
 
 [Collection(FakeNknNetworkCollection.Name)]
+[Trait("Area", "Core")]
 public sealed class FrontierRetainedParentFailureTests : FileTransferOpsScriptsTestBase
 {
     public static IEnumerable<object[]> Cases =>

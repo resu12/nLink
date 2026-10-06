@@ -6,6 +6,7 @@ using System.Reflection;
 namespace NLink.SmokeTests;
 
 [Collection(FakeNknNetworkCollection.Name)]
+[Trait("Area", "Core")]
 public sealed class FrontierNativePickerTests : FileTransferOpsScriptsTestBase
 {
     [Theory]

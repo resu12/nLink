@@ -61,7 +61,9 @@ foreach($pair in @(@($route,'Invoke-RouteAcceptanceRetainedAnalysis'),@($wrapper
         },$true))
         $hashAssignment=@($hashAssignments | Where-Object {$_.Right.Extent.Text -like 'Get-FileTransferEvidenceSha256 *'})
         $nativeHashAssignment=@($hashAssignments | Where-Object {$_.Right.Extent.Text -ceq '$private:frontierPreparation.InputSha256'})
-        if($hashAssignments.Count -ne 2 -or $hashAssignment.Count -ne 1 -or $nativeHashAssignment.Count -ne 1) { throw 'Parent source hash seam changed' }
+        $failedGuiHashAssignment=@($hashAssignments | Where-Object {$_.Right.Extent.Text -ceq '$FailedGuiCapture.SourceSha256'})
+        $expectedFailedGuiHashCount=if($pair[1] -ceq 'Invoke-RouteAcceptanceRetainedAnalysis') { 1 } else { 0 }
+        if($hashAssignments.Count -ne (2+$expectedFailedGuiHashCount) -or $hashAssignment.Count -ne 1 -or $nativeHashAssignment.Count -ne 1 -or $failedGuiHashAssignment.Count -ne $expectedFailedGuiHashCount) { throw 'Parent source hash seam changed' }
         $needle='-ReadLease $sourceLeaseReference'
         if($hashAssignment[0].Extent.Text.Split([string[]]@($needle),[StringSplitOptions]::None).Length -ne 2) { throw 'Parent optional source lease changed' }
         $text=$text.Replace($hashAssignment[0].Extent.Text,($hashAssignment[0].Extent.Text.Replace($needle,'-ReadLease ([ref]$script:inputReadLease)')))

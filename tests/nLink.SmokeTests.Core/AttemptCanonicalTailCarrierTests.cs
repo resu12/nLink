@@ -8,6 +8,8 @@ using Stamp = NLink.Core.FileTransfer.FileTransferCoordinator.FrontierPublicatio
 namespace NLink.SmokeTests;
 
 [Collection(FakeNknNetworkCollection.Name)]
+[Trait("Area", "Core")]
+[Trait("RequiredConfiguration", "Debug")]
 public sealed class AttemptCanonicalTailCarrierTests : FileTransferOpsScriptsTestBase
 {
     private static int First(bool canonical) => canonical ? 12476 : 0;

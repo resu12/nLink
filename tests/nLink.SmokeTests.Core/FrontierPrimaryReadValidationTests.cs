@@ -3,6 +3,7 @@ using System.Text.RegularExpressions;
 namespace NLink.SmokeTests;
 
 [Collection(FakeNknNetworkCollection.Name)]
+[Trait("Area", "Core")]
 public sealed class FrontierPrimaryReadValidationTests : FileTransferOpsScriptsTestBase
 {
     [Fact]

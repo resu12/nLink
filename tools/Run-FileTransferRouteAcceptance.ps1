@@ -2598,7 +2598,7 @@ function Test-RouteAcceptanceAllowedOperatorWarning {
     param(
         [Parameter(Mandatory = $true)][string]$ExpectedRoute,
         [Parameter(Mandatory = $true)][string]$Verdict,
-        [Parameter(Mandatory = $true)][string[]]$WarningKinds
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][string[]]$WarningKinds
     )
 
     $kinds = @($WarningKinds)
@@ -3597,7 +3597,60 @@ function Assert-Phase4RouteSummary {
     $Result.bridgeLivenessStaleDeferralCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $routeSummary -Name 'bridge_liveness_stale_deferral_count' -DefaultValue '0')
     $Result.bridgeLivenessTimeoutDuringValidRecoveryCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $routeSummary -Name 'session_liveness_timeout_during_valid_recovery_count' -DefaultValue '0')
 
-    $routeText = [string]$Result.route
+    if ($Result.coordinatorSnapshotMode -ceq 'SnapshotV1Authoritative' -and $Result.coordinatorSnapshotBoundaryCount -gt 0) {
+        try {
+            # The primary analyzer already reconciled the peer publication histories.
+            # Consume its persisted logical cycle, not their interleaved global timeline.
+            if ($Result.routeConsistencyVerdict -cne 'pass' -or
+                -not $Result.coordinatorSnapshotStreamComplete -or
+                $Result.coordinatorSnapshotArtifactEvidenceVerdict -cne 'pass' -or
+                $snapshotParityReport.Verdict -cne 'pass' -or
+                (Get-RouteAcceptanceReportValue -Report $routeSummary -Name 'coordinator_snapshot_route_consistency_full_compact_parity_verdict' -DefaultValue '') -cne 'pass') {
+                throw 'invalid normalized route evidence'
+            }
+            $normalizedJson = Get-RouteAcceptanceReportValue -Report $routeSummary -Name 'coordinator_snapshot_route_consistency_normalized_json' -DefaultValue ''
+            if (-not $normalizedJson.TrimStart().StartsWith('{', [StringComparison]::Ordinal)) {
+                throw 'invalid normalized route evidence'
+            }
+            $normalizedHash = Get-RouteAcceptanceEvidenceTextSha256 -Value $normalizedJson
+            foreach ($side in @('', 'full_', 'compact_')) {
+                $jsonKey = "coordinator_snapshot_route_consistency_${side}normalized_json"
+                $hashKey = "coordinator_snapshot_route_consistency_${side}boundary_hash"
+                if ((Get-RouteAcceptanceReportValue -Report $routeSummary -Name $jsonKey -DefaultValue '') -cne $normalizedJson -or
+                    (Get-RouteAcceptanceReportValue -Report $routeSummary -Name $hashKey -DefaultValue '') -cne $normalizedHash) {
+                    throw 'invalid normalized route evidence'
+                }
+            }
+            $normalized = $normalizedJson | ConvertFrom-Json -ErrorAction Stop
+            if ($normalized -isnot [pscustomobject] -or $normalized.source -cne 'SnapshotAuthorityV1' -or
+                $normalized.verdict -cne 'pass' -or $normalized.selectedRouteChanges -isnot [array] -or
+                $normalized.selectedRouteChanges.Count -eq 0) { throw 'invalid normalized route evidence' }
+            foreach ($routeToken in $normalized.selectedRouteChanges) {
+                if ($routeToken -isnot [string] -or [string]::IsNullOrWhiteSpace($routeToken)) {
+                    throw 'invalid normalized route evidence'
+                }
+            }
+            $logicalCycle = @($normalized.selectedRouteChanges)
+            $logicalCycleText = Join-RouteAcceptanceTokenList -Values $logicalCycle
+            if ((Get-RouteAcceptanceReportValue -Report $routeSummary -Name 'selected_route_changes' -DefaultValue '') -cne $logicalCycleText) {
+                throw 'invalid normalized route evidence'
+            }
+            $Result.selectedRouteSequence = $logicalCycle
+            $Result.selectedRouteChanges = $logicalCycle
+            $Result.route = $logicalCycleText
+            $Result.finalRoute = [string]$logicalCycle[$logicalCycle.Count - 1]
+        }
+        catch {
+            Add-RouteAcceptanceFailure -Result $Result -Message 'coordinator normalized route cycle evidence invalid'
+            $Result.selectedRouteSequence = @()
+            $Result.selectedRouteChanges = @()
+            $Result.route = '(none)'
+            $Result.finalRoute = '(none)'
+            return
+        }
+    }
+
+    $routeText = Join-RouteAcceptanceTokenList -Values (@($selected | ForEach-Object { [string]$_.Route }) + @($Result.selectedRouteChanges))
     if ([string]::IsNullOrWhiteSpace($routeText)) {
         $routeText = '(none)'
         $Result.route = $routeText
@@ -5415,8 +5468,11 @@ function Write-RouteAcceptanceFakePhase4Run {
     else {
         Test-RouteAcceptanceScenarioEnvEnabled -ScenarioName $scenarioName -Suffix 'CONTAMINATED_MEASUREMENT'
     }
-    $transferId = ('fake-phase4-{0}' -f $scenarioName)
-    $sessionId = 'phase4-fake-session'
+    $routeCycleSource = if ($scenarioName -ceq 'regular-v4-live-activation-off-on-off-256mb') {
+        [string]$env:NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_ROUTE_CYCLE_SOURCE
+    } else { '' }
+    $transferId = if ([string]::IsNullOrWhiteSpace($routeCycleSource)) { ('fake-phase4-{0}' -f $scenarioName) } else { 'transfer_two_writer_ingress' }
+    $sessionId = if ([string]::IsNullOrWhiteSpace($routeCycleSource)) { 'phase4-fake-session' } else { '[redacted]' }
     $lines = New-Object System.Collections.Generic.List[string]
     $seconds = 0
     $liveEpoch = 0
@@ -5560,6 +5616,15 @@ function Write-RouteAcceptanceFakePhase4Run {
         $lines.Add((New-RouteAcceptanceFakeLogLine -SecondsOffset 120 -Message ("event=file_transfer_outbound_terminal; role=helpee; session_id={0}; transfer_id={1}; state={2}; error_code={3}; bytes_transferred={4}; integrity_ok={5}; route={6}; protocol_version={7}" -f $sessionId, $transferId, $terminalState, $terminalError, $payloadBytes, ($(if ($completed -and $terminalState -eq 'Completed') { 1 } else { 0 })), $finalRoute, $metadata.Protocol))) | Out-Null
     }
     $lines.Add((New-RouteAcceptanceFakeLogLine -SecondsOffset 110 -Message ("event=nkn_bridge_bulk_send_summary; queue_depth=0; queued_bytes=0; oldest_queued_age_ms=0; frames_sent=1; send_failures=0; queue_clears=0; payload_bytes_sent={0}; payload_bytes_per_second=6000000; send_p95_ms=1; configured_concurrency=4; effective_concurrency=4" -f $payloadBytes))) | Out-Null
+    if (-not [string]::IsNullOrWhiteSpace($routeCycleSource)) {
+        # Preserve genuine coordinator/security/payload records. Only terminal
+        # GUI output remains simulated; it cannot supply route or delivery proof.
+        $terminalLines = @($lines | Where-Object { $_ -match 'event=file_transfer_(inbound|outbound)_terminal;' })
+        $lines.Clear()
+        foreach ($line in @((Get-Content -LiteralPath $routeCycleSource -ErrorAction Stop)) + $terminalLines) {
+            $lines.Add([string]$line) | Out-Null
+        }
+    }
     $lines.ToArray() | Set-Content -LiteralPath (Join-Path $ArtifactDir 'filetransfer-retained-log-slice.log') -Encoding UTF8
 
     $liveMode = if ($Scenario.LiveProofMode) { [string]$Scenario.LiveProofMode } else { 'None' }
@@ -6915,6 +6980,12 @@ function Write-RouteAcceptanceFakeAuthoritativeSnapshotEvidence {
 
     if ($script:RouteAcceptanceExecutionMode -ne 'fake') {
         return
+    }
+
+    $fullPath = Join-Path $ArtifactDir 'filetransfer-coordinator-snapshot-full-summary.json'
+    if (Test-Path -LiteralPath $fullPath -PathType Leaf) {
+        $existing = Get-Content -LiteralPath $fullPath -Raw | ConvertFrom-Json
+        if ([long]$existing.BoundaryCount -gt 0) { return }
     }
 
     $summary = [ordered]@{

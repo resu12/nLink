@@ -1,3 +1,4 @@
+using System.Reflection;
 using NLink.Core.FileTransfer;
 
 namespace NLink.SmokeTests;
@@ -92,9 +93,37 @@ internal sealed class InitialFallbackStartupFixture : SessionFileTransferService
     internal static Task<string[]> CreateCorrelatedAsync() => CreateAsync(correlated: true);
 
     private sealed class CorrelatedLoopbackTransport(string sessionId, bool correlated)
-        : LoopbackFileTransferTransport(sessionId), IFileTransferRouteTransitionBridge
+        : LoopbackFileTransferTransport(sessionId), IFileTransferRouteTransitionBridge, IFileTransferSignalingTransport
     {
+        private long sessionGeneration;
         bool IFileTransferRouteTransitionBridge.SupportsFallbackBootstrapCorrelation => correlated;
+
+        async Task<IFileTransferDataSession> IFileTransferSignalingTransport.OpenFileTransferDataSessionAsync(
+            string session, string transfer, CancellationToken ct)
+            => new StartupDataSession(await OpenFileTransferDataSessionAsync(session, transfer, ct),
+                Interlocked.Increment(ref sessionGeneration));
+    }
+
+    // The provider generation binds fallback writes to this opened session, not to transport observations.
+    private sealed class StartupDataSession(IFileTransferDataSession inner, long generation)
+        : IFileTransferDataSession, IFileTransferDataPathAuthoritySession, IFileTransferDataSessionGenerationProvider
+    {
+        public string SessionId => inner.SessionId;
+        public string TransferId => inner.TransferId;
+        public long Generation => generation;
+        public bool IsAvailable => inner.IsAvailable;
+        public event EventHandler<FileTransferDataSessionAvailabilityChangedEventArgs>? AvailabilityChanged
+        {
+            add => inner.AvailabilityChanged += value;
+            remove => inner.AvailabilityChanged -= value;
+        }
+        public ValueTask<FileTransferDataFrame> ReceiveAsync(CancellationToken ct) => inner.ReceiveAsync(ct);
+        public ValueTask<FileTransferReceivedDataFrame> ReceiveWithMetadataAsync(CancellationToken ct)
+            => inner.ReceiveWithMetadataAsync(ct);
+        public Task SendAsync(FileTransferDataFrame frame, CancellationToken ct) => inner.SendAsync(frame, ct);
+        public Task SendAsync(FileTransferDataFrame frame, FileTransferDataPathSendAuthority authority, CancellationToken ct)
+            => ((IFileTransferDataPathAuthoritySession)inner).SendAsync(frame, authority, ct);
+        public void Dispose() => inner.Dispose();
     }
 
     private static async Task<string[]> CreateAsync(bool correlated)
@@ -123,8 +152,35 @@ internal sealed class InitialFallbackStartupFixture : SessionFileTransferService
             _ => Task.FromResult<Stream>(new MemoryStream(payload, writable: false)), CancellationToken.None);
         await WaitUntilAsync(() => receiver.Snapshot.Inbound?.State == FileTransferTransferState.PendingDecision);
         await receiver.AcceptIncomingTransferAsync(transferId, (_, _) => Task.FromResult<Stream>(destination), CancellationToken.None);
-        await WaitUntilAsync(() => sender.Snapshot.Outbound?.State == FileTransferTransferState.Completed &&
-            receiver.Snapshot.Inbound?.State == FileTransferTransferState.Completed, timeoutMs: 20_000);
+        try
+        {
+            await WaitUntilAsync(() => sender.Snapshot.Outbound?.State == FileTransferTransferState.Completed &&
+                receiver.Snapshot.Inbound?.State == FileTransferTransferState.Completed, timeoutMs: 20_000);
+        }
+        catch (TaskCanceledException)
+        {
+            const BindingFlags flags = BindingFlags.Instance | BindingFlags.NonPublic;
+            var type = typeof(SessionFileTransferService);
+            lock (type.GetField("gate", flags)!.GetValue(receiver)!)
+            {
+                var context = type.GetField("inboundTransfer", flags)!.GetValue(receiver)!;
+                var session = context.GetType().GetProperty("DataSession")!.GetValue(context);
+                var capture = type.GetMethods(BindingFlags.Static | BindingFlags.NonPublic).Single(method =>
+                    method.Name == "CreateCoordinatorStateLocked" && method.GetParameters()[0].ParameterType == context.GetType());
+                var state = Assert.IsType<FileTransferCoordinatorState>(capture.Invoke(null, [context]));
+                throw new Xunit.Sdk.XunitException(System.Text.Json.JsonSerializer.Serialize(new
+                {
+                    correlated, sender = sender.Snapshot.Outbound, receiver = receiver.Snapshot.Inbound,
+                    sessionType = session?.GetType().Name,
+                    providerGeneration = (session as IFileTransferDataSessionGenerationProvider)?.Generation,
+                    state.CurrentDataSessionIdentity, state.CurrentDataSessionGeneration,
+                    state.CurrentRuntimeOwner, state.CurrentRoutePublicationToken, state.CurrentLeg,
+                    writeScope = FileTransferCoordinator.CaptureInboundFallbackRepairWriteScope(state),
+                    sentFrames = senderTransport.SentDataFrames.GroupBy(frame => frame.Type)
+                        .ToDictionary(group => group.Key, group => group.Count()),
+                }));
+            }
+        }
         Assert.Equal(payload, destination.ToArray()[..payload.Length]);
         sender.Dispose();
         receiver.Dispose();

@@ -225,17 +225,17 @@ its bridge-policy text is not the `tuna_strict` value required here.
 
 ## References and evidence limits
 
-- [Recorded failures/results](<C:/Users/Juraj/Desktop/Remote help/artifacts/validation/consolidation-bounded-20260907/implementation-rejected-ingress/RESULTS.md>)
-- [GUI reducer](<C:/Users/Juraj/Desktop/Remote help/tools/GuiSmoke-Windows.ps1:7301>)
-- [GUI event partition](<C:/Users/Juraj/Desktop/Remote help/tools/GuiSmoke-Windows.ps1:19238>)
-- [GUI early indexing](<C:/Users/Juraj/Desktop/Remote help/tools/GuiSmoke-Windows.ps1:22279>)
-- [Authoritative GUI early return](<C:/Users/Juraj/Desktop/Remote help/tools/GuiSmoke-Windows.ps1:7217>)
-- [Existing GUI fixture](<C:/Users/Juraj/Desktop/Remote help/tests/nLink.SmokeTests.Core/FileTransferGuiHarnessScriptTests.cs:12809>)
-- [Retained positive test](<C:/Users/Juraj/Desktop/Remote help/tests/nLink.SmokeTests.Core/FileTransferRetainedAuthorityProofAnalyzerTests.cs:1207>)
-- [Static Tuna wrapper](<C:/Users/Juraj/Desktop/Remote help/tests/nLink.SmokeTests.Core/FileTransferRetainedAuthorityProofAnalyzerTests.cs:5012>)
-- [Rejected-ingress fixture](<C:/Users/Juraj/Desktop/Remote help/tests/nLink.SmokeTests.Core/FileTransferRetainedAuthorityProofAnalyzerTests.cs:5033>)
-- [Allowed live route transition](<C:/Users/Juraj/Desktop/Remote help/tools/FileTransferSoak/SoakSummaryExtraction.ps1:1039>)
-- [Existing route selection checks](<C:/Users/Juraj/Desktop/Remote help/tools/FileTransferSoak/SoakSummaryExtraction.ps1:1278>)
+- [Recorded failures/results](<../artifacts/validation/consolidation-bounded-20260907/implementation-rejected-ingress/RESULTS.md>)
+- [GUI reducer](<../tools/GuiSmoke-Windows.ps1#L7301>)
+- [GUI event partition](<../tools/GuiSmoke-Windows.ps1#L19238>)
+- [GUI early indexing](<../tools/GuiSmoke-Windows.ps1#L22279>)
+- [Authoritative GUI early return](<../tools/GuiSmoke-Windows.ps1#L7217>)
+- [Existing GUI fixture](<../tests/nLink.SmokeTests.Core/FileTransferGuiHarnessScriptTests.cs#L12809>)
+- [Retained positive test](<../tests/nLink.SmokeTests.Core/FileTransferRetainedAuthorityProofAnalyzerTests.cs#L1207>)
+- [Static Tuna wrapper](<../tests/nLink.SmokeTests.Core/FileTransferRetainedAuthorityProofAnalyzerTests.cs#L5012>)
+- [Rejected-ingress fixture](<../tests/nLink.SmokeTests.Core/FileTransferRetainedAuthorityProofAnalyzerTests.cs#L5033>)
+- [Allowed live route transition](<../tools/FileTransferSoak/SoakSummaryExtraction.ps1#L1039>)
+- [Existing route selection checks](<../tools/FileTransferSoak/SoakSummaryExtraction.ps1#L1278>)
 
 This follow-up preparation used source and saved finalized test outputs only.
 No implementation, tests, evaluator/report invocation, build, commit, package,
@@ -260,4 +260,4 @@ Second-cycle GUI recovery and authoritative-GUI integration remain deferred.
 Conflict checks cover records contributing to candidate evidence, not arbitrary
 conflicting invalidator identities. Historical helper9564 remains unresolved;
 no package, live run, historical report, commit, or reconstructed finalization.
-See [implementation results](<C:/Users/Juraj/Desktop/Remote help/artifacts/validation/consolidation-bounded-20260907/implementation-rejected-ingress-follow-up/RESULTS.md>).
+See [implementation results](<../artifacts/validation/consolidation-bounded-20260907/implementation-rejected-ingress-follow-up/RESULTS.md>).

@@ -65,6 +65,7 @@ public sealed class ConfigurationAndRunbookTests : CoreSmokeTestsBase
     {
         var previousSeqGate = Environment.GetEnvironmentVariable("NLINK_FEATURE_REMOTE_CONTROL_SEQ_GATE");
         var previousOptIn = Environment.GetEnvironmentVariable(FeatureFlags.AllowInsecureRemoteControlSeqGateOverrideEnvVar);
+        using var safeReleaseMode = DisableUnsafeDeveloperModeForTests();
 
         try
         {
@@ -75,6 +76,10 @@ public sealed class ConfigurationAndRunbookTests : CoreSmokeTestsBase
             Assert.False(FeatureFlags.RemoteControlSeqGateEnabled);
 #else
             Assert.True(FeatureFlags.RemoteControlSeqGateEnabled);
+            using (EnableUnsafeDeveloperModeForTests())
+            {
+                Assert.True(FeatureFlags.RemoteControlSeqGateEnabled);
+            }
 #endif
 
             Environment.SetEnvironmentVariable(FeatureFlags.AllowInsecureRemoteControlSeqGateOverrideEnvVar, "1");
@@ -87,6 +92,7 @@ public sealed class ConfigurationAndRunbookTests : CoreSmokeTestsBase
             {
                 Assert.False(FeatureFlags.RemoteControlSeqGateEnabled);
             }
+            Assert.True(FeatureFlags.RemoteControlSeqGateEnabled);
 #endif
         }
         finally
@@ -113,7 +119,11 @@ public sealed class ConfigurationAndRunbookTests : CoreSmokeTestsBase
         Assert.Contains("negotiated remote bulk endpoint", runbook, StringComparison.Ordinal);
         Assert.Contains("`64 KiB` payload cap", runbook, StringComparison.Ordinal);
         Assert.Contains("`196,606` body bytes before allocation", runbook, StringComparison.Ordinal);
-        Assert.Contains("live NKN file-transfer soak", runbook, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("run the route acceptance gate before installer creation", runbook, StringComparison.Ordinal);
+        Assert.Contains("verify regular NKN completion/integrity on route `regular_nkn_v4_fast` protocol `4`", runbook, StringComparison.Ordinal);
+        Assert.Contains("verify active Tuna completion/integrity on route `file_tuna_v4` protocol `4`", runbook, StringComparison.Ordinal);
+        Assert.Contains("verify live fallback completion/integrity on final route `post_tuna_fallback_v6` protocol `6` with explicit live-route epoch proof", runbook, StringComparison.Ordinal);
+        Assert.Contains("retain `filetransfer-live-nkn-summary.txt`, `filetransfer-live-nkn-cycles.jsonl`, and the retained log slice with the release evidence", runbook, StringComparison.Ordinal);
         Assert.Contains("preferred public release artifacts are Authenticode-signed before publish", runbook, StringComparison.Ordinal);
         Assert.Contains("unsigned public Windows artifacts are an accepted release exception", runbook, StringComparison.Ordinal);
         Assert.Contains("Authenticode status is `Valid`", runbook, StringComparison.Ordinal);
@@ -145,7 +155,10 @@ public sealed class ConfigurationAndRunbookTests : CoreSmokeTestsBase
         Assert.Contains("Node archive SHA-256", checklist, StringComparison.Ordinal);
         Assert.Contains("Unsigned public Windows artifacts are recorded as an accepted release exception", checklist, StringComparison.Ordinal);
 
-        Assert.Contains("V6-only", releaseNotes, StringComparison.Ordinal);
+        Assert.Contains("`regular_nkn_v4_fast`, protocol `4`", releaseNotes, StringComparison.Ordinal);
+        Assert.Contains("`file_tuna_v4`, protocol `4`", releaseNotes, StringComparison.Ordinal);
+        Assert.Contains("one-shot `post_tuna_fallback_v6`, protocol `6`", releaseNotes, StringComparison.Ordinal);
+        Assert.DoesNotContain("V6-only", releaseNotes, StringComparison.Ordinal);
         Assert.Contains("explicit accept/decline", releaseNotes, StringComparison.Ordinal);
         Assert.Contains("session envelope", releaseNotes, StringComparison.Ordinal);
         Assert.Contains("source/session validation", releaseNotes, StringComparison.Ordinal);
@@ -153,7 +166,11 @@ public sealed class ConfigurationAndRunbookTests : CoreSmokeTestsBase
         Assert.Contains("Release exception: Windows artifacts for this release are unsigned", releaseNotes, StringComparison.Ordinal);
         Assert.Contains("High quality", releaseNotes, StringComparison.Ordinal);
 
-        Assert.Contains("V6-only", githubNotes, StringComparison.Ordinal);
+        Assert.Contains("`regular_nkn_v4_fast` / protocol `4`", githubNotes, StringComparison.Ordinal);
+        Assert.Contains("`file_tuna_v4` / protocol `4`", githubNotes, StringComparison.Ordinal);
+        Assert.Contains("one-shot `post_tuna_fallback_v6` / protocol `6`", githubNotes, StringComparison.Ordinal);
+        Assert.Contains("active `file_tuna_v6` is not revived", githubNotes, StringComparison.Ordinal);
+        Assert.DoesNotContain("V6-only", githubNotes, StringComparison.Ordinal);
         Assert.Contains("explicit accept/decline", githubNotes, StringComparison.Ordinal);
         Assert.Contains("session envelope", githubNotes, StringComparison.Ordinal);
         Assert.Contains("Release exception: Windows artifacts for this release are unsigned", githubNotes, StringComparison.Ordinal);

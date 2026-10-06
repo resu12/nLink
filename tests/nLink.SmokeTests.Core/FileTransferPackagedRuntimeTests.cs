@@ -1,5 +1,6 @@
 namespace NLink.SmokeTests;
 
+[Trait("Area", "Core")]
 public sealed class FileTransferPackagedRuntimeTests : FileTransferOpsScriptsTestBase
 {
     private readonly Xunit.Abstractions.ITestOutputHelper output;

@@ -65,9 +65,9 @@ The original failing cases were
 `BootstrapSourceFailure_HoldAfterEligibilityCannotTerminalize` with
 `retired-handoff` and `retired-next-stop`. Both reproduced without the new native
 stream installation condition in the earlier installer-baseline comparison.
-The [fresh diagnostic run](<C:/Users/Juraj/Desktop/Remote help/artifacts/verification-fixture-rca-20260930/callback-red.trx>)
+The [fresh diagnostic run](<../artifacts/verification-fixture-rca-20260930/callback-red.trx>)
 again failed both cases, while the two recovery-order variants passed. Its
-[log](<C:/Users/Juraj/Desktop/Remote help/artifacts/verification-fixture-rca-20260930/callback-red/nlink.log>)
+[log](<../artifacts/verification-fixture-rca-20260930/callback-red/nlink.log>)
 records `bootstrap_initiation_source_not_current`.
 
 The first missing step was admission of a current, coordinator-bound local stop
@@ -88,9 +88,9 @@ relabeled as local authority, and no route is published by this predicate.
 Four additional sender/receiver cases cover stale peer bindings with either a
 current or stale local stop. Before the fix, the two current-stop cases failed
 and the two stale-stop cases passed
-([red report](<C:/Users/Juraj/Desktop/Remote help/artifacts/verification-fixture-rca-20260930/local-stop-stale-peer-red.trx>)).
+([red report](<../artifacts/verification-fixture-rca-20260930/local-stop-stale-peer-red.trx>)).
 After the fix all four pass, together with the four original retired-callback
-variants ([green report](<C:/Users/Juraj/Desktop/Remote help/artifacts/verification-fixture-rca-20260930/local-stop-stale-peer-green.trx>)).
+variants ([green report](<../artifacts/verification-fixture-rca-20260930/local-stop-stale-peer-green.trx>)).
 Rejected evaluations now also assert that the retained frame and binding are
 unchanged. Existing route publication, runtime owner, no-dispatch and no-pause
 assertions remain in place.
@@ -110,8 +110,8 @@ This preserves the coordinator-authored history and leaves the delivery,
 same-command, same-binding and install-replacement assertions unchanged.
 
 With that correction alone, the test still failed waiting for `Delivered`
-([intermediate report](<C:/Users/Juraj/Desktop/Remote help/artifacts/verification-fixture-rca-20260930/checkpoint-after-envelopes.trx>)).
-The [fresh log](<C:/Users/Juraj/Desktop/Remote help/artifacts/verification-fixture-rca-20260930/checkpoint-after-envelopes/nlink.log>)
+([intermediate report](<../artifacts/verification-fixture-rca-20260930/checkpoint-after-envelopes.trx>)).
+The [fresh log](<../artifacts/verification-fixture-rca-20260930/checkpoint-after-envelopes/nlink.log>)
 shows the checkpoint queued and successor installation completed, without an
 applied delivery receipt.
 
@@ -125,9 +125,9 @@ coordinator's decision and its snapshot are adopted together; the guard itself
 is unchanged.
 
 The checkpoint test passes after that production correction
-([green report](<C:/Users/Juraj/Desktop/Remote help/artifacts/verification-fixture-rca-20260930/checkpoint-typed-receipt-green.trx>)).
+([green report](<../artifacts/verification-fixture-rca-20260930/checkpoint-typed-receipt-green.trx>)).
 It also passes on the default test-process stack alongside the native queued-pump
-regression ([default-stack report](<C:/Users/Juraj/Desktop/Remote help/artifacts/verification-fixture-rca-20260930/native-checkpoint-default-stack.trx>)).
+regression ([default-stack report](<../artifacts/verification-fixture-rca-20260930/native-checkpoint-default-stack.trx>)).
 That result does not certify all Debug call paths against the historical stack
 overflow issue.
 
@@ -150,17 +150,17 @@ The route-cycle fixture additionally uses the synthetic reasons
 not be treated as real local-disable authority. Merely changing the labels or
 waiting longer would not supply the missing exchange.
 
-The [isolated pre-correction report](<C:/Users/Juraj/Desktop/Remote help/artifacts/native-queued-pump-20260930/native-queued-pump-isolated-routes.trx>)
-and [log](<C:/Users/Juraj/Desktop/Remote help/artifacts/native-queued-pump-20260930/isolated-route-checks/nlink.log>)
+The [isolated pre-correction report](<../artifacts/native-queued-pump-20260930/native-queued-pump-isolated-routes.trx>)
+and [log](<../artifacts/native-queued-pump-20260930/isolated-route-checks/nlink.log>)
 show the fallback waits failing without bootstrap initiation records. This
 establishes a missing fixture prerequisite, not proof that all later runtime
 paths are correct. The native factory predicate is not used by these generic
 MemoryStream fixtures. No claim is made that their complete behavior has been
 baseline-certified.
 
-A [final rerun against the corrected working tree](<C:/Users/Juraj/Desktop/Remote help/artifacts/verification-fixture-rca-20260930/unmigrated-routes.trx>)
+A [final rerun against the corrected working tree](<../artifacts/verification-fixture-rca-20260930/unmigrated-routes.trx>)
 fails at the same two waits (lines 10457 and 31434). Its fresh
-[log](<C:/Users/Juraj/Desktop/Remote help/artifacts/verification-fixture-rca-20260930/unmigrated-routes/nlink.log>)
+[log](<../artifacts/verification-fixture-rca-20260930/unmigrated-routes/nlink.log>)
 contains zero bootstrap events and zero fallback route publications. This
 confirms that the two fixes above do not supply the fixtures' missing initiation.
 
@@ -189,7 +189,7 @@ confirms that the two fixes above do not supply the fixtures' missing initiation
 
 The original `FileTunaV4_LiveSwitchOffRecovery_DoesNotUseLiveV4RepairAndCompletesSameTransfer`
 test now delegates to the joined fixture in
-[NknBootstrapCorrelationRouteRecoveryTests.cs](<C:/Users/Juraj/Desktop/Remote help/tests/nLink.SmokeTests.Core/NknBootstrapCorrelationRouteRecoveryTests.cs>).
+[NknBootstrapCorrelationRouteRecoveryTests.cs](<../tests/nLink.SmokeTests.Core/NknBootstrapCorrelationRouteRecoveryTests.cs>).
 Both real services attach before session approval. The existing preparation
 handshake fake supplies physical lane evidence; the public negotiation request,
 Core preparation admission and exact `header_switch_off` initiate the real
@@ -206,9 +206,9 @@ The old transport-epoch log assertion is mapped to the correlated path's
 live-route epoch publication on both sides, checking the exact source route,
 target route, protocol and handoff. Full bootstrap delivery, settlement,
 source-hold receipt and current publication checks are additional gates.
-The [final original-name run](<C:/Users/Juraj/Desktop/Remote help/artifacts/joined-route-migration-20260930/initial-default-stack.trx>)
+The [final original-name run](<../artifacts/joined-route-migration-20260930/initial-default-stack.trx>)
 passes with `DOTNET_DefaultStackSize` removed. Its
-[log](<C:/Users/Juraj/Desktop/Remote help/artifacts/joined-route-migration-20260930/initial-default-stack/nlink.log>)
+[log](<../artifacts/joined-route-migration-20260930/initial-default-stack/nlink.log>)
 is separate from the failed development runs, which remain retained.
 
 ### Initial route cycle candidate and coverage gaps
@@ -233,10 +233,10 @@ hold was also represented as packet loss, not a blocked send; these were
 fixture differences, not equivalent physical-drain proofs. The completed
 migration and its additional coverage are recorded below.
 
-The pre-fix [source-scope run](<C:/Users/Juraj/Desktop/Remote help/artifacts/joined-route-migration-20260930/route-cycle-source-scope.trx>)
+The pre-fix [source-scope run](<../artifacts/joined-route-migration-20260930/route-cycle-source-scope.trx>)
 passes the first activation, correlated fallback, checkpoint recovery and stale
 owner rejection, but times out waiting for the second Tuna publication. Its
-[log](<C:/Users/Juraj/Desktop/Remote help/artifacts/joined-route-migration-20260930/route-cycle-source-scope/nlink.log>)
+[log](<../artifacts/joined-route-migration-20260930/route-cycle-source-scope/nlink.log>)
 shows inbound fallback-tail pairing committed while outbound admission remains
 denied with `paired_fallback_tail_yield_missing`. This is the first missing
 proof step in that run. The captured first local-stop scope matches Core,
@@ -245,11 +245,11 @@ the receiver's second local stop, so it cannot diagnose that stop's scope.
 
 Two earlier outcomes remain separate evidence, not substituted passes:
 
-- The [checkpoint-gated run](<C:/Users/Juraj/Desktop/Remote help/artifacts/joined-route-migration-20260930/route-cycle-checkpoint.trx>)
+- The [checkpoint-gated run](<../artifacts/joined-route-migration-20260930/route-cycle-checkpoint.trx>)
   reaches the second Tuna publication, then rejects the receiver's local stop
   with `bootstrap_initiation_source_not_current`. The exact mismatching field
   is not yet established.
-- The [retained-tail run](<C:/Users/Juraj/Desktop/Remote help/artifacts/joined-route-migration-20260930/route-cycle-retained-tail.trx>)
+- The [retained-tail run](<../artifacts/joined-route-migration-20260930/route-cycle-retained-tail.trx>)
   reaches all four route epochs and exact-byte completion, then fails the
   retained `filetransfer_runtime_started` publication assertion. Both Tuna
   epochs have route-selected, epoch-started/recovered and outbound sparse-worker
@@ -268,7 +268,7 @@ accepted. When the sender subsequently yields, the receiver proof is no longer
 available. This explains the unpaired sender without weakening the shared
 route or checkpoint matching rule.
 
-The [deterministic reproduction](<C:/Users/Juraj/Desktop/Remote help/artifacts/early-yield-checkpoint-20260930/early-proof-red.trx>)
+The [deterministic reproduction](<../artifacts/early-yield-checkpoint-20260930/early-proof-red.trx>)
 failed in both directions for that same reason before the fix. The coordinator
 now retains one exact proof in `PendingPeerProofAwaitingCheckpoint`, separate
 from the peer-first yield slot. Retention cannot clear a checkpoint, issue a
@@ -281,24 +281,24 @@ predicate is unchanged.
 
 Verification for this bounded change is:
 
-- [23 final custody and scope guards](<C:/Users/Juraj/Desktop/Remote help/artifacts/early-yield-checkpoint-20260930/early-proof-final-guards.trx>)
+- [23 final custody and scope guards](<../artifacts/early-yield-checkpoint-20260930/early-proof-final-guards.trx>)
   pass at the default stack setting, including both directions, duplicates,
   conflicts, wrong checkpoints, stale scopes and immutable snapshot boundaries.
 - Five existing initial-peer-proof cases pass in the
-  [focused selection](<C:/Users/Juraj/Desktop/Remote help/artifacts/early-yield-checkpoint-20260930/early-proof-snapshot-guards.trx>).
+  [focused selection](<../artifacts/early-yield-checkpoint-20260930/early-proof-snapshot-guards.trx>).
   Its other 21 cases are included in the final 23 above, not additional cases.
-- [51 affected tail and checkpoint contract cases](<C:/Users/Juraj/Desktop/Remote help/artifacts/early-yield-checkpoint-20260930/affected-tail-checkpoint-diagnostic-stack.trx>)
+- [51 affected tail and checkpoint contract cases](<../artifacts/early-yield-checkpoint-20260930/affected-tail-checkpoint-diagnostic-stack.trx>)
   pass with the existing diagnostic 32 MiB stack setting. The preceding
-  [default-stack attempt](<C:/Users/Juraj/Desktop/Remote help/artifacts/early-yield-checkpoint-20260930/affected-tail-checkpoint-contracts.trx>)
+  [default-stack attempt](<../artifacts/early-yield-checkpoint-20260930/affected-tail-checkpoint-contracts.trx>)
   aborted with stack overflow in `FallbackTailYield_TransportEpochReauthorizationPreservesExactPredecessorAcrossRestart`;
   this is not a default-stack pass or a diagnosis of that overflow's cause.
 
-The [new joined cycle run](<C:/Users/Juraj/Desktop/Remote help/artifacts/early-yield-checkpoint-20260930/joined-cycle.trx>)
+The [new joined cycle run](<../artifacts/early-yield-checkpoint-20260930/joined-cycle.trx>)
 reaches Tuna epochs 1 and 3 and fallback epochs 2 and 4 on both sides, then
 completes the payload byte-for-byte. It still fails at
 `Missing runtime_started for Outbound Tuna epoch 1, publication 2.` Assertions
 after that point, including next-transfer cleanup, were not reached. Its
-[log](<C:/Users/Juraj/Desktop/Remote help/artifacts/early-yield-checkpoint-20260930/joined-cycle/nlink.log>)
+[log](<../artifacts/early-yield-checkpoint-20260930/joined-cycle/nlink.log>)
 does not exercise early-checkpoint custody; the proof arrives after acceptance
 in this ordering. Thus it demonstrates progress through the cycle, not a
 deterministic end-to-end proof of the new retention path. It ran before the final
@@ -307,7 +307,7 @@ canonical-observation-key guard; that guard has focused regression coverage.
 The new snapshot role `peer_proof_awaiting_checkpoint` was not in the frozen
 `snapshot-authority-v1` analyzer catalog (hash
 `17b5e4a90a18a5f4173ebd1b2081aeee1db48773b0213f1bb45549e0a0f057e2`).
-The [analyzer reproduction](<C:/Users/Juraj/Desktop/Remote help/artifacts/early-yield-evidence-20260930/analyzer-red.trx>)
+The [analyzer reproduction](<../artifacts/early-yield-evidence-20260930/analyzer-red.trx>)
 rejected the production-generated retention and promotion envelopes in both
 directions. The follow-up below extends the catalog rather than changing that
 frozen profile. The coordinator change remains a working-tree candidate, not
@@ -360,23 +360,23 @@ correction changes runtime admission or relaxes an assertion.
 
 Verification for this analyzer step is:
 
-- The [final focused selection](<C:/Users/Juraj/Desktop/Remote help/artifacts/early-yield-evidence-20260930/analyzer-final-contracts.trx>)
+- The [final focused selection](<../artifacts/early-yield-evidence-20260930/analyzer-final-contracts.trx>)
   passes eight tests: four retention-history cases, two production-emitter
   cases and two correlated initial-fallback service cases. Each retention case
   checks 29 inputs: five valid and 24 rejected. That is 116 fixture checks
   across both directions and both PowerShell hosts, each with full/compact/GUI
   classifier parity. This report also contains the separate accounting failure
   below; it is not an all-green report.
-- The [profile and redaction selection](<C:/Users/Juraj/Desktop/Remote help/artifacts/early-yield-evidence-20260930/profile-and-history.trx>)
+- The [profile and redaction selection](<../artifacts/early-yield-evidence-20260930/profile-and-history.trx>)
   passes 52 catalog/redaction tests. Its two development fixture failures were
   corrected before the final focused selection; they are not concealed or
   counted as additional passing tests.
 - The recent-progress supersession case passes in the
-  [compatibility selection](<C:/Users/Juraj/Desktop/Remote help/artifacts/early-yield-evidence-20260930/analyzer-crosshost-inheritance.trx>).
+  [compatibility selection](<../artifacts/early-yield-evidence-20260930/analyzer-crosshost-inheritance.trx>).
   The other failures in that report led to the two fixture corrections above.
 - With the reflection call corrected, the
-  [isolated joined stale-request scenario](<C:/Users/Juraj/Desktop/Remote help/artifacts/early-yield-evidence-20260930/superseded-source-after-replay.trx>)
-  passes. Its [retained capture](<C:/Users/Juraj/Desktop/Remote help/artifacts/early-yield-evidence-20260930/superseded-source-after-replay/joined.log>)
+  [isolated joined stale-request scenario](<../artifacts/early-yield-evidence-20260930/superseded-source-after-replay.trx>)
+  passes. Its [retained capture](<../artifacts/early-yield-evidence-20260930/superseded-source-after-replay/joined.log>)
   also passes the accounting script and its negative controls.
 
 The final selection's accounting failure is
@@ -385,20 +385,20 @@ the snapshot itself passed analysis; the accounting consumer could not prove
 the local old-source retirement. That failing capture was deleted by the
 fixture's original cleanup, so its exact missing link cannot be reconstructed.
 The fixture now retains its input on any future failure. A single
-[scoped rerun](<C:/Users/Juraj/Desktop/Remote help/artifacts/early-yield-evidence-20260930/superseded-source-retained.trx>)
+[scoped rerun](<../artifacts/early-yield-evidence-20260930/superseded-source-retained.trx>)
 passes the accounting checks and reports on both hosts. This does not establish
 a fix for the intermittent failure. No runtime code or acceptance condition was
 changed in response to it.
 
 These runs use the default test-process stack. No full contract suite or live
-GUI matrix was run. The [analyzer review receipt](<C:/Users/Juraj/Desktop/Remote help/artifacts/early-yield-evidence-20260930/implementation-review.json>)
+GUI matrix was run. The [analyzer review receipt](<../artifacts/early-yield-evidence-20260930/implementation-review.json>)
 pins the source and retained verification artifacts at that earlier step.
 
 ### Deterministic joined early proof verification
 
 `JoinedBootstrapCorrelation_EarlyCheckpointProofPromotesThroughReactivation`
 now passes with actual service and transport decisions on the fake NKN network
-([final report](<C:/Users/Juraj/Desktop/Remote help/artifacts/early-yield-joined-20260930/final-ordering.trx>)).
+([final report](<../artifacts/early-yield-joined-20260930/final-ordering.trx>)).
 The test establishes a real contiguous prefix, then withholds encrypted
 receiver-state packets while allowing the receiver's genuine yield proof to
 arrive. Before releasing the packets, it requires a current checkpoint lease
@@ -417,21 +417,21 @@ claim second-stop, completion, runtime-start or next-transfer coverage.
 
 Two fixture prerequisites mattered. With checkpoint feedback withheld while
 chunk zero was still missing, the receiver could not legitimately yield
-([first report](<C:/Users/Juraj/Desktop/Remote help/artifacts/early-yield-joined-20260930/checkpoint-barrier.trx>)).
+([first report](<../artifacts/early-yield-joined-20260930/checkpoint-barrier.trx>)).
 With a contiguous prefix but every remaining fallback chunk withheld, sender
 frontier recovery could not settle
-([prefix report](<C:/Users/Juraj/Desktop/Remote help/artifacts/early-yield-joined-20260930/ordered-prefix.trx>)).
+([prefix report](<../artifacts/early-yield-joined-20260930/ordered-prefix.trx>)).
 A provisional checkpoint-continuation change remained blocked by that owner
 work and was removed. Allowing the required recovery batch passes with the
 production code unchanged from the previous step
-([recovery report](<C:/Users/Juraj/Desktop/Remote help/artifacts/early-yield-joined-20260930/ordered-recovery.trx>)).
+([recovery report](<../artifacts/early-yield-joined-20260930/ordered-recovery.trx>)).
 Neither development failure establishes a missing production yield recheck.
 
 Windows PowerShell 5.1 and PowerShell 7 analyze the final capture identically:
 retention, checkpoint promotion and local-yield consumption boundaries pass,
 the stream is complete and full/compact parity passes
-([Windows PowerShell report](<C:/Users/Juraj/Desktop/Remote help/artifacts/early-yield-joined-20260930/analyzer-powershell.json>),
-[PowerShell 7 report](<C:/Users/Juraj/Desktop/Remote help/artifacts/early-yield-joined-20260930/analyzer-pwsh.json>)).
+([Windows PowerShell report](<../artifacts/early-yield-joined-20260930/analyzer-powershell.json>),
+[PowerShell 7 report](<../artifacts/early-yield-joined-20260930/analyzer-pwsh.json>)).
 This is not an all-clear analyzer result. After the second Tuna publication,
 the deliberately incomplete fixture leaves an unresolved inbound frontier
 pressure lifecycle boundary at source line 2893, classified as
@@ -441,14 +441,14 @@ the later capture's artifact-level pass does not diagnose or waive that result.
 
 ### Second-fallback checkpoint receive-install gap
 
-The [shared-fixture regression report](<C:/Users/Juraj/Desktop/Remote help/artifacts/early-yield-joined-20260930/shared-route-regression.trx>)
+The [shared-fixture regression report](<../artifacts/early-yield-joined-20260930/shared-route-regression.trx>)
 passes initial-Tuna switch-off recovery but fails the full joined cycle at
 same-transfer completion. Both Tuna publications and both fallback publications
 were reached. The original missing-frontier and tail barriers and all later
 full-cycle assertions remain unchanged; the early-proof variant did not replace
 that gate.
 
-In the [fresh log](<C:/Users/Juraj/Desktop/Remote help/artifacts/early-yield-joined-20260930/shared-route-regression/nlink.log>),
+In the [fresh log](<../artifacts/early-yield-joined-20260930/shared-route-regression/nlink.log>),
 the receiver accepts checkpoint
 `v6-regular-nkn-state-refresh:route-transition:4:1` at line 4411. There is no
 corresponding outbound checkpoint acceptance. At line 4430 a receive result
@@ -480,14 +480,14 @@ an old frame and source reopening, prove that the stale frame does not advance
 progress, and deliver one exact checkpoint response after the successor is
 installed. Before the guard, the response was rejected with
 `receive_install_missing` and frontier stayed at zero
-([red report](<C:/Users/Juraj/Desktop/Remote help/artifacts/sparse-receive-install-gap-20260930/red-capture.trx>),
-[red log](<C:/Users/Juraj/Desktop/Remote help/artifacts/sparse-receive-install-gap-20260930/red-capture/install-gap.log>)).
+([red report](<../artifacts/sparse-receive-install-gap-20260930/red-capture.trx>),
+[red log](<../artifacts/sparse-receive-install-gap-20260930/red-capture/install-gap.log>)).
 With the guard, the regression passes: the checkpoint lease is cleared, frontier
 advances to two, publication is unchanged, stale-frame rejection remains, and
 no missing-install rejection occurs
-([focused report](<C:/Users/Juraj/Desktop/Remote help/artifacts/sparse-receive-install-gap-20260930/focused-final.trx>)).
+([focused report](<../artifacts/sparse-receive-install-gap-20260930/focused-final.trx>)).
 
-The [affected receive/handoff selection](<C:/Users/Juraj/Desktop/Remote help/artifacts/sparse-receive-install-gap-20260930/affected-receive-handoff.trx>)
+The [affected receive/handoff selection](<../artifacts/sparse-receive-install-gap-20260930/affected-receive-handoff.trx>)
 passes all 33 cases, excluding the new regression already run. This includes
 pending-install draining while source reopening is blocked, stale callback
 rejection, frontier-request rebinding, data-session replacement and checkpoint
@@ -500,13 +500,13 @@ the focused pass. Both reports and logs are retained.
 
 ### Earlier joined-route verification remained blocked
 
-The [new joined selection](<C:/Users/Juraj/Desktop/Remote help/artifacts/sparse-receive-install-gap-20260930/joined-routes.trx>)
+The [new joined selection](<../artifacts/sparse-receive-install-gap-20260930/joined-routes.trx>)
 passes initial-Tuna switch-off recovery and fails both cycle variants. It does
 not validate second-fallback completion with the new guard:
 
 - The full cycle reaches the second Tuna publication, then times out waiting
   for the second correlated fallback. At line 4836 of the
-  [retained log](<C:/Users/Juraj/Desktop/Remote help/artifacts/sparse-receive-install-gap-20260930/joined-routes/nlink.log>)
+  [retained log](<../artifacts/sparse-receive-install-gap-20260930/joined-routes/nlink.log>)
   a separate transport observation is rejected as
   `bootstrap_initiation_source_not_current`. The earlier RCA incorrectly
   attributed that line to the local stop. The coordinator snapshots instead
@@ -527,7 +527,7 @@ neither failing variant reaches the former second-fallback checkpoint edge.
 The runtime-start, completion and next-transfer assertions remain unchanged
 and unexercised in these failures. Do not replace them with the focused pass.
 
-The [receive-gap review receipt](<C:/Users/Juraj/Desktop/Remote help/artifacts/sparse-receive-install-gap-20260930/implementation-review.json>)
+The [receive-gap review receipt](<../artifacts/sparse-receive-install-gap-20260930/implementation-review.json>)
 pins that source state and retained artifacts. That step changes only receive
 issuance, adds its regression and updates this RCA. No catalog, route contract,
 performance limit, portable build or live run was changed.
@@ -562,10 +562,10 @@ The new barrier regression seeds a correlated Tuna source, admits a real sender
 callback, pauses before its completion is consumed, and supplies an exact peer
 proof. It then consumes the stale callback and delivers the same proof again.
 Before the fix, the second delivery cannot start the exchange
-([red report](<C:/Users/Juraj/Desktop/Remote help/artifacts/bootstrap-pause-capture-20260930/red-final.trx>),
-[red trace](<C:/Users/Juraj/Desktop/Remote help/artifacts/bootstrap-pause-capture-20260930/red-final/pause-capture.log>)).
+([red report](<../artifacts/bootstrap-pause-capture-20260930/red-final.trx>),
+[red trace](<../artifacts/bootstrap-pause-capture-20260930/red-final/pause-capture.log>)).
 After the ordering change it passes
-([focused report](<C:/Users/Juraj/Desktop/Remote help/artifacts/bootstrap-pause-capture-20260930/focused.trx>)).
+([focused report](<../artifacts/bootstrap-pause-capture-20260930/focused.trx>)).
 The test also requires unchanged route/runtime tokens, no progress credit from
 the stale completion, and a `Stale`/`none` callback-consumption record. The final
 version additionally checks that the first peer wake leaves coordinator state
@@ -573,14 +573,14 @@ unchanged. Two earlier fixture-development failures occurred before callback
 admission (unconnected loopback and an undersized default source); they are
 retained but are not evidence of the production defect.
 
-The [affected source-hold selection](<C:/Users/Juraj/Desktop/Remote help/artifacts/bootstrap-pause-capture-20260930/affected.trx>)
+The [affected source-hold selection](<../artifacts/bootstrap-pause-capture-20260930/affected.trx>)
 passes 97 of 98 cases on the default stack, including that strengthened
 regression. The sole failure is the existing `receive-gap` callback-handoff
 variant, which waits for `frontier_receive_authority_gap` after replacing the
 data-session generation. A bounded comparison restored only the source-hold
 file to its pre-change version, retaining the prior receive-install guard and
 all other working-tree changes. It fails at the same assertion
-([comparison report](<C:/Users/Juraj/Desktop/Remote help/artifacts/bootstrap-pause-capture-20260930/receive-gap-baseline.trx>)).
+([comparison report](<../artifacts/bootstrap-pause-capture-20260930/receive-gap-baseline.trx>)).
 This establishes that the failure predates the capture-ordering fix, not that
 it can be waived. The receive/install issuance contract and this regression's
 expected observation need review. No assertion was removed or timeout changed;
@@ -588,10 +588,10 @@ the source-hold fix was restored before the subsequent rebuild.
 
 ### Full joined cycle now reaches runtime-start evidence
 
-The [fresh single-cycle report](<C:/Users/Juraj/Desktop/Remote help/artifacts/bootstrap-pause-capture-20260930/joined-cycle.trx>)
+The [fresh single-cycle report](<../artifacts/bootstrap-pause-capture-20260930/joined-cycle.trx>)
 reaches both Tuna publications and both correlated fallbacks. Its unchanged
 completion, byte-equality, single-offer/open/manifest and no-cancel checks pass.
-In its [log](<C:/Users/Juraj/Desktop/Remote help/artifacts/bootstrap-pause-capture-20260930/joined-cycle/nlink.log>),
+In its [log](<../artifacts/bootstrap-pause-capture-20260930/joined-cycle/nlink.log>),
 the second fallback checkpoint is accepted inbound at line 3273 and outbound
 at line 3312; both sides complete at lines 3567 and 3584. This run has neither
 missing-install rejection nor callback-unbound rejection, so the barrier
@@ -604,7 +604,7 @@ the required runtime-start evidence. The later next-transfer assertions are
 not reached. This established the actual authorized installation to
 runtime-start evidence boundary as the next bounded diagnosis.
 
-The [pause-capture review receipt](<C:/Users/Juraj/Desktop/Remote help/artifacts/bootstrap-pause-capture-20260930/implementation-review.json>)
+The [pause-capture review receipt](<../artifacts/bootstrap-pause-capture-20260930/implementation-review.json>)
 supersedes the earlier local-stop attribution and pins the then-current sources and
 retained reports. No portable build, live run, full matrix, commit or push was
 performed.
@@ -614,7 +614,7 @@ performed.
 The sender supervisor survives route changes, but its `runtime_started` call
 ran only during initial startup. Later sparse pump installations therefore
 had installation evidence without a corresponding runtime-start record.
-The [red regression](<C:/Users/Juraj/Desktop/Remote help/artifacts/sparse-runtime-start-20260930/red.trx>)
+The [red regression](<../artifacts/sparse-runtime-start-20260930/red.trx>)
 reproduces this directly: the first committed Tuna pump produces zero records
 where one is required. Six other initial cases pass before the change.
 
@@ -626,20 +626,20 @@ before deduplication, so a previously logged but now-stale token is still
 rejected. The supervisor's existing startup validation remains in place.
 No route, retry, progress, callback or runtime-ownership decision changes.
 
-The [focused report](<C:/Users/Juraj/Desktop/Remote help/artifacts/sparse-runtime-start-20260930/focused.trx>)
+The [focused report](<../artifacts/sparse-runtime-start-20260930/focused.trx>)
 passes the initial seven cases. The final regression expands to ten cases,
 covering Tuna/fallback/Tuna publications, duplicate startup, pending and unbound
 installs, cancellation, stale publication/owner/leg/session generation and
 terminal context. All ten pass within the
-[affected selection](<C:/Users/Juraj/Desktop/Remote help/artifacts/sparse-runtime-start-20260930/affected.trx>),
+[affected selection](<../artifacts/sparse-runtime-start-20260930/affected.trx>),
 which totals 35 passes and two failures. The unit fixture seeds publication
 tuples; production coordinator publication is exercised by the joined cycle.
 
 Both affected-selection failures reproduce with only this turn's diagnostic
 change removed, while retaining all preceding working-tree changes
-([baseline report](<C:/Users/Juraj/Desktop/Remote help/artifacts/sparse-runtime-start-20260930/lifecycle-baseline.trx>)).
+([baseline report](<../artifacts/sparse-runtime-start-20260930/lifecycle-baseline.trx>)).
 The baseline has four passes and the same two failures. Its
-[log](<C:/Users/Juraj/Desktop/Remote help/artifacts/sparse-runtime-start-20260930/lifecycle-baseline/nlink.log>)
+[log](<../artifacts/sparse-runtime-start-20260930/lifecycle-baseline/nlink.log>)
 shows initial fallback sender startup rejected for
 `route_publication_generation_mismatch` at line 42. The synthetic active-Tuna
 fixture is rejected for `initial_tuna_readiness_missing` at line 178 and
@@ -647,9 +647,9 @@ fixture is rejected for `initial_tuna_readiness_missing` at line 178 and
 These failures predate this change; neither is waived. The fix was restored
 before rebuilding the joined-cycle test.
 
-The [fresh joined cycle](<C:/Users/Juraj/Desktop/Remote help/artifacts/sparse-runtime-start-20260930/joined-cycle.trx>)
+The [fresh joined cycle](<../artifacts/sparse-runtime-start-20260930/joined-cycle.trx>)
 passes all four required evidence checks for each outbound Tuna publication.
-Its [log](<C:/Users/Juraj/Desktop/Remote help/artifacts/sparse-runtime-start-20260930/joined-cycle/nlink.log>)
+Its [log](<../artifacts/sparse-runtime-start-20260930/joined-cycle/nlink.log>)
 records the epoch 1/publication 2 installation at line 1011 and runtime start
 at line 1012; epoch 3/publication 4 follows at lines 2541 and 2542. The second
 fallback checkpoint is accepted inbound at line 2984 and outbound at line 2994.
@@ -662,7 +662,7 @@ This established the receiver's route-adoption boundary as the next review,
 without inferring runtime authority from an arriving frame or transport
 observation. The later next-transfer assertions were not reached.
 
-The [sender evidence review receipt](<C:/Users/Juraj/Desktop/Remote help/artifacts/sparse-runtime-start-20260930/implementation-review.json>)
+The [sender evidence review receipt](<../artifacts/sparse-runtime-start-20260930/implementation-review.json>)
 pins those sources and retained evidence. All runs used the default stack.
 No acceptance assertions, timeout limits, analyzer catalogs or live behavior
 were relaxed, and no portable build, live run, full matrix, commit or push ran.
@@ -682,24 +682,24 @@ loop only while that binding is still current. The existing publication
 validator runs before per-publication deduplication. These fields are not read
 by receive dispatch, route selection, progress, retries or callback authority.
 
-The [focused receiver report](<C:/Users/Juraj/Desktop/Remote help/artifacts/sparse-receiver-runtime-start-20260930/focused.trx>)
+The [focused receiver report](<../artifacts/sparse-receiver-runtime-start-20260930/focused.trx>)
 passes all 12 cases. The tests exercise the real receive loop with one pending
 read and seeded publication tuples. They cover repeated publications, duplicate
 emission, never-started and exited loops, replaced context/session/generations,
 terminal/canceled contexts and missing or stale publication/owner/leg authority.
 Emission leaves coordinator state unchanged and sends no frames.
 
-The [affected report](<C:/Users/Juraj/Desktop/Remote help/artifacts/sparse-receiver-runtime-start-20260930/affected.trx>)
+The [affected report](<../artifacts/sparse-receiver-runtime-start-20260930/affected.trx>)
 has 34 passes and the same two lifecycle failures established by the previous
 baseline comparison. All 24 write-tracking cases and all six second-Tuna
 transition controls pass; the lifecycle lane has four passes and two failures
 at the same assertions. The prior failures are not waived or relabeled as
 success, and the aggregate suites were not rerun.
 
-The [fresh joined-cycle report](<C:/Users/Juraj/Desktop/Remote help/artifacts/sparse-receiver-runtime-start-20260930/joined-cycle.trx>)
+The [fresh joined-cycle report](<../artifacts/sparse-receiver-runtime-start-20260930/joined-cycle.trx>)
 now passes all four per-publication evidence requirements for both Tuna
 publications on both sides. Its
-[log](<C:/Users/Juraj/Desktop/Remote help/artifacts/sparse-receiver-runtime-start-20260930/joined-cycle/nlink.log>)
+[log](<../artifacts/sparse-receiver-runtime-start-20260930/joined-cycle/nlink.log>)
 has inbound startup at lines 1017 and 3130 for epochs 1 and 3, publications 2
 and 4; outbound startup is at lines 1009 and 3146. The second fallback checkpoint
 is accepted inbound at line 3573 and outbound at line 3599. Completed terminal
@@ -718,7 +718,7 @@ reactivation. The next investigation must distinguish a missing terminal
 retirement contract or continuation from an incorrect immediate test expectation.
 No adapter flag, cleanup policy or acceptance assertion was changed here.
 
-The [receiver implementation receipt](<C:/Users/Juraj/Desktop/Remote help/artifacts/sparse-receiver-runtime-start-20260930/implementation-review.json>)
+The [receiver implementation receipt](<../artifacts/sparse-receiver-runtime-start-20260930/implementation-review.json>)
 pins the sources and reports. Verification used the default stack and offline
 fixtures only. No portable build, live run, full matrix, commit or push ran.
 
@@ -731,7 +731,7 @@ terminal disposition retires that transfer's session file projection. Clearing
 the projection in a generic completion callback would hide the first defect
 and give an observation authority it does not have.
 
-The fresh [counter diagnostic report](<C:/Users/Juraj/Desktop/Remote help/artifacts/fallback-terminal-projection-20260930/joined-counters.trx>)
+The fresh [counter diagnostic report](<../artifacts/fallback-terminal-projection-20260930/joined-counters.trx>)
 retains the unchanged host failure, now at test line 290. Its failure message
 captures both endpoints before the assertion. Both coordinators are terminal
 at generation 1 with no current publication. Both adapter projections still
@@ -742,7 +742,7 @@ transport inputs resolve to a next-route candidate of `post_tuna_fallback_v6`.
 This is a resolver result, not a new admitted or completed transfer: the
 next-transfer portion remains unreached.
 
-In the [same capture](<C:/Users/Juraj/Desktop/Remote help/artifacts/fallback-terminal-projection-20260930/joined-counters/nlink.log>),
+In the [same capture](<../artifacts/fallback-terminal-projection-20260930/joined-counters/nlink.log>),
 the first fallback commits and clears proof generation 1 at lines 1652–1676.
 The second fallback commits at lines 3426/3429 outbound and 3498/3501 inbound,
 with peer proof generation 2 and transport epoch 1. It has no matching second
@@ -772,14 +772,14 @@ substitute for retiring a completed fallback publication. Even corrected proof
 cleanup would leave the file lane `Recovered`, which still counts as an active
 fallback projection without retirement.
 
-The [focused controls](<C:/Users/Juraj/Desktop/Remote help/artifacts/fallback-terminal-projection-20260930/focused.trx>)
+The [focused controls](<../artifacts/fallback-terminal-projection-20260930/focused.trx>)
 pass 4/4. Two new direction-specific cases prove that matching and wrong-transfer
 terminal/completion observations cannot retire a committed projection or mutate
 its publication, epoch or pending-proof identity. The existing unscoped pending
 proof control and transport-busy cleanup control also pass. These seeded
 transition fixtures verify negative authority boundaries, not successful terminal
 retirement. The joined fixture supplies the real Service/Coordinator lifecycle
-evidence. An earlier [diagnostic capture](<C:/Users/Juraj/Desktop/Remote help/artifacts/fallback-terminal-projection-20260930/joined-cycle.trx>)
+evidence. An earlier [diagnostic capture](<../artifacts/fallback-terminal-projection-20260930/joined-cycle.trx>)
 failed at the same assertion before the counter fields were added; both failures
 are retained, not counted as passes.
 
@@ -821,7 +821,7 @@ are retained, not counted as passes.
 
 That diagnostic step changed tests and this RCA only. No production cleanup, terminal
 authority, acceptance condition, timeout, protocol or analyzer catalog changed.
-The [diagnostic review receipt](<C:/Users/Juraj/Desktop/Remote help/artifacts/fallback-terminal-projection-20260930/implementation-review.json>)
+The [diagnostic review receipt](<../artifacts/fallback-terminal-projection-20260930/implementation-review.json>)
 pins that source boundary, prior receipt and retained reports. Its historical
 failures remain unchanged. The following implementation covers the cleanup
 portion of the plan only.
@@ -853,22 +853,22 @@ preserve `proof_generation` for the peer proof and add separate
 retire the session projection, grant Tuna readiness, clear screen state or
 change route publication, progress, retry policy, protocols or timeout limits.
 
-The [red regression](<C:/Users/Juraj/Desktop/Remote help/artifacts/fallback-proof-episode-20260930/red.trx>)
+The [red regression](<../artifacts/fallback-proof-episode-20260930/red.trx>)
 had two first-episode passes and two second-episode failures before the runtime
-change. The [initial green run](<C:/Users/Juraj/Desktop/Remote help/artifacts/fallback-proof-episode-20260930/green.trx>)
+change. The [initial green run](<../artifacts/fallback-proof-episode-20260930/green.trx>)
 passed all four. The final focused suite contains 25 cases: both directions and
 episodes, duplicate cleanup and a newer stop, missing pending work/binding,
 replaced scope/projection/session, terminal-first and rollback/supersession,
 and Core command/publication validation. It also preserves screen state and
 counters, and proves cleanup is not terminal retirement.
 
-The [affected transition and projection lane](<C:/Users/Juraj/Desktop/Remote help/artifacts/fallback-proof-episode-20260930/affected.trx>)
+The [affected transition and projection lane](<../artifacts/fallback-proof-episode-20260930/affected.trx>)
 passed 61 cases. After the applied-receipt recheck and committed-reopen review,
-the [final focused report](<C:/Users/Juraj/Desktop/Remote help/artifacts/fallback-proof-episode-20260930/focused-final.trx>)
+the [final focused report](<../artifacts/fallback-proof-episode-20260930/focused-final.trx>)
 passed the 25 episode cases plus four directly affected supersession/reopen
 controls, 29 total. No unrelated aggregate lane was rerun.
 
-The [final joined report](<C:/Users/Juraj/Desktop/Remote help/artifacts/fallback-proof-episode-20260930/joined-verified.trx>)
+The [final joined report](<../artifacts/fallback-proof-episode-20260930/joined-verified.trx>)
 retains the host terminal-projection failure at test line 299. The added
 assertions require exactly one cleanup event for each of transitions 2 and 4
 in each direction, and no pending proof on either endpoint; all pass before
@@ -880,7 +880,7 @@ no-cancel and stale-sender rejection pass. Actual next-transfer assertions
 remain unreached. Earlier joined reports in the same artifact directory are
 retained as intermediate failures, not full acceptance passes.
 
-The [current implementation receipt](<C:/Users/Juraj/Desktop/Remote help/artifacts/fallback-proof-episode-20260930/implementation-review.json>)
+The [current implementation receipt](<../artifacts/fallback-proof-episode-20260930/implementation-review.json>)
 pins the exact source and report boundary. All runs use the default stack and
 offline fixtures. Frozen analyzer catalogs, acceptance requirements and the
 two existing lifecycle failures remain unchanged. No portable build, live run,
@@ -911,17 +911,17 @@ under the adapter locks.
 
 Verification uses the default stack and fake NKN network only:
 
-- [Focused projection and proof cleanup report](<C:/Users/Juraj/Desktop/Remote help/artifacts/fallback-terminal-retirement-20260930/focused.trx>):
+- [Focused projection and proof cleanup report](<../artifacts/fallback-terminal-retirement-20260930/focused.trx>):
   99 passed, including 22 new terminal issuance, retirement and stale-scope cases.
-- [Terminal projection reuse report](<C:/Users/Juraj/Desktop/Remote help/artifacts/fallback-terminal-retirement-20260930/reopen-final.trx>):
+- [Terminal projection reuse report](<../artifacts/fallback-terminal-retirement-20260930/reopen-final.trx>):
   4 passed, covering same-transfer rejection and different-transfer reopening in
   both directions. Its initial report failed because the seeded predecessor had
   no recovered File lane; the fixture now explicitly seeds that prerequisite.
   Production code was not changed for this test correction.
-- [Existing terminal regression report](<C:/Users/Juraj/Desktop/Remote help/artifacts/fallback-terminal-retirement-20260930/terminal-regression.trx>):
+- [Existing terminal regression report](<../artifacts/fallback-terminal-retirement-20260930/terminal-regression.trx>):
   11 passed, covering first-terminal-wins, publication invalidation, stale
   fallback mutation and service stream retirement.
-- [Joined offline cycle report](<C:/Users/Juraj/Desktop/Remote help/artifacts/fallback-terminal-retirement-20260930/joined.trx>):
+- [Joined offline cycle report](<../artifacts/fallback-terminal-retirement-20260930/joined.trx>):
   1 passed. Both coordinator-published Tuna V4 activations and correlated fallback
   transitions retain their per-publication runtime evidence. Exact payload
   equality covers 1,572,864 bytes, followed by a verified 1,024-byte Regular V4
@@ -930,15 +930,15 @@ Verification uses the default stack and fake NKN network only:
   retirement per direction for publication 5, leg 5, fallback epoch 2, transport
   epoch 1 and terminal generation 1.
 
-The [initial red report](<C:/Users/Juraj/Desktop/Remote help/artifacts/fallback-terminal-retirement-20260930/red.trx>)
+The [initial red report](<../artifacts/fallback-terminal-retirement-20260930/red.trx>)
 preserves two expected missing-adapter-retirement failures and one inbound fixture
 setup failure. The inbound fixture was corrected to use its responder Tuna setup;
-the [first green report](<C:/Users/Juraj/Desktop/Remote help/artifacts/fallback-terminal-retirement-20260930/green.trx>)
+the [first green report](<../artifacts/fallback-terminal-retirement-20260930/green.trx>)
 passes all four initial cases. The joined fixture retains all prior integrity,
 route, stale-callback and next-transfer checks; its added checks verify retirement
 at completion notification, not merely after a later wait.
 
-The [terminal retirement implementation receipt](<C:/Users/Juraj/Desktop/Remote help/artifacts/fallback-terminal-retirement-20260930/implementation-review.json>)
+The [terminal retirement implementation receipt](<../artifacts/fallback-terminal-retirement-20260930/implementation-review.json>)
 pins the source and retained reports. The later reuse-test-only change does not
 change the joined fixture or production sources validated by the joined pass.
 Acceptance contracts, frozen catalogs and runtime/performance limits are unchanged.
@@ -946,7 +946,7 @@ No portable build, live run, full matrix, commit or push ran in this step.
 
 ### Receive gap regression aligned with descriptor bound issuance
 
-The [fresh baseline](<C:/Users/Juraj/Desktop/Remote help/artifacts/receive-gap-contract-review-20260930/baseline.trx>)
+The [fresh baseline](<../artifacts/receive-gap-contract-review-20260930/baseline.trx>)
 reproduces the callback `receive-gap` timeout on the current working tree. The
 fixture changed the service data-session generation from 17 to 18 before
 delivering a frontier frame. The receive-install guard correctly prevented a
@@ -970,15 +970,15 @@ coordinator persistent state, unchanged receiver frontier and unchanged
 acknowledged bytes. The barrier is released and restored in `finally`; no sleep,
 timeout extension, runtime change or acceptance relaxation was introduced.
 
-The [focused correction](<C:/Users/Juraj/Desktop/Remote help/artifacts/receive-gap-contract-review-20260930/focused.trx>)
+The [focused correction](<../artifacts/receive-gap-contract-review-20260930/focused.trx>)
 passes. After strengthening the final discard and generation checks, the
-[affected selection](<C:/Users/Juraj/Desktop/Remote help/artifacts/receive-gap-contract-review-20260930/affected.trx>)
+[affected selection](<../artifacts/receive-gap-contract-review-20260930/affected.trx>)
 passes all 33 cases on the default stack: 28 callback failure/handoff variants
 and five directly related receive cases. These retain coverage for the one-shot
 successor checkpoint, pending-descriptor proof staging, draining while source
 reopen is blocked, and exactly-once frontier dispatch across installation.
 
-The [receive gap review receipt](<C:/Users/Juraj/Desktop/Remote help/artifacts/receive-gap-contract-review-20260930/implementation-review.json>)
+The [receive gap review receipt](<../artifacts/receive-gap-contract-review-20260930/implementation-review.json>)
 pins the test change and retained evidence. Production sources match the
 terminal-retirement checkpoint. The prior joined-cycle pass remains relevant;
 this test-only correction did not rerun it or the unrelated early-proof variant.
@@ -993,8 +993,8 @@ is present in the failing capture, and no unsettled frontier-repair contract
 remains. The sender instead retains its legacy frontier-repair flag because it
 has not received the receiver's advance from chunk 69 to chunk 72.
 
-The fresh [baseline](<C:/Users/Juraj/Desktop/Remote help/artifacts/early-proof-frontier-review-20260930/baseline.trx>)
-and [repeat](<C:/Users/Juraj/Desktop/Remote help/artifacts/early-proof-frontier-review-20260930/repeat.trx>)
+The fresh [baseline](<../artifacts/early-proof-frontier-review-20260930/baseline.trx>)
+and [repeat](<../artifacts/early-proof-frontier-review-20260930/repeat.trx>)
 both pass. Their logs reveal a weaker precondition: the receiver had committed
 the prefix, but the sender still began fallback recovery at frontier 0. The
 checkpoint at 69 then cleared that frontier-repair flag. Those passes do not
@@ -1009,15 +1009,15 @@ No feedback packet for frontier 72 is deliberately dropped. Original route,
 proof-lineage, timeout and stale-callback assertions are unchanged. The ordinary
 full-cycle variant is not changed or rerun in this step.
 
-The [first synchronized run](<C:/Users/Juraj/Desktop/Remote help/artifacts/early-proof-frontier-review-20260930/synchronized.trx>)
+The [first synchronized run](<../artifacts/early-proof-frontier-review-20260930/synchronized.trx>)
 fails at the second Tuna publication. After adding failure-only scope capture,
-the [diagnostic run](<C:/Users/Juraj/Desktop/Remote help/artifacts/early-proof-frontier-review-20260930/synchronized-diagnostic.trx>)
-passes, but its [unchanged-source repeat](<C:/Users/Juraj/Desktop/Remote help/artifacts/early-proof-frontier-review-20260930/synchronized-diagnostic-repeat.trx>)
+the [diagnostic run](<../artifacts/early-proof-frontier-review-20260930/synchronized-diagnostic.trx>)
+passes, but its [unchanged-source repeat](<../artifacts/early-proof-frontier-review-20260930/synchronized-diagnostic-repeat.trx>)
 fails at the same edge. These are five executions of one test, not five distinct
 cases. Synchronizing the starting frontier removes one confounder; it does not
 make the failure deterministic.
 
-The latest [failing log](<C:/Users/Juraj/Desktop/Remote help/artifacts/early-proof-frontier-review-20260930/synchronized-diagnostic-repeat/nlink.log>)
+The latest [failing log](<../artifacts/early-proof-frontier-review-20260930/synchronized-diagnostic-repeat/nlink.log>)
 and the report's `Frontier feedback scope` establish the following chain:
 
 1. Recovery starts at frontier 69 at line 1605. Receiver states at lines 1638
@@ -1037,7 +1037,7 @@ and the report's `Frontier feedback scope` establish the following chain:
    and zero active physical sends. Both retain fallback V6 publication 3,
    live-route epoch 2 and data-session generation 1.
 
-The passing [diagnostic log](<C:/Users/Juraj/Desktop/Remote help/artifacts/early-proof-frontier-review-20260930/synchronized-diagnostic/nlink.log>)
+The passing [diagnostic log](<../artifacts/early-proof-frontier-review-20260930/synchronized-diagnostic/nlink.log>)
 starts at the same frontier 69 and also records a held repair recheck at line
 1989. It then sends frontier 72 as `chunk_batch_committed` at line 2059. The
 sender clears its repair flag at line 2052, consumes the retained proof and
@@ -1081,7 +1081,7 @@ feedback gap is therefore the supported diagnosis, not a precisely measured
    arrived and its blocker cleared.
 
 This step changes only the joined test and this RCA. The
-[review receipt](<C:/Users/Juraj/Desktop/Remote help/artifacts/early-proof-frontier-review-20260930/implementation-review.json>)
+[review receipt](<../artifacts/early-proof-frontier-review-20260930/implementation-review.json>)
 pins the current sources and all five reports and logs. Runtime, cadence limits,
 acceptance rules and frozen catalogs are unchanged. No aggregate lane, portable
 build, live test, full matrix, commit or push ran.
@@ -1109,11 +1109,11 @@ yield. They pin the last-state timestamp to `DateTimeOffset.MaxValue` to disable
 elapsed-time forcing, so a pass cannot depend on scheduling delay. They test
 the feedback predicate and authorized send boundary, not a physical write. The
 joined scenarios below exercise actual payload writes. The
-[corrected baseline report](<C:/Users/Juraj/Desktop/Remote help/artifacts/post-yield-progress-20261001/red-corrected.trx>)
+[corrected baseline report](<../artifacts/post-yield-progress-20261001/red-corrected.trx>)
 fails at the force-send assertion with only this production change removed.
 The coordinator proof's currentness is asserted before that expected failure.
 
-The [final affected selection](<C:/Users/Juraj/Desktop/Remote help/artifacts/post-yield-progress-20261001/affected.trx>)
+The [final affected selection](<../artifacts/post-yield-progress-20261001/affected.trx>)
 passes all 23 cases on the default stack:
 
 - Twelve new cases cover the small advance, duplicate coalescing, absent local
@@ -1132,21 +1132,21 @@ a peer-visible delivery receipt. Earlier fixture attempts omitted sparse mode;
 the intermediate 11/12 pass then expected an adapter-only delivery log. Those
 reports are retained but are not the authoritative baseline or final gate.
 
-The [early-proof joined report](<C:/Users/Juraj/Desktop/Remote help/artifacts/post-yield-progress-20261001/joined.trx>)
-passes. Its [log](<C:/Users/Juraj/Desktop/Remote help/artifacts/post-yield-progress-20261001/joined/nlink.log>)
+The [early-proof joined report](<../artifacts/post-yield-progress-20261001/joined.trx>)
+passes. Its [log](<../artifacts/post-yield-progress-20261001/joined/nlink.log>)
 starts fallback at frontier 69 at line 1804, promotes the retained peer proof at
 line 2004, sends receiver frontier 72 at line 2091 and clears sender repair at
 line 2084. As before, send-completion logging can follow receipt processing.
 The test requires the same proof identity through retention, promotion and
 consumption, plus second coordinator-published Tuna V4 routes on both endpoints.
 
-The [ordinary joined cycle](<C:/Users/Juraj/Desktop/Remote help/artifacts/post-yield-progress-20261001/joined-cycle.trx>)
+The [ordinary joined cycle](<../artifacts/post-yield-progress-20261001/joined-cycle.trx>)
 also passes on the same build. It retains both Tuna activations and fallback
 transitions, exact 1,572,864-byte payload equality, terminal projection retirement
 and the subsequent 1,024-byte Regular V4 transfer. These two joins and the 23
 affected cases are 25 distinct passing cases, not live acceptance.
 
-The [implementation receipt](<C:/Users/Juraj/Desktop/Remote help/artifacts/post-yield-progress-20261001/implementation-review.json>)
+The [implementation receipt](<../artifacts/post-yield-progress-20261001/implementation-review.json>)
 pins the production change, focused tests, RCA and retained reports. No broad
 aggregate suite, portable rebuild, GUI matrix, live run, commit or push ran.
 
@@ -1159,7 +1159,7 @@ synthetic route-cycle body is replaced by the shared negotiated path. No
 production code, shared loopback default, timeout or acceptance rule changes
 in this coverage step.
 
-The [final focused lane](<C:/Users/Juraj/Desktop/Remote help/artifacts/cycle-coverage-20261001/final-cycle-lane.trx>)
+The [final focused lane](<../artifacts/cycle-coverage-20261001/final-cycle-lane.trx>)
 passes four distinct cases on the default stack:
 
 - The new pending-receive regression holds an actual loopback receive across
@@ -1186,7 +1186,7 @@ passes four distinct cases on the default stack:
 The final parity review also preserves the old full route-publication tuple
 comparison and requires each Tuna recovered event to follow its started event.
 Both full-cycle variants pass the
-[targeted parity rerun](<C:/Users/Juraj/Desktop/Remote help/artifacts/cycle-coverage-20261001/publication-parity.trx>).
+[targeted parity rerun](<../artifacts/cycle-coverage-20261001/publication-parity.trx>).
 Only those two cases were rerun after this assertion change; the pending-read
 and early-proof paths are unaffected. Two assertion helpers made unused by the
 migration are removed. The final evidence covers four distinct passing cases,
@@ -1200,12 +1200,12 @@ because its drop barrier depended on a test flag set after publication. The
 fixture now acknowledges prefix 69, allows V6 batch 69 through 71 based on its
 wire type, holds the final batch, and releases it only after the exact drain
 command captures it. A
-[standalone physical-hold run](<C:/Users/Juraj/Desktop/Remote help/artifacts/cycle-coverage-20261001/physical-wire-barrier.trx>)
+[standalone physical-hold run](<../artifacts/cycle-coverage-20261001/physical-wire-barrier.trx>)
 passed before migration; the final lane verifies the original test name and
 the strengthened receipt assertion. These were fixture corrections, not a
 reason to weaken coordinator drain authority.
 
-The [review receipt](<C:/Users/Juraj/Desktop/Remote help/artifacts/cycle-coverage-20261001/implementation-review.json>)
+The [review receipt](<../artifacts/cycle-coverage-20261001/implementation-review.json>)
 pins current sources, this RCA, the prior receipt and all reports and logs from
 this coverage step. Offline coverage is complete for this migration, not proof
 of live GUI behavior. No aggregate suite, portable rebuild, live run, full GUI
@@ -1213,7 +1213,7 @@ matrix, commit or push ran.
 
 ### Initial runtime lifecycle corrections and remaining offer mismatch
 
-The [fresh baseline](<C:/Users/Juraj/Desktop/Remote help/artifacts/remaining-gates-20261001/baseline.trx>)
+The [fresh baseline](<../artifacts/remaining-gates-20261001/baseline.trx>)
 reproduces both lifecycle failures and passes the other four lifecycle cases
 and the accounting test. Accounting still has no retained failing input for
 `local_source_supersession_unproven`; another pass does not establish a fix.
@@ -1234,7 +1234,7 @@ leg generations, while payload remains blocked until checkpoint acceptance.
 The negative replaces the publication during the open and requires rejection,
 no installed data session, no session-open or payload frames and no startup
 record. Before the fix, the
-[red report](<C:/Users/Juraj/Desktop/Remote help/artifacts/remaining-gates-20261001/startup-red.trx>)
+[red report](<../artifacts/remaining-gates-20261001/startup-red.trx>)
 fails only the positive case because the startup record is absent. Both pass
 afterward. The production change is one token assignment and two comment lines.
 
@@ -1244,7 +1244,7 @@ unit evidence, not negotiated transport proof; the joined fixtures retain that
 separate responsibility. Shared loopback defaults and production admission are
 unchanged. The inbound route-cache-only rejection test still passes.
 
-The [affected selection](<C:/Users/Juraj/Desktop/Remote help/artifacts/remaining-gates-20261001/affected.trx>)
+The [affected selection](<../artifacts/remaining-gates-20261001/affected.trx>)
 has 27 passes and one failure, not an all-green result. Passing checks include
 all six lifecycle variants, the two new startup cases, the ten existing startup
 checkpoint cases, V4/V6 route isolation, diagnostic opt-in, fallback completion
@@ -1258,7 +1258,7 @@ cache without readiness and waited for acceptance before inspecting the offer.
 Using a Regular receiver removes that unrelated prerequisite but still fails.
 Moving the unchanged wire-route assertion before the pending-decision wait now
 produces a direct, retained
-[failure](<C:/Users/Juraj/Desktop/Remote help/artifacts/remaining-gates-20261001/offer-mismatch.trx>):
+[failure](<../artifacts/remaining-gates-20261001/offer-mismatch.trx>):
 expected `regular_nkn_v4_fast`, actual `file_tuna_v4`.
 
 The first missing edge is in `TryStartSendAsync`: it constructs `offerMessage`
@@ -1296,16 +1296,16 @@ metadata. Shared loopback defaults and production feedback guards are unchanged.
 The intermediate reports retain both this omission and the incomplete wrapper
 attempts; they are not counted as product regressions or discarded results.
 
-The final [service report](<C:/Users/Juraj/Desktop/Remote help/artifacts/initial-offer-route-20261001/service-final.trx>)
+The final [service report](<../artifacts/initial-offer-route-20261001/service-final.trx>)
 passes all eight cases, requiring offer, accept, session-open, publication and
 optional immutable agreement to match, with exact payload completion on both
 sides. Seven new coordinator controls passed in the
-[focused report](<C:/Users/Juraj/Desktop/Remote help/artifacts/initial-offer-route-20261001/focused.trx>);
+[focused report](<../artifacts/initial-offer-route-20261001/focused.trx>);
 that earlier report also contains the two fixture failures subsequently corrected.
 The controls cover ownerless pinning, snapshot-chain continuity, stale scope,
 terminal/restarted state, repeat start, late first-pin rejection, missing
 readiness and invalid issuer. The
-[affected report](<C:/Users/Juraj/Desktop/Remote help/artifacts/initial-offer-route-20261001/affected.trx>)
+[affected report](<../artifacts/initial-offer-route-20261001/affected.trx>)
 passes 36 existing tests, including prepared-Tuna credit/payload and reset
 controls, preparation scope replacement, joined negotiation, and correlated and
 legacy agreement-history mutation checks. These are 51 distinct passing tests,
@@ -1313,13 +1313,13 @@ not a full aggregate or live-network gate.
 
 ### Initial selection analyzer correction
 
-The [fresh service capture](<C:/Users/Juraj/Desktop/Remote help/artifacts/initial-offer-route-20261001/service-final/nlink.log>)
+The [fresh service capture](<../artifacts/initial-offer-route-20261001/service-final/nlink.log>)
 contains 106 complete snapshot boundaries, eight outbound starts and four
 outbound offer pins. Snapshot integrity and full/compact evaluation parity passed,
 but route consistency failed at all six outbound Tuna-to-Regular initial selections.
 PowerShell 5.1 and 7 produced identical normalized results and first unresolved
 boundary, retained in the
-[analyzer results](<C:/Users/Juraj/Desktop/Remote help/artifacts/initial-offer-route-20261001/analyzer-results.json>).
+[analyzer results](<../artifacts/initial-offer-route-20261001/analyzer-results.json>).
 The earlier diagnostic script and its failure results are preserved unchanged.
 They describe the analyzer before this correction, not current acceptance.
 
@@ -1343,9 +1343,9 @@ exists, the unchanged-route rule still applies. This recognizes coordinator
 ownership; transport observations do not establish authority.
 
 Two new coordinator/emitter cases reproduced the failure before the correction
-([red report](<C:/Users/Juraj/Desktop/Remote help/artifacts/initial-selection-evidence-20261001/red.trx>)).
+([red report](<../artifacts/initial-selection-evidence-20261001/red.trx>)).
 Both now pass with correlation enabled and disabled on PowerShell 5.1 and 7
-([focused report](<C:/Users/Juraj/Desktop/Remote help/artifacts/initial-selection-evidence-20261001/focused.trx>)).
+([focused report](<../artifacts/initial-selection-evidence-20261001/focused.trx>)).
 Each mode/host checks 26 negative mutations at the history reducer, including
 wrong routes/protocols/direction, pre-existing or noninitial owners and legs,
 missing/duplicate births, broken scope/history, missing/incorrect forwarding
@@ -1354,7 +1354,7 @@ full/compact parity and the GUI setup-classification consumer. It establishes
 one Regular publication, not a Tuna route cycle. An intermediate report retains
 a test-script property error corrected before those controls completed.
 
-The [affected evidence lane](<C:/Users/Juraj/Desktop/Remote help/artifacts/initial-selection-evidence-20261001/affected.trx>)
+The [affected evidence lane](<../artifacts/initial-selection-evidence-20261001/affected.trx>)
 passes all 30 existing cases: initial Regular publication and same-owner
 republication, prepared initial Tuna, initial fallback, and fallback startup
 successors with correlated/legacy agreements and independent generation
@@ -1364,7 +1364,7 @@ No aggregate suite or unrelated runtime lane was rerun.
 Reanalysis of the unchanged service input now passes route consistency on both
 hosts, with 16 exact initial-publication proofs and no findings. The six original
 selection failures are resolved; all 106 snapshot boundaries and their aggregate
-hash remain unchanged. The [service analyzer results](<C:/Users/Juraj/Desktop/Remote help/artifacts/initial-selection-evidence-20261001/service-analyzer-results.json>)
+hash remain unchanged. The [service analyzer results](<../artifacts/initial-selection-evidence-20261001/service-analyzer-results.json>)
 record input SHA-256, boundary hash and full/compact/cross-host parity.
 
 ### Initial bounded accounting investigation
@@ -1375,12 +1375,12 @@ the preceding receipt before making changes. Its first fresh joined run
 failed before accounting with `TargetParameterCountException`: the fixture
 passed 12 arguments to `StartOutboundTransferLegLocked`, whose offer-ordering
 change added two optional parameters. Reflection requires those arguments
-explicitly. The [failed report](<C:/Users/Juraj/Desktop/Remote help/artifacts/supersession-diagnostic-20261001/capture-1.trx>)
+explicitly. The [failed report](<../artifacts/supersession-diagnostic-20261001/capture-1.trx>)
 and incomplete input are retained; this is not the original accounting failure.
 
 The joined fixture and the other two reflection callers now supply `null` and
 `false` for the new offer parameters. This preserves their existing startup
-and recovery behavior. The [focused fixture report](<C:/Users/Juraj/Desktop/Remote help/artifacts/supersession-diagnostic-20261001/fixture-regressions.trx>)
+and recovery behavior. The [focused fixture report](<../artifacts/supersession-diagnostic-20261001/fixture-regressions.trx>)
 passes all three directly affected checkpoint/recovery cases. The corrected
 joined scenario passes in five fresh, retained captures. Each has one stall
 hold, complete passing snapshot evidence and a `SourceSuperseded` closure.
@@ -1393,7 +1393,7 @@ predicate, snapshot input or production file. The unchanged accounting and
 report scripts also pass on the first complete capture in both Windows
 PowerShell and PowerShell 7, with identical output, full/compact/GUI parity,
 mixed unresolved accounting and the existing negative controls. The
-[diagnostic results](<C:/Users/Juraj/Desktop/Remote help/artifacts/supersession-diagnostic-20261001/diagnostic-results.json>)
+[diagnostic results](<../artifacts/supersession-diagnostic-20261001/diagnostic-results.json>)
 record capture hashes, outcomes, traces and both host outputs.
 
 The original failing input was unavailable, so these five passes established
@@ -1402,11 +1402,11 @@ limits were unchanged in that investigation. This led to the controlled ordering
 checks below rather than another unstructured batch. Live validation stayed on
 hold; no acceptance waiver was applied.
 
-The [bounded investigation receipt](<C:/Users/Juraj/Desktop/Remote help/artifacts/supersession-diagnostic-20261001/implementation-review.json>)
+The [bounded investigation receipt](<../artifacts/supersession-diagnostic-20261001/implementation-review.json>)
 pins the fixture corrections and bounded investigation, including the
-[preceding analyzer receipt](<C:/Users/Juraj/Desktop/Remote help/artifacts/initial-selection-evidence-20261001/implementation-review.json>)
+[preceding analyzer receipt](<../artifacts/initial-selection-evidence-20261001/implementation-review.json>)
 and the
-[preceding offer-ordering receipt](<C:/Users/Juraj/Desktop/Remote help/artifacts/initial-offer-route-20261001/implementation-review.json>).
+[preceding offer-ordering receipt](<../artifacts/initial-offer-route-20261001/implementation-review.json>).
 No aggregate suite, portable rebuild, live test, full GUI matrix, commit or
 push ran in this accounting investigation.
 
@@ -1416,7 +1416,7 @@ The next step verified all 99 source and 301 artifact hashes from that receipt.
 A new joined-network fixture holds only receiver snapshot writer scheduling
 after repair settlement and releases the original queued envelopes after route
 commit and disposition. Coordinator decisions and runtime effects are unchanged.
-The [retained capture](<C:/Users/Juraj/Desktop/Remote help/artifacts/supersession-ordering-20261001/delayed/joined.log>)
+The [retained capture](<../artifacts/supersession-ordering-20261001/delayed/joined.log>)
 has complete passing snapshot evidence, but reproduced
 `local_source_supersession_unproven` in two successive analyzer predicates.
 
@@ -1426,7 +1426,7 @@ early twice, emitting same-scope `rearmed` decisions with
 600 and 601. The actual dispatch followed at 643. The shared dispatched-progress
 reducer required exactly one recheck record, so it rejected the two harmless
 rearms together with the one valid dispatch. The
-[first-failure trace](<C:/Users/Juraj/Desktop/Remote help/artifacts/supersession-ordering-20261001/rearm-first-failure.json>)
+[first-failure trace](<../artifacts/supersession-ordering-20261001/rearm-first-failure.json>)
 records that exit. Controlled consumer regressions reproduce this ordering;
 the fixture did not force the timer itself to wake early.
 
@@ -1440,7 +1440,7 @@ effects, ordering and missing physical proof still fail closed.
 
 With that edge corrected, the same retained input failed the analyzer's
 cross-queue write-order assumption, recorded in the
-[second trace](<C:/Users/Juraj/Desktop/Remote help/artifacts/supersession-ordering-20261001/after-rearm-snapshot-order-failure.json>).
+[second trace](<../artifacts/supersession-ordering-20261001/after-rearm-snapshot-order-failure.json>).
 The receiver commit snapshot was authored at generations 27 to 28 and written
 at 832, after its synchronous runtime diagnostic at 815. The disposition
 snapshot was authored at 28 to 29 and written at 841, after its schema-2
@@ -1451,19 +1451,19 @@ scope bindings, complete history, diagnostic commit-to-disposition-to-publicatio
 order, and peer proof remain required. Legacy catalogs retain their previous
 write-order checks. No catalog, runtime, timeout or throughput policy changed.
 
-The [early-wake regression](<C:/Users/Juraj/Desktop/Remote help/artifacts/supersession-ordering-20261001/rearm-green.trx>)
+The [early-wake regression](<../artifacts/supersession-ordering-20261001/rearm-green.trx>)
 passes on PowerShell 5.1 and 7, including GUI and indexed-consumer parity and
 negative controls. Fresh normal and deliberately delayed captures both pass the
-[accounting regression](<C:/Users/Juraj/Desktop/Remote help/artifacts/supersession-ordering-20261001/accounting-green.trx>),
+[accounting regression](<../artifacts/supersession-ordering-20261001/accounting-green.trx>),
 with full/compact/GUI and report parity on both hosts. Each retains the three
 peer-interval poison controls and 26 invalid-DTO controls, including reversed
 generation, invalid disposition step and reversed snapshot order.
 
-The [affected analyzer lane](<C:/Users/Juraj/Desktop/Remote help/artifacts/supersession-ordering-20261001/affected-analyzers.trx>)
+The [affected analyzer lane](<../artifacts/supersession-ordering-20261001/affected-analyzers.trx>)
 passed six cases and exposed one older synthetic fixture that assigned both
 commit and disposition generations 40 to 41. Correcting only the exact
 repair-owner fixture to author disposition at 41 to 42 restores the
-[remaining cross-host test](<C:/Users/Juraj/Desktop/Remote help/artifacts/supersession-ordering-20261001/unresolved-fixture-green.trx>).
+[remaining cross-host test](<../artifacts/supersession-ordering-20261001/unresolved-fixture-green.trx>).
 Together with the new delayed-drain fixture, 12 distinct test cases pass for this
 step. Red and intermediate reports are retained; no aggregate lane was rerun.
 
@@ -1471,8 +1471,8 @@ Reanalysis of the unchanged retained input now yields `SourceSuperseded` on both
 hosts, with complete passing snapshot evidence and the same input SHA-256. This
 does not relabel the stalled repair as recovered: its outcome remains
 `SettledStalled`, and its successor remains `StaleRejected`. The
-[ordering results](<C:/Users/Juraj/Desktop/Remote help/artifacts/supersession-ordering-20261001/ordering-results.json>)
-and [current checkpoint](<C:/Users/Juraj/Desktop/Remote help/artifacts/supersession-ordering-20261001/implementation-review.json>)
+[ordering results](<../artifacts/supersession-ordering-20261001/ordering-results.json>)
+and [current checkpoint](<../artifacts/supersession-ordering-20261001/implementation-review.json>)
 record the evidence. The original deleted failure cannot be retrospectively
 attributed to either cause, but both newly reproduced blockers are corrected
 and the current targeted accounting gate passes. No portable rebuild, live GUI
@@ -1510,7 +1510,7 @@ disposition, holds the projection lock, starts the cleanup worker and disposes
 the session while that worker is blocked. It preserves the fixture's original
 binding and episode; it does not claim live-network or original producer proof.
 Both directions fail before the fix with generation 3 changed to 4
-([red report](<C:/Users/Juraj/Desktop/Remote help/artifacts/accumulated-review-20261001/cleanup-race-red.trx>)).
+([red report](<../artifacts/accumulated-review-20261001/cleanup-race-red.trx>)).
 
 The fix takes the session-map lock before the projection lock and checks the
 session after both are acquired, retaining the map lock through proof cleanup.
@@ -1520,21 +1520,21 @@ receipt, publication, episode, generation and scope checks remain intact.
 Notifications still run outside these locks. No retry, protocol, timeout,
 performance or acceptance rule changed.
 
-All 27 [focused cleanup cases](<C:/Users/Juraj/Desktop/Remote help/artifacts/accumulated-review-20261001/cleanup-green.trx>)
-and 78 [affected projection cases](<C:/Users/Juraj/Desktop/Remote help/artifacts/accumulated-review-20261001/projection-affected.trx>)
+All 27 [focused cleanup cases](<../artifacts/accumulated-review-20261001/cleanup-green.trx>)
+and 78 [affected projection cases](<../artifacts/accumulated-review-20261001/projection-affected.trx>)
 pass. The normal and early-checkpoint joined cycles also pass in the
-[scoped capture](<C:/Users/Juraj/Desktop/Remote help/artifacts/accumulated-review-20261001/joined-cycle-scoped.trx>),
+[scoped capture](<../artifacts/accumulated-review-20261001/joined-cycle-scoped.trx>),
 including their existing route, payload, cleanup and subsequent-transfer
 assertions. These are 107 distinct passing cases, not an aggregate suite.
 
-An earlier [joined invocation](<C:/Users/Juraj/Desktop/Remote help/artifacts/accumulated-review-20261001/joined-cycle.trx>)
+An earlier [joined invocation](<../artifacts/accumulated-review-20261001/joined-cycle.trx>)
 failed to retain its operational-log cursors because the invocation omitted
 the acceptance and scenario run IDs required for workspace log redirection.
 The corrected invocation supplies all four logging environment values and
 restores them afterward. No runtime or test assertion was changed for that
 setup error; the failed report remains retained.
 
-The [review checkpoint](<C:/Users/Juraj/Desktop/Remote help/artifacts/accumulated-review-20261001/implementation-review.json>)
+The [review checkpoint](<../artifacts/accumulated-review-20261001/implementation-review.json>)
 pins the changes and reports. No additional blocking finding was identified
 in the reviewed paths. This does not certify all possible interleavings or
 live behavior. The live provenance reducer rejects a dirty source tree, so
@@ -1544,14 +1544,14 @@ preflights. No portable rebuild, GUI run, commit or push occurred in this step.
 ### Earlier verification retained for traceability
 
 The directly affected follow-up contract selection passed 102 cases
-([report](<C:/Users/Juraj/Desktop/Remote help/artifacts/verification-fixture-rca-20260930/affected-contracts.trx>)).
+([report](<../artifacts/verification-fixture-rca-20260930/affected-contracts.trx>)).
 It covers the remaining callback failure boundaries, peer admission, local-stop
 origin/currentness, source hold and drain, physical feedback settlement, and
 checkpoint delivery/resume/redelivery coordinator behavior. The eight focused
 local-stop cases were excluded where already tested; no full aggregate suite
 was rerun.
 
-The [affected analyzer selection](<C:/Users/Juraj/Desktop/Remote help/artifacts/verification-fixture-rca-20260930/affected-analyzers.trx>)
+The [affected analyzer selection](<../artifacts/verification-fixture-rca-20260930/affected-analyzers.trx>)
 passes 14 cases: checkpoint handoff, held delivery retirement, coordinator
 redelivery and full/compact/GUI source-hold evidence parity. Analyzer and
 acceptance code were unchanged at that earlier boundary.
@@ -1562,7 +1562,7 @@ analyzer cases. At that boundary the two route fixtures were separate failures,
 not waived results. The subsequent initial-recovery pass and remaining cycle
 failure are recorded above. The prior red and intermediate reports are retained as evidence.
 Source and artifact hashes are recorded in the
-[follow-up review](<C:/Users/Juraj/Desktop/Remote help/artifacts/verification-fixture-rca-20260930/implementation-review.json>).
+[follow-up review](<../artifacts/verification-fixture-rca-20260930/implementation-review.json>).
 
 The local-stop and broader contract runs used the existing diagnostic
 `DOTNET_DefaultStackSize=2000000` setting (hexadecimal, 32 MiB), restored after

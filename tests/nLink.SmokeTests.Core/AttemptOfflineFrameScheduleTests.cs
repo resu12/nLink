@@ -8,6 +8,7 @@ using NLink.Tests;
 namespace NLink.SmokeTests;
 
 [Collection(FakeNknNetworkCollection.Name)]
+[Trait("Area", "Core")]
 public sealed class AttemptOfflineFrameScheduleTests
 {
     private static byte[] Bytes(int index, int count = 256) => Enumerable.Repeat((byte)(index + 1), count).ToArray();
@@ -23,6 +24,7 @@ public sealed class AttemptOfflineFrameScheduleTests
 
     [Theory]
     [InlineData(false)] [InlineData(true)]
+    [Trait("RequiredConfiguration", "Debug")]
     public void OriginalFramesDropHoldAndReleaseInExactOrderWithoutBlockingLaterDelivery(bool latePublication)
     {
         using var schedule = new AttemptOfflineFrameSchedule("sender", "session", "transfer", CancellationToken.None, latePublication);
@@ -79,6 +81,7 @@ public sealed class AttemptOfflineFrameScheduleTests
 
     [Theory]
     [InlineData(false)] [InlineData(true)]
+    [Trait("RequiredConfiguration", "Debug")]
     public void DescriptorCapacityAndAggregateHeldCapacityAreEnforced(bool latePublication)
     {
         var bytes = Bytes(1);
@@ -93,6 +96,7 @@ public sealed class AttemptOfflineFrameScheduleTests
 
     [Theory]
     [InlineData(false)] [InlineData(true)]
+    [Trait("RequiredConfiguration", "Debug")]
     public void CancellationAndRetirementDiscardFramesWithoutRelease(bool latePublication)
     {
         using var cancellation = new CancellationTokenSource();
@@ -121,6 +125,7 @@ public sealed class AttemptOfflineFrameScheduleTests
     [InlineData(null, 3000, "frontier-fixed-3s-v1")]
     [InlineData(false, 3000, "frontier-fixed-3s-v1")]
     [InlineData(true, 4000, "late-publication-fixed-4s-v1")]
+    [Trait("RequiredConfiguration", "Debug")]
     public void FixedPolicyIsImmutableAndReportedOnce(bool? latePublication, int milliseconds, string policy)
     {
         var original = Console.Out;
@@ -145,6 +150,7 @@ public sealed class AttemptOfflineFrameScheduleTests
     [Theory]
     [InlineData(false, -1)] [InlineData(false, 0)] [InlineData(false, 1)]
     [InlineData(true, -1)] [InlineData(true, 0)] [InlineData(true, 1)]
+    [Trait("RequiredConfiguration", "Debug")]
     public void BudgetAndEnforcedExpiryAgreeAtExactBoundary(bool latePublication, int offset)
     {
         using var schedule = new AttemptOfflineFrameSchedule("sender", "session", "transfer", CancellationToken.None, latePublication);
@@ -174,6 +180,7 @@ public sealed class AttemptOfflineFrameScheduleTests
     }
 
     [Fact]
+    [Trait("RequiredConfiguration", "Debug")]
     public async Task LateFourSecondDeadlineIsNotRenewedByLaterFrames()
     {
         using var schedule = new AttemptOfflineFrameSchedule("sender", "session", "transfer", CancellationToken.None, latePublication: true);
@@ -233,6 +240,7 @@ public sealed class AttemptOfflineFrameScheduleTests
     }
 
     [Fact]
+    [Trait("RequiredConfiguration", "Debug")]
     public void ProfileRestoresPriorEnvironmentWithoutEnablingDeveloperMode()
     {
         var previous = Environment.GetEnvironmentVariable(AttemptSingleSegmentProfile.Variable);

@@ -5,6 +5,7 @@ using NLink.Infra.DevLocal;
 
 namespace NLink.SmokeTests;
 
+[Trait("Area", "Core")]
 public sealed class DevLocalFileTransferDataSessionTests
 {
     private const BindingFlags PrivateInstance = BindingFlags.Instance | BindingFlags.NonPublic;

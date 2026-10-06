@@ -3,6 +3,7 @@ using System.Text.Json;
 namespace NLink.SmokeTests;
 
 [Collection(FakeNknNetworkCollection.Name)]
+[Trait("Area", "Core")]
 public sealed class FrontierAppStartTests : FileTransferOpsScriptsTestBase
 {
     public static IEnumerable<object[]> Cases =>

@@ -3,6 +3,7 @@ using System.Security.Cryptography;
 namespace NLink.SmokeTests;
 
 [Collection(FakeNknNetworkCollection.Name)]
+[Trait("Area", "Core")]
 public sealed class FrontierCanonicalTailNativeTests : FileTransferOpsScriptsTestBase
 {
     [Fact]

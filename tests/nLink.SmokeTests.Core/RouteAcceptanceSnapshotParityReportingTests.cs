@@ -36,6 +36,24 @@ public sealed class RouteAcceptanceSnapshotParityReportingTests : FileTransferOp
     [InlineData("array-compact")]
     public Task RouteAcceptance_RejectsArrayArtifactRoots(string mode) => RunContractAsync(mode);
 
+    [Theory]
+    [InlineData("cycle-interleaved")]
+    [InlineData("cycle-conflicting-csv")]
+    [InlineData("cycle-missing-normalized")]
+    [InlineData("cycle-malformed")]
+    [InlineData("cycle-wrong-hash")]
+    [InlineData("cycle-full-compact-conflict")]
+    [InlineData("cycle-empty")]
+    [InlineData("cycle-array-root")]
+    [InlineData("cycle-wrong-type")]
+    [InlineData("cycle-wrong-protocol")]
+    [InlineData("cycle-forbidden-tuna-v6")]
+    [InlineData("cycle-forbidden-regular-v6")]
+    [InlineData("cycle-peer-disagreement")]
+    [InlineData("cycle-incomplete")]
+    [InlineData("cycle-artifact-fail")]
+    public Task RouteAcceptance_ConsumesValidatedLogicalCycleWithoutReevaluation(string mode) => RunContractAsync(mode);
+
     private async Task RunContractAsync(string mode)
     {
         if (!OperatingSystem.IsWindows()) { return; }

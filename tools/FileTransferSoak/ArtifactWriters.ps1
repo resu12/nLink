@@ -23311,8 +23311,9 @@ function Get-FileTransferRuntimeUnlockRetryLifecycleCorrelation {
                 ((Get-FileTransferEventInt64Field -Event $evaluation -Name 'missing_dispatch_successor_generation' -Default -2) + 1) -and
             (Get-FileTransferEventField -Event $_ -Name 'request_active_predecessor_supersession' -Default '') -in @('0', 'false', 'False')
         } | Sort-Object Sequence, LineNumber)
-        [object[]]$matches = if ($transportMatches.Count -eq 1) {
-            @($successorDecisions | Where-Object {
+        [object[]]$matches = @()
+        if ($transportMatches.Count -eq 1) {
+            $matches = @($successorDecisions | Where-Object {
             [int64]$_.Sequence -gt [int64]$transportMatches[0].Sequence -and
             (Test-LifecycleAuthorityMatch -Left $evaluation -Right $_ -SuccessorEvaluation) -and
             (Test-LifecycleFieldMatch -Left $evaluation -LeftName 'predecessor_offer_generation' -Right $_ -RightName 'retired_offer_generation') -and
@@ -23325,7 +23326,6 @@ function Get-FileTransferRuntimeUnlockRetryLifecycleCorrelation {
             (Test-LifecycleFieldMatch -Left $transportMatches[0] -LeftName 'decision_reason' -Right $_ -RightName 'decision_reason')
             } | Sort-Object Sequence, LineNumber)
         }
-        else { @() }
         if ($matches.Count -ne 1) {
             $unresolvedSuccessorEvaluations.Add($evaluation) | Out-Null
         }
@@ -51076,7 +51076,7 @@ function Get-FileTransferRuntimeUnlockRetryDispatchInstallProof {
             continue
         }
 
-        [object[]]$commit = @($distinctCommitted | Where-Object {
+        [object[]]$grantCommitMatches = @($distinctCommitted | Where-Object {
             (Test-InstallEventBefore -Earlier $_ -Later $grant) -and
             (Test-InstallScopeMatch `
                 -Left $grant `
@@ -51084,47 +51084,47 @@ function Get-FileTransferRuntimeUnlockRetryDispatchInstallProof {
                 -RequireInstallGeneration `
                 -RequireRequestTuple)
         } | Sort-Object Sequence, LineNumber | Select-Object -Last 1)
-        [object[]]$receipt = @()
-        if ($commit.Count -gt 0) {
-            $receipt = @($distinctReceipts | Where-Object {
-                (Test-InstallEventBefore -Earlier $_ -Later $commit[0]) -and
+        [object[]]$grantReceiptMatches = @()
+        if ($grantCommitMatches.Count -gt 0) {
+            $grantReceiptMatches = @($distinctReceipts | Where-Object {
+                (Test-InstallEventBefore -Earlier $_ -Later $grantCommitMatches[0]) -and
                 (Test-InstallScopeMatch `
-                    -Left $commit[0] `
+                    -Left $grantCommitMatches[0] `
                     -Right $_ `
                     -RequireInstallGeneration `
                     -RequireRequestTuple)
             } | Sort-Object Sequence, LineNumber | Select-Object -Last 1)
         }
-        [object[]]$stage = @()
-        if ($receipt.Count -gt 0) {
-            $stage = @($distinctStages | Where-Object {
-                (Test-InstallEventBefore -Earlier $_ -Later $receipt[0]) -and
+        [object[]]$grantStageMatches = @()
+        if ($grantReceiptMatches.Count -gt 0) {
+            $grantStageMatches = @($distinctStages | Where-Object {
+                (Test-InstallEventBefore -Earlier $_ -Later $grantReceiptMatches[0]) -and
                 (Test-InstallScopeMatch -Left $grant -Right $_ -RequireRequestTuple) -and
-                (Test-InstallScopeMatch -Left $receipt[0] -Right $_ -RequireRequestTuple)
+                (Test-InstallScopeMatch -Left $grantReceiptMatches[0] -Right $_ -RequireRequestTuple)
             } | Sort-Object Sequence, LineNumber | Select-Object -Last 1)
         }
         $chainInvalidated = $false
-        if ($commit.Count -gt 0 -and $receipt.Count -gt 0 -and $stage.Count -gt 0) {
+        if ($grantCommitMatches.Count -gt 0 -and $grantReceiptMatches.Count -gt 0 -and $grantStageMatches.Count -gt 0) {
             $stageClearedBeforeReceipt = @($distinctRejected | Where-Object {
-                (Test-InstallEventBefore -Earlier $stage[0] -Later $_) -and
-                (Test-InstallEventBefore -Earlier $_ -Later $receipt[0]) -and
+                (Test-InstallEventBefore -Earlier $grantStageMatches[0] -Later $_) -and
+                (Test-InstallEventBefore -Earlier $_ -Later $grantReceiptMatches[0]) -and
                 (Test-InstallStageClearedByDirectRejection `
-                    -Stage $stage[0] `
+                    -Stage $grantStageMatches[0] `
                     -Rejection $_)
             }).Count -gt 0
             $receiptClearedBeforeCommit = @($distinctRejected | Where-Object {
-                (Test-InstallEventBefore -Earlier $receipt[0] -Later $_) -and
-                (Test-InstallEventBefore -Earlier $_ -Later $commit[0]) -and
+                (Test-InstallEventBefore -Earlier $grantReceiptMatches[0] -Later $_) -and
+                (Test-InstallEventBefore -Earlier $_ -Later $grantCommitMatches[0]) -and
                 (Test-InstallReceiptClearedByExactRejection `
-                    -Receipt $receipt[0] `
+                    -Receipt $grantReceiptMatches[0] `
                     -Rejection $_)
             }).Count -gt 0
             $receiptRejectedAfterCommit = @($distinctRejected | Where-Object {
-                (Test-InstallEventBefore -Earlier $commit[0] -Later $_) -and
+                (Test-InstallEventBefore -Earlier $grantCommitMatches[0] -Later $_) -and
                 (Test-InstallEventBefore -Earlier $_ -Later $grant) -and
                 (Test-InstallRejectionDisposition -Rejection $_) -and
                 (Test-InstallScopeMatch `
-                    -Left $commit[0] `
+                    -Left $grantCommitMatches[0] `
                     -Right $_ `
                     -RequireInstallGeneration `
                     -RequireRequestTuple)
@@ -51133,9 +51133,9 @@ function Get-FileTransferRuntimeUnlockRetryDispatchInstallProof {
                 $receiptClearedBeforeCommit -or
                 $receiptRejectedAfterCommit
         }
-        if ($commit.Count -gt 0 -and
-            $receipt.Count -gt 0 -and
-            $stage.Count -gt 0 -and
+        if ($grantCommitMatches.Count -gt 0 -and
+            $grantReceiptMatches.Count -gt 0 -and
+            $grantStageMatches.Count -gt 0 -and
             -not $chainInvalidated) {
             $effectiveGrants.Add($grant) | Out-Null
         }
@@ -65416,7 +65416,7 @@ function Get-FileTransferRecoveryFailureClassification {
         Get-FileTransferRegularV4PeerSilenceReplayInstalledAuthorityDispatchProof -Events $events
     $regularV4FrontierRepairLifecycleProof =
         Get-FileTransferRegularV4FrontierRepairLifecycleProof `
-            -Events $events `
+            -Events $allEvents `
             -SettlementDispositionProof $regularV4FrontierRepairSettlementDispositionProof
     $regularV4FrontierRepairPressureAuthorityLifecycleSplitProof =
         Get-FileTransferRegularV4FrontierRepairPressureAuthorityLifecycleSplitProof -Events $events
@@ -72856,6 +72856,9 @@ function Write-FileTransferDiagnosticsArtifacts {
         $recoveryClassification.FirstProofChainFailureReason -eq
             'post_fallback_initiator_probe_launch_accepted_without_route_transition_authority') {
         'route_runtime'
+    }
+    elseif ($recoveryClassification.Class -eq 'filetransfer_tuna_activation_delivery_unproven') {
+        'incomplete_proof'
     }
     elseif ($recoveryClassification.Class -in @('filetransfer_gui_live_fallback_fault_window_missed', 'filetransfer_gui_live_reactivation_action_window_missed', 'filetransfer_live_route_epoch_projection_missing', 'runtime_unlock_retry_dispatch_install_grant_evidence_incomplete', 'runtime_unlock_retry_dispatch_fallback_paired_yield_successor_release_invalid', 'runtime_unlock_retry_regular_v4_recovery_settlement_missing', 'runtime_unlock_retry_regular_v4_recovery_lease_closure_hold_not_preserved', 'runtime_unlock_precommit_probe_start_handoff_missing', 'runtime_unlock_uncommitted_tuna_fallback_proof_authority_missing', 'runtime_unlock_precommit_fallback_recovery_handoff_suppressed', 'regular_v4_frontier_repair_settlement_disposition_unverifiable', 'regular_v4_frontier_repair_initial_pressure_install_missing', 'regular_v4_frontier_repair_successor_pressure_install_missing', 'regular_v4_frontier_repair_projection_reauthorization_missing_after_recovery', 'regular_v4_frontier_repair_pressure_recovery_handoff_missing')) {
         'incomplete_proof'

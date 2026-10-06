@@ -5,6 +5,17 @@ $ErrorActionPreference = 'Stop'
 $catalog = Get-FileTransferCoordinatorEvidenceCatalog
 if ($catalog.Hash -cne '17b5e4a90a18a5f4173ebd1b2081aeee1db48773b0213f1bb45549e0a0f057e2') { throw 'Frozen catalog changed.' }
 $envelopes = Get-Content -LiteralPath $FixturePath -Raw | ConvertFrom-Json
+if (@($envelopes.aggregate.operations | Where-Object { Test-FileTransferCoordinatorCheckpointRepairContinuityMarker $_ }).Count -gt 0) {
+    foreach ($envelope in $envelopes) {
+        foreach ($operation in @($envelope.aggregate.operations | Where-Object { Test-FileTransferCoordinatorCheckpointRepairContinuityMarker $_ })) {
+            if (Test-FileTransferCoordinatorCheckpointRepairContinuityOperation $envelope $operation $catalog) {
+                throw 'Base catalog accepted unsupported checkpoint continuity.'
+            }
+        }
+    }
+    $catalog = Get-FileTransferCoordinatorCheckpointRepairContinuityCatalog
+    if ($catalog.Hash -cne 'e6c3b5ff7cf8b44bcde0782ec325d2623cb96ba8ff362edca1902f9a1929059d') { throw 'Frozen continuity catalog changed.' }
+}
 function Copy-Value($value) { ConvertTo-Json -InputObject $value -Depth 64 -Compress | ConvertFrom-Json }
 function Subject($envelope, [string]$role) {
     $subjects = @($envelope.aggregate.operations | Where-Object { $_.operationRole -ceq $role })
@@ -100,10 +111,25 @@ function Assert-Parity([string[]]$inputLines, [bool]$valid) {
     }
     $path = Join-Path $OutputRoot 'compact.log'; [IO.File]::WriteAllLines($path, $compactLines)
     $gui = Get-TunaGuiFileTransferSetupFailureClassification -Bookmark 0 -ErrorMessage 'fixture' -RouteMode 'regular-v4-live-activation-off-on-off-256mb' -ImmutableEvidencePaths @($path)
-    if ($valid) { if ($null -ne $gui) { throw 'GUI rejected valid discard.' } }
+    $boundary = $full.FirstUnresolvedBoundary
+    if ($valid) {
+        # The fixture begins on established fallback and contains no publication
+        # history. Valid discard evidence does not satisfy that separate gate.
+        $route = Get-FileTransferCoordinatorSnapshotRouteConsistency -Evaluation $full
+        $compactRoute = Get-FileTransferCoordinatorSnapshotRouteConsistency -Evaluation $compact
+        $origin = @($full.Boundaries | Where-Object boundaryId -CEQ $first.transitionId)
+        if ((Compare-FileTransferCoordinatorSnapshotRouteConsistency $route $compactRoute).Verdict -cne 'pass' -or
+            $route.Verdict -cne 'fail' -or @($route.RouteSelectedEvents).Count -ne 0 -or @($route.Findings).Count -ne 1 -or
+            $route.Findings[0] -cne 'snapshot authoritative route stream contains no route publications' -or
+            $origin.Count -ne 1 -or $route.FirstUnresolvedBoundary.boundaryId -cne $origin[0].boundaryId -or
+            $route.FirstUnresolvedBoundary.boundaryHash -cne $origin[0].boundaryHash -or
+            $gui.ClassificationSource -cne 'coordinator_snapshot_authority_v1_route_consistency') { throw 'Unexpected partial-route discard rejection.' }
+        $boundary = $route.FirstUnresolvedBoundary
+    }
+    if ($null -eq $gui -or $null -eq $boundary) { throw 'Missing GUI discard boundary.' }
     else {
-        $boundary = $full.FirstUnresolvedBoundary
         if ($gui.CoordinatorBoundaryHash -cne $boundary.boundaryHash -or $gui.CoordinatorBoundaryId -cne $boundary.boundaryId -or
+            $gui.FailureClass -cne $boundary.taxonomyClass -or $gui.FailureVariant -cne $boundary.variant -or
             $gui.CoordinatorWriter -cne $boundary.writer -or $gui.CoordinatorWriterSequence -ne $boundary.writerSequence -or
             $gui.CoordinatorRawCount -ne $boundary.rawCount -or $gui.CoordinatorDistinctCount -ne $boundary.distinctCount -or
             $gui.CoordinatorRecoveredCount -ne $boundary.recoveredCount -or $gui.CoordinatorUnresolvedCount -ne $boundary.unresolvedCount) { throw 'GUI boundary diverged.' }

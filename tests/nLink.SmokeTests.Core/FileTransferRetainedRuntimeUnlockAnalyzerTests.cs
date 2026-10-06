@@ -783,9 +783,7 @@ public sealed class FileTransferRetainedRuntimeUnlockAnalyzerTests : FileTransfe
         var recovered = mode is
             "recovered" or
             "recovered_exact_duplicates" or
-            "recovered_then_replaced" or
-            "retry_commit" or
-            "retry_publication";
+            "recovered_then_replaced";
 
         Assert.Equal(detected ? "1" : "0", verdict["runtime_unlock_responder_acked_probe_route_transition_handoff_missing_raw_count"]);
         Assert.Equal(detected ? "1" : "0", verdict["runtime_unlock_responder_acked_probe_route_transition_handoff_missing_distinct_count"]);
@@ -857,7 +855,7 @@ public sealed class FileTransferRetainedRuntimeUnlockAnalyzerTests : FileTransfe
     [InlineData(false, true)]
     [InlineData(true, true)]
     [Trait("Category", "Smoke")]
-    public async Task AnalyzeRetained_InitialResponderDrainBoundaryRejectionUsesRouteTransitionOwnership(
+    public async Task AnalyzeRetained_InitialResponderDrainBoundaryRejectionPreservesUnfinishedHandoff(
         bool compact,
         bool recovered)
     {
@@ -886,18 +884,21 @@ public sealed class FileTransferRetainedRuntimeUnlockAnalyzerTests : FileTransfe
         Assert.Equal(recovered ? "0" : "1", verdict["filetransfer_route_transition_incomplete_unresolved_count"]);
         Assert.Equal("1", verdict["runtime_unlock_responder_acked_probe_route_transition_handoff_missing_raw_count"]);
         Assert.Equal("1", verdict["runtime_unlock_responder_acked_probe_route_transition_handoff_missing_distinct_count"]);
-        Assert.Equal("1", verdict["runtime_unlock_responder_acked_probe_route_transition_handoff_missing_recovered_count"]);
-        Assert.Equal("0", verdict["runtime_unlock_responder_acked_probe_route_transition_handoff_missing_unresolved_count"]);
+        // A rejected drain retains its own incident but cannot complete the earlier handoff.
+        Assert.Equal(recovered ? "1" : "0", verdict["runtime_unlock_responder_acked_probe_route_transition_handoff_missing_recovered_count"]);
+        Assert.Equal(recovered ? "0" : "1", verdict["runtime_unlock_responder_acked_probe_route_transition_handoff_missing_unresolved_count"]);
         if (!recovered)
         {
-            Assert.Equal("filetransfer_route_transition_incomplete", verdict["first_proof_chain_failure_class"]);
+            Assert.Equal("runtime_unlock_responder_acked_probe_route_transition_handoff_missing", verdict["first_proof_chain_failure_class"]);
             Assert.Equal(
-                "filetransfer_route_transition_drain_receipt_decided",
+                "filetransfer_runtime_unlock_responder_peer_probe_route_transition_handoff_decided",
                 verdict["first_proof_chain_failure_event"]);
             Assert.Equal(
-                "filetransfer_route_transition_initial_responder_boundary_not_current",
+                "bound_responder_acked_peer_probe_route_transition_handoff_missing",
                 verdict["first_proof_chain_failure_reason"]);
-            Assert.Equal("(none)", verdict["failure_variant"]);
+            Assert.Equal(
+                "runtime_unlock_responder_acked_probe_route_transition_handoff_missing_after_bound_probe",
+                verdict["failure_variant"]);
         }
     }
 
@@ -2859,18 +2860,47 @@ public sealed class FileTransferRetainedRuntimeUnlockAnalyzerTests : FileTransfe
         Assert.Equal(injected ? "0" : "1", verdict["filetransfer_gui_live_fallback_fault_window_missed_raw_count"]);
         Assert.Equal(injected ? "0" : "1", verdict["filetransfer_gui_live_fallback_fault_window_missed_distinct_count"]);
         Assert.Equal(injected ? "0" : "1", verdict["filetransfer_gui_live_fallback_fault_window_missed_unresolved_count"]);
-        if (!injected)
-        {
-            Assert.Equal("incomplete_proof", verdict["acceptance_failure_class"]);
-            Assert.Equal("incomplete_proof", verdict["runtime_correctness_verdict"]);
-            Assert.Equal("evidence_harness", verdict["semantic_failure_domain"]);
-            Assert.Equal(
-                "filetransfer_gui_live_fallback_fault_window_missed",
-                verdict["first_proof_chain_failure_class"]);
-            Assert.Equal(
-                "fallback_switch_off_not_injected_before_completed_transfer",
-                verdict["first_proof_chain_failure_reason"]);
-        }
+        // The local fault-window diagnostic does not supply either activation's matched delivery.
+        Assert.Equal("fail", verdict["gate_status"]);
+        Assert.Equal("incomplete_proof", verdict["acceptance_failure_class"]);
+        Assert.Equal("incomplete_proof", verdict["runtime_correctness_verdict"]);
+        Assert.Equal(
+            "filetransfer_tuna_activation_delivery_unproven",
+            verdict["first_proof_chain_failure_class"]);
+        Assert.Equal(
+            "tuna_activation_2_matched_delivery_unproven",
+            verdict["first_proof_chain_failure_reason"]);
+
+        const string localProofScript = """
+            param([string]$RepoRoot, [string]$LogPath, [int]$ExpectedCount)
+            $ErrorActionPreference = 'Stop'
+            Set-StrictMode -Version Latest
+            . (Join-Path $RepoRoot 'tools/FileTransferSoak/LogParsing.ps1')
+            . (Join-Path $RepoRoot 'tools/FileTransferSoak/ArtifactWriters.ps1')
+            $events = @(Read-FileTransferLogEvents -LogFiles @($LogPath))
+            $proof = Get-FileTransferGuiLiveFallbackFaultWindowCorrelation `
+                -Events $events -LiveRouteProofMode RegularActivationCycle
+            if ($proof.RawCount -ne $ExpectedCount -or
+                $proof.DistinctCount -ne $ExpectedCount -or
+                $proof.UnresolvedCount -ne $ExpectedCount) {
+                throw 'unexpected local fault-window counts'
+            }
+            if ($ExpectedCount -eq 1 -and
+                ($proof.UnresolvedCandidateRecords[0].Class -cne
+                    'filetransfer_gui_live_fallback_fault_window_missed' -or
+                 $proof.UnresolvedCandidateRecords[0].Reason -cne
+                    'fallback_switch_off_not_injected_before_completed_transfer')) {
+                throw 'unexpected local fault-window classification'
+            }
+            Write-Output 'fault-window-local=pass'
+            """;
+        var localProof = await RunPowerShellScriptTextAsync(
+            localProofScript,
+            [FindRepoRoot(), Path.Combine(result.TempRoot, "nlink.log"), injected ? "0" : "1"]);
+        Assert.True(
+            localProof.ExitCode == 0,
+            localProof.Stdout + Environment.NewLine + localProof.Stderr);
+        Assert.Contains("fault-window-local=pass", localProof.Stdout, StringComparison.Ordinal);
     }
 
     [Theory]
@@ -5083,7 +5113,7 @@ public sealed class FileTransferRetainedRuntimeUnlockAnalyzerTests : FileTransfe
             BuildPostTunaFallbackTransportProofHandoffFixture(
                 exactArtifactSequence: true,
                 includeRecoveryOutcome: false),
-            ["-LiveRouteProofMode", "RegularActivationCycle"],
+            ["-LiveRouteProofMode", "None"],
             compact
                 ? new Dictionary<string, string>
                 {
@@ -5264,7 +5294,7 @@ public sealed class FileTransferRetainedRuntimeUnlockAnalyzerTests : FileTransfe
             BuildPostTunaFallbackExactActivationDispositionFixture(
                 duplicateStarted: true,
                 mutation: "started_only"),
-            ["-LiveRouteProofMode", "RegularActivationCycle"],
+            ["-LiveRouteProofMode", "None"],
             compact
                 ? new Dictionary<string, string>
                 {
@@ -5305,7 +5335,7 @@ public sealed class FileTransferRetainedRuntimeUnlockAnalyzerTests : FileTransfe
             BuildPostTunaFallbackExactActivationDispositionFixture(
                 duplicateStarted: false,
                 mutation),
-            ["-LiveRouteProofMode", "RegularActivationCycle"],
+            ["-LiveRouteProofMode", "None"],
             compact
                 ? new Dictionary<string, string>
                 {
@@ -5352,7 +5382,7 @@ public sealed class FileTransferRetainedRuntimeUnlockAnalyzerTests : FileTransfe
 
         var result = await RunAnalyzeFixtureAsync(
             lines.ToArray(),
-            ["-LiveRouteProofMode", "RegularActivationCycle"],
+            ["-LiveRouteProofMode", "None"],
             compact
                 ? new Dictionary<string, string>
                 {
@@ -5432,7 +5462,7 @@ public sealed class FileTransferRetainedRuntimeUnlockAnalyzerTests : FileTransfe
 
         var result = await RunAnalyzeFixtureAsync(
             lines,
-            ["-LiveRouteProofMode", "RegularActivationCycle"],
+            ["-LiveRouteProofMode", "None"],
             compact
                 ? new Dictionary<string, string>
                 {
@@ -5532,7 +5562,7 @@ public sealed class FileTransferRetainedRuntimeUnlockAnalyzerTests : FileTransfe
 
         var result = await RunAnalyzeFixtureAsync(
             BuildRuntimeUnlockRecoveryCoordinationFailureFixture(),
-            ["-LiveRouteProofMode", "RegularActivationCycle"]);
+            ["-LiveRouteProofMode", "None"]);
 
         var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
         Assert.Equal("FAIL_PROTOCOL_OR_INTEGRITY", verdict["verdict"]);
@@ -5541,7 +5571,8 @@ public sealed class FileTransferRetainedRuntimeUnlockAnalyzerTests : FileTransfe
         Assert.Equal("1", verdict["runtime_unlock_retry_scheduled_count"]);
         Assert.Equal("1", verdict["runtime_unlock_retry_queued_behind_active_negotiation_count"]);
         Assert.Equal("1", verdict["session_liveness_timeout_after_runtime_unlock_count"]);
-        Assert.Equal("fail", verdict["live_route_epoch_proof_verdict"]);
+        Assert.Equal("None", verdict["live_route_epoch_proof_mode"]);
+        Assert.Equal("not_required", verdict["live_route_epoch_proof_verdict"]);
 
         var routeSummary = ReadArtifactReport(result.ArtifactDir, "filetransfer-route-consistency-summary.txt");
         Assert.Equal("regular_nkn_v4_fast", routeSummary["selected_route_changes"]);
@@ -6058,13 +6089,16 @@ public sealed class FileTransferRetainedRuntimeUnlockAnalyzerTests : FileTransfe
     }
 
     [Theory]
-    [InlineData(false, false)]
-    [InlineData(true, false)]
-    [InlineData(false, true)]
-    [InlineData(true, true)]
+    [InlineData(false, false, false)]
+    [InlineData(true, false, false)]
+    [InlineData(false, true, false)]
+    [InlineData(true, true, false)]
+    [InlineData(false, false, true)]
+    [InlineData(true, false, true)]
     public async Task AnalyzeRetained_RuntimeUnlockRetryCoordinatorLifecycleCorrelation_HasFullCompactParity(
         bool compact,
-        bool mismatchDeadline)
+        bool mismatchDeadline,
+        bool missingTransportDecision)
     {
         if (!OperatingSystem.IsWindows())
         {
@@ -6103,14 +6137,21 @@ public sealed class FileTransferRetainedRuntimeUnlockAnalyzerTests : FileTransfe
                     "retry_dispatch_execution_observed"),
                 AuthorityLine(
                     "runtime_unlock_retry_dispatch_successor_evaluation_requested",
-                    "; retired_generation=12; requires_listener_retry=1" +
-                    "; request_active_predecessor_supersession=1; subscriber_present=1",
+                    "; predecessor_offer_generation=12; predecessor_offer_nonce=nonce-lifecycle" +
+                    "; predecessor_dispatch_observed=0; requires_listener_retry=1; subscriber_present=1",
                     "reported_to_core"),
                 AuthorityLine(
+                    "runtime_unlock_retry_dispatch_successor_decided",
+                    "; requested_retired_generation=12; requested_dispatch_attempt_generation=2" +
+                    "; requested_missing_dispatch_successor_generation=1" +
+                    "; request_active_predecessor_supersession=0; successor_status=Held",
+                    "retry_dispatch_successor_predecessor_send_in_flight"),
+                AuthorityLine(
                     "runtime_unlock_retry_lifecycle_successor_decided",
-                    "; retired_offer_generation=12; requires_listener_retry=1" +
-                    "; active_predecessor_supersession=1; requested_attempt_generation=2" +
-                    "; requested_missing_dispatch_generation=0; decision_status=Held",
+                    "; retired_offer_generation=12; predecessor_offer_generation=12" +
+                    "; predecessor_offer_nonce=nonce-lifecycle; predecessor_dispatch_observed=0" +
+                    "; requires_listener_retry=1; active_predecessor_supersession=0" +
+                    "; requested_attempt_generation=2; requested_missing_dispatch_generation=1; decision_status=Held",
                     "retry_dispatch_successor_predecessor_send_in_flight"),
                 AuthorityLine(
                     "runtime_unlock_retry_dispatch_deadline_evaluation_requested",
@@ -6123,7 +6164,10 @@ public sealed class FileTransferRetainedRuntimeUnlockAnalyzerTests : FileTransfe
                     "; coordinator_deadline_utc_ms=1700000000200" +
                     $"; observed_utc_ms={(mismatchDeadline ? 1700000000101 : 1700000000100)}" +
                     "; decision_status=Idempotent",
-                    "retry_dispatch_deadline_pending")),
+                    "retry_dispatch_deadline_pending"))
+                .Where(line => !missingTransportDecision ||
+                    !line.Contains("event=runtime_unlock_retry_dispatch_successor_decided;", StringComparison.Ordinal))
+                .ToArray(),
             ["-LiveRouteProofMode", "None"],
             compact
                 ? new Dictionary<string, string>
@@ -6138,8 +6182,8 @@ public sealed class FileTransferRetainedRuntimeUnlockAnalyzerTests : FileTransfe
         Assert.Equal("1", verdict["runtime_unlock_retry_lifecycle_execution_decision_count"]);
         Assert.Equal("0", verdict["runtime_unlock_retry_lifecycle_execution_unresolved_count"]);
         Assert.Equal("1", verdict["runtime_unlock_retry_lifecycle_successor_evaluation_count"]);
-        Assert.Equal("1", verdict["runtime_unlock_retry_lifecycle_successor_decision_count"]);
-        Assert.Equal("0", verdict["runtime_unlock_retry_lifecycle_successor_unresolved_count"]);
+        Assert.Equal(missingTransportDecision ? "0" : "1", verdict["runtime_unlock_retry_lifecycle_successor_decision_count"]);
+        Assert.Equal(missingTransportDecision ? "1" : "0", verdict["runtime_unlock_retry_lifecycle_successor_unresolved_count"]);
         Assert.Equal("1", verdict["runtime_unlock_retry_lifecycle_deadline_evaluation_count"]);
         Assert.Equal(
             mismatchDeadline ? "0" : "1",
@@ -6148,7 +6192,7 @@ public sealed class FileTransferRetainedRuntimeUnlockAnalyzerTests : FileTransfe
             mismatchDeadline ? "1" : "0",
             verdict["runtime_unlock_retry_lifecycle_deadline_unresolved_count"]);
         Assert.Equal(
-            mismatchDeadline ? "fail" : "pass",
+            mismatchDeadline || missingTransportDecision ? "fail" : "pass",
             verdict["runtime_unlock_retry_lifecycle_verdict"]);
     }
 
@@ -7777,13 +7821,18 @@ public sealed class FileTransferRetainedRuntimeUnlockAnalyzerTests : FileTransfe
     }
 
     [Theory]
-    [InlineData(false, false)]
-    [InlineData(true, false)]
-    [InlineData(false, true)]
-    [InlineData(true, true)]
+    [InlineData(false, false, false)]
+    [InlineData(true, false, false)]
+    [InlineData(false, true, false)]
+    [InlineData(true, true, false)]
+    [InlineData(false, false, true)]
+    [InlineData(true, false, true)]
+    [InlineData(false, true, true)]
+    [InlineData(true, true, true)]
     public async Task AnalyzeRetained_NonzeroOfferMissingDispatchOperationCompletesWithoutRetirement_SelectsExactFirstEdge(
         bool compact,
-        bool completionFirst)
+        bool completionFirst,
+        bool wrongSlotEpoch)
     {
         if (!OperatingSystem.IsWindows())
         {
@@ -7800,16 +7849,24 @@ public sealed class FileTransferRetainedRuntimeUnlockAnalyzerTests : FileTransfe
             RuntimeUnlockRetrySchema2Line(
                 eventName,
                 transferId,
-                suffix: "; offer_generation=2; offer_nonce=nonce-2" + suffix) + writer;
+                suffix: suffix)
+                .Replace("offer_generation=12", "offer_generation=2", StringComparison.Ordinal)
+                .Replace("offer_nonce=nonce-1", "offer_nonce=nonce-2", StringComparison.Ordinal) + writer;
         var slot =
             "event=runtime_unlock_retry_negotiation_slot_decided; decision_status=Deferred; " +
             "intent_kind=SuccessorEvaluation; intent_generation=2; slot_generation=0; " +
             $"session_id=sess_runtime_unlock_dispatch_proof; transfer_id={transferId}; " +
+            "direction=outbound; source_protocol_version=4; source_live_route_epoch=1; " +
+            "source_runtime_generation=4; source_terminal_generation=0; source_leg_generation=9; " +
             "contract_generation=7; retired_generation=11; source_route=regular_nkn_v4_fast; " +
             "source_publication_generation=6; source_transport_epoch=2; " +
             "source_bridge_recovery_generation=3; source_checkpoint_request_id=(none); " +
             "data_session_identity=session:1; data_session_generation=1; authority_effect=none; " +
             "decision_reason=retry_dispatch_negotiation_slot_busy" + writer;
+        if (wrongSlotEpoch)
+        {
+            slot = slot.Replace("source_live_route_epoch=1", "source_live_route_epoch=2", StringComparison.Ordinal);
+        }
         var backoff = slot.Replace(
             "retry_dispatch_negotiation_slot_busy",
             "retry_dispatch_authority_backoff_pending",
@@ -7886,6 +7943,14 @@ public sealed class FileTransferRetainedRuntimeUnlockAnalyzerTests : FileTransfe
 
         Assert.True(result.Script.ExitCode == 0, result.Script.Stdout + Environment.NewLine + result.Script.Stderr);
         var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+        if (wrongSlotEpoch)
+        {
+            Assert.Equal("0", verdict["runtime_unlock_retry_dispatch_successor_missing_after_missing_dispatch_raw_count"]);
+            Assert.Equal("0", verdict["runtime_unlock_retry_dispatch_successor_missing_after_missing_dispatch_distinct_count"]);
+            Assert.Equal("0", verdict["runtime_unlock_retry_dispatch_successor_missing_after_missing_dispatch_recovered_count"]);
+            Assert.Equal("0", verdict["runtime_unlock_retry_dispatch_successor_missing_after_missing_dispatch_unresolved_count"]);
+            return;
+        }
         Assert.Equal(
             "runtime_unlock_retry_dispatch_successor_missing_after_missing_dispatch",
             verdict["first_proof_chain_failure_class"]);
@@ -9178,14 +9243,34 @@ public sealed class FileTransferRetainedRuntimeUnlockAnalyzerTests : FileTransfe
                 .. settlementEvents
             ]);
 
-        var full = await RunAnalyzeFixtureAsync(lines, ["-LiveRouteProofMode", "None"]);
-        var compact = await RunAnalyzeFixtureAsync(
-            lines,
-            ["-LiveRouteProofMode", "None"],
-            new Dictionary<string, string>
-            {
-                ["NLINK_FILETRANSFER_RETAINED_ANALYSIS_COMPACT"] = "1"
-            });
+        var analyses = new List<AnalyzeFixtureResult>();
+        foreach (var compactMode in new[] { false, true })
+        {
+            var tempRoot = Path.Combine(Path.GetTempPath(), "nlink-filetransfer-ops", Guid.NewGuid().ToString("N"));
+            var logPath = Path.Combine(tempRoot, "nlink.log");
+            var artifactDir = Path.Combine(tempRoot, "artifacts");
+            Directory.CreateDirectory(artifactDir);
+            await File.WriteAllLinesAsync(logPath, lines, new UTF8Encoding(encoderShouldEmitUTF8Identifier: false));
+            // Independent synthetic verifier input isolates settlement ordering from integrity evidence.
+            await File.WriteAllTextAsync(
+                Path.Combine(artifactDir, "filetransfer-tuna-gui-summary.json"),
+                """
+                { "completed": true, "integrityOk": true, "hardFailureCount": 0,
+                  "inboundTerminalState": "Completed", "outboundTerminalState": "Completed" }
+                """,
+                new UTF8Encoding(encoderShouldEmitUTF8Identifier: false));
+            var script = await RunFileTransferOpsAsync(
+                FindRepoRoot(),
+                ["-Mode", "AnalyzeRetained", "-LogPath", logPath, "-ArtifactDir", artifactDir,
+                    "-LiveRouteProofMode", "None"],
+                compactMode ? new Dictionary<string, string>
+                {
+                    ["NLINK_FILETRANSFER_RETAINED_ANALYSIS_COMPACT"] = "1"
+                } : null);
+            analyses.Add(new AnalyzeFixtureResult(tempRoot, artifactDir, script));
+        }
+        var full = analyses[0];
+        var compact = analyses[1];
 
         Assert.True(full.Script.ExitCode == 0, full.Script.Stdout + Environment.NewLine + full.Script.Stderr);
         Assert.True(compact.Script.ExitCode == 0, compact.Script.Stdout + Environment.NewLine + compact.Script.Stderr);
@@ -10157,9 +10242,21 @@ public sealed class FileTransferRetainedRuntimeUnlockAnalyzerTests : FileTransfe
             .Replace(
                 "decision_reason=retry_dispatch_missing_successor_limit_exhausted",
                 "decision_reason=reported_to_core",
-                StringComparison.Ordinal);
+                StringComparison.Ordinal) +
+            "; predecessor_offer_generation=4; predecessor_offer_nonce=nonce-1; predecessor_dispatch_observed=0";
         messages.Insert(
             rejectionIndex + 1,
+            legacyRejection
+                .Replace(
+                    "event=runtime_unlock_retry_successor_intent_rejected",
+                    "event=runtime_unlock_retry_dispatch_successor_decided",
+                    StringComparison.Ordinal)
+                .Replace(
+                    "intent_disposition=Rejected",
+                    "successor_status=ChainClosed",
+                    StringComparison.Ordinal));
+        messages.Insert(
+            rejectionIndex + 2,
             legacyRejection
                 .Replace(
                     "event=runtime_unlock_retry_successor_intent_rejected",
@@ -10184,7 +10281,8 @@ public sealed class FileTransferRetainedRuntimeUnlockAnalyzerTests : FileTransfe
                 .Replace(
                     "intent_disposition=Rejected",
                     "requires_listener_retry=1; decision_status=ChainClosed",
-                    StringComparison.Ordinal));
+                    StringComparison.Ordinal) +
+                "; predecessor_offer_generation=4; predecessor_offer_nonce=nonce-1; predecessor_dispatch_observed=0");
         var closeIndex = messages.FindIndex(line =>
             line.Contains(
                 "event=runtime_unlock_retry_dispatch_chain_closed",
@@ -11518,7 +11616,7 @@ public sealed class FileTransferRetainedRuntimeUnlockAnalyzerTests : FileTransfe
             LogLine($"event=file_transfer_inbound_terminal; role=Helper; session_id={sessionId}; transfer_id={transferId}; state=Failed; error_code=peer_disconnected; route=regular_nkn_v4_fast; protocol_version=4", secondsOffset: 90),
         };
 
-        var result = await RunAnalyzeFixtureAsync(lines, ["-LiveRouteProofMode", "RegularActivationCycle"]);
+        var result = await RunAnalyzeFixtureAsync(lines, ["-LiveRouteProofMode", "None"]);
 
         var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
         Assert.Equal("FAIL_PROTOCOL_OR_INTEGRITY", verdict["verdict"]);
@@ -11556,7 +11654,7 @@ public sealed class FileTransferRetainedRuntimeUnlockAnalyzerTests : FileTransfe
             LogLine($"event=file_transfer_inbound_terminal; role=Helper; session_id={sessionId}; transfer_id={transferId}; state=Failed; error_code=peer_disconnected; route=regular_nkn_v4_fast; protocol_version=4", secondsOffset: 90),
         };
 
-        var result = await RunAnalyzeFixtureAsync(lines, ["-LiveRouteProofMode", "RegularActivationCycle"]);
+        var result = await RunAnalyzeFixtureAsync(lines, ["-LiveRouteProofMode", "None"]);
 
         var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
         Assert.Equal("FAIL_PROTOCOL_OR_INTEGRITY", verdict["verdict"]);
@@ -12246,7 +12344,7 @@ public sealed class FileTransferRetainedRuntimeUnlockAnalyzerTests : FileTransfe
             : null;
         var result = await RunAnalyzeFixtureAsync(
             BuildRuntimeUnlockRegularV4RecoveryLeaseNotIssuedCurrentArtifactFixture(),
-            ["-LiveRouteProofMode", "RegularActivationCycle"],
+            ["-LiveRouteProofMode", "None"],
             environment);
 
         Assert.Equal(0, result.Script.ExitCode);
@@ -12414,7 +12512,7 @@ public sealed class FileTransferRetainedRuntimeUnlockAnalyzerTests : FileTransfe
 
         var result = await RunAnalyzeFixtureAsync(
             BuildRuntimeUnlockRegularV4ClosureWindowLivenessCurrentArtifactFixture(),
-            ["-LiveRouteProofMode", "RegularActivationCycle"],
+            ["-LiveRouteProofMode", "None"],
             compact
                 ? new Dictionary<string, string>
                 {
@@ -12459,7 +12557,7 @@ public sealed class FileTransferRetainedRuntimeUnlockAnalyzerTests : FileTransfe
 
         var result = await RunAnalyzeFixtureAsync(
             BuildOneShotRecoveryReceiptClosureRejectedCurrentArtifactFixture(),
-            ["-LiveRouteProofMode", "RegularActivationCycle"],
+            ["-LiveRouteProofMode", "None"],
             compact
                 ? new Dictionary<string, string>
                 {
@@ -12585,7 +12683,7 @@ public sealed class FileTransferRetainedRuntimeUnlockAnalyzerTests : FileTransfe
 
         var result = await RunAnalyzeFixtureAsync(
             lines,
-            ["-LiveRouteProofMode", "RegularActivationCycle"],
+            ["-LiveRouteProofMode", "None"],
             compact
                 ? new Dictionary<string, string>
                 {
@@ -13152,7 +13250,7 @@ public sealed class FileTransferRetainedRuntimeUnlockAnalyzerTests : FileTransfe
 
         var result = await RunAnalyzeFixtureAsync(
             BuildRuntimeUnlockRegularV4ClosureHoldNotPreservedCurrentArtifactFixture(),
-            ["-LiveRouteProofMode", "RegularActivationCycle"],
+            ["-LiveRouteProofMode", "None"],
             compact
                 ? new Dictionary<string, string>
                 {
@@ -13477,7 +13575,7 @@ public sealed class FileTransferRetainedRuntimeUnlockAnalyzerTests : FileTransfe
             .ToArray();
         var result = await RunAnalyzeFixtureAsync(
             fixture,
-            ["-LiveRouteProofMode", "RegularActivationCycle"],
+            ["-LiveRouteProofMode", "None"],
             compact
                 ? new Dictionary<string, string>
                 {
@@ -13510,7 +13608,7 @@ public sealed class FileTransferRetainedRuntimeUnlockAnalyzerTests : FileTransfe
 
         var result = await RunAnalyzeFixtureAsync(
             BuildRuntimeUnlockFallbackTailUnblockRecheckMissingCurrentArtifactFixture(),
-            ["-LiveRouteProofMode", "RegularActivationCycle"],
+            ["-LiveRouteProofMode", "None"],
             compact
                 ? new Dictionary<string, string>
                 {
@@ -14954,7 +15052,7 @@ public sealed class FileTransferRetainedRuntimeUnlockAnalyzerTests : FileTransfe
             LogLine($"event=file_transfer_outbound_terminal; role=Helpee; session_id={sessionId}; transfer_id={transferId}; state=Failed; error_code=peer_disconnected; route=regular_nkn_v4_fast; protocol_version=4", secondsOffset: 89),
         };
 
-        var result = await RunAnalyzeFixtureAsync(lines, ["-LiveRouteProofMode", "RegularActivationCycle"]);
+        var result = await RunAnalyzeFixtureAsync(lines, ["-LiveRouteProofMode", "None"]);
 
         var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
         Assert.Equal("FAIL_PROTOCOL_OR_INTEGRITY", verdict["verdict"]);
@@ -14986,7 +15084,7 @@ public sealed class FileTransferRetainedRuntimeUnlockAnalyzerTests : FileTransfe
             LogLine($"event=file_transfer_outbound_terminal; role=Helpee; session_id={sessionId}; transfer_id={transferId}; state=Failed; error_code=peer_disconnected; route=regular_nkn_v4_fast; protocol_version=4", secondsOffset: 89),
         };
 
-        var result = await RunAnalyzeFixtureAsync(lines, ["-LiveRouteProofMode", "RegularActivationCycle"]);
+        var result = await RunAnalyzeFixtureAsync(lines, ["-LiveRouteProofMode", "None"]);
 
         var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
         Assert.Equal("FAIL_PROTOCOL_OR_INTEGRITY", verdict["verdict"]);
@@ -15017,7 +15115,7 @@ public sealed class FileTransferRetainedRuntimeUnlockAnalyzerTests : FileTransfe
             LogLine($"event=file_transfer_outbound_terminal; role=Helpee; session_id={sessionId}; transfer_id={transferId}; state=Failed; error_code=peer_disconnected; route=regular_nkn_v4_fast; protocol_version=4", secondsOffset: 89),
         };
 
-        var result = await RunAnalyzeFixtureAsync(lines, ["-LiveRouteProofMode", "RegularActivationCycle"]);
+        var result = await RunAnalyzeFixtureAsync(lines, ["-LiveRouteProofMode", "None"]);
 
         var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
         Assert.Equal("FAIL_PROTOCOL_OR_INTEGRITY", verdict["verdict"]);
@@ -15211,7 +15309,7 @@ public sealed class FileTransferRetainedRuntimeUnlockAnalyzerTests : FileTransfe
             LogLine($"event=file_transfer_inbound_terminal; role=Helper; session_id={sessionId}; transfer_id={transferId}; state=Failed; error_code=peer_disconnected; route=regular_nkn_v4_fast; protocol_version=4", secondsOffset: 90),
         };
 
-        var result = await RunAnalyzeFixtureAsync(lines, ["-LiveRouteProofMode", "RegularActivationCycle"]);
+        var result = await RunAnalyzeFixtureAsync(lines, ["-LiveRouteProofMode", "None"]);
 
         var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
         Assert.Equal("FAIL_PROTOCOL_OR_INTEGRITY", verdict["verdict"]);
@@ -15259,7 +15357,7 @@ public sealed class FileTransferRetainedRuntimeUnlockAnalyzerTests : FileTransfe
 
         var result = await RunAnalyzeFixtureAsync(
             BuildRuntimeUnlockRetryDispatchedButOfferObservationBlockedFixture(),
-            ["-LiveRouteProofMode", "RegularActivationCycle"]);
+            ["-LiveRouteProofMode", "None"]);
 
         var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
         Assert.Equal("runtime_unlock_offer_observation_blocked_by_receive_recovery", verdict["recovery_failure_class"]);
@@ -15283,7 +15381,7 @@ public sealed class FileTransferRetainedRuntimeUnlockAnalyzerTests : FileTransfe
 
         var result = await RunAnalyzeFixtureAsync(
             BuildRuntimeUnlockDispatchDeferredByRegularV4ReceiveRecoveryFixture(),
-            ["-LiveRouteProofMode", "RegularActivationCycle"]);
+            ["-LiveRouteProofMode", "None"]);
 
         var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
         Assert.Equal("runtime_unlock_regular_v4_recovery_arbitration", verdict["recovery_failure_class"]);
@@ -15425,7 +15523,7 @@ public sealed class FileTransferRetainedRuntimeUnlockAnalyzerTests : FileTransfe
 
         var result = await RunAnalyzeFixtureAsync(
             BuildRuntimeUnlockListenerRearmFailureFixture(),
-            ["-LiveRouteProofMode", "RegularActivationCycle"]);
+            ["-LiveRouteProofMode", "None"]);
 
         var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
         Assert.Equal("tuna_listener_rearm_coordination", verdict["recovery_failure_class"]);
@@ -15477,7 +15575,7 @@ public sealed class FileTransferRetainedRuntimeUnlockAnalyzerTests : FileTransfe
 
         var result = await RunAnalyzeFixtureAsync(
             BuildRuntimeUnlockPeerResponseMissingUnderRegularV4RecoveryFixture(),
-            ["-LiveRouteProofMode", "RegularActivationCycle"]);
+            ["-LiveRouteProofMode", "None"]);
 
         var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
         Assert.Equal("runtime_unlock_peer_response_not_received_under_regular_v4_recovery", verdict["recovery_failure_class"]);
@@ -15489,7 +15587,8 @@ public sealed class FileTransferRetainedRuntimeUnlockAnalyzerTests : FileTransfe
         Assert.Equal("1", verdict["runtime_unlock_cutthrough_timeout_count"]);
         Assert.Equal("fail", verdict["runtime_unlock_cutthrough_verdict"]);
         Assert.Equal("1", verdict["session_liveness_timeout_after_runtime_unlock_count"]);
-        Assert.Equal("fail", verdict["live_route_epoch_proof_verdict"]);
+        Assert.Equal("None", verdict["live_route_epoch_proof_mode"]);
+        Assert.Equal("not_required", verdict["live_route_epoch_proof_verdict"]);
 
         var stability = ReadArtifactReport(result.ArtifactDir, "stability-gates-summary.txt");
         Assert.Equal("runtime_unlock_peer_response_not_received_under_regular_v4_recovery", stability["recovery_failure_class"]);
@@ -15507,7 +15606,7 @@ public sealed class FileTransferRetainedRuntimeUnlockAnalyzerTests : FileTransfe
 
         var result = await RunAnalyzeFixtureAsync(
             BuildRuntimeUnlockBrokenStateRetryChurnFixture(),
-            ["-LiveRouteProofMode", "RegularActivationCycle"]);
+            ["-LiveRouteProofMode", "None"]);
 
         var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
         Assert.Equal("runtime_unlock_broken_state_retry_churn", verdict["recovery_failure_class"]);
@@ -15523,7 +15622,7 @@ public sealed class FileTransferRetainedRuntimeUnlockAnalyzerTests : FileTransfe
 
     [Fact]
     [Trait("Category", "Smoke")]
-    public async Task AnalyzeRetained_RuntimeUnlockCutThroughPeerReceivedWithRegularActivationCycle_IsAccepted()
+    public async Task AnalyzeRetained_RuntimeUnlockCutThroughPeerReceivedWithRegularActivationCycle_LocalProofDoesNotEstablishCycleDelivery()
     {
         if (!OperatingSystem.IsWindows())
         {
@@ -15535,7 +15634,12 @@ public sealed class FileTransferRetainedRuntimeUnlockAnalyzerTests : FileTransfe
             ["-LiveRouteProofMode", "RegularActivationCycle"]);
 
         var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
-        Assert.Equal("(none)", verdict["recovery_failure_class"]);
+        // Local route/probe proof is not matched payload delivery for the complete cycle.
+        Assert.Equal("filetransfer_tuna_activation_delivery_unproven", verdict["recovery_failure_class"]);
+        Assert.Equal("fail", verdict["gate_status"]);
+        Assert.Equal("filetransfer_tuna_activation_delivery_unproven", verdict["first_proof_chain_failure_class"]);
+        Assert.Equal("incomplete_proof", verdict["acceptance_failure_class"]);
+        Assert.Equal("incomplete_proof", verdict["runtime_correctness_verdict"]);
         Assert.Equal("1", verdict["runtime_unlock_cutthrough_attempt_count"]);
         Assert.Equal("2", verdict["runtime_unlock_cutthrough_peer_received_count"]);
         Assert.Equal("0", verdict["runtime_unlock_cutthrough_timeout_count"]);
@@ -15544,7 +15648,7 @@ public sealed class FileTransferRetainedRuntimeUnlockAnalyzerTests : FileTransfe
         Assert.Equal("pass", verdict["live_route_epoch_proof_verdict"]);
 
         var stability = ReadArtifactReport(result.ArtifactDir, "stability-gates-summary.txt");
-        Assert.Equal("(none)", stability["recovery_failure_class"]);
+        Assert.Equal("filetransfer_tuna_activation_delivery_unproven", stability["recovery_failure_class"]);
         Assert.Equal("pass", stability["runtime_unlock_cutthrough_verdict"]);
     }
 
@@ -15559,7 +15663,7 @@ public sealed class FileTransferRetainedRuntimeUnlockAnalyzerTests : FileTransfe
 
         var result = await RunAnalyzeFixtureAsync(
             BuildRuntimeUnlockTransactionLocalOnlyObservedSendFixture(),
-            ["-LiveRouteProofMode", "RegularActivationCycle"]);
+            ["-LiveRouteProofMode", "None"]);
 
         var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
         Assert.Equal("runtime_unlock_transaction_local_only", verdict["recovery_failure_class"]);
@@ -15576,7 +15680,7 @@ public sealed class FileTransferRetainedRuntimeUnlockAnalyzerTests : FileTransfe
 
     [Fact]
     [Trait("Category", "Smoke")]
-    public async Task AnalyzeRetained_RuntimeUnlockTransactionPeerProofAndRouteCommit_IsAccepted()
+    public async Task AnalyzeRetained_RuntimeUnlockTransactionPeerProofAndRouteCommit_LocalProofDoesNotEstablishCycleDelivery()
     {
         if (!OperatingSystem.IsWindows())
         {
@@ -15588,7 +15692,12 @@ public sealed class FileTransferRetainedRuntimeUnlockAnalyzerTests : FileTransfe
             ["-LiveRouteProofMode", "RegularActivationCycle"]);
 
         var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
-        Assert.Equal("(none)", verdict["recovery_failure_class"]);
+        // Local route/probe proof is not matched payload delivery for the complete cycle.
+        Assert.Equal("filetransfer_tuna_activation_delivery_unproven", verdict["recovery_failure_class"]);
+        Assert.Equal("fail", verdict["gate_status"]);
+        Assert.Equal("filetransfer_tuna_activation_delivery_unproven", verdict["first_proof_chain_failure_class"]);
+        Assert.Equal("incomplete_proof", verdict["acceptance_failure_class"]);
+        Assert.Equal("incomplete_proof", verdict["runtime_correctness_verdict"]);
         Assert.Equal("1", verdict["runtime_unlock_transaction_started_count"]);
         Assert.Equal("1", verdict["runtime_unlock_transaction_observed_send_count"]);
         Assert.Equal("2", verdict["runtime_unlock_transaction_peer_proof_count"]);
@@ -15602,13 +15711,13 @@ public sealed class FileTransferRetainedRuntimeUnlockAnalyzerTests : FileTransfe
         Assert.Equal("pass", verdict["live_route_epoch_proof_verdict"]);
 
         var stability = ReadArtifactReport(result.ArtifactDir, "stability-gates-summary.txt");
-        Assert.Equal("(none)", stability["recovery_failure_class"]);
+        Assert.Equal("filetransfer_tuna_activation_delivery_unproven", stability["recovery_failure_class"]);
         Assert.Equal("pass", stability["runtime_unlock_transaction_proof_verdict"]);
     }
 
     [Fact]
     [Trait("Category", "Smoke")]
-    public async Task AnalyzeRetained_RuntimeUnlockPreCommitRouteEpochProof_IsAccepted()
+    public async Task AnalyzeRetained_RuntimeUnlockPreCommitRouteEpochProof_LocalProofDoesNotEstablishCycleDelivery()
     {
         if (!OperatingSystem.IsWindows())
         {
@@ -15620,14 +15729,19 @@ public sealed class FileTransferRetainedRuntimeUnlockAnalyzerTests : FileTransfe
             ["-LiveRouteProofMode", "RegularActivationCycle"]);
 
         var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
-        Assert.Equal("(none)", verdict["recovery_failure_class"]);
+        // Local route/probe proof is not matched payload delivery for the complete cycle.
+        Assert.Equal("filetransfer_tuna_activation_delivery_unproven", verdict["recovery_failure_class"]);
+        Assert.Equal("fail", verdict["gate_status"]);
+        Assert.Equal("filetransfer_tuna_activation_delivery_unproven", verdict["first_proof_chain_failure_class"]);
+        Assert.Equal("incomplete_proof", verdict["acceptance_failure_class"]);
+        Assert.Equal("incomplete_proof", verdict["runtime_correctness_verdict"]);
         Assert.Equal("2", verdict["runtime_unlock_precommit_probe_acked_count"]);
         Assert.Equal("pass", verdict["runtime_unlock_make_before_break_verdict"]);
         Assert.Equal("pass", verdict["runtime_unlock_transaction_proof_verdict"]);
         Assert.Equal("pass", verdict["live_route_epoch_proof_verdict"]);
 
         var stability = ReadArtifactReport(result.ArtifactDir, "stability-gates-summary.txt");
-        Assert.Equal("(none)", stability["recovery_failure_class"]);
+        Assert.Equal("filetransfer_tuna_activation_delivery_unproven", stability["recovery_failure_class"]);
         Assert.Equal("pass", stability["runtime_unlock_transaction_proof_verdict"]);
     }
 
@@ -15864,7 +15978,7 @@ public sealed class FileTransferRetainedRuntimeUnlockAnalyzerTests : FileTransfe
 
         var result = await RunAnalyzeFixtureAsync(
             BuildRuntimeUnlockTunaProbePathNotEstablishedFixture(),
-            ["-LiveRouteProofMode", "RegularActivationCycle"]);
+            ["-LiveRouteProofMode", "None"]);
 
         var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
         Assert.Equal("runtime_unlock_tuna_probe_sidecar_closed_regular_v4_terminal", verdict["recovery_failure_class"]);
@@ -15918,7 +16032,7 @@ public sealed class FileTransferRetainedRuntimeUnlockAnalyzerTests : FileTransfe
 
         var result = await RunAnalyzeFixtureAsync(
             BuildRuntimeUnlockOldV6ProbeRejectedByV4PeerFixture(),
-            ["-LiveRouteProofMode", "RegularActivationCycle"]);
+            ["-LiveRouteProofMode", "None"]);
 
         var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
         Assert.Equal("runtime_unlock_precommit_probe_protocol_mismatch", verdict["recovery_failure_class"]);
@@ -15944,7 +16058,7 @@ public sealed class FileTransferRetainedRuntimeUnlockAnalyzerTests : FileTransfe
 
         var result = await RunAnalyzeFixtureAsync(
             BuildRuntimeUnlockTunaPathLeaseUnavailableAtAnswerFixture(),
-            ["-LiveRouteProofMode", "RegularActivationCycle"]);
+            ["-LiveRouteProofMode", "None"]);
 
         var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
         Assert.Equal("tuna_path_lease_unavailable_at_answer", verdict["recovery_failure_class"]);

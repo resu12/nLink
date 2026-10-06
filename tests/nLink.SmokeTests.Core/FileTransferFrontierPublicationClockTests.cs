@@ -5,6 +5,7 @@ using Timing = NLink.Core.FileTransfer.FileTransferCoordinator.FrontierPublicati
 
 namespace NLink.SmokeTests;
 
+[Trait("Area", "Core")]
 public sealed class FileTransferFrontierPublicationClockTests
 {
     private static readonly long Epoch = new DateTimeOffset(2026, 9, 15, 0, 0, 0, TimeSpan.Zero).Ticks;

@@ -7,6 +7,7 @@ using System.Text.Json;
 namespace NLink.SmokeTests;
 
 [Trait("FileTransferInfraSuite", "BridgeStdinFraming")]
+[Trait("Area", "Core")]
 public sealed class BridgeStdinFramingTests : CoreSmokeTestsBase
 {
     [Theory]

@@ -64,9 +64,18 @@ $request = [pscustomobject]@{schemaVersion=1;attemptId=[guid]::NewGuid().ToStrin
     inputSha256=(Get-FileHash $inputPath).Hash.ToLowerInvariant();sliceSha256=(Get-FileHash $slicePath).Hash.ToLowerInvariant();
     guiSha256=(Get-FileHash (Join-Path $Directory 'filetransfer-tuna-gui-summary.json')).Hash.ToLowerInvariant()}
 $before = @($full,$compact,$parity,$route,$events) | ConvertTo-Json -Depth 64 -Compress
-Write-FileTransferSecondTransferReport -ArtifactDir $Directory -Request $request -Index ([pscustomobject]@{AllEvents=$events}) `
-    -Full $full -Compact $compact -Parity $parity -RouteState $route -Gui $gui -ParentVerdict PASS -ParentGateStatus pass `
-    -ParentHardFailures 0 -ParentProofFailures 0 -ParentWarningCapExceeded '(none)'
+$reportArgs = @{ArtifactDir=$Directory; Request=$request; Index=[pscustomobject]@{AllEvents=$events};
+    Full=$full; Compact=$compact; Parity=$parity; RouteState=$route; Gui=$gui; ParentVerdict='PASS'; ParentGateStatus='pass';
+    ParentHardFailures=0; ParentProofFailures=0; ParentWarningCapExceeded='(none)'}
+# Even a valid second-transfer scope cannot override failed combined authority.
+$failedParent = @{} + $reportArgs
+$failedParent.ParentVerdict = 'FAIL'
+$failedParent.ParentGateStatus = 'fail'
+$failedParent.ParentHardFailures = 3
+try { Write-FileTransferSecondTransferReport @failedParent; throw 'failed_parent_accepted' }
+catch { if ($_.Exception.Message -cne 'second_transfer_parent_proof_not_accepted') { throw } }
+if (Test-Path (Join-Path $Directory 'second-transfer-analysis')) { throw 'failed_parent_published_output' }
+Write-FileTransferSecondTransferReport @reportArgs
 if ((@($full,$compact,$parity,$route,$events) | ConvertTo-Json -Depth 64 -Compress) -cne $before) { throw 'fresh_parent_mutated' }
 $report = Get-Content (Join-Path $Directory 'second-transfer-analysis/primary-derived-report.json') -Raw | ConvertFrom-Json
 if ($report.routes.Count -ne 2 -or $report.terminals.Count -ne 2 -or $report.pairedPayloadCount -ne 1 -or $report.operatorVerdict -cne 'PASS') { throw 'fresh_report_incorrect' }
@@ -102,6 +111,9 @@ $script:RouteAcceptanceRetainedMarkerIndexCache=@{}
 $result = New-RouteAcceptanceRunResult -Name 'second-transfer-after-reactivation' -ArtifactDir $Directory -ExpectedRoute file_tuna_v4 -ExpectedProtocol 4
 $cycle = [pscustomobject]@{firstTransferTerminalBeforeLiveReactivation=$false;liveRouteEpochRouteChanges=@('post_tuna_fallback_v6','file_tuna_v4')}
 if (-not (Try-ApplySecondTransferSplitProofAcceptance -Result $result -Summary $cycle)) { throw 'live_split_proof_rejected' }
+if ($result.routeConsistencyVerdict -cne 'pass' -or $result.protocol -cne '4' -or $result.finalRoute -cne 'file_tuna_v4' -or
+    $result.route -cne 'file_tuna_v4,post_tuna_fallback_v6,file_tuna_v4' -or $result.liveRouteEpochProofVerdict -cne 'pass' -or
+    $result.operatorVerdict -cne 'PASS' -or $result.hardFailureCount -ne 0) { throw 'accepted_parent_split_result_incorrect' }
 $scenario = [pscustomobject]@{Name='second-transfer-after-reactivation';Kind='tuna'}
 Set-Phase4MeasurementContamination -Scenario $scenario -Result $result
 if ($result.failures.Count -ne 0) { throw "clean_measurement_rejected:$($result.failures -join ',')" }

@@ -5,6 +5,7 @@ using NLink.Core.Logging;
 
 namespace NLink.SmokeTests;
 
+[Trait("Area", "Core")]
 public sealed class FileTransferRepairOwnerEvidenceTests : FileTransferOpsScriptsTestBase
 {
     [Fact]

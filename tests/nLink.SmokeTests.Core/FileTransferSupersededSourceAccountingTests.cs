@@ -2,6 +2,7 @@ using System.Diagnostics;
 
 namespace NLink.SmokeTests;
 
+[Trait("Area", "Core")]
 public sealed class FileTransferSupersededSourceAccountingTests : FileTransferOpsScriptsTestBase
 {
     [Theory]

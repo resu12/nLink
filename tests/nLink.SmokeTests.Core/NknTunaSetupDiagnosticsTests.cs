@@ -6,6 +6,7 @@ namespace NLink.SmokeTests;
 
 [Collection(FakeNknNetworkCollection.Name)]
 [Trait("FileTransferInfraSuite", "SessionPreparationLane")]
+[Trait("Area", "Core")]
 public sealed class NknTunaSetupDiagnosticsTests
 {
     private const string ProviderLine = """

@@ -272,7 +272,9 @@ public sealed class NknScreenShareAccelerationTransportTests : ScreenCaptureAbst
             var logTail = CoreSmokeTestsBase.ReadOperationalLogTail(logStart);
             Assert.Contains("event=tuna_mixed_handoff_started;", logTail, StringComparison.Ordinal);
             Assert.Contains("event=tuna_mixed_handoff_lane_state_changed;", logTail, StringComparison.Ordinal);
-            Assert.Contains("event=tuna_fallback_filetransfer_rebind_requested;", logTail, StringComparison.Ordinal);
+            // Adapter fallback evidence is not coordinator route-publication authority.
+            Assert.Contains("event=tuna_fallback_filetransfer_evidence_requested;", logTail, StringComparison.Ordinal);
+            Assert.DoesNotContain("event=tuna_fallback_filetransfer_rebind_requested;", logTail, StringComparison.Ordinal);
             Assert.Contains("event=screenshare_tuna_handoff_started;", logTail, StringComparison.Ordinal);
             Assert.Contains("event=tuna_disable_handoff_screen_started;", logTail, StringComparison.Ordinal);
             Assert.Contains("event=tuna_fallback_nkn_frame_sent; message_type=file_transfer_data_frame; channel=bulk", logTail, StringComparison.Ordinal);
@@ -439,7 +441,9 @@ public sealed class NknScreenShareAccelerationTransportTests : ScreenCaptureAbst
             Assert.Contains("event=tuna_fallback_started;", logTail, StringComparison.Ordinal);
             Assert.Contains("reason=soak_switch_off", logTail, StringComparison.Ordinal);
             Assert.Contains("lanes=file", logTail, StringComparison.Ordinal);
-            Assert.Contains("event=tuna_fallback_filetransfer_rebind_requested;", logTail, StringComparison.Ordinal);
+            // Adapter fallback evidence is not coordinator route-publication authority.
+            Assert.Contains("event=tuna_fallback_filetransfer_evidence_requested;", logTail, StringComparison.Ordinal);
+            Assert.DoesNotContain("event=tuna_fallback_filetransfer_rebind_requested;", logTail, StringComparison.Ordinal);
             Assert.Contains("event=tuna_fallback_nkn_frame_sent; message_type=file_transfer_data_frame; channel=bulk", logTail, StringComparison.Ordinal);
             Assert.Contains("event=tuna_fallback_nkn_frame_sent; message_type=screenshare_frame; channel=media", logTail, StringComparison.Ordinal);
             Assert.Contains("event=tuna_fallback_nkn_frame_received; message_type=file_transfer_data_frame; channel=bulk", logTail, StringComparison.Ordinal);

@@ -1,5 +1,6 @@
 using System.Collections.Generic;
 using System.Linq;
+using System.Text;
 
 namespace NLink.SmokeTests;
 
@@ -1214,13 +1215,33 @@ public sealed class FileTransferRetainedAuthorityProofAnalyzerTests : FileTransf
         const string transferId = "transfer_file_tuna_v4_receive_regular_rejected";
         var lines = BuildFileTunaV4InitialActivationRejectedReceiveFixture(transferId);
 
-        var result = await RunAnalyzeFixtureAsync(lines);
-        var compact = await RunAnalyzeFixtureAsync(
-            lines,
-            environment: new Dictionary<string, string>
-            {
-                ["NLINK_FILETRANSFER_RETAINED_ANALYSIS_COMPACT"] = "1"
-            });
+        var analyses = new List<AnalyzeFixtureResult>();
+        foreach (var compactMode in new[] { false, true })
+        {
+            var tempRoot = Path.Combine(Path.GetTempPath(), "nlink-filetransfer-ops", Guid.NewGuid().ToString("N"));
+            var logPath = Path.Combine(tempRoot, "nlink.log");
+            var artifactDir = Path.Combine(tempRoot, "artifacts");
+            Directory.CreateDirectory(artifactDir);
+            await File.WriteAllLinesAsync(logPath, lines, new UTF8Encoding(encoderShouldEmitUTF8Identifier: false));
+            // Supply synthetic verifier evidence; Completed alone is not integrity proof.
+            await File.WriteAllTextAsync(
+                Path.Combine(artifactDir, "filetransfer-tuna-gui-summary.json"),
+                """
+                { "completed": true, "integrityOk": true, "hardFailureCount": 0,
+                  "inboundTerminalState": "Completed", "outboundTerminalState": "Completed" }
+                """,
+                new UTF8Encoding(encoderShouldEmitUTF8Identifier: false));
+            var script = await RunFileTransferOpsAsync(
+                FindRepoRoot(),
+                ["-Mode", "AnalyzeRetained", "-LogPath", logPath, "-ArtifactDir", artifactDir],
+                compactMode ? new Dictionary<string, string>
+                {
+                    ["NLINK_FILETRANSFER_RETAINED_ANALYSIS_COMPACT"] = "1"
+                } : null);
+            analyses.Add(new AnalyzeFixtureResult(tempRoot, artifactDir, script));
+        }
+        var result = analyses[0];
+        var compact = analyses[1];
 
         foreach (var analysis in new[] { result, compact })
         {
@@ -1234,6 +1255,8 @@ public sealed class FileTransferRetainedAuthorityProofAnalyzerTests : FileTransf
             Assert.Equal("1", route["file_tuna_v4_data_path_mismatch_recovered_count"]);
             Assert.Equal("0", route["file_tuna_v4_data_path_mismatch_unresolved_count"]);
             var verdict = ReadArtifactReport(analysis.ArtifactDir, "filetransfer-operator-verdict.txt");
+            Assert.Equal("PASS", verdict["verdict"]);
+            Assert.Equal("pass", verdict["gate_status"]);
             Assert.Equal("(none)", verdict["failure_variant"]);
             Assert.NotEqual("protocol_or_integrity", verdict["recovery_failure_class"]);
         }
@@ -3517,12 +3540,14 @@ public sealed class FileTransferRetainedAuthorityProofAnalyzerTests : FileTransf
                     [hashtable]$Fields
                 )
 
-                return [pscustomobject]@{
-                    EventName = $Name
-                    Sequence = $Sequence
-                    LineNumber = $Sequence
-                    Fields = $Fields
-                }
+                $parts = @("event=$Name") + @($Fields.Keys | Sort-Object | ForEach-Object {
+                    "$_=$($Fields[$_])"
+                })
+                return ConvertFrom-FileTransferLogLine `
+                    -Line ('[2026-10-04 00:00:00Z] [INFO] [Test] ' + ($parts -join '; ')) `
+                    -FilePath 'route-transition-lease-index.log' `
+                    -LineNumber $Sequence `
+                    -Sequence $Sequence
             }
 
             function Copy-Fields {

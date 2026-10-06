@@ -1446,6 +1446,43 @@ public abstract class FileTransferOpsScriptsTestBase
         };
     }
 
+    protected static async Task<string> GenerateRouteCycleSourceAsync(string root, string directory, string payloadMode)
+    {
+        Directory.CreateDirectory(directory);
+        using var child = new Process { StartInfo = new ProcessStartInfo("dotnet")
+        {
+            UseShellExecute = false, CreateNoWindow = true, WorkingDirectory = root,
+            RedirectStandardOutput = true, RedirectStandardError = true,
+        } };
+        child.StartInfo.ArgumentList.Add("vstest");
+        child.StartInfo.ArgumentList.Add(typeof(FileTransferOpsScriptsTestBase).Assembly.Location);
+        child.StartInfo.ArgumentList.Add("--TestCaseFilter:FullyQualifiedName~PublicationUseConsumer_GeneratedRecordsAreBoundAndFailClosed");
+        foreach (var name in new[] { "NLINK_PUBLICATION_CONSUMER_FIXTURE", "NLINK_PUBLICATION_TWO_WRITER_FIXTURE",
+            "NLINK_PUBLICATION_SERVICE_INGRESS_FIXTURE", "NLINK_PUBLICATION_FINAL_FALLBACK_FIXTURE", "NLINK_PUBLICATION_SERVICE_YIELD_FIXTURE" })
+        {
+            child.StartInfo.Environment[name] = "1";
+        }
+        child.StartInfo.Environment["NLINK_PUBLICATION_TUNA_PAYLOAD_MODE"] = payloadMode;
+        child.StartInfo.Environment["NLINK_PUBLICATION_YIELD_CASE"] = "both";
+        child.StartInfo.Environment["NLINK_FILETRANSFER_SOAK_ARTIFACT_DIR"] = directory;
+        child.StartInfo.Environment["NLINK_FILETRANSFER_ACCEPTANCE_LOG_PATH"] = Path.Combine(directory, "nlink.log");
+        var runId = Guid.NewGuid().ToString();
+        child.StartInfo.Environment["NLINK_FILETRANSFER_ACCEPTANCE_RUN_ID"] = runId;
+        child.StartInfo.Environment["NLINK_FILETRANSFER_SCENARIO_RUN_ID"] = runId + ":offline:1";
+        child.Start();
+        var stdout = child.StandardOutput.ReadToEndAsync();
+        var stderr = child.StandardError.ReadToEndAsync();
+        using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(60));
+        try { await child.WaitForExitAsync(deadline.Token); }
+        catch { if (!child.HasExited) { child.Kill(entireProcessTree: true); } throw; }
+        Assert.True(child.ExitCode == 0, await stdout + Environment.NewLine + await stderr);
+        var records = new[] { "nlink.log", "sender.log" }.SelectMany(name => File.ReadAllLines(Path.Combine(directory, name)));
+        var source = Path.Combine(directory, "two-writer-source.log");
+        await File.WriteAllLinesAsync(source, records.OrderBy(line => long.Parse(Regex.Match(line,
+            @"(?:^|;\s*)log_writer_attempt_utc_ticks=([0-9]+)").Groups[1].Value, CultureInfo.InvariantCulture)));
+        return source;
+    }
+
     protected static void AssertRequiredLiveArtifacts(string artifactDir)
     {
         foreach (var artifactName in RequiredLiveNknArtifactFiles.Concat(RequiredArtifactFiles))

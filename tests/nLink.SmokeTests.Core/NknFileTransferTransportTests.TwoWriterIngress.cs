@@ -370,6 +370,7 @@ public sealed partial class NknFileTransferTransportTests
         else { await CheckDelayedIngressAsync(transport, dataSession, history.Tokens[3], link); }
         if (finalFallbackFixture)
         {
+            transport.SetAccelerationAcceptedForTests(NknAccelerationLaneKind.None, sessionId);
             var beforeFallback = history.Tokens[3];
             var fallbackEvidence = history.PublishFinalFallback(serviceFallback ? 1 : 2);
             var fallback = history.Tokens[4];

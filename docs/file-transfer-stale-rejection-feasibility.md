@@ -8,7 +8,7 @@ no classifier or acceptance cutover has been enabled.
 Date: 2026-09-10. Baseline: `d408e58c4c7e97cfdec451b663b55995e83ace37`.
 Scope: initial 30-active-minute feasibility slice, separately approved test-only
 follow-up and read-only binding review, then scoped local closeout; one agent.
-Contract: [proven stale rejection proposal](<C:/Users/Juraj/Desktop/Remote help/docs/file-transfer-proven-stale-rejection-contract-proposal.md>).
+Contract: [proven stale rejection proposal](<file-transfer-proven-stale-rejection-contract-proposal.md>).
 
 ## Final binding-review decision
 
@@ -21,17 +21,17 @@ The separately approved read-only review found three remaining boundaries:
   unchanged by that reset. A new Coordinator instance in the fixture does not
   prove uniqueness across key installations within a process. This is missing
   evidence, not a demonstrated runtime collision or security vulnerability.
-  [Key installation](<C:/Users/Juraj/Desktop/Remote help/src/nLink.Infra.Nkn/NknSignalingTransport.FileTransferTransportChannel.cs:6173>),
-  [Process writer identity](<C:/Users/Juraj/Desktop/Remote help/src/nLink.Core/Logging/LocalOperationalLog.cs:16>).
+  [Key installation](<../src/nLink.Infra.Nkn/NknSignalingTransport.FileTransferTransportChannel.cs#L6173>),
+  [Process writer identity](<../src/nLink.Core/Logging/LocalOperationalLog.cs#L16>).
 - The fixture compares supplied writer labels, not ownership validated against
   real retained streams. Existing writer/run checks provide useful primitives,
   but this candidate join has not been integrated with or proved by them.
-  [Fixture labels](<C:/Users/Juraj/Desktop/Remote help/tests/nLink.SmokeTests.Core/FileTransferCoordinatorTests.PairedDataPathProof.cs:64>),
-  [Writer evidence checks](<C:/Users/Juraj/Desktop/Remote help/tools/GuiSmokeLogLedger.ps1:329>).
+  [Fixture labels](<../tests/nLink.SmokeTests.Core/FileTransferCoordinatorTests.PairedDataPathProof.cs#L64>),
+  [Writer evidence checks](<../tools/GuiSmokeLogLedger.ps1#L329>).
 - Existing full/compact parity checks cover local Snapshot and peer-proof
   bindings, not the proposed cross-writer projection or its immutable handoff.
   Primary-preservation controls for that new handoff also remain unproved.
-  [Current parity comparison](<C:/Users/Juraj/Desktop/Remote help/tools/FileTransferOps/CoordinatorSnapshotEvidence.ps1:16342>).
+  [Current parity comparison](<../tools/FileTransferOps/CoordinatorSnapshotEvidence.ps1#L16342>).
 
 The binding review changed no files and ran no tests. The subsequent approved
 closeout records this decision and retains only the paired-proof fixture, its
@@ -46,7 +46,7 @@ The user separately approved a 20-active-minute, test-only follow-up. Its result
 is **a demonstrated candidate link, not approval of the classifier**. The
 earlier no-go below remains applicable to the complete validated handoff.
 
-Added a [four-case paired Coordinator fixture](<C:/Users/Juraj/Desktop/Remote help/tests/nLink.SmokeTests.Core/FileTransferCoordinatorTests.PairedDataPathProof.cs:8>).
+Added a [four-case paired Coordinator fixture](<../tests/nLink.SmokeTests.Core/FileTransferCoordinatorTests.PairedDataPathProof.cs#L8>).
 It captures continuous Coordinator Snapshot generations/hashes from initial
 Regular through first Tuna and fallback for both roles. It creates each yield
 frame with the unmodified service factory, serializes/deserializes it with the
@@ -76,7 +76,7 @@ policy. Additional ambiguity/ABA controls remain part of any binding review.
 
 Verification: initial focused 4/4, directly affected unchanged-helper regression
 3/3, final focused 4/4 after publication-scope assertions. Receipts are under
-[paired-data-path-proof](<C:/Users/Juraj/Desktop/Remote help/artifacts/validation/consolidation-bounded-20260907/paired-data-path-proof/paired-data-path-proof-final.trx>).
+[paired-data-path-proof](<../artifacts/validation/consolidation-bounded-20260907/paired-data-path-proof/paired-data-path-proof-final.trx>).
 The final rebuild first stopped in Avalonia's telemetry target because its
 AppData log was not writable; retrying with `UsedAvaloniaProducts` empty skipped
 only that telemetry target and passed compilation/tests. No runtime, validator,
@@ -108,15 +108,15 @@ create this missing causation proof.
   it calls the route-cycle helper independently for inbound and outbound. That
   helper returns tokens, discards the intermediate Snapshot results and uses
   no-op evidence callbacks. It is not a validated two-writer evidence fixture.
-  [Transport fixture](<C:/Users/Juraj/Desktop/Remote help/tests/nLink.SmokeTests.Core/NknFileTransferTransportTests.DataPathProvenance.cs:80>),
-  [Coordinator helper](<C:/Users/Juraj/Desktop/Remote help/tests/nLink.SmokeTests.Core/FileTransferCoordinatorTests.DataPathIngress.cs:11>).
+  [Transport fixture](<../tests/nLink.SmokeTests.Core/NknFileTransferTransportTests.DataPathProvenance.cs#L80>),
+  [Coordinator helper](<../tests/nLink.SmokeTests.Core/FileTransferCoordinatorTests.DataPathIngress.cs#L11>).
 - Route consistency validates publication successors within a Coordinator,
   writer, session, transfer and direction. Its cross-direction check compares
   sequences of `liveRouteEpoch|route|protocolVersion`, ordered by local operation
   generation. It does not emit a causal link naming both writers' exact
   publication/receipt references.
-  [Local history scope](<C:/Users/Juraj/Desktop/Remote help/tools/FileTransferOps/CoordinatorSnapshotEvidence.ps1:15278>),
-  [Cross-direction comparison](<C:/Users/Juraj/Desktop/Remote help/tools/FileTransferOps/CoordinatorSnapshotEvidence.ps1:15703>).
+  [Local history scope](<../tools/FileTransferOps/CoordinatorSnapshotEvidence.ps1#L15278>),
+  [Cross-direction comparison](<../tools/FileTransferOps/CoordinatorSnapshotEvidence.ps1#L15703>).
 - `__FallbackTailPeerProofBindings` preserves useful local pending/paired
   receipt and effect histories, including proof identities and fingerprints.
   The inspected builders emit one local writer/Coordinator per binding; they
@@ -125,13 +125,13 @@ create this missing causation proof.
   a separately specified and verified join, not a claim that the current
   aggregate pass already certifies it. This review does not establish that
   such a join is impossible; it establishes that it was not proved here.
-  [Pending binding](<C:/Users/Juraj/Desktop/Remote help/tools/FileTransferOps/CoordinatorSnapshotEvidence.ps1:5162>),
-  [Paired binding](<C:/Users/Juraj/Desktop/Remote help/tools/FileTransferOps/CoordinatorSnapshotEvidence.ps1:12914>).
+  [Pending binding](<../tools/FileTransferOps/CoordinatorSnapshotEvidence.ps1#L5162>),
+  [Paired binding](<../tools/FileTransferOps/CoordinatorSnapshotEvidence.ps1#L12914>).
 - The data-path and Snapshot session/transfer projections do use the same
   `fte1-` plus first 24 lowercase SHA-256 hex characters over the existing raw
   value. A token-domain mismatch is not the blocker identified in this slice.
-  [Data-path projection](<C:/Users/Juraj/Desktop/Remote help/src/nLink.Infra.Nkn/NknSignalingTransport.FileTransferTransportChannel.cs:2815>),
-  [Snapshot projection](<C:/Users/Juraj/Desktop/Remote help/src/nLink.Core/FileTransfer/SessionFileTransferService.CoordinatorSnapshots.cs:3658>).
+  [Data-path projection](<../src/nLink.Infra.Nkn/NknSignalingTransport.FileTransferTransportChannel.cs#L2815>),
+  [Snapshot projection](<../src/nLink.Core/FileTransfer/SessionFileTransferService.CoordinatorSnapshots.cs#L3658>).
 
 ## Authenticated-identity design retained, not implemented
 
@@ -149,7 +149,7 @@ secure sequence, normalized request ID (empty when absent). A future private
 codec-owned projection must reuse `CreateWire` and `BuildAuthenticatedData`,
 not duplicate their normalization in transport or PowerShell. This design
 is not an implemented/tested API or a replacement for the outer `ftenv1-` check.
-[Canonical codec encoding](<C:/Users/Juraj/Desktop/Remote help/src/nLink.Core/SessionSecurity/SessionSecureEnvelopeCodec.cs:243>).
+[Canonical codec encoding](<../src/nLink.Core/SessionSecurity/SessionSecureEnvelopeCodec.cs#L243>).
 
 Capture on send must use the exact metadata local that allocates the sequence
 and is passed to encryption, carrying its resulting binding across the async
@@ -157,15 +157,15 @@ send. Capture on receive must use successfully decrypted metadata only after
 the existing replay, transfer and session checks, before the rejection guard.
 No mutable sequence-counter reread, plaintext/key logging, wire change or public
 authority DTO extension is proposed.
-[Send allocation](<C:/Users/Juraj/Desktop/Remote help/src/nLink.Infra.Nkn/NknSignalingTransport.FileTransferTransportChannel.cs:5617>),
-[Validated receive boundary](<C:/Users/Juraj/Desktop/Remote help/src/nLink.Infra.Nkn/NknSignalingTransport.FileTransferTransportChannel.cs:4354>).
+[Send allocation](<../src/nLink.Infra.Nkn/NknSignalingTransport.FileTransferTransportChannel.cs#L5617>),
+[Validated receive boundary](<../src/nLink.Infra.Nkn/NknSignalingTransport.FileTransferTransportChannel.cs#L4354>).
 
 This tuple is not a payload-content hash. It additionally needs the contract's
 validated session/sender/incarnation uniqueness before any positive result.
 Key installation and secure-state reset can reset the sequence; no completed
 incarnation/reset-exclusion proof was demonstrated in this slice. Do not derive
 it from a Coordinator instance or a log writer merely because those are unique.
-[Sequence reset](<C:/Users/Juraj/Desktop/Remote help/src/nLink.Infra.Nkn/NknSignalingTransport.FileTransferTransportChannel.cs:6173>).
+[Sequence reset](<../src/nLink.Infra.Nkn/NknSignalingTransport.FileTransferTransportChannel.cs#L6173>).
 
 ## Initial handoff status and verification limits
 
@@ -175,8 +175,8 @@ starting its isolated companion. That ordering was inspected, not changed.
 The worker currently serializes `diagnosticEligibility` in the same response
 as the primary classification, so adding bounded projection work there does
 not by itself prove the stronger primary-preservation requirement.
-[Current worker response](<C:/Users/Juraj/Desktop/Remote help/tools/GuiSmoke-Windows.ps1:31675>),
-[Primary persistence before companion](<C:/Users/Juraj/Desktop/Remote help/tools/GuiSmoke-Windows.ps1:37929>).
+[Current worker response](<../tools/GuiSmoke-Windows.ps1#L31675>),
+[Primary persistence before companion](<../tools/GuiSmoke-Windows.ps1#L37929>).
 
 No production-shaped positive projection fixture, full/compact projection
 parity, send/decrypted-receive binding test, reused-outer-ID negative, or

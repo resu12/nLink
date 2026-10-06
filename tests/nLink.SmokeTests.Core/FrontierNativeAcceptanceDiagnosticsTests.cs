@@ -4,6 +4,7 @@ using System.Text.RegularExpressions;
 
 namespace NLink.SmokeTests;
 
+[Trait("Area", "Core")]
 public sealed class FrontierNativeAcceptanceDiagnosticsTests : FileTransferOpsScriptsTestBase
 {
     [Fact]

@@ -177,13 +177,13 @@ action in this plan.
 
 ## Source anchors at the planning revision
 
-- [Current exact retained result](<C:/Users/Juraj/Desktop/Remote help/tools/FileTransferSoak/ArtifactWriters.ps1:9850>)
-- [Existing Tuna send/receive window](<C:/Users/Juraj/Desktop/Remote help/tools/FileTransferSoak/ArtifactWriters.ps1:10053>)
-- [Index construction](<C:/Users/Juraj/Desktop/Remote help/tools/FileTransferSoak/ArtifactWriters.ps1:9336>)
-- [Outer retained reduction/dependency](<C:/Users/Juraj/Desktop/Remote help/tools/FileTransferSoak/ArtifactWriters.ps1:15509>)
-- [Authoritative GUI early return](<C:/Users/Juraj/Desktop/Remote help/tools/GuiSmoke-Windows.ps1:7217>)
-- [Primary legacy GUI reducer](<C:/Users/Juraj/Desktop/Remote help/tools/GuiSmoke-Windows.ps1:7301>)
-- [Verified current fixes](<C:/Users/Juraj/Desktop/Remote help/artifacts/validation/consolidation-bounded-20260907/implementation-rejected-ingress-follow-up/RESULTS.md>)
+- [Current exact retained result](<../tools/FileTransferSoak/ArtifactWriters.ps1#L9850>)
+- [Existing Tuna send/receive window](<../tools/FileTransferSoak/ArtifactWriters.ps1#L10053>)
+- [Index construction](<../tools/FileTransferSoak/ArtifactWriters.ps1#L9336>)
+- [Outer retained reduction/dependency](<../tools/FileTransferSoak/ArtifactWriters.ps1#L15509>)
+- [Authoritative GUI early return](<../tools/GuiSmoke-Windows.ps1#L7217>)
+- [Primary legacy GUI reducer](<../tools/GuiSmoke-Windows.ps1#L7301>)
+- [Verified current fixes](<../artifacts/validation/consolidation-bounded-20260907/implementation-rejected-ingress-follow-up/RESULTS.md>)
 
 Prepared from source and saved test results only. No new build, test, evaluator,
 report, package or live execution was performed while preparing this plan.

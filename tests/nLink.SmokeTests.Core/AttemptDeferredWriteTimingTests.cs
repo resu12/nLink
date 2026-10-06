@@ -4,6 +4,7 @@ using Boundary = NLink.Tests.AttemptDeferredWriteTiming.Boundary;
 
 namespace NLink.SmokeTests;
 
+[Trait("Area", "Core")]
 public sealed class AttemptDeferredWriteTimingTests
 {
     private const string Prefix = "carrier-canonical-deferred-write-timing=";

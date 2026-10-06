@@ -30,6 +30,8 @@ public sealed class FileTransferPhase5PreflightTests : FileTransferAcceptancePha
         try
         {
             var environment = BuildFakeRouteAcceptanceEnvironment("phase5-helpee-invite-readiness-timeout-rerun-pass");
+            environment["NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_ROUTE_CYCLE_SOURCE"] =
+                await GenerateRouteCycleSourceAsync(repoRoot, Path.Combine(artifactRoot, "peers"), "independent_pairs");
             environment["NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_PHASE4_LIVE_SWITCH_OFF_HELPEE_64MB_TRANSIENT_SETUP_FAILURE"] = "1";
             environment["NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_PHASE4_LIVE_SWITCH_OFF_HELPEE_64MB_TRANSIENT_SETUP_PHASE"] = "preactivation_readiness";
             environment["NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_PHASE4_LIVE_SWITCH_OFF_HELPEE_64MB_TRANSIENT_SETUP_REASON"] = "helpee_invite_readiness_timeout";
@@ -470,6 +472,8 @@ public sealed class FileTransferPhase5PreflightTests : FileTransferAcceptancePha
         try
         {
             var environment = BuildFakeRouteAcceptanceEnvironment("phase5-preflight-retry-pass");
+            environment["NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_ROUTE_CYCLE_SOURCE"] =
+                await GenerateRouteCycleSourceAsync(repoRoot, Path.Combine(artifactRoot, "peers"), "independent_pairs");
             environment["NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_PHASE5_PREFLIGHT_BRIDGE_BOOTSTRAP_FAIL_ONCE"] = "1";
             environment["NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_PHASE5_PREFLIGHT_FAILURE_REASON"] = "helpee_invite_readiness_timeout";
 
@@ -525,6 +529,8 @@ public sealed class FileTransferPhase5PreflightTests : FileTransferAcceptancePha
         try
         {
             var environment = BuildFakeRouteAcceptanceEnvironment("phase5-filtered-preflight-quarantine");
+            environment["NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_ROUTE_CYCLE_SOURCE"] =
+                await GenerateRouteCycleSourceAsync(repoRoot, Path.Combine(artifactRoot, "peers"), "independent_pairs");
             environment["NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_PHASE5_PREFLIGHT_BRIDGE_BOOTSTRAP_FAIL"] = "1";
             environment["NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_PHASE5_PREFLIGHT_FAILURE_REASON"] = "helpee_invite_connection_failed_before_ready";
 
@@ -585,6 +591,8 @@ public sealed class FileTransferPhase5PreflightTests : FileTransferAcceptancePha
         try
         {
             var environment = BuildFakeRouteAcceptanceEnvironment("phase5-filtered-preflight-mixed-helpee-bootstrap");
+            environment["NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_ROUTE_CYCLE_SOURCE"] =
+                await GenerateRouteCycleSourceAsync(repoRoot, Path.Combine(artifactRoot, "peers"), "independent_pairs");
             environment["NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_PHASE5_PREFLIGHT_BRIDGE_BOOTSTRAP_FAIL"] = "1";
             environment["NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_PHASE5_PREFLIGHT_FAILURE_REASON"] =
                 "nkn_bridge_bootstrap_network_unready: role=helpee; failure_markers=Helpee hosting failed before invite readiness";

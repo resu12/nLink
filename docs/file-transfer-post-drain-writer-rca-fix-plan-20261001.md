@@ -21,7 +21,7 @@ The run is `20261001T094106Z`, scenario
 `regular-v4-live-activation-off-on-off-256mb`. It used the rebuilt portable
 package from the investigated HEAD, a clean worktree, strict preflights and one
 attempt without retry. All 59 pins in the
-[post-run review](<C:/Users/Juraj/Desktop/Remote help/artifacts/live-checkpoint-7f0bc969-20261001/20261001T094106Z/post-run-review.json>)
+[post-run review](<../artifacts/live-checkpoint-7f0bc969-20261001/20261001T094106Z/post-run-review.json>)
 were reverified without drift.
 
 Both receiver holds were prepared, captured and drained by accepted coordinator
@@ -32,7 +32,7 @@ warnings. The GUI reports both transfers completed and a 268,435,456-byte
 received file with matching SHA-256. These positive findings do not override
 the failed writer-integrity gate.
 
-The [sender failure marker](<C:/Users/Juraj/Desktop/Remote help/artifacts/live-checkpoint-7f0bc969-20261001/20261001T094106Z/regular-v4-live-activation-off-on-off-256mb/filetransfer-gui-log-writer-output-snapshots/001-helpee-9208.stderr.log>)
+The [sender failure marker](<../artifacts/live-checkpoint-7f0bc969-20261001/20261001T094106Z/regular-v4-live-activation-off-on-off-256mb/filetransfer-gui-log-writer-output-snapshots/001-helpee-9208.stderr.log>)
 binds the failure to writer `p9208r1d1ff502e8fe451b`. Times below come from that
 writer's attempt ticks, not line ordering across the two processes.
 
@@ -53,18 +53,18 @@ this from a disk, mutex, queue-capacity or throughput failure.
 
 ## Why acceptance fails
 
-[LocalOperationalLog.Write](<C:/Users/Juraj/Desktop/Remote help/src/nLink.Core/Logging/LocalOperationalLog.cs:55>)
+[LocalOperationalLog.Write](<../src/nLink.Core/Logging/LocalOperationalLog.cs#L55>)
 still creates an exact batch for a late write. If a frontier writer is bound,
 it also cancels that handoff and revokes the writer registration. The
-[write pump](<C:/Users/Juraj/Desktop/Remote help/src/nLink.Core/Logging/OrderedOperationalLogWritePump.cs:154>)
+[write pump](<../src/nLink.Core/Logging/OrderedOperationalLogWritePump.cs#L154>)
 rejects a non-drain batch once completion has been requested and emits the
 failure marker to stderr. It must not reopen the final evidence stream.
 
-The [GUI ledger validator](<C:/Users/Juraj/Desktop/Remote help/tools/GuiSmoke-Windows.ps1:4606>)
+The [GUI ledger validator](<../tools/GuiSmoke-Windows.ps1#L4606>)
 therefore records `operational_log_write_failure_observed`. The
-[direct manifest](<C:/Users/Juraj/Desktop/Remote help/tools/Run-FileTransferTunaGuiSmoke.ps1:2472>)
+[direct manifest](<../tools/Run-FileTransferTunaGuiSmoke.ps1#L2472>)
 requires passing cursor and writer integrity, so `currentRuntimeProof=false`.
-The [route-acceptance wrapper](<C:/Users/Juraj/Desktop/Remote help/tools/Run-FileTransferRouteAcceptance.ps1:9471>)
+The [route-acceptance wrapper](<../tools/Run-FileTransferRouteAcceptance.ps1#L9471>)
 then rejects selection of this attempt. The campaign's
 `filetransfer_route_acceptance_finalized_attempt_selection_missing` is the
 downstream result, not the first defect to fix.
@@ -77,20 +77,20 @@ originating cause; do not replace the proven writer failure with that symptom.
 
 ## Shutdown gap and attribution limit
 
-[Program.Main](<C:/Users/Juraj/Desktop/Remote help/src/nLink.App/Program.cs:22>)
+[Program.Main](<../src/nLink.App/Program.cs#L22>)
 performs the final drain after desktop shutdown. The desktop exit handler
 disposes the main view model, which disposes the session runtime. The
-[frontier lifetime](<C:/Users/Juraj/Desktop/Remote help/src/nLink.Core/FileTransfer/SessionFileTransferService.FrontierAppLifetime.cs:93>)
+[frontier lifetime](<../src/nLink.Core/FileTransfer/SessionFileTransferService.FrontierAppLifetime.cs#L93>)
 waits on its producer registry before draining, but that
-[registry](<C:/Users/Juraj/Desktop/Remote help/src/nLink.Core/FileTransfer/SessionFileTransferService.FrontierProducerRegistry.cs:28>)
+[registry](<../src/nLink.Core/FileTransfer/SessionFileTransferService.FrontierProducerRegistry.cs#L28>)
 tracks coordinator snapshot emitters, not every app logging task.
 
 There are plausible paths outside that barrier. In particular,
-[SessionRuntime.RunCountedBackgroundTask](<C:/Users/Juraj/Desktop/Remote help/src/nLink.App/Services/SessionRuntime.cs:674>)
+[SessionRuntime.RunCountedBackgroundTask](<../src/nLink.App/Services/SessionRuntime.cs#L674>)
 discards the returned task; its counters are not completion joins.
-[BackgroundTaskRunner](<C:/Users/Juraj/Desktop/Remote help/src/nLink.App/Services/BackgroundTaskRunner.cs:33>)
+[BackgroundTaskRunner](<../src/nLink.App/Services/BackgroundTaskRunner.cs#L33>)
 can log failure or finalizer errors after its body completes.
-[RunBoundedCleanup](<C:/Users/Juraj/Desktop/Remote help/src/nLink.App/Services/SessionRuntime.RemoteControlHost.cs:1859>)
+[RunBoundedCleanup](<../src/nLink.App/Services/SessionRuntime.RemoteControlHost.cs#L1859>)
 can also return on timeout while its cleanup task continues. No retained
 `dispose_timeout` establishes that the latter path caused this run's failure.
 These are inspection findings, not identification of sequence 68763.
@@ -142,14 +142,14 @@ owners while investigating this edge.
 
 ## Verification performed for this RCA
 
-The read-only [inspection script](<C:/Users/Juraj/Desktop/Remote help/artifacts/post-drain-writer-rca-20261001/Inspect-PostDrain.ps1>)
-and [result](<C:/Users/Juraj/Desktop/Remote help/artifacts/post-drain-writer-rca-20261001/inspection.json>)
+The read-only [inspection script](<../artifacts/post-drain-writer-rca-20261001/Inspect-PostDrain.ps1>)
+and [result](<../artifacts/post-drain-writer-rca-20261001/inspection.json>)
 retain the marker, exact time calculation, candidate-search limit and source
 pins. The existing
 `OrderedOperationalLogExactBatchReceiptTests.SubmissionAfterWriterCompletionHasAnExactFailedReceipt`
 test passed: one test, zero failures. It confirms intentional rejection and
 non-persistence after drain, not the identity of the live producer. Its
-[TRX](<C:/Users/Juraj/Desktop/Remote help/artifacts/post-drain-writer-rca-20261001/control/writer-completed-control.trx>)
+[TRX](<../artifacts/post-drain-writer-rca-20261001/control/writer-completed-control.trx>)
 is retained. The initial RCA was read-only; the subsequent diagnostic
 implementation is recorded below.
 
@@ -173,15 +173,15 @@ callback or runtime authority.
 
 Verification on October 1, 2026:
 
-- The [red run](<C:/Users/Juraj/Desktop/Remote help/artifacts/post-drain-diagnostics-20261001/red/red.trx>)
+- The [red run](<../artifacts/post-drain-diagnostics-20261001/red/red.trx>)
   had 23 expected failures for absent diagnostics and one unchanged-marker
   control pass before the formatter change.
-- The [focused run](<C:/Users/Juraj/Desktop/Remote help/artifacts/post-drain-diagnostics-20261001/focused/focused.trx>)
+- The [focused run](<../artifacts/post-drain-diagnostics-20261001/focused/focused.trx>)
   passed all 25 checks. These cover identity preservation, bounded extraction,
   malformed and multiline input, redaction, failed persistence and the GUI
   evidence reader. The reader retains the enriched marker exactly and still
   reports `operational_log_write_failure_observed`, without duplicate fields.
-- The [guard run](<C:/Users/Juraj/Desktop/Remote help/artifacts/post-drain-diagnostics-20261001/guards/guards.trx>)
+- The [guard run](<../artifacts/post-drain-diagnostics-20261001/guards/guards.trx>)
   passed all five checks: valid and malformed rejected batches remain failed
   and unpersisted; the legacy marker stays unchanged; and a write after a
   completed native handoff still invalidates proof in both PowerShell hosts.

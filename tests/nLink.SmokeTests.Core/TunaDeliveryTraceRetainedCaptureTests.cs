@@ -8,6 +8,7 @@ using NLink.Infra.Nkn;
 namespace NLink.SmokeTests;
 
 [Collection(FakeNknNetworkCollection.Name)]
+[Trait("Area", "Core")]
 public sealed class TunaDeliveryTraceRetainedCaptureTests : FileTransferOpsScriptsTestBase
 {
     [Fact]

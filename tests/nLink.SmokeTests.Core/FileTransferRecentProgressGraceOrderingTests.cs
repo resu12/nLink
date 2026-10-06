@@ -2,6 +2,7 @@ using System.Text;
 
 namespace NLink.SmokeTests;
 
+[Trait("Area", "Core")]
 public sealed class FileTransferRecentProgressGraceOrderingTests : FileTransferOpsScriptsTestBase
 {
     [Theory]

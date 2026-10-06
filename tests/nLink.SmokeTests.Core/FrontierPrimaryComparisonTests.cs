@@ -1,5 +1,6 @@
 namespace NLink.SmokeTests;
 
+[Trait("Area", "Core")]
 public sealed class FrontierPrimaryComparisonTests : FileTransferOpsScriptsTestBase
 {
     [Theory]

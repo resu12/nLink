@@ -3,6 +3,7 @@ using NLink.Infra.Nkn;
 
 namespace NLink.SmokeTests;
 
+[Trait("Area", "Core")]
 public sealed partial class FileTransferRouteTransitionInfraTests
 {
     [Theory]

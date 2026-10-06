@@ -906,7 +906,7 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
             .GetMethod(outbound ? "EnsureOutboundTransferLegLocked" : "EnsureInboundTransferLegLocked",
                 BindingFlags.Instance | BindingFlags.NonPublic)!
             .Invoke(service, outbound
-                ? [context, "unit_test_initial_publication_terminal", null, null]
+                ? [context, "unit_test_initial_publication_terminal", null, null, null, false]
                 : [context, "unit_test_initial_publication_terminal", null]));
         var publish = typeof(SessionFileTransferService)
             .GetMethods(BindingFlags.Instance | BindingFlags.NonPublic)
@@ -1153,7 +1153,7 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
         StartCoordinatorSnapshotStreamForTest(context);
         Assert.NotNull(typeof(SessionFileTransferService)
             .GetMethod("EnsureOutboundTransferLegLocked", BindingFlags.Instance | BindingFlags.NonPublic)!
-            .Invoke(service, [context, "unit_test_obsolete_repair_start", null, null]));
+            .Invoke(service, [context, "unit_test_obsolete_repair_start", null, null, null, false]));
         var publishRoute = typeof(SessionFileTransferService)
             .GetMethods(BindingFlags.Instance | BindingFlags.NonPublic)
             .Single(method => method.Name == "TryPublishRouteSelectedIfAuthorizedLocked" &&
@@ -17484,6 +17484,9 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
             remoteGrantedUntilExclusive: 11652,
             chunkCount: 16384);
         serviceType
+            .GetField("outboundTransfer", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .SetValue(service, context);
+        serviceType
             .GetMethod("StartOutboundPostTunaRecoveryLocked", BindingFlags.Instance | BindingFlags.NonPublic)!
             .Invoke(service, [context, "test_tail_retired_owner_repair_enqueue"]);
 
@@ -18483,6 +18486,18 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
         originalLeg.TransportEpochId = 1;
         originalLeg.BridgeRecoveryGeneration = 1;
 
+        if (inbound)
+        {
+            // This restart fixture begins quiescent; current-gap blocking has separate coverage.
+            var committed = GetPrivateProperty<int>(context, "NextChunkIndex");
+            var written = new System.Collections.BitArray(GetPrivateProperty<int>(context, "ChunkCount"));
+            for (var index = 0; index < committed; index++) written[index] = true;
+            SetPrivateProperty(context, "ReceiverSparseChunksWritten", written);
+            SetPrivateProperty(context, "PullHighestReceivedChunkIndex", committed - 1);
+            originalLeg.ProvenCommittedChunkIndex = committed;
+            originalLeg.ProvenHighestObservedChunkIndex = committed - 1;
+        }
+
         object?[] authorizeArgs =
         [
             context,
@@ -18777,6 +18792,32 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
                 staged,
                 out var currentnessReason),
             $"{currentnessReason}; staged={staged}; state={coordinatorState}");
+
+        if (inbound && !dataSessionInitiallyAvailable)
+        {
+            // Availability dispatches a real repair obligation; model its matching chunk commit.
+            var repair = GetPrivatePropertyValue(context, "CurrentFallbackFrontierRepairContract");
+            Assert.NotNull(repair);
+            var lifecycle = GetPrivatePropertyValue(repair, "Lifecycle")!;
+            Assert.True(GetPrivateProperty<bool>(lifecycle, "DispatchObserved"));
+            Assert.False(GetPrivateProperty<bool>(lifecycle, "IsSettled"));
+            var repairAuthority = GetPrivateProperty<FallbackFrontierRepairAuthority>(repair, "Authority");
+            var frontier = GetPrivateProperty<int>(context, "NextChunkIndex");
+            Assert.Equal(frontier, repairAuthority.FrontierChunkIndex);
+            var written = GetPrivateProperty<System.Collections.BitArray>(context, "ReceiverSparseChunksWritten");
+            written[frontier] = true;
+            SetPrivateProperty(context, "NextChunkIndex", frontier + 1);
+            SetPrivateProperty(context, "PullHighestReceivedChunkIndex", frontier);
+            currentLeg.ProvenCommittedChunkIndex = frontier + 1;
+            currentLeg.ProvenHighestObservedChunkIndex = frontier;
+            Assert.NotNull(serviceType.GetMethod(
+                "TrySettleInboundFallbackFrontierProgressLocked", BindingFlags.Static | BindingFlags.NonPublic)!
+                .Invoke(null, [context, repair, repairAuthority.ProtocolRepairRequestId,
+                    repairAuthority.TransportEpoch, FileTransferTransportKind.RegularNkn,
+                    frontier, frontier + 1, "unit_test_peer_epoch_repair_committed"]));
+            Assert.Equal("ProgressObserved", GetPrivatePropertyValue(lifecycle, "SettlementOutcome")?.ToString());
+            Assert.Same(repair, GetPrivatePropertyValue(context, "CurrentFallbackFrontierRepairContract"));
+        }
 
         currentLeg.State = FileTransferLegState.RecoveryActive;
         currentLeg.CanSendData = true;
@@ -20702,6 +20743,7 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
             RecoveryMode = "fallback_tail_yield",
         };
 
+        var stateBeforeProof = CreateCoordinatorStateForTest(context);
         var logStart = GetOperationalLogLength();
         serviceType
             .GetMethod("ApplyOutboundFallbackTailYieldProof", BindingFlags.Instance | BindingFlags.NonPublic)!
@@ -20710,7 +20752,22 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
         var log = ReadOperationalLogTail(logStart);
         Assert.False(GetPrivateProperty<bool>(context, "PeerFallbackTailYieldGranted"));
         Assert.False(GetPrivateProperty<bool>(context, "LocalFallbackTailYieldGranted"));
-        Assert.Null(GetCoordinatorFallbackTailYieldSubstate(context).CurrentOperation);
+        var substate = GetCoordinatorFallbackTailYieldSubstate(context);
+        Assert.Null(substate.CurrentOperation);
+        Assert.Null(substate.PendingPeerProofBeforeLocalYield);
+        Assert.Null(substate.PendingRetryRecheckRequest);
+        Assert.Null(substate.CurrentReservation);
+        var pending = Assert.IsType<FileTransferFallbackTailPeerProofReceipt>(substate.PendingPeerProofAwaitingCheckpoint);
+        Assert.False(pending.IsDefault);
+        Assert.Equal(FileTransferCoordinator.CreateFallbackTailPeerProofReceipt(
+            stateBeforeProof, pending.Proof, pending.ObservationIdentity, pending.ObservedUtcMs), pending);
+        Assert.Equal(currentCheckpointId, pending.ObservationScope.CheckpointRequestIdSnapshot);
+        Assert.Equal(peerYield.AuthorityId, pending.Proof.AuthorityId.ToString());
+        Assert.Equal(SessionFileTransferService.CreateFallbackTailYieldFrameFingerprint(peerYield), pending.Proof.FrameFingerprint);
+        var stateAfterProof = CreateCoordinatorStateForTest(context);
+        Assert.Equal(stateBeforeProof.CurrentFallbackCheckpointLease, stateAfterProof.CurrentFallbackCheckpointLease);
+        Assert.Equal(stateBeforeProof.CurrentRuntimeOwner, stateAfterProof.CurrentRuntimeOwner);
+        Assert.Equal(stateBeforeProof.CurrentRoutePublicationToken, stateAfterProof.CurrentRoutePublicationToken);
         var currentLeg = GetCurrentContextLeg(context);
         Assert.False(currentLeg.CanSendData);
         Assert.Equal(FileTransferLegState.CheckpointPending, currentLeg.State);
@@ -20720,15 +20777,19 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
             "event=filetransfer_fallback_tail_peer_proof_receipt_decided;",
             log,
             StringComparison.Ordinal);
-        Assert.Contains("decision_status=Rejected;", log, StringComparison.Ordinal);
+        Assert.Contains("decision_status=Accepted;", log, StringComparison.Ordinal);
         Assert.Contains(
-            "reason=fallback_tail_peer_proof_scope_mismatch",
+            "reason=fallback_tail_checkpoint_pending_peer_proof_retained",
             log,
             StringComparison.Ordinal);
-        Assert.DoesNotContain(
-            "event=filetransfer_fallback_tail_yield_proof_received; direction=outbound;",
-            log,
-            StringComparison.Ordinal);
+        var transferLogRows = log.Split('\n').Where(row =>
+            row.Contains($"; transfer_id={transferId};", StringComparison.Ordinal)).ToArray();
+        var receivedRow = Assert.Single(transferLogRows, row =>
+            row.Contains("event=filetransfer_fallback_tail_yield_proof_received;", StringComparison.Ordinal));
+        Assert.Contains($"; checkpoint_request_id={currentCheckpointId};", receivedRow, StringComparison.Ordinal);
+        Assert.Contains("; peer_checkpoint_request_id=(none);", receivedRow, StringComparison.Ordinal);
+        Assert.DoesNotContain(transferLogRows, row => row.Contains("event=filetransfer_fallback_tail_quiescent_yield_granted;", StringComparison.Ordinal));
+        Assert.DoesNotContain(transferLogRows, row => row.Contains("event=filetransfer_fallback_tail_paired_yield_granted;", StringComparison.Ordinal));
     }
 
     [Fact]

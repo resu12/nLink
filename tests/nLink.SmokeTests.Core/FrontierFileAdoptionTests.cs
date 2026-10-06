@@ -8,6 +8,7 @@ using Manifest = NLink.Tools.LocalFrontierFileManifest;
 
 namespace NLink.SmokeTests;
 
+[Trait("Area", "Core")]
 public sealed partial class FrontierFileAdoptionTests : FileTransferOpsScriptsTestBase
 {
     [Fact]

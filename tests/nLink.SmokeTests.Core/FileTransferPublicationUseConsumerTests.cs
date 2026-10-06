@@ -7,6 +7,7 @@ using NLink.Core.Logging;
 namespace NLink.SmokeTests;
 
 [Collection(FakeNknNetworkCollection.Name)]
+[Trait("Area", "Core")]
 public sealed partial class FileTransferPublicationUseConsumerTests : FileTransferOpsScriptsTestBase
 {
     [Fact]

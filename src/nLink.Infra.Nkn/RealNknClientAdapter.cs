@@ -238,6 +238,7 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
         BridgeSubmissionAfterGateAcquiredForTests { get; set; }
     internal Action<FileTransferBridgeRecoveryExecutionCommand>?
         FileTransferBridgeRecoveryBeforeTerminalCommitForTests { get; set; }
+    internal Action? BridgePingTimeoutAfterInactiveTransferCheckForTests { get; set; }
     private long fileTransferBridgeRecoveryEvaluationGeneration;
     private long activeFileTransferRecoveryTombstoneExpiresTick;
     private readonly object fileTransferBulkPolicyGate = new();
@@ -7188,40 +7189,12 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
                         continue;
                     }
 
-                    if (GetActiveFileTransferSessionCountForPingRecovery() > 0)
-                    {
-                        EmitFileTransferBridgeRecoveryEvaluation(
-                            FileTransferBridgeRecoveryEvaluationKind.PingTimeout,
-                            "ping_timeout",
-                            "bridge_ping_timeout",
-                            consecutiveMisses,
-                            Volatile.Read(ref lastBridgeTransportHealthFramesSentSinceLast),
-                            Volatile.Read(ref lastBridgeTransportHealthMessagesReceivedSinceLast),
-                            Volatile.Read(ref lastBridgeTransportHealthControlLastReceivedAgeMs),
-                            Volatile.Read(ref lastBridgeTransportHealthBulkLastReceivedAgeMs));
-                        Log(
-                            "event=nkn_bridge_ping_timeout_filetransfer_restart_suppressed; " +
-                            "reason=coordinator_evaluation_requested");
-                        consecutiveMisses = 0;
-                        continue;
-                    }
-
-                    if (TrySuppressBridgePingTimeoutForActiveFileTransfer())
+                    if (await HandleBridgePingTimeoutAsync(consecutiveMisses).ConfigureAwait(false))
                     {
                         consecutiveMisses = 0;
                         continue;
                     }
 
-                    NknRuntimeDiagnostics.SetLastError("bridge_ping_timeout");
-                    RecordBridgeFailure("bridge_ping_timeout", "The local helper process stopped responding.");
-                    if (await TryRecoverBridgePingTimeoutForActiveFileTransferAsync().ConfigureAwait(false))
-                    {
-                        consecutiveMisses = 0;
-                        continue;
-                    }
-
-                    await RestartBridgeProcessAsync().ConfigureAwait(false);
-                    SignalDisconnected("bridge_ping_timeout");
                     return;
                 }
             }
@@ -7230,6 +7203,43 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
         {
             // normal shutdown
         }
+    }
+
+    private async Task<bool> HandleBridgePingTimeoutAsync(int consecutiveMisses)
+    {
+        if (GetActiveFileTransferSessionCountForPingRecovery() > 0)
+        {
+            EmitFileTransferBridgeRecoveryEvaluation(
+                FileTransferBridgeRecoveryEvaluationKind.PingTimeout,
+                "ping_timeout",
+                "bridge_ping_timeout",
+                consecutiveMisses,
+                Volatile.Read(ref lastBridgeTransportHealthFramesSentSinceLast),
+                Volatile.Read(ref lastBridgeTransportHealthMessagesReceivedSinceLast),
+                Volatile.Read(ref lastBridgeTransportHealthControlLastReceivedAgeMs),
+                Volatile.Read(ref lastBridgeTransportHealthBulkLastReceivedAgeMs));
+            Log(
+                "event=nkn_bridge_ping_timeout_filetransfer_restart_suppressed; " +
+                "reason=coordinator_evaluation_requested");
+            return true;
+        }
+
+        BridgePingTimeoutAfterInactiveTransferCheckForTests?.Invoke();
+        if (TrySuppressBridgePingTimeoutForActiveFileTransfer())
+        {
+            return true;
+        }
+
+        if (await TryRecoverBridgePingTimeoutForActiveFileTransferAsync().ConfigureAwait(false))
+        {
+            return true;
+        }
+
+        NknRuntimeDiagnostics.SetLastError("bridge_ping_timeout");
+        RecordBridgeFailure("bridge_ping_timeout", "The local helper process stopped responding.");
+        await RestartBridgeProcessAsync().ConfigureAwait(false);
+        SignalDisconnected("bridge_ping_timeout");
+        return false;
     }
 
     internal Task<bool> RecoverBridgePingTimeoutForActiveFileTransferForTestsAsync() =>
@@ -7288,56 +7298,12 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
             return false;
         }
 
-        var recentActivityWindowMs = Math.Max(5000, (int)ScreenShareBridgeLogInterval.TotalMilliseconds * 3);
-        var summaryTick = Volatile.Read(ref lastBridgeTransportHealthSummaryTick);
-        var summaryAgeMs = ElapsedSinceTicksMilliseconds(summaryTick);
-        var disconnectSignalCount = Volatile.Read(ref lastBridgeTransportHealthDisconnectSignalCount);
-        if (summaryAgeMs is not null &&
-            summaryAgeMs.Value <= recentActivityWindowMs &&
-            disconnectSignalCount <= 0)
-        {
-            var framesSentSinceLast = Volatile.Read(ref lastBridgeTransportHealthFramesSentSinceLast);
-            var messagesReceivedSinceLast = Volatile.Read(ref lastBridgeTransportHealthMessagesReceivedSinceLast);
-            var controlLastReceivedAgeMs = Volatile.Read(ref lastBridgeTransportHealthControlLastReceivedAgeMs);
-            var bulkLastReceivedAgeMs = Volatile.Read(ref lastBridgeTransportHealthBulkLastReceivedAgeMs);
-            Log(
-                "event=nkn_bridge_ping_timeout_filetransfer_recovery_suppressed; " +
-                "reason=recent_bridge_health_summary; " +
-                $"active_file_transfer_sessions={activeFileTransferSessionCount}; " +
-                $"health_summary_age_ms={(long)summaryAgeMs.Value}; frames_sent_since_last={framesSentSinceLast}; " +
-                $"messages_received_since_last={messagesReceivedSinceLast}; control_last_received_age_ms={controlLastReceivedAgeMs}; " +
-                $"bulk_last_received_age_ms={bulkLastReceivedAgeMs}");
-            return true;
-        }
-
-        var sendTick = Volatile.Read(ref lastBridgeSendFrameTick);
-        var sendAgeMs = ElapsedSinceTicksMilliseconds(sendTick);
-        if (sendAgeMs is not null &&
-            sendAgeMs.Value <= recentActivityWindowMs)
-        {
-            var channel = (NknBridgeChannel)Volatile.Read(ref lastBridgeSendFrameChannel);
-            var payloadBytes = Volatile.Read(ref lastBridgeSendFramePayloadBytes);
-            var serializedBytes = Volatile.Read(ref lastBridgeSendFrameSerializedBytes);
-            Log(
-                "event=nkn_bridge_ping_timeout_filetransfer_recovery_suppressed; " +
-                "reason=recent_bridge_send; " +
-                $"active_file_transfer_sessions={activeFileTransferSessionCount}; " +
-                $"send_age_ms={(long)sendAgeMs.Value}; send_channel={channel}; payload_bytes={payloadBytes}; serialized_bytes={serializedBytes}; " +
-                $"health_summary_age_ms={(summaryAgeMs is null ? -1 : (long)summaryAgeMs.Value)}; disconnect_signal_count={disconnectSignalCount}");
-            return true;
-        }
-
-        if (disconnectSignalCount > 0)
-        {
-            return false;
-        }
-
+        // Activity observations cannot grant recovery suppression. The caller must
+        // request coordinator evaluation even if a transfer started after its first check.
         Log(
-            "event=nkn_bridge_ping_timeout_filetransfer_recovery_not_suppressed; " +
-            "reason=stale_bridge_health_and_send; " +
-            $"active_file_transfer_sessions={activeFileTransferSessionCount}; " +
-            $"send_age_ms={(sendAgeMs is null ? -1 : (long)sendAgeMs.Value)}; " +
-            $"health_summary_age_ms={(summaryAgeMs is null ? -1 : (long)summaryAgeMs.Value)}; disconnect_signal_count={disconnectSignalCount}");
+            "event=nkn_bridge_ping_timeout_filetransfer_recovery_suppression_diagnostic_only; " +
+            "reason=bridge_recovery_authority_missing; " +
+            $"active_file_transfer_sessions={activeFileTransferSessionCount}; authority_effect=none");
         return false;
     }
 

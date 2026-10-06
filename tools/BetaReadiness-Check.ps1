@@ -467,7 +467,8 @@ try {
             # LeakCheck already enforces growth intent with its own monotonic checkpoint gate
             # (--leak-growth-fail-percent). Disable generic baseline->last growth checks in ResourceGate
             # so this stage enforces cleanup/absolute ceilings + the dedicated monotonic leak gate.
-            dotnet run -c Release --no-build --project .\src\nLink.App -- --leak-check --cycles $LeakCheckCycles --transport devlocal --bridge-reuse-mode persession --delay-ms 0 --fail-on-gate --leak-growth-fail-percent 20 --resource-disable-growth-checks
+            # Reused peers must remain within the unchanged 12-validations/10-second security window.
+            dotnet run -c Release --no-build --project .\src\nLink.App -- --leak-check --cycles $LeakCheckCycles --transport devlocal --bridge-reuse-mode persession --delay-ms 1000 --fail-on-gate --leak-growth-fail-percent 20 --resource-disable-growth-checks
             if ($LASTEXITCODE -ne 0) { throw "leak check failed (exit $LASTEXITCODE)" }
         }
         $resourcesDir = Join-Path $repoRoot "artifacts\resources"

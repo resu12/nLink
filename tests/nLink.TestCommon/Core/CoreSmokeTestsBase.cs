@@ -450,7 +450,7 @@ function startSpam() {
   let n = 0;
   spamTimer = setInterval(() => {
     for (let i = 0; i < 50; i++) {
-      process.stderr.write('spam-line-' + (n++) + ' xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\\n');
+      process.stderr.write('spam-line-' + (n++) + ' xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n');
     }
   }, 5);
 }
@@ -465,6 +465,11 @@ rl.on('line', (line) => {
   let msg;
   try { msg = JSON.parse(line); } catch { emit({ event:'error', id:null, cmd:null, reason:'Invalid JSON' }); return; }
   if (msg.cmd === 'hello') { emit({ event:'hello_ok', id: msg.id ?? null, protocol: 2, sdk: 'mock-sdk@1.0.0' }); startSpam(); return; }
+  if (msg.cmd === 'connect') {
+    emit({ event:'ok', id: msg.id ?? null, cmd:'connect' });
+    emit({ event:'ready', protocol:2, channels:['control','media','bulk'], address:'mock.stderr.addr', controlAddress:'mock.stderr.addr', mediaAddress:'mock.stderr-media.addr', bulkAddress:'mock.stderr-bulk.addr', connectId: msg.connectId ?? null });
+    return;
+  }
   if ((msg.type === 'ping') || (msg.cmd === 'ping')) { emit({ type:'pong', id: msg.id ?? null, ts: Date.now() }); return; }
   if (msg.cmd === 'shutdown') {
     emit({ event:'ok', id: msg.id ?? null, cmd: 'shutdown' });

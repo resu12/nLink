@@ -1,6 +1,7 @@
 param([string]$RepoRoot,[string]$Directory,[string]$Mode)
 $ErrorActionPreference='Stop'
 Set-StrictMode -Version Latest
+. (Join-Path $RepoRoot 'tools/FileTransferRouteAcceptanceEvidence.ps1')
 $tokens=$null; $errors=$null
 $ast=[Management.Automation.Language.Parser]::ParseFile((Join-Path $RepoRoot 'tools/Run-FileTransferRouteAcceptance.ps1'),[ref]$tokens,[ref]$errors)
 if($errors.Count) {throw 'parent script parse failed'}
@@ -23,6 +24,7 @@ $route=[ordered]@{
     coordinator_snapshot_mode=$full.Mode;coordinator_snapshot_contract_version=1
     coordinator_snapshot_catalog_hash=$catalog;coordinator_snapshot_boundary_hash=$hash
     coordinator_snapshot_boundary_count=36;coordinator_snapshot_transition_count=36;coordinator_snapshot_effect_count=36
+    coordinator_snapshot_stream_complete='true';coordinator_snapshot_artifact_evidence_verdict='pass'
     coordinator_snapshot_route_consistency_full_compact_parity_verdict='pass'
 }
 $expectedVerdict='invalid'
@@ -68,7 +70,60 @@ switch($Mode) {
     'array-parity' {$expectedReason='snapshot_parity_artifact_invalid'}
     'array-full' {$expectedReason='snapshot_parity_artifact_invalid'}
     'array-compact' {$expectedReason='snapshot_parity_artifact_invalid'}
-    default {throw 'unknown mode'}
+    default {
+        if(-not $Mode.StartsWith('cycle-', [StringComparison]::Ordinal)) {throw 'unknown mode'}
+        $expectedVerdict='pass';$expectedReason=''
+    }
+}
+$expectedRoutes=@('regular_nkn_v4_fast')
+if($Mode -in @('cycle-interleaved','cycle-wrong-protocol','cycle-forbidden-tuna-v6','cycle-forbidden-regular-v6')) {
+    $expectedRoutes=@('regular_nkn_v4_fast','file_tuna_v4','post_tuna_fallback_v6','file_tuna_v4','post_tuna_fallback_v6')
+    $publications=@(0,1,2,0,1,2,3,3,4,4)
+    $route.route_selected_count=$publications.Count
+    for($i=0;$i -lt $publications.Count;$i++) {
+        $token=$expectedRoutes[$publications[$i]]
+        $metadata=Get-RouteAcceptanceRouteMetadata -Route $token
+        $route["selected.$($i+1).route"]=$token
+        $route["selected.$($i+1).protocol_version"]=$metadata.Protocol
+        $route["selected.$($i+1).runtime_profile"]=$metadata.Runtime
+        $route["selected.$($i+1).bridge_recovery_policy"]=$metadata.Bridge
+    }
+    if($Mode -ceq 'cycle-wrong-protocol') {$route['selected.2.protocol_version']=6}
+    if($Mode -in @('cycle-forbidden-tuna-v6','cycle-forbidden-regular-v6')) {
+        $token=if($Mode -ceq 'cycle-forbidden-tuna-v6') {'file_tuna_v6'} else {'diagnostic_regular_nkn_v6'}
+        $metadata=Get-RouteAcceptanceRouteMetadata -Route $token
+        $route['selected.2.route']=$token
+        $route['selected.2.protocol_version']=$metadata.Protocol
+        $route['selected.2.runtime_profile']=$metadata.Runtime
+        $route['selected.2.bridge_recovery_policy']=$metadata.Bridge
+    }
+}
+$normalized=[ordered]@{source='SnapshotAuthorityV1';verdict='pass';selectedRouteChanges=$expectedRoutes}
+switch($Mode) {
+    'cycle-empty' {$normalized.selectedRouteChanges=@()}
+    'cycle-wrong-type' {$normalized.selectedRouteChanges=@(4)}
+    'cycle-peer-disagreement' {$route.route_consistency_verdict='fail';$normalized.verdict='fail'}
+    'cycle-incomplete' {$route.coordinator_snapshot_stream_complete='false'}
+    'cycle-artifact-fail' {$route.coordinator_snapshot_artifact_evidence_verdict='fail'}
+}
+$normalizedJson=$normalized | ConvertTo-Json -Depth 5 -Compress
+switch($Mode) {
+    'cycle-missing-normalized' {$normalizedJson=''}
+    'cycle-malformed' {$normalizedJson='{not-json'}
+    'cycle-array-root' {$normalizedJson='['+$normalizedJson+']'}
+}
+$route.selected_route_changes=$expectedRoutes -join ','
+foreach($side in @('','full_','compact_')) {
+    $route["coordinator_snapshot_route_consistency_${side}normalized_json"]=$normalizedJson
+    $route["coordinator_snapshot_route_consistency_${side}boundary_hash"]=Get-RouteAcceptanceEvidenceTextSha256 -Value $normalizedJson
+}
+switch($Mode) {
+    'cycle-conflicting-csv' {$route.selected_route_changes='file_tuna_v4'}
+    'cycle-wrong-hash' {$route.coordinator_snapshot_route_consistency_boundary_hash='f'*64}
+    'cycle-full-compact-conflict' {
+        $route.coordinator_snapshot_route_consistency_compact_normalized_json=$normalizedJson+' '
+        $route.coordinator_snapshot_route_consistency_compact_boundary_hash=Get-RouteAcceptanceEvidenceTextSha256 -Value ($normalizedJson+' ')
+    }
 }
 foreach($kind in @('full','compact','parity')) {
     if($Mode -ceq "missing-$kind") {continue}
@@ -81,7 +136,7 @@ foreach($kind in @('full','compact','parity')) {
 $original=@{}
 Get-ChildItem -LiteralPath $Directory -File | ForEach-Object { $original[$_.Name]=[Convert]::ToBase64String([IO.File]::ReadAllBytes($_.FullName)) }
 $result=New-RouteAcceptanceRunResult -Name 'regular-nkn-v4-64mb' -ArtifactDir $Directory -ExpectedRoute 'regular_nkn_v4_fast' -ExpectedProtocol 4
-Assert-Phase4RouteSummary -Result $result -ExpectedRouteChanges @('regular_nkn_v4_fast')
+Assert-Phase4RouteSummary -Result $result -ExpectedRouteChanges $expectedRoutes
 if($result.coordinatorSnapshotFullCompactParityVerdict -cne $expectedVerdict -or
     $result.coordinatorSnapshotFullCompactParityFailureReason -cne $expectedReason) {
     throw "projection mismatch: expected=$expectedVerdict/$expectedReason actual=$($result.coordinatorSnapshotFullCompactParityVerdict)/$($result.coordinatorSnapshotFullCompactParityFailureReason)"
@@ -90,8 +145,19 @@ if($expectedVerdict -in @('pass','fail')) {
     if($result.coordinatorSnapshotFullBoundaryHash -cne $parity.FullBoundaryHash -or
         $result.coordinatorSnapshotCompactBoundaryHash -cne $parity.CompactBoundaryHash) {throw 'original parity hashes not projected'}
 } elseif($result.coordinatorSnapshotFullBoundaryHash -cne '' -or $result.coordinatorSnapshotCompactBoundaryHash -cne '') {throw 'invalid projection retained hashes'}
-if($Mode -ceq 'route-failure' -and -not ($result.failures -contains 'route consistency verdict is fail')) {throw 'reporting erased route failure'}
-if($Mode -cne 'route-failure' -and $result.failures.Count -ne 0) {throw "reporting changed route acceptance: $($result.failures -join ',')"}
+if($Mode -in @('route-failure','cycle-peer-disagreement')) {
+    if(-not ($result.failures -contains 'route consistency verdict is fail')) {throw 'reporting erased route failure'}
+} elseif($Mode -ceq 'cycle-wrong-protocol') {
+    if(-not ($result.failures -contains 'route selected protocol mismatch: route=file_tuna_v4; expected 4; actual 6')) {throw 'publication protocol was not checked'}
+} elseif($Mode -in @('cycle-forbidden-tuna-v6','cycle-forbidden-regular-v6')) {
+    $message=if($Mode -ceq 'cycle-forbidden-tuna-v6') {'active file_tuna_v6 route is not allowed during acceptance'} else {'diagnostic_regular_nkn_v6 route is not allowed during acceptance'}
+    if(-not ($result.failures -contains $message)) {throw 'forbidden publication route was not checked'}
+} elseif(($expectedVerdict -cne 'pass' -or $Mode -ceq 'route-family-failure' -or
+    ($Mode.StartsWith('cycle-', [StringComparison]::Ordinal) -and $Mode -cne 'cycle-interleaved')) -and $Mode -cne 'legacy') {
+    if(-not ($result.failures -contains 'coordinator normalized route cycle evidence invalid')) {throw 'invalid logical cycle was not rejected'}
+} elseif($result.failures.Count -ne 0 -or ($result.selectedRouteSequence -join ',') -cne ($expectedRoutes -join ',')) {
+    throw "logical route comparison mismatch: $($result.failures -join ',')"
+}
 if($Mode -ceq 'legacy' -and $result.coordinatorSnapshotMode -cne 'LegacyV0') {throw 'parity upgraded legacy mode'}
 foreach($name in $original.Keys) {
     if([Convert]::ToBase64String([IO.File]::ReadAllBytes((Join-Path $Directory $name))) -cne $original[$name]) {throw 'original primary artifact mutated'}

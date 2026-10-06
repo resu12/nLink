@@ -9,7 +9,7 @@ an acceptance-rule cutover, historical reclassification, or another live run.
 
 Feasibility follow-up: the user approved the first bounded slice. It stopped
 before implementation at the missing validated cross-writer publication link;
-see the [no-go report](<C:/Users/Juraj/Desktop/Remote help/docs/file-transfer-stale-rejection-feasibility.md>).
+see the [no-go report](<file-transfer-stale-rejection-feasibility.md>).
 The complete classifier and acceptance changes remain unapproved.
 The separately approved paired-proof test slice subsequently demonstrated a
 candidate identity/receipt link through real Coordinator histories; the report
@@ -420,14 +420,14 @@ remain unchanged. Standalone reports: three consumed. Live campaign: 6/6 exhaust
 Preparing this proposal runs no tests/reports and changes no runtime or acceptance
 code. Unrelated frontier work and ArtifactWriters changes remain untouched.
 
-- [Current outer-ID fingerprint](<C:/Users/Juraj/Desktop/Remote help/src/nLink.Infra.Nkn/NknSignalingTransport.FileTransferTransportChannel.cs:2802>)
-- [Secure metadata allocated for send](<C:/Users/Juraj/Desktop/Remote help/src/nLink.Infra.Nkn/NknSignalingTransport.FileTransferTransportChannel.cs:5602>)
-- [Authenticated-data fields](<C:/Users/Juraj/Desktop/Remote help/src/nLink.Core/SessionSecurity/SessionSecureEnvelopeCodec.cs:248>)
-- [Receive decryption and replay boundary](<C:/Users/Juraj/Desktop/Remote help/src/nLink.Infra.Nkn/NknSignalingTransport.FileTransferTransportChannel.cs:5850>)
-- [Guard before file-transfer state tracking](<C:/Users/Juraj/Desktop/Remote help/src/nLink.Infra.Nkn/NknSignalingTransport.FileTransferTransportChannel.cs:4363>)
-- [Legacy-derived rejection disposition](<C:/Users/Juraj/Desktop/Remote help/tools/FileTransferSoak/DataPathRejectedIngressEvidence.ps1:726>)
-- [Unchanged missing-Tuna-receive result](<C:/Users/Juraj/Desktop/Remote help/tools/FileTransferSoak/DataPathRejectedIngressEvidence.ps1:951>)
-- [Existing validated publication collections](<C:/Users/Juraj/Desktop/Remote help/tools/FileTransferOps/CoordinatorSnapshotEvidence.ps1:14499>)
-- [Current eligibility-only handoff](<C:/Users/Juraj/Desktop/Remote help/tools/GuiSmoke-Windows.ps1:7244>)
-- [Existing effect identity and binding fields](<C:/Users/Juraj/Desktop/Remote help/src/nLink.Core/FileTransfer/SessionFileTransferService.CoordinatorSnapshots.cs:3192>)
-- [Historical full-capture receive](<C:/Users/Juraj/Desktop/Remote help/artifacts/filetransfer-route-acceptance/20260910T060311Z/regular-v4-live-activation-off-on-off-256mb/filetransfer-gui-log-ledger-slice.log:38278>)
+- [Current outer-ID fingerprint](<../src/nLink.Infra.Nkn/NknSignalingTransport.FileTransferTransportChannel.cs#L2802>)
+- [Secure metadata allocated for send](<../src/nLink.Infra.Nkn/NknSignalingTransport.FileTransferTransportChannel.cs#L5602>)
+- [Authenticated-data fields](<../src/nLink.Core/SessionSecurity/SessionSecureEnvelopeCodec.cs#L248>)
+- [Receive decryption and replay boundary](<../src/nLink.Infra.Nkn/NknSignalingTransport.FileTransferTransportChannel.cs#L5850>)
+- [Guard before file-transfer state tracking](<../src/nLink.Infra.Nkn/NknSignalingTransport.FileTransferTransportChannel.cs#L4363>)
+- [Legacy-derived rejection disposition](<../tools/FileTransferSoak/DataPathRejectedIngressEvidence.ps1#L726>)
+- [Unchanged missing-Tuna-receive result](<../tools/FileTransferSoak/DataPathRejectedIngressEvidence.ps1#L951>)
+- [Existing validated publication collections](<../tools/FileTransferOps/CoordinatorSnapshotEvidence.ps1#L14499>)
+- [Current eligibility-only handoff](<../tools/GuiSmoke-Windows.ps1#L7244>)
+- [Existing effect identity and binding fields](<../src/nLink.Core/FileTransfer/SessionFileTransferService.CoordinatorSnapshots.cs#L3192>)
+- [Historical full-capture receive](<../artifacts/filetransfer-route-acceptance/20260910T060311Z/regular-v4-live-activation-off-on-off-256mb/filetransfer-gui-log-ledger-slice.log#L38278>)

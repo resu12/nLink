@@ -2,6 +2,7 @@ using NLink.Core.Logging;
 
 namespace NLink.SmokeTests;
 
+[Trait("Area", "Core")]
 public sealed class SensitiveDataRedactorRepairOwnerTests
 {
     private const string Profile = "snapshot-authority-v1-receiver-barrier-v1-checkpoint-repair-continuity-v1-fallback-bootstrap-correlation-v1-fallback-bootstrap-initiation-v1-source-callback-v1-repair-owner-v1";

@@ -8,6 +8,8 @@ using NLink.Tests;
 namespace NLink.SmokeTests;
 
 [Collection(FakeNknNetworkCollection.Name)]
+[Trait("Area", "Core")]
+[Trait("RequiredConfiguration", "Debug")]
 public sealed class AttemptCanonicalTailProfileTests : IDisposable
 {
     private const BindingFlags Private = BindingFlags.Instance | BindingFlags.NonPublic;

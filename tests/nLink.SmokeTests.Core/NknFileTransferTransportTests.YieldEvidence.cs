@@ -68,16 +68,16 @@ public sealed partial class NknFileTransferTransportTests
             var session = sender.CurrentSessionSecurityState.SessionId!.Value.Value;
             using var data = await sender.OpenFileTransferDataSessionAsync(session, "security-transfer", ct);
             if (mode == "control-only") { SetPrivateField(sender, "remoteBulkEndpoint", null); }
-            var packets = new ConcurrentQueue<(NknBridgeChannel Lane, Envelope Envelope)>();
+            var packets = new ConcurrentQueue<(NknBridgeChannel Lane, Envelope Envelope, CancellationToken Token)>();
             var current = true;
-            client.BeforeSendCoreAsync = (_, bytes, lane, _) =>
+            client.BeforeSendCoreAsync = (_, bytes, lane, sendCt) =>
             {
                 if (!EnvelopeCodec.TryDeserialize(bytes, out var envelope) || envelope.Type != MsgType.FileTransferDataFrame)
                     return Task.CompletedTask;
-                packets.Enqueue((lane, envelope));
+                packets.Enqueue((lane, envelope, sendCt));
                 if (mode == "stale") { current = false; }
-                var queuedCopy = new System.Diagnostics.StackTrace().GetFrames().Any(stack =>
-                    stack.GetMethod()?.DeclaringType?.FullName?.Contains("ControlOutboundQueue", StringComparison.Ordinal) == true);
+                // Queued sends retain the caller token; direct copies have separate timeout tokens.
+                var queuedCopy = lane == NknBridgeChannel.Control && sendCt == ct;
                 if (mode == "all-failed" || mode == "queue-only" && !queuedCopy || mode == "bulk-only" && lane == NknBridgeChannel.Control)
                     throw new InvalidOperationException("test_copy_failure");
                 return Task.CompletedTask;
@@ -108,7 +108,13 @@ public sealed partial class NknFileTransferTransportTests
             if (mode is "bulk-only" or "both" or "retired") { Assert.True(result.BulkCopy); }
             if (mode is "bulk-only" or "queue-only" or "all-failed" or "preflight-rejected" or "cancelled") { Assert.False(result.ControlCopy); }
             if (mode is "queue-only" or "all-failed" or "preflight-rejected" or "cancelled") { Assert.False(result.PeerVisibleAny); }
-            if (mode == "queue-only") { Assert.True(result.ControlQueue); }
+            if (mode == "queue-only")
+            {
+                Assert.True(result.ControlQueue);
+                Assert.Single(packets, packet => packet.Lane == NknBridgeChannel.Control && packet.Token == ct);
+                Assert.Single(packets, packet => packet.Lane == NknBridgeChannel.Control && packet.Token != ct);
+                Assert.Single(packets, packet => packet.Lane == NknBridgeChannel.Bulk && packet.Token != ct);
+            }
             if (mode == "preflight-rejected") { Assert.False(result.AcceptedAny); Assert.Empty(packets); }
             var rows = ReadOperationalLogTail(start).Split('\n').Where(row =>
                 row.Contains("yield_evidence_role=send_copy;", StringComparison.Ordinal)).ToArray();

@@ -61,6 +61,7 @@ public sealed partial class SessionFileTransferV4SenderTests
     [InlineData("unpause")] [InlineData("still_paused")] [InlineData("user_pause")]
     [InlineData("repause_after_eof")] [InlineData("retire")] [InlineData("context_cancel")]
     [InlineData("dispose")] [InlineData("peer_retired")]
+    [Trait("RequiredConfiguration", "Debug")]
     public async Task CanonicalPrefixPausedSenderPipeCannotReleaseTailUntilStrictConsumption(string fault)
     {
         if (!OperatingSystem.IsWindows()) return;

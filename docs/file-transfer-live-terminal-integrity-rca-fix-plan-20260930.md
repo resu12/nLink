@@ -32,13 +32,13 @@ custody, route or acceptance proof.
 ## Evidence and freshness
 
 The reviewed run is
-[20260930T115636Z](<C:/Users/Juraj/Desktop/Remote help/artifacts/live-checkpoint-77df4ccb-20260930/20260930T115636Z>),
+[20260930T115636Z](<../artifacts/live-checkpoint-77df4ccb-20260930/20260930T115636Z>),
 scenario `regular-v4-live-activation-off-on-off-256mb`, one attempt.
 It used the freshly built portable from the reviewed clean HEAD with strict
 preflights, outside the restricted sandbox. Connectivity, isolation and
 provenance passed. The existing acceptance rules were not bypassed.
 
-[Post-run review](<C:/Users/Juraj/Desktop/Remote help/artifacts/live-checkpoint-77df4ccb-20260930/20260930T115636Z/post-run-review.json>)
+[Post-run review](<../artifacts/live-checkpoint-77df4ccb-20260930/20260930T115636Z/post-run-review.json>)
 pins 15 original artifacts. All 15 size/hash pairs were rechecked during this
 RCA and still match. The GUI harness and wrapper hashes also match the run's
 manifest. Build verification SHA-256 remains
@@ -48,7 +48,7 @@ manifest. Build verification SHA-256 remains
 
 The relevant sequence at the reviewed pre-fix HEAD was:
 
-- [Native destination creation](<C:/Users/Juraj/Desktop/Remote help/src/nLink.Core/SessionSecurity/FileTransferWriteHandle.Windows.cs:21>)
+- [Native destination creation](<../src/nLink.Core/SessionSecurity/FileTransferWriteHandle.Windows.cs#L21>)
   opens the destination with sharing disabled.
 - Finalization renames that same file and keeps a read-only duplicate, then
   closes the writer. Read-only rights do not remove the original sharing
@@ -56,8 +56,8 @@ The relevant sequence at the reviewed pre-fix HEAD was:
 - The native destination handoff can transfer that retained file into app/GUI
   custody. Ordinary download completion releases its remaining guard hold, but
   that does not release a hold already moved into native evidence custody.
-- [GUI terminal hashing](<C:/Users/Juraj/Desktop/Remote help/tools/GuiSmoke-Windows.ps1>)
-  calls [Get-FileSha256Hex](<C:/Users/Juraj/Desktop/Remote help/tools/GuiSmoke-Windows.ps1:2556>),
+- [GUI terminal hashing](<../tools/GuiSmoke-Windows.ps1>)
+  calls [Get-FileSha256Hex](<../tools/GuiSmoke-Windows.ps1#L2556>),
   which uses `File.OpenRead(path)`. Destination adoption is joined later in
   cleanup, after this check; the background adoption can already hold the file.
 - The exception occurs before terminal states, completion and integrity are
@@ -73,8 +73,8 @@ finalization code and the actual production PowerShell hash function:
 | Windows PowerShell 5.1.26100.9549 | IOException, Win32 error 32 | SHA matches |
 | PowerShell 7.6.6 | IOException, Win32 error 32 | SHA matches |
 
-[Diagnostic result](<C:/Users/Juraj/Desktop/Remote help/artifacts/terminal-integrity-rca-20260930/lock-probe-result.json>)
-and [reproduction script](<C:/Users/Juraj/Desktop/Remote help/artifacts/terminal-integrity-rca-20260930/Invoke-LockProbe.ps1>)
+[Diagnostic result](<../artifacts/terminal-integrity-rca-20260930/lock-probe-result.json>)
+and [reproduction script](<../artifacts/terminal-integrity-rca-20260930/Invoke-LockProbe.ps1>)
 record four expected outcomes on a new 60-byte local file. This exercised the
 primitive boundary, not a full authenticated app/GUI handoff or a live transfer.
 That initial RCA reproduction did not run an automated regression suite.
@@ -87,7 +87,7 @@ the real terminal hashing consumer, not merely each component separately.
 ### First missing route proof edge
 
 Times below are UTC; line numbers refer to
-[the retained log](<C:/Users/Juraj/Desktop/Remote help/artifacts/live-checkpoint-77df4ccb-20260930/20260930T115636Z/regular-v4-live-activation-off-on-off-256mb/filetransfer-retained-log-slice.log>).
+[the retained log](<../artifacts/live-checkpoint-77df4ccb-20260930/20260930T115636Z/regular-v4-live-activation-off-on-off-256mb/filetransfer-retained-log-slice.log>).
 
 | Time | Retained lines | Observed event |
 | --- | --- | --- |
@@ -126,10 +126,10 @@ be interpreted as proof of payload corruption.
 The direct evidence manifest has `artifactFinalized=true`, passing cursor/
 writer checks and a completed valid retained-analysis receipt, but
 `currentRuntimeProof=false`. In
-[Write-TunaGuiDirectEvidenceManifest](<C:/Users/Juraj/Desktop/Remote help/tools/Run-FileTransferTunaGuiSmoke.ps1:2472>),
+[Write-TunaGuiDirectEvidenceManifest](<../tools/Run-FileTransferTunaGuiSmoke.ps1#L2472>),
 a zero GUI exit and a completed/integrity-valid summary are mandatory.
 This run has GUI exit 1 and an invalid success summary. Therefore the
-[attempt-finalization gate](<C:/Users/Juraj/Desktop/Remote help/tools/Run-FileTransferRouteAcceptance.ps1:9709>)
+[attempt-finalization gate](<../tools/Run-FileTransferRouteAcceptance.ps1#L9709>)
 rejects selection, producing the final selected-attempt-missing class.
 Do not force selection or runtime proof to true.
 
@@ -147,9 +147,9 @@ the missing probe ACK.
 ### 1. Implemented terminal measurement with the held destination
 
 Implemented scope: the terminal measurement helper/call site in
-[GuiSmoke-Windows.ps1](<C:/Users/Juraj/Desktop/Remote help/tools/GuiSmoke-Windows.ps1:2594>)
+[GuiSmoke-Windows.ps1](<../tools/GuiSmoke-Windows.ps1#L2594>)
 and a narrowly scoped read operation in
-[LocalGuiWriterCanonicalDestination.cs](<C:/Users/Juraj/Desktop/Remote help/tools/FileTransferOps/LocalGuiWriterCanonicalDestination.cs:86>),
+[LocalGuiWriterCanonicalDestination.cs](<../tools/FileTransferOps/LocalGuiWriterCanonicalDestination.cs#L86>),
 plus directly affected tests. No Core/Infra route change is currently justified.
 
 The implemented measurement contract is:
@@ -214,15 +214,15 @@ are rejected or handled without granting authority or reopening the path.
 
 Receipts:
 
-- [Initial focused run](<C:/Users/Juraj/Desktop/Remote help/artifacts/terminal-integrity-fix-20260930/terminal-integrity-focused.trx>):
+- [Initial focused run](<../artifacts/terminal-integrity-fix-20260930/terminal-integrity-focused.trx>):
   5 passed, 1 failed because a test callback could not see a private PowerShell
   variable. A direct delegate to the original Dispose method corrected that
   fixture; the failure is not omitted from the retained receipt.
-- [Focused follow-up](<C:/Users/Juraj/Desktop/Remote help/artifacts/terminal-integrity-fix-20260930/terminal-integrity-followup.trx>):
+- [Focused follow-up](<../artifacts/terminal-integrity-fix-20260930/terminal-integrity-followup.trx>):
   9 passed, including the corrected disposal case, strengthened summary checks
   and six armed-handoff cases. Together with the unaffected initial cases,
   the latest result for each of the 12 focused cases is pass.
-- [Existing contract lane](<C:/Users/Juraj/Desktop/Remote help/artifacts/terminal-integrity-fix-20260930/terminal-integrity-contract.trx>):
+- [Existing contract lane](<../artifacts/terminal-integrity-fix-20260930/terminal-integrity-contract.trx>):
   10 passed, covering canonical source/helper association and retirement,
   normal loader exposure, summary validation, direct-manifest requirements
   and the unchanged strict route-cycle contract.
@@ -240,13 +240,13 @@ Tuna route failure or live-256 acceptance.
 ### 2. Completed probe capture review
 
 No new instrumentation is needed before the next attempt. Existing
-[bounded delivery tracing](<C:/Users/Juraj/Desktop/Remote help/docs/file-transfer-tuna-delivery-capture-plan.md>)
+[bounded delivery tracing](<file-transfer-tuna-delivery-capture-plan.md>)
 covers the unresolved boundary. No `tuna_delivery_trace` records were found in
 the latest run's full operational log, full ledger or compact retained log.
 The trace is separately opt-in; ordinary file-transfer tracing does not enable
 it. Its absence cannot establish where the probe was lost or rejected.
 
-The [full ledger](<C:/Users/Juraj/Desktop/Remote help/artifacts/live-checkpoint-77df4ccb-20260930/20260930T115636Z/regular-v4-live-activation-off-on-off-256mb/filetransfer-gui-log-ledger-slice.log>)
+The [full ledger](<../artifacts/live-checkpoint-77df4ccb-20260930/20260930T115636Z/regular-v4-live-activation-off-on-off-256mb/filetransfer-gui-log-ledger-slice.log>)
 contains two richer records at 11:58:27 UTC, omitted from the compact log:
 
 | Full ledger line | Sidecar | Terminal observation |
@@ -289,12 +289,12 @@ primary acceptance predicates or grant coordinator authority.
 
 Offline verification on the unchanged tracing implementation:
 
-- [18 focused .NET cases passed](<C:/Users/Juraj/Desktop/Remote help/artifacts/tuna-probe-capture-review-20260930/tuna-delivery-trace-focused.trx>),
+- [18 focused .NET cases passed](<../artifacts/tuna-probe-capture-review-20260930/tuna-delivery-trace-focused.trx>),
   covering exact-wire binding, deferred application receive, unavailable
   callbacks, default-off behavior, bounds, redaction, both stdout adapters and
   full retention despite compact omission. The filter was
   `FullyQualifiedName~TunaDeliveryTrace`; no aggregate suite was run.
-- [Four Go trace tests passed](<C:/Users/Juraj/Desktop/Remote help/artifacts/tuna-probe-capture-review-20260930/go-delivery-trace-output.txt>),
+- [Four Go trace tests passed](<../artifacts/tuna-probe-capture-review-20260930/go-delivery-trace-output.txt>),
   including five subtests for forwarding, write failure and incomplete output.
   Command: `go test -count=1 -run '^TestDeliveryTrace' -v .`, with workspace
   `GOCACHE` and `GOPROXY=off`. These tests use local pipes, not live NKN.

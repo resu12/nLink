@@ -2,6 +2,8 @@ using System.Text.Json;
 using System.Text.Json.Serialization;
 using System.Text.RegularExpressions;
 using System.Xml.Linq;
+using Microsoft.CodeAnalysis.CSharp;
+using Microsoft.CodeAnalysis.CSharp.Syntax;
 
 namespace NLink.SmokeTests;
 
@@ -83,6 +85,7 @@ public sealed class TestArchitectureContractTests
         "FileTransferAnalyzerFallback",
         "FileTransferAnalyzerRuntimeUnlock",
         "FileTransferAnalyzerV4Transport",
+        "FileTransferEvidenceIntegrity",
         "FileTransferAcceptanceFake",
         "Smoke",
         "NonGui",
@@ -125,7 +128,7 @@ public sealed class TestArchitectureContractTests
         "Track D Closeout State",
         @"tools\ScreenShare-Ops.ps1` is the only screenshare operator entry point",
         "`screenshare-operator-verdict.txt` is the first-read live evidence artifact",
-        "App Diagnostics and Save Hang Report are the first support capture surfaces",
+        "Options -> Diagnostics and Save Hang Report are the first support capture surfaces",
         "Retained Track B analyzers are preserved closeout evidence"
     ];
 
@@ -167,31 +170,56 @@ public sealed class TestArchitectureContractTests
     }
 
     [Fact]
-    public void TestFiles_WithFactsOrTheories_HaveExactlyOneAllowedAreaTraitMatchingProject()
+    public void TestClasses_WithFactsOrTheories_HaveExactlyOneAllowedAreaTraitMatchingProject()
     {
         var repoRoot = CoreSmokeTestsBase.FindRepoRoot();
 
         foreach (var (area, projectName) in DomainProjects)
         {
             var projectRoot = Path.Combine(repoRoot, "tests", projectName);
-            var files = Directory.GetFiles(projectRoot, "*.cs", SearchOption.AllDirectories);
-
-            foreach (var file in files)
-            {
-                var text = File.ReadAllText(file);
-                if (!ContainsTestMethod(text))
-                {
-                    continue;
-                }
-
-                var matches = Regex.Matches(text, "\\[Trait\\(\"Area\",\\s*\"(?<area>[^\"]+)\"\\)\\]");
-                Assert.True(matches.Count == 1, $"Expected exactly one Area trait in {file}, found {matches.Count}.");
-
-                var actualArea = matches[0].Groups["area"].Value;
-                Assert.Contains(actualArea, AllowedAreas);
-                Assert.Equal(area, actualArea);
-            }
+            var sources = Directory.GetFiles(projectRoot, "*.cs", SearchOption.AllDirectories)
+                .Where(file => !IsPathUnder(file, Path.Combine(projectRoot, "bin")) &&
+                               !IsPathUnder(file, Path.Combine(projectRoot, "obj")))
+                .Select(File.ReadAllText);
+            Assert.Contains(area, AllowedAreas);
+            Assert.Empty(FindTestAreaOwnershipIssues(sources, area));
         }
+    }
+
+    [Theory]
+    [InlineData("Core", null, true)]
+    [InlineData(null, "Core", true)]
+    [InlineData(null, null, false)]
+    [InlineData("Gui", null, false)]
+    [InlineData("Core", "Core", false)]
+    [InlineData("Core", "Gui", false)]
+    public void AreaOwnership_RequiresOneMatchingTraitAcrossPartialDeclarations(
+        string? firstArea, string? secondArea, bool valid)
+    {
+        static string Trait(string? area) => area is null ? "" : $"[Trait(\"Area\", \"{area}\")]";
+        var sources = new[]
+        {
+            $"namespace Sample; {Trait(firstArea)} public partial class Tests {{ }}",
+            $"namespace Sample; {Trait(secondArea)} public partial class Tests {{ [Fact] public void Test() {{ }} }}"
+        };
+        Assert.Equal(valid, FindTestAreaOwnershipIssues(sources, "Core").Length == 0);
+    }
+
+    [Fact]
+    public void AreaOwnership_DoesNotBorrowTraitsFromOtherTypesOrSourceStrings()
+    {
+        var sources = new[]
+        {
+            "namespace One; [Trait(\"Area\", \"Core\")] public class Tests { [Fact] public void Test() {} }",
+            "namespace Two; public class Tests { [Fact] public void Test() {} }",
+            "namespace One; [Trait(\"Area\", \"Core\")] public class Outer { public class Nested { [Fact] public void Test() {} } }",
+            "namespace One; public class Untagged { const string Text = \"[Trait(\\\"Area\\\", \\\"Core\\\")]\"; [Fact] public void Test() {} }"
+        };
+        var issues = FindTestAreaOwnershipIssues(sources, "Core");
+        Assert.Equal(3, issues.Length);
+        Assert.Contains(issues, issue => issue.StartsWith("Two.Tests:", StringComparison.Ordinal));
+        Assert.Contains(issues, issue => issue.StartsWith("One.Outer.Nested:", StringComparison.Ordinal));
+        Assert.Contains(issues, issue => issue.StartsWith("One.Untagged:", StringComparison.Ordinal));
     }
 
     [Fact]
@@ -680,7 +708,6 @@ public sealed class TestArchitectureContractTests
         var repoRoot = CoreSmokeTestsBase.FindRepoRoot();
         var currentVersion = File.ReadAllText(Path.Combine(repoRoot, "VERSION")).Trim();
         var offenders = new List<string>();
-        var versionPattern = new Regex(@"\b0\.\d+\.\d+(?:\.\d+)?(?:-[A-Za-z0-9.]+)?\b");
 
         foreach (var file in GetActiveDocsAndTemplateFiles(repoRoot))
         {
@@ -688,22 +715,57 @@ public sealed class TestArchitectureContractTests
             var lines = File.ReadLines(file).Select((line, index) => (Line: line, Number: index + 1));
             foreach (var (line, lineNumber) in lines)
             {
-                foreach (Match match in versionPattern.Matches(line))
+                foreach (var value in FindStaleReleaseVersions(line, currentVersion))
                 {
-                    var value = match.Value;
-                    if (string.Equals(value, currentVersion, StringComparison.Ordinal) ||
-                        value.StartsWith(currentVersion + "-", StringComparison.Ordinal) ||
-                        IsAllowedImageVersionReference(line))
-                    {
-                        continue;
-                    }
-
                     offenders.Add($"{relativePath}:{lineNumber}: {value}");
                 }
             }
         }
 
         Assert.Empty(offenders.OrderBy(item => item, StringComparer.Ordinal));
+    }
+
+    [Theory]
+    [InlineData("CLR 4.0.30319.42000; --local-ipc 127.0.0.1:0", 0)]
+    [InlineData("nLink 0.7.0 and 0.7.0-rc.1", 0)]
+    [InlineData("historical baseline: nLink 0.6.2", 0)]
+    [InlineData("Install nLink 0.6.2", 1)]
+    [InlineData("Use nLink 0.6.2-rc.1", 1)]
+    [InlineData("historical baseline: nLink 0.6.2; install 0.5.0", 1)]
+    [InlineData("CLR 4.0.30319.42000; install nLink 0.6.2", 1)]
+    public void ReleaseVersionCheck_DistinguishesAppInstructionsFromOtherVersionedReferences(string line, int count)
+    {
+        Assert.Equal(count, FindStaleReleaseVersions(line, "0.7.0").Length);
+    }
+
+    [Theory]
+    [InlineData("../src/example.cs", true)]
+    [InlineData("../src/example.cs#L42", true)]
+    [InlineData("<../src/a file.cs#L42>", true)]
+    [InlineData("/src/example.cs", true)]
+    [InlineData("..", true)]
+    [InlineData("../src/missing.cs", false)]
+    [InlineData("<../src/missing.cs#L42>", false)]
+    public void LocalMarkdownLinks_KeepExistenceChecksWithPortableLineReferences(string target, bool exists)
+    {
+        var root = Path.Combine(Path.GetTempPath(), "nlink-contract-links", Guid.NewGuid().ToString("N"));
+        try
+        {
+            Directory.CreateDirectory(Path.Combine(root, "docs"));
+            Directory.CreateDirectory(Path.Combine(root, "src"));
+            File.WriteAllText(Path.Combine(root, "src", "example.cs"), "// fixture");
+            File.WriteAllText(Path.Combine(root, "src", "a file.cs"), "// fixture");
+            var doc = Path.Combine(root, "docs", "guide.md");
+            File.WriteAllText(doc, $"[source]({target})");
+            Assert.Equal(exists, FindMissingLocalMarkdownLinks(root, doc).Length == 0);
+            // An existing machine-local path still must not qualify as a portable repository link.
+            File.WriteAllText(doc, $"[source](<{Path.Combine(root, "src", "example.cs")}>)");
+            Assert.Single(FindMissingLocalMarkdownLinks(root, doc));
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
     }
 
     [Fact]
@@ -903,6 +965,47 @@ public sealed class TestArchitectureContractTests
         return manifest;
     }
 
+    private static string[] FindTestAreaOwnershipIssues(IEnumerable<string> sources, string expectedArea)
+    {
+        // Parse declarations so partial files share one owner, while comments/strings and nested types do not.
+        var classes = sources.SelectMany(source => CSharpSyntaxTree.ParseText(source).GetRoot()
+            .DescendantNodes().OfType<ClassDeclarationSyntax>());
+        var issues = new List<string>();
+        foreach (var group in classes.GroupBy(type => string.Join(".", type.AncestorsAndSelf().Reverse()
+                     .Select(node => node switch
+                     {
+                         BaseNamespaceDeclarationSyntax ns => ns.Name.ToString(),
+                         TypeDeclarationSyntax declaration => declaration.Identifier.ValueText +
+                             (declaration.TypeParameterList is { } parameters ? $"`{parameters.Parameters.Count}" : ""),
+                         _ => null
+                     }).Where(name => name is not null)), StringComparer.Ordinal))
+        {
+            var testAttributes = group.SelectMany(type => type.Members.OfType<MethodDeclarationSyntax>())
+                .SelectMany(method => method.AttributeLists.SelectMany(list => list.Attributes));
+            if (!testAttributes.Any(attribute => new[] { "Fact", "Theory", "ManualBridgeFact", "GuiSmokeFact", "MfDiagnosticFact" }
+                    .Any(name => IsAttribute(attribute, name))))
+            {
+                continue;
+            }
+
+            var areas = group.SelectMany(type => type.AttributeLists.SelectMany(list => list.Attributes))
+                .Where(attribute => IsAttribute(attribute, "Trait") && attribute.ArgumentList?.Arguments.Count == 2 &&
+                    attribute.ArgumentList.Arguments[0].Expression is LiteralExpressionSyntax { Token.ValueText: "Area" })
+                .Select(attribute => (attribute.ArgumentList!.Arguments[1].Expression as LiteralExpressionSyntax)?.Token.ValueText)
+                .ToArray();
+            if (areas.Length != 1 || areas[0] != expectedArea)
+            {
+                issues.Add($"{group.Key}: expected exactly one Area={expectedArea}, found [{string.Join(", ", areas)}].");
+            }
+        }
+
+        return issues.OrderBy(issue => issue, StringComparer.Ordinal).ToArray();
+    }
+
+    private static bool IsAttribute(AttributeSyntax attribute, string name)
+        => attribute.Name.ToString().Split('.').Last() is var actual &&
+           (actual == name || actual == name + "Attribute");
+
     private static bool ContainsTestMethod(string text)
     {
         return text.Contains("[Fact]", StringComparison.Ordinal)
@@ -959,6 +1062,10 @@ public sealed class TestArchitectureContractTests
         foreach (Match match in Regex.Matches(text, @"!?\[[^\]]+\]\((?<target>[^)]+)\)"))
         {
             var target = match.Groups["target"].Value.Trim();
+            if (target.StartsWith('<') && target.EndsWith('>'))
+            {
+                target = target[1..^1];
+            }
             if (string.IsNullOrWhiteSpace(target) ||
                 target.StartsWith("#", StringComparison.Ordinal) ||
                 target.StartsWith("http://", StringComparison.OrdinalIgnoreCase) ||
@@ -978,7 +1085,11 @@ public sealed class TestArchitectureContractTests
             var candidate = Path.IsPathRooted(targetWithoutAnchor)
                 ? Path.Combine(repoRoot, targetWithoutAnchor.TrimStart(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar))
                 : Path.Combine(baseDirectory, targetWithoutAnchor.Replace('/', Path.DirectorySeparatorChar));
-            if (!File.Exists(candidate) && !Directory.Exists(candidate))
+            candidate = Path.GetFullPath(candidate);
+            if ((!string.Equals(candidate, Path.GetFullPath(repoRoot), StringComparison.OrdinalIgnoreCase) &&
+                 !IsPathUnder(candidate, repoRoot)) ||
+                Regex.IsMatch(targetWithoutAnchor, @"^[A-Za-z]:[/\\]|^\\\\") ||
+                (!File.Exists(candidate) && !Directory.Exists(candidate)))
             {
                 var relativePath = Path.GetRelativePath(repoRoot, file).Replace('\\', '/');
                 missing.Add($"{relativePath} -> {target}");
@@ -987,6 +1098,14 @@ public sealed class TestArchitectureContractTests
 
         return missing.ToArray();
     }
+
+    private static string[] FindStaleReleaseVersions(string line, string currentVersion)
+        => Regex.Matches(line, @"(?<![\w.])0\.\d+\.\d+(?:\.\d+)?(?:-[A-Za-z0-9.]+)?\b")
+            .Where(match => !string.Equals(match.Value, currentVersion, StringComparison.Ordinal) &&
+                !match.Value.StartsWith(currentVersion + "-", StringComparison.Ordinal) &&
+                !IsAllowedImageVersionReference(line) &&
+                !line[..match.Index].EndsWith("historical baseline: nLink ", StringComparison.Ordinal))
+            .Select(match => match.Value).ToArray();
 
     private static bool IsAllowedImageVersionReference(string line)
         => line.Contains("docs/images/", StringComparison.OrdinalIgnoreCase) &&

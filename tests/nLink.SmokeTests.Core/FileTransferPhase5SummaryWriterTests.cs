@@ -954,6 +954,8 @@ public sealed class FileTransferPhase5SummaryWriterTests : FileTransferAcceptanc
         try
         {
             var environment = BuildFakeRouteAcceptanceEnvironment("phase5-current-listener-adoption-summary-propagation");
+            environment["NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_ROUTE_CYCLE_SOURCE"] =
+                await GenerateRouteCycleSourceAsync(repoRoot, Path.Combine(artifactRoot, "peers"), "independent_pairs");
             environment["NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_PHASE4_REGULAR_V4_LIVE_ACTIVATION_OFF_ON_OFF_256MB_CURRENT_LISTENER_ADOPTION_SUMMARY_FIXTURE"] = "1";
             var result = await RunPowerShellFileAsync(
                 repoRoot,
@@ -1594,6 +1596,8 @@ public sealed class FileTransferPhase5SummaryWriterTests : FileTransferAcceptanc
         {
             var environment = BuildFakeRouteAcceptanceEnvironment(
                 "phase5-fallback-frontier-checkpoint-acceptance-recheck-summary-propagation");
+            environment["NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_ROUTE_CYCLE_SOURCE"] =
+                await GenerateRouteCycleSourceAsync(repoRoot, Path.Combine(artifactRoot, "peers"), "independent_pairs");
             environment["NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_PHASE4_REGULAR_V4_LIVE_ACTIVATION_OFF_ON_OFF_256MB_FALLBACK_FRONTIER_CHECKPOINT_ACCEPTANCE_RECHECK_SUMMARY_FIXTURE"] = "1";
             var result = await RunPowerShellFileAsync(
                 repoRoot,
@@ -1783,6 +1787,8 @@ public sealed class FileTransferPhase5SummaryWriterTests : FileTransferAcceptanc
         try
         {
             var environment = BuildFakeRouteAcceptanceEnvironment("phase5-pairing-summary-propagation");
+            environment["NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_ROUTE_CYCLE_SOURCE"] =
+                await GenerateRouteCycleSourceAsync(repoRoot, Path.Combine(artifactRoot, "peers"), "independent_pairs");
             environment["NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_PHASE4_REGULAR_V4_LIVE_ACTIVATION_OFF_ON_OFF_256MB_FALLBACK_TAIL_BRIDGE_RECOVERY_GENERATION_PAIRING_SUMMARY_FIXTURE"] = "1";
 
             var result = await RunPowerShellFileAsync(
@@ -1865,6 +1871,8 @@ public sealed class FileTransferPhase5SummaryWriterTests : FileTransferAcceptanc
         try
         {
             var environment = BuildFakeRouteAcceptanceEnvironment("phase5-projection-summary-propagation");
+            environment["NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_ROUTE_CYCLE_SOURCE"] =
+                await GenerateRouteCycleSourceAsync(repoRoot, Path.Combine(artifactRoot, "peers"), "independent_pairs");
             environment["NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_PHASE4_REGULAR_V4_LIVE_ACTIVATION_OFF_ON_OFF_256MB_REGULAR_V4_FRONTIER_REPAIR_PROJECTION_SUMMARY_FIXTURE"] = "1";
 
             var result = await RunPowerShellFileAsync(
@@ -1934,6 +1942,8 @@ public sealed class FileTransferPhase5SummaryWriterTests : FileTransferAcceptanc
         try
         {
             var environment = BuildFakeRouteAcceptanceEnvironment("phase5-projection-reauthorization-summary-propagation");
+            environment["NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_ROUTE_CYCLE_SOURCE"] =
+                await GenerateRouteCycleSourceAsync(repoRoot, Path.Combine(artifactRoot, "peers"), "independent_pairs");
             environment["NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_PHASE4_REGULAR_V4_LIVE_ACTIVATION_OFF_ON_OFF_256MB_REGULAR_V4_PROJECTION_REAUTHORIZATION_SUMMARY_FIXTURE"] = "1";
 
             var result = await RunPowerShellFileAsync(
@@ -2010,6 +2020,8 @@ public sealed class FileTransferPhase5SummaryWriterTests : FileTransferAcceptanc
         try
         {
             var environment = BuildFakeRouteAcceptanceEnvironment("phase5-peer-silence-replay-summary-propagation");
+            environment["NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_ROUTE_CYCLE_SOURCE"] =
+                await GenerateRouteCycleSourceAsync(repoRoot, Path.Combine(artifactRoot, "peers"), "independent_pairs");
             environment["NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_PHASE4_REGULAR_V4_LIVE_ACTIVATION_OFF_ON_OFF_256MB_PEER_SILENCE_REPLAY_RANGE_PRESERVATION_SUMMARY_FIXTURE"] = "1";
 
             var result = await RunPowerShellFileAsync(
@@ -2092,6 +2104,8 @@ public sealed class FileTransferPhase5SummaryWriterTests : FileTransferAcceptanc
         try
         {
             var environment = BuildFakeRouteAcceptanceEnvironment("phase5-successor-pressure-install-summary-propagation");
+            environment["NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_ROUTE_CYCLE_SOURCE"] =
+                await GenerateRouteCycleSourceAsync(repoRoot, Path.Combine(artifactRoot, "peers"), "independent_pairs");
             environment["NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_PHASE4_REGULAR_V4_LIVE_ACTIVATION_OFF_ON_OFF_256MB_REGULAR_V4_SUCCESSOR_PRESSURE_INSTALL_SUMMARY_FIXTURE"] = "1";
 
             var result = await RunPowerShellFileAsync(
@@ -2170,6 +2184,8 @@ public sealed class FileTransferPhase5SummaryWriterTests : FileTransferAcceptanc
         try
         {
             var environment = BuildFakeRouteAcceptanceEnvironment("phase5-route-commit-send-drain-summary-propagation");
+            environment["NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_ROUTE_CYCLE_SOURCE"] =
+                await GenerateRouteCycleSourceAsync(repoRoot, Path.Combine(artifactRoot, "peers"), "independent_pairs");
             environment["NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_PHASE4_REGULAR_V4_LIVE_ACTIVATION_OFF_ON_OFF_256MB_REGULAR_V4_ROUTE_COMMIT_SEND_DRAIN_SUMMARY_FIXTURE"] = "1";
 
             var result = await RunPowerShellFileAsync(
@@ -2350,6 +2366,8 @@ public sealed class FileTransferPhase5SummaryWriterTests : FileTransferAcceptanc
         try
         {
             var environment = BuildFakeRouteAcceptanceEnvironment("phase5-precommit-probe-start-handoff-summary-propagation");
+            environment["NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_ROUTE_CYCLE_SOURCE"] =
+                await GenerateRouteCycleSourceAsync(repoRoot, Path.Combine(artifactRoot, "peers"), "independent_pairs");
             environment["NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_PHASE4_REGULAR_V4_LIVE_ACTIVATION_OFF_ON_OFF_256MB_PRECOMMIT_PROBE_START_HANDOFF_SUMMARY_FIXTURE"] = "1";
 
             var result = await RunPowerShellFileAsync(
@@ -2447,6 +2465,8 @@ public sealed class FileTransferPhase5SummaryWriterTests : FileTransferAcceptanc
         try
         {
             var environment = BuildFakeRouteAcceptanceEnvironment("phase5-settlement-disposition-summary-propagation");
+            environment["NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_ROUTE_CYCLE_SOURCE"] =
+                await GenerateRouteCycleSourceAsync(repoRoot, Path.Combine(artifactRoot, "peers"), "independent_pairs");
             environment["NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_PHASE4_REGULAR_V4_LIVE_ACTIVATION_OFF_ON_OFF_256MB_REGULAR_V4_SETTLEMENT_DISPOSITION_SUMMARY_FIXTURE"] = "1";
 
             var result = await RunPowerShellFileAsync(
@@ -2525,6 +2545,8 @@ public sealed class FileTransferPhase5SummaryWriterTests : FileTransferAcceptanc
         try
         {
             var environment = BuildFakeRouteAcceptanceEnvironment("phase5-pressure-authority-lifecycle-split-summary-propagation");
+            environment["NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_ROUTE_CYCLE_SOURCE"] =
+                await GenerateRouteCycleSourceAsync(repoRoot, Path.Combine(artifactRoot, "peers"), "independent_pairs");
             environment["NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_PHASE4_REGULAR_V4_LIVE_ACTIVATION_OFF_ON_OFF_256MB_REGULAR_V4_PRESSURE_AUTHORITY_LIFECYCLE_SPLIT_SUMMARY_FIXTURE"] = "1";
 
             var result = await RunPowerShellFileAsync(
@@ -2602,6 +2624,8 @@ public sealed class FileTransferPhase5SummaryWriterTests : FileTransferAcceptanc
         try
         {
             var environment = BuildFakeRouteAcceptanceEnvironment("phase5-pressure-recovery-handoff-summary-propagation");
+            environment["NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_ROUTE_CYCLE_SOURCE"] =
+                await GenerateRouteCycleSourceAsync(repoRoot, Path.Combine(artifactRoot, "peers"), "independent_pairs");
             environment["NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_PHASE4_REGULAR_V4_LIVE_ACTIVATION_OFF_ON_OFF_256MB_REGULAR_V4_PRESSURE_RECOVERY_HANDOFF_SUMMARY_FIXTURE"] = "1";
 
             var result = await RunPowerShellFileAsync(
@@ -2679,6 +2703,8 @@ public sealed class FileTransferPhase5SummaryWriterTests : FileTransferAcceptanc
         try
         {
             var environment = BuildFakeRouteAcceptanceEnvironment("phase5-closure-liveness-summary-propagation");
+            environment["NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_ROUTE_CYCLE_SOURCE"] =
+                await GenerateRouteCycleSourceAsync(repoRoot, Path.Combine(artifactRoot, "peers"), "independent_pairs");
             environment["NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_PHASE4_REGULAR_V4_LIVE_ACTIVATION_OFF_ON_OFF_256MB_RECOVERY_LEASE_CLOSURE_LIVENESS_SUMMARY_FIXTURE"] = "1";
             var result = await RunPowerShellFileAsync(
                 repoRoot,
@@ -2757,6 +2783,8 @@ public sealed class FileTransferPhase5SummaryWriterTests : FileTransferAcceptanc
         {
             var environment = BuildFakeRouteAcceptanceEnvironment(
                 "phase5-bridge-recovery-startup-payload-isolation-summary-propagation");
+            environment["NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_ROUTE_CYCLE_SOURCE"] =
+                await GenerateRouteCycleSourceAsync(repoRoot, Path.Combine(artifactRoot, "peers"), "independent_pairs");
             environment["NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_PHASE4_REGULAR_V4_LIVE_ACTIVATION_OFF_ON_OFF_256MB_BRIDGE_RECOVERY_STARTUP_PAYLOAD_ISOLATION_SUMMARY_FIXTURE"] = "1";
             var result = await RunPowerShellFileAsync(
                 repoRoot,
@@ -2841,6 +2869,8 @@ public sealed class FileTransferPhase5SummaryWriterTests : FileTransferAcceptanc
         try
         {
             var environment = BuildFakeRouteAcceptanceEnvironment("phase5-fallback-tail-unblock-recheck-summary-propagation");
+            environment["NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_ROUTE_CYCLE_SOURCE"] =
+                await GenerateRouteCycleSourceAsync(repoRoot, Path.Combine(artifactRoot, "peers"), "independent_pairs");
             environment["NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_PHASE4_REGULAR_V4_LIVE_ACTIVATION_OFF_ON_OFF_256MB_FALLBACK_TAIL_UNBLOCK_RECHECK_SUMMARY_FIXTURE"] = "1";
             var result = await RunPowerShellFileAsync(
                 repoRoot,
@@ -2908,7 +2938,7 @@ public sealed class FileTransferPhase5SummaryWriterTests : FileTransferAcceptanc
 
     [Fact]
     [Trait("Category", "Smoke")]
-    public async Task RunFileTransferRouteAcceptance_CurrentArtifactEquivalentIsIncompleteProofWithRetryCandidate()
+    public async Task RunFileTransferRouteAcceptance_CurrentArtifactMissingDeliveryPrecedesRetryCandidate()
     {
         if (!OperatingSystem.IsWindows())
         {
@@ -2947,11 +2977,32 @@ public sealed class FileTransferPhase5SummaryWriterTests : FileTransferAcceptanc
             Assert.Equal("incomplete", summary[$"{prefix}.transfer_evidence_status"]);
             Assert.Equal("fail", summary[$"{prefix}.cursor_integrity_verdict"]);
             Assert.Equal("0", summary[$"{prefix}.current_runtime_proof"]);
-            Assert.Equal("runtime_unlock_retry_dispatch_successor_attempt_mismatch", summary[$"{prefix}.runtime_failure_candidate"]);
-            Assert.Equal("runtime_unlock_retry_dispatch_authority_rejected", summary[$"{prefix}.first_proof_chain_failure_event"]);
-            Assert.Equal("retry_dispatch_successor_attempt_mismatch", summary[$"{prefix}.first_proof_chain_failure_reason"]);
+            Assert.Equal("filetransfer_tuna_activation_delivery_unproven", summary[$"{prefix}.runtime_failure_candidate"]);
             Assert.NotEqual("fallback_authority", summary[$"{prefix}.runtime_failure_candidate"]);
             Assert.Equal("evidence_dry_run", JsonDocument.Parse(await File.ReadAllTextAsync(Path.Combine(runRoot, "route-acceptance-run-manifest.json"))).RootElement.GetProperty("executionMode").GetString());
+            // The later diagnostic still classifies correctly in isolation; it must
+            // not displace the earlier mandatory delivery-proof failure above.
+            const string classify = """
+                param([string]$RepoRoot, [string]$LogPath)
+                $ErrorActionPreference = 'Stop'
+                $errors = $null
+                $ast = [Management.Automation.Language.Parser]::ParseFile(
+                    (Join-Path $RepoRoot 'tools/Run-FileTransferRouteAcceptance.ps1'), [ref]$null, [ref]$errors)
+                if ($errors.Count) { throw 'wrapper_parse_failed' }
+                foreach ($definition in $ast.EndBlock.Statements | Where-Object {
+                    $_ -is [Management.Automation.Language.FunctionDefinitionAst]
+                }) { . ([scriptblock]::Create($definition.Extent.Text)) }
+                $line = Get-Content -LiteralPath $LogPath | Where-Object {
+                    $_ -match 'event=runtime_unlock_retry_dispatch_authority_rejected;' -and
+                    $_ -match 'decision_reason=retry_dispatch_successor_attempt_mismatch'
+                } | Select-Object -First 1
+                if (-not $line) { throw 'retry_candidate_not_retained' }
+                Get-Phase5FailureClass -Failures @($line)
+                """;
+            var diagnostic = await RunPowerShellScriptTextAsync(classify,
+                [repoRoot, Path.Combine(runRoot, prefix, "filetransfer-retained-log-slice.log")]);
+            Assert.True(diagnostic.ExitCode == 0, diagnostic.Stdout + Environment.NewLine + diagnostic.Stderr);
+            Assert.Equal("runtime_unlock_retry_dispatch_successor_attempt_mismatch", diagnostic.Stdout.Trim());
         }
         finally
         {
@@ -2992,7 +3043,11 @@ public sealed class FileTransferPhase5SummaryWriterTests : FileTransferAcceptanc
                     "-ProgressTimeoutSeconds", "30"
                 ],
                 BuildFakeRouteAcceptanceEnvironment("phase5-evidence-source"));
-            Assert.True(source.ExitCode == 0, $"Expected source fixture run to pass.{Environment.NewLine}{source.Stdout}{Environment.NewLine}{source.Stderr}");
+            Assert.NotEqual(0, source.ExitCode);
+            var sourceSummary = ReadArtifactReport(sourceRunRoot, "phase5-analyzer-gui-acceptance-summary.txt");
+            Assert.Equal("FAIL", sourceSummary["verdict"]);
+            Assert.Equal("filetransfer_tuna_activation_delivery_unproven", sourceSummary["runtime_failure_candidate"]);
+            Assert.Equal("pass", sourceSummary["cursor_integrity_verdict"]);
 
             var dryEnvironment = BuildFakeRouteAcceptanceEnvironment("phase5-evidence-dry-run");
             var dry = await RunPowerShellFileAsync(
@@ -3650,6 +3705,8 @@ public sealed class FileTransferPhase5SummaryWriterTests : FileTransferAcceptanc
         {
             var environment = BuildFakeRouteAcceptanceEnvironment(
                 "phase5-retry-dispatch-install-grant-evidence-summary-propagation");
+            environment["NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_ROUTE_CYCLE_SOURCE"] =
+                await GenerateRouteCycleSourceAsync(repoRoot, Path.Combine(artifactRoot, "peers"), "independent_pairs");
             environment["NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_PHASE4_REGULAR_V4_LIVE_ACTIVATION_OFF_ON_OFF_256MB_RETRY_DISPATCH_INSTALL_GRANT_EVIDENCE_SUMMARY_FIXTURE"] = "1";
 
             var result = await RunPowerShellFileAsync(
@@ -3741,6 +3798,8 @@ public sealed class FileTransferPhase5SummaryWriterTests : FileTransferAcceptanc
         {
             var environment = BuildFakeRouteAcceptanceEnvironment(
                 "phase5-post-tuna-fallback-transport-proof-handoff-summary-propagation");
+            environment["NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_ROUTE_CYCLE_SOURCE"] =
+                await GenerateRouteCycleSourceAsync(repoRoot, Path.Combine(artifactRoot, "peers"), "independent_pairs");
             environment["NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_PHASE4_REGULAR_V4_LIVE_ACTIVATION_OFF_ON_OFF_256MB_POST_TUNA_FALLBACK_TRANSPORT_PROOF_HANDOFF_SUMMARY_FIXTURE"] = "1";
 
             var result = await RunPowerShellFileAsync(

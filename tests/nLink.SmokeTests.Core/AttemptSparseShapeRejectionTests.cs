@@ -6,6 +6,7 @@ using NLink.Tests;
 
 namespace NLink.SmokeTests;
 
+[Trait("Area", "Core")]
 public sealed class AttemptSparseShapeRejectionTests
 {
     private const string Failure = "offline_schedule_frontier_advanced_before_sparse_shape";

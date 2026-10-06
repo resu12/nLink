@@ -72,7 +72,7 @@ Clean regular-NKN evidence should show:
 - SHA/integrity OK,
 - `bridge_bulk_send_failure_count=0`,
 - no regular-NKN bridge queue clear,
-- average goodput recorded against the `1,500,000 B/s` target when compared with the current 0.6.2-style baseline; on public NKN, below-target goodput is triage evidence rather than an automatic release blocker when route, integrity, terminal, and bridge-failure gates pass.
+- average goodput recorded against the `1,500,000 B/s` target (historical baseline: nLink 0.6.2); on public NKN, below-target goodput is triage evidence rather than an automatic release blocker when route, integrity, terminal, and bridge-failure gates pass.
 
 Recent route reference cells:
 

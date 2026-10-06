@@ -12739,6 +12739,29 @@ function Invoke-FileTransferRetainedAnalysis {
                 StageDiagnostics = $stageDiagnostics
             }
             Write-FileTransferEfficiencySummaryArtifacts @efficiencyArtifactArgs
+            # Measurement-only counters reuse the parsed index and the full report's transfer scope.
+            $repairAllTransfers = $AllTransfers -and [string]::IsNullOrWhiteSpace($TransferId)
+            $repairTransferId = if ($repairAllTransfers) { '' } else {
+                Select-FileTransferIdForAnalysis -Events $index.AllEvents -RequestedTransferId $TransferId
+            }
+            $repairEvents = @(
+                foreach ($name in @('filetransfer_v4_repair_requested', 'filetransfer_v4_repair_scheduled', 'filetransfer_v4_repair_sent')) {
+                    Get-FileTransferCompactIndexEventsByName -Index $index -Name $name |
+                        Where-Object {
+                            -not [string]::IsNullOrWhiteSpace([string]$_.TransferId) -and
+                            ($repairAllTransfers -or $_.TransferId -eq $repairTransferId)
+                        }
+                }
+            )
+            $repairSent = @($repairEvents | Where-Object { $_.EventName -eq 'filetransfer_v4_repair_sent' })
+            @(
+                ("v4_repair_requested_count={0}" -f @($repairEvents | Where-Object { $_.EventName -eq 'filetransfer_v4_repair_requested' }).Count),
+                ("v4_missing_range_repair_scheduled_count={0}" -f @($repairEvents | Where-Object { $_.EventName -eq 'filetransfer_v4_repair_scheduled' }).Count),
+                ("v4_missing_range_repair_sent_count={0}" -f $repairSent.Count),
+                ("v4_repair_delivery_control_bulk_escalated_count={0}" -f (Get-FileTransferEventFieldValueCount -Events $repairSent -FieldName 'repair_delivery_mode' -Value 'control_bulk_escalated')),
+                ("v4_repair_delivery_credit_stall_escalated_count={0}" -f (Get-FileTransferEventFieldValueCount -Events $repairSent -FieldName 'repair_delivery_escalation_reason' -Value 'credit_stall')),
+                ("v4_repair_delivery_frontier_not_advanced_escalated_count={0}" -f (Get-FileTransferEventFieldValueCount -Events $repairSent -FieldName 'repair_delivery_escalation_reason' -Value 'frontier_not_advanced'))
+            ) | Set-Content -LiteralPath (Join-Path $resolvedArtifactDir 'repair-reorder-summary.txt') -Encoding UTF8
             if ($null -ne $NknReportingSummary) {
                 $NknReportingSummary.Value = New-FileTransferRetainedSummary -Events $eventsForArtifacts -LogFiles $logFiles `
                     -RequestedTransferId $TransferId -AllTransfers:$AllTransfers -ReportingOnly

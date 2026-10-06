@@ -7,6 +7,8 @@ using Stamp = NLink.Core.FileTransfer.FileTransferCoordinator.FrontierPublicatio
 
 namespace NLink.SmokeTests;
 
+[Trait("Area", "Core")]
+[Trait("RequiredConfiguration", "Debug")]
 public sealed class AttemptCanonicalTailPublicationTests
 {
     private static FileTransferReceiverStateFrameV6 Frame(bool canonical = true) => new()

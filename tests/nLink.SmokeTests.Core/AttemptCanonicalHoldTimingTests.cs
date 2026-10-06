@@ -7,6 +7,8 @@ using NLink.Tests;
 namespace NLink.SmokeTests;
 
 [Collection(FakeNknNetworkCollection.Name)]
+[Trait("Area", "Core")]
+[Trait("RequiredConfiguration", "Debug")]
 public sealed class AttemptCanonicalHoldTimingTests
 {
     private const BindingFlags Private = BindingFlags.Instance | BindingFlags.NonPublic;

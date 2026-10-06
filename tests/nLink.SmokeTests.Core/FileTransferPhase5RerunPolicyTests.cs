@@ -15,7 +15,7 @@ public sealed class FileTransferPhase5RerunPolicyTests : FileTransferAcceptanceP
 {
     [Fact]
     [Trait("Category", "Smoke")]
-    public async Task RunFileTransferRouteAcceptance_Phase5CanonicalReceiveRecoveryExhaustionRerunsAsEnvironmentalVariance()
+    public async Task RunFileTransferRouteAcceptance_Phase5ReceiveRecoveryExhaustionCannotOverrideMissingDelivery()
     {
         if (!OperatingSystem.IsWindows())
         {
@@ -43,19 +43,22 @@ public sealed class FileTransferPhase5RerunPolicyTests : FileTransferAcceptanceP
                 ],
                 environment);
 
-            Assert.True(
-                result.ExitCode == 0,
-                $"Expected canonical receive-recovery exhaustion to require and pass a clean Phase 5 rerun.{Environment.NewLine}STDOUT:{Environment.NewLine}{result.Stdout}{Environment.NewLine}STDERR:{Environment.NewLine}{result.Stderr}");
+            // Legacy route-only input does not prove Tuna delivery. Recovery observations
+            // cannot replace that proof; classifier-only coverage uses explicit policy inputs.
+            Assert.NotEqual(0, result.ExitCode);
             var summary = ReadArtifactReport(runRoot, "phase5-analyzer-gui-acceptance-summary.txt");
-            Assert.Equal("PASS", summary["verdict"]);
-            Assert.Equal("1", summary["regular-v4-live-activation-off-on-off-256mb.retry_used"]);
-            Assert.Equal("2", summary["regular-v4-live-activation-off-on-off-256mb.selected_attempt"]);
-            Assert.Contains("live_transport_receive_recovery_exhausted_before_runtime_unlock", summary["regular-v4-live-activation-off-on-off-256mb.first_failure_reason"], StringComparison.Ordinal);
-            Assert.Equal("none", summary["regular-v4-live-activation-off-on-off-256mb.acceptance_failure_class"]);
-            Assert.Equal("pass", summary["regular-v4-live-activation-off-on-off-256mb.live_route_epoch_proof_verdict"]);
-            Assert.Equal("pass", summary["regular-v4-live-activation-off-on-off-256mb.fallback_leg_authority_proof_verdict"]);
-            Assert.Equal("pass", summary["regular-v4-live-activation-off-on-off-256mb.bridge_liveness_integration_verdict"]);
-            Assert.True(Directory.Exists(Path.Combine(runRoot, "regular-v4-live-activation-off-on-off-256mb-rerun-1")));
+            const string prefix = "regular-v4-live-activation-off-on-off-256mb";
+            Assert.Equal("FAIL", summary["verdict"]);
+            Assert.Equal("0", summary[$"{prefix}.retry_used"]);
+            Assert.Equal("filetransfer_tuna_activation_delivery_unproven", summary[$"{prefix}.runtime_failure_candidate"]);
+            Assert.Equal("(none)", summary[$"{prefix}.environmental_classification"]);
+            Assert.Equal("0", summary[$"{prefix}.measurement_contaminated"]);
+            Assert.False(Directory.Exists(Path.Combine(runRoot, prefix + "-rerun-1")));
+            var retainedText = File.ReadAllText(Path.Combine(runRoot, prefix, "filetransfer-retained-log-slice.log"));
+            var retryBlockedIndex = retainedText.IndexOf("event=tuna_activation_control_send_waiting_for_regular_v4_recovery", StringComparison.Ordinal);
+            var recoveryExhaustedIndex = retainedText.IndexOf("event=nkn_bridge_receive_stall_recovery_failed", StringComparison.Ordinal);
+            Assert.True(retryBlockedIndex >= 0 && recoveryExhaustedIndex > retryBlockedIndex,
+                "The raw fixture must retain the intended recovery observations despite the earlier missing delivery proof.");
         }
         finally
         {
@@ -65,7 +68,7 @@ public sealed class FileTransferPhase5RerunPolicyTests : FileTransferAcceptanceP
 
     [Fact]
     [Trait("Category", "Smoke")]
-    public async Task RunFileTransferRouteAcceptance_Phase5CanonicalReceiveRecoveryLivenessTimeoutRerunsAsEnvironmentalVariance()
+    public async Task RunFileTransferRouteAcceptance_Phase5ReceiveRecoveryLivenessCannotOverrideMissingDelivery()
     {
         if (!OperatingSystem.IsWindows())
         {
@@ -93,19 +96,20 @@ public sealed class FileTransferPhase5RerunPolicyTests : FileTransferAcceptanceP
                 ],
                 environment);
 
-            Assert.True(
-                result.ExitCode == 0,
-                $"Expected canonical receive-recovery liveness timeout to require and pass a clean Phase 5 rerun.{Environment.NewLine}STDOUT:{Environment.NewLine}{result.Stdout}{Environment.NewLine}STDERR:{Environment.NewLine}{result.Stderr}");
+            // Legacy route-only input does not prove Tuna delivery. Recovery observations
+            // cannot replace that proof; classifier-only coverage uses explicit policy inputs.
+            Assert.NotEqual(0, result.ExitCode);
             var summary = ReadArtifactReport(runRoot, "phase5-analyzer-gui-acceptance-summary.txt");
-            Assert.Equal("PASS", summary["verdict"]);
-            Assert.Equal("1", summary["regular-v4-live-activation-off-on-off-256mb.retry_used"]);
-            Assert.Equal("2", summary["regular-v4-live-activation-off-on-off-256mb.selected_attempt"]);
-            Assert.Contains("live_transport_receive_recovery_exhausted_before_runtime_unlock", summary["regular-v4-live-activation-off-on-off-256mb.first_failure_reason"], StringComparison.Ordinal);
-            Assert.Equal("none", summary["regular-v4-live-activation-off-on-off-256mb.acceptance_failure_class"]);
-            Assert.Equal("pass", summary["regular-v4-live-activation-off-on-off-256mb.live_route_epoch_proof_verdict"]);
-            Assert.Equal("pass", summary["regular-v4-live-activation-off-on-off-256mb.fallback_leg_authority_proof_verdict"]);
-            Assert.Equal("pass", summary["regular-v4-live-activation-off-on-off-256mb.bridge_liveness_integration_verdict"]);
-            Assert.True(Directory.Exists(Path.Combine(runRoot, "regular-v4-live-activation-off-on-off-256mb-rerun-1")));
+            const string prefix = "regular-v4-live-activation-off-on-off-256mb";
+            Assert.Equal("FAIL", summary["verdict"]);
+            Assert.Equal("0", summary[$"{prefix}.retry_used"]);
+            Assert.Equal("filetransfer_tuna_activation_delivery_unproven", summary[$"{prefix}.runtime_failure_candidate"]);
+            Assert.Equal("(none)", summary[$"{prefix}.environmental_classification"]);
+            Assert.Equal("0", summary[$"{prefix}.measurement_contaminated"]);
+            Assert.False(Directory.Exists(Path.Combine(runRoot, prefix + "-rerun-1")));
+            var retainedText = File.ReadAllText(Path.Combine(runRoot, prefix, "filetransfer-retained-log-slice.log"));
+            Assert.Contains("event=session_liveness_timeout", retainedText, StringComparison.Ordinal);
+            Assert.Contains("regular_v4_unproven_recovery_escalation", retainedText, StringComparison.Ordinal);
         }
         finally
         {
@@ -115,7 +119,7 @@ public sealed class FileTransferPhase5RerunPolicyTests : FileTransferAcceptanceP
 
     [Fact]
     [Trait("Category", "Smoke")]
-    public async Task RunFileTransferRouteAcceptance_Phase5PersistentCanonicalReceiveRecoveryExhaustionFailsAsEnvironmental()
+    public async Task RunFileTransferRouteAcceptance_Phase5PersistentReceiveRecoveryCannotOverrideMissingDelivery()
     {
         if (!OperatingSystem.IsWindows())
         {
@@ -144,30 +148,22 @@ public sealed class FileTransferPhase5RerunPolicyTests : FileTransferAcceptanceP
                 ],
                 environment);
 
+            // Legacy route-only input does not prove Tuna delivery. Recovery observations
+            // cannot replace that proof; classifier-only coverage uses explicit policy inputs.
             Assert.NotEqual(0, result.ExitCode);
-            var summaryText = File.ReadAllText(Path.Combine(runRoot, "phase5-analyzer-gui-acceptance-summary.txt"));
             var summary = ReadArtifactReport(runRoot, "phase5-analyzer-gui-acceptance-summary.txt");
+            const string prefix = "regular-v4-live-activation-off-on-off-256mb";
             Assert.Equal("FAIL", summary["verdict"]);
-            Assert.Equal("1", summary["regular-v4-live-activation-off-on-off-256mb.retry_used"]);
-            Assert.Equal("2", summary["regular-v4-live-activation-off-on-off-256mb.selected_attempt"]);
-            Assert.Equal("incomplete_proof", summary["regular-v4-live-activation-off-on-off-256mb.acceptance_failure_class"]);
-            Assert.Equal("runtime_unlock_offer_observation_blocked_by_receive_recovery", summary["regular-v4-live-activation-off-on-off-256mb.runtime_failure_candidate"]);
-            Assert.Equal("live_transport_receive_recovery_exhausted_before_runtime_unlock", summary["regular-v4-live-activation-off-on-off-256mb.environmental_classification"]);
-            Assert.Equal("1", summary["regular-v4-live-activation-off-on-off-256mb.measurement_contaminated"]);
-            Assert.Contains("live_transport_receive_recovery_exhausted_before_runtime_unlock", summaryText, StringComparison.Ordinal);
-            foreach (var attemptDirName in new[]
-                     {
-                         "regular-v4-live-activation-off-on-off-256mb",
-                         "regular-v4-live-activation-off-on-off-256mb-rerun-1"
-                     })
-            {
-                var retainedText = File.ReadAllText(Path.Combine(runRoot, attemptDirName, "filetransfer-retained-log-slice.log"));
-                var retryBlockedIndex = retainedText.IndexOf("event=tuna_activation_control_send_waiting_for_regular_v4_recovery", StringComparison.Ordinal);
-                var recoveryExhaustedIndex = retainedText.IndexOf("event=nkn_bridge_receive_stall_recovery_failed", StringComparison.Ordinal);
-                Assert.True(
-                    retryBlockedIndex >= 0 && recoveryExhaustedIndex > retryBlockedIndex,
-                    $"Expected {attemptDirName} to retain the retry-observation failure before the later environmental recovery exhaustion.");
-            }
+            Assert.Equal("0", summary[$"{prefix}.retry_used"]);
+            Assert.Equal("filetransfer_tuna_activation_delivery_unproven", summary[$"{prefix}.runtime_failure_candidate"]);
+            Assert.Equal("(none)", summary[$"{prefix}.environmental_classification"]);
+            Assert.Equal("0", summary[$"{prefix}.measurement_contaminated"]);
+            Assert.False(Directory.Exists(Path.Combine(runRoot, prefix + "-rerun-1")));
+            var retainedText = File.ReadAllText(Path.Combine(runRoot, prefix, "filetransfer-retained-log-slice.log"));
+            var retryBlockedIndex = retainedText.IndexOf("event=tuna_activation_control_send_waiting_for_regular_v4_recovery", StringComparison.Ordinal);
+            var recoveryExhaustedIndex = retainedText.IndexOf("event=nkn_bridge_receive_stall_recovery_failed", StringComparison.Ordinal);
+            Assert.True(retryBlockedIndex >= 0 && recoveryExhaustedIndex > retryBlockedIndex,
+                "The raw fixture must retain the intended recovery observations despite the earlier missing delivery proof.");
         }
         finally
         {
@@ -342,6 +338,8 @@ public sealed class FileTransferPhase5RerunPolicyTests : FileTransferAcceptanceP
         try
         {
             var environment = BuildFakeRouteAcceptanceEnvironment("phase5-single-scenario-approval-timeout-rerun");
+            environment["NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_ROUTE_CYCLE_SOURCE"] =
+                await GenerateRouteCycleSourceAsync(repoRoot, Path.Combine(artifactRoot, "peers"), "independent_pairs");
             environment["NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_PHASE4_REGULAR_V4_LIVE_ACTIVATION_OFF_ON_OFF_256MB_TRANSIENT_SETUP_FAILURE"] = "1";
             environment["NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_PHASE4_REGULAR_V4_LIVE_ACTIVATION_OFF_ON_OFF_256MB_TRANSIENT_SETUP_PHASE"] = "measured_terminal";
             environment["NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_PHASE4_REGULAR_V4_LIVE_ACTIVATION_OFF_ON_OFF_256MB_TRANSIENT_SETUP_REASON"] = "terminal_before_accept";
@@ -394,6 +392,8 @@ public sealed class FileTransferPhase5RerunPolicyTests : FileTransferAcceptanceP
         try
         {
             var environment = BuildFakeRouteAcceptanceEnvironment("phase5-harness-cursor-rerun");
+            environment["NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_ROUTE_CYCLE_SOURCE"] =
+                await GenerateRouteCycleSourceAsync(repoRoot, Path.Combine(artifactRoot, "peers"), "independent_pairs");
             environment["NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_PHASE4_REGULAR_V4_LIVE_ACTIVATION_OFF_ON_OFF_256MB_TRANSIENT_SETUP_FAILURE"] = "1";
             environment["NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_PHASE4_REGULAR_V4_LIVE_ACTIVATION_OFF_ON_OFF_256MB_TRANSIENT_SETUP_PHASE"] = "harness_log_cursor";
             environment["NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_PHASE4_REGULAR_V4_LIVE_ACTIVATION_OFF_ON_OFF_256MB_TRANSIENT_SETUP_REASON"] = "gui_smoke_log_cursor_gap";

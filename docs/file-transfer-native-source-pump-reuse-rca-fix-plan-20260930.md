@@ -20,20 +20,20 @@ Follow-up status: the five original wider verification failures and the
 correlated-bootstrap fixture migrations are resolved in retained offline runs.
 The subsequent accumulated review also fixed a stale fallback-cleanup race;
 its focused, affected projection and joined-cycle checks pass. See
-the [verification blocker RCA](<C:/Users/Juraj/Desktop/Remote help/docs/file-transfer-verification-blockers-rca-fix-plan-20260930.md>)
+the [verification blocker RCA](<file-transfer-verification-blockers-rca-fix-plan-20260930.md>)
 for the current findings and next gate; the reports below preserve the earlier
 native-fix verification history.
 
 ## Current evidence
 
 The reviewed attempt is
-[20260930T133822Z](<C:/Users/Juraj/Desktop/Remote help/artifacts/live-checkpoint-f42e2548-20260930/20260930T133822Z>),
+[20260930T133822Z](<../artifacts/live-checkpoint-f42e2548-20260930/20260930T133822Z>),
 scenario `regular-v4-live-activation-off-on-off-256mb`. It used the fresh portable
 from the reviewed HEAD, strict preflights and an escalated live run outside the
 restricted sandbox. Connectivity, isolation, portable freshness and provenance
 passed. There was one scenario attempt and no automatic rerun.
 
-The [post-run review](<C:/Users/Juraj/Desktop/Remote help/artifacts/live-checkpoint-f42e2548-20260930/20260930T133822Z/post-run-review.json>)
+The [post-run review](<../artifacts/live-checkpoint-f42e2548-20260930/20260930T133822Z/post-run-review.json>)
 pins 60 original artifacts. All 60 size and SHA-256 pairs were rechecked during
 this RCA and match. Its current SHA-256 is
 `860080970fcaf3dfe813583fddd68d8e237df977679dc45488b95b5be121c209`.
@@ -41,7 +41,7 @@ The retained analysis completed with exit 0, without timing out, in 133.182
 seconds. Snapshot parity passed; current runtime proof remains false.
 
 The following line references are in the original
-[operational log](<C:/Users/Juraj/Desktop/Remote help/artifacts/live-checkpoint-f42e2548-20260930/20260930T133822Z/regular-v4-live-activation-off-on-off-256mb/live-operational-log/nlink.log>).
+[operational log](<../artifacts/live-checkpoint-f42e2548-20260930/20260930T133822Z/regular-v4-live-activation-off-on-off-256mb/live-operational-log/nlink.log>).
 Times are UTC. Sender writer identity is `p3200r86140119502d4bf7`.
 
 | Time | Observed event | Evidence |
@@ -67,20 +67,20 @@ or nondelivery of later absent records.
 
 ### The source and pump lifetime contracts disagree
 
-[NativeSenderSelection](<C:/Users/Juraj/Desktop/Remote help/src/nLink.Core/FileTransfer/SessionFileTransferService.NativeSenderSelection.cs:102>)
+[NativeSenderSelection](<../src/nLink.Core/FileTransfer/SessionFileTransferService.NativeSenderSelection.cs#L102>)
 opens each payload view from the original retained native anchor. It captures the
 current runtime owner, route publication, pending pump installation and data
 session, then revalidates that tuple after native I/O. A successful new payload
 view must have a newer installation generation.
 
-[RuntimeRead](<C:/Users/Juraj/Desktop/Remote help/src/nLink.Core/FileTransfer/SessionFileTransferService.NativeSenderSelection.cs:189>)
+[RuntimeRead](<../src/nLink.Core/FileTransfer/SessionFileTransferService.NativeSenderSelection.cs#L189>)
 retains that tuple and checks it on access. Its installation must still be the
 current installed or pending descriptor. This is an intentional safety boundary:
 a readable file handle is not authority to read for a successor runtime.
 
 The pump supervisor has two paths that clear its completed task while retaining
 the stream: a
-[nonterminal bootstrap callback completion](<C:/Users/Juraj/Desktop/Remote help/src/nLink.Core/FileTransfer/SessionFileTransferService.PullTransferSessionV4.cs:3088>)
+[nonterminal bootstrap callback completion](<../src/nLink.Core/FileTransfer/SessionFileTransferService.PullTransferSessionV4.cs#L3088>)
 and ordinary pump completion while the receive loop stays alive. The current log
 contains the held callback sequence, but no ordinary
 `filetransfer_v4_receive_loop_kept_alive_after_sender_pump_completed` event.
@@ -88,11 +88,11 @@ Therefore the held-callback path is the primary reproduction target; successful
 pump completion must not be presented as an observed fact.
 
 When queued work requires a successor, the
-[queued work branch](<C:/Users/Juraj/Desktop/Remote help/src/nLink.Core/FileTransfer/SessionFileTransferService.PullTransferSessionV4.cs:3000>)
+[queued work branch](<../src/nLink.Core/FileTransfer/SessionFileTransferService.PullTransferSessionV4.cs#L3000>)
 requests reopening only if the retained stream is null. The install helper also
 forces reopening for a still-running predecessor, but that condition does not
 apply after the task slot has been cleared. The
-[installer](<C:/Users/Juraj/Desktop/Remote help/src/nLink.Core/FileTransfer/SessionFileTransferService.PullTransferSessionV4.cs:1414>)
+[installer](<../src/nLink.Core/FileTransfer/SessionFileTransferService.PullTransferSessionV4.cs#L1414>)
 can consequently commit a new descriptor and start its pump with the old nonnull
 stream, without invoking the native source factory.
 
@@ -140,7 +140,7 @@ held callback remains diagnostic-only. Do not synthesize authority tokens or
 wrap the source factory in a way that hides the production source identity.
 
 The existing
-[runtime-read fixture](<C:/Users/Juraj/Desktop/Remote help/tests/nLink.SmokeTests.Core/FrontierAttemptRuntimeReadTests.cs:108>)
+[runtime-read fixture](<../tests/nLink.SmokeTests.Core/FrontierAttemptRuntimeReadTests.cs#L108>)
 checks four fresh opens and rejects retired views. Its gated reads cover forced
 reopening across transitions, not this completed-task and retained-stream branch.
 Use that coverage as a base, not proof that the reuse branch is safe.
@@ -200,7 +200,7 @@ cadence, goodput, wallet behavior, GUI setup or acceptance to mask this failure.
 
 ## Implementation and offline verification
 
-The [new native queued-pump regression](<C:/Users/Juraj/Desktop/Remote help/tests/nLink.SmokeTests.Core/FrontierNativeQueuedPumpTests.cs>)
+The [new native queued-pump regression](<../tests/nLink.SmokeTests.Core/FrontierNativeQueuedPumpTests.cs>)
 uses the original native picker factory without a stream or factory wrapper,
 real native file custody, production Core services and coordinator transitions,
 and the existing fake NKN transport. It performs no live NKN connection. Existing
@@ -208,9 +208,9 @@ send-completion and transport hooks hold a Tuna callback while the source hold
 captures it, then retire the callback before releasing the fallback control
 exchange. No route, runtime token or hold receipt is synthesized.
 
-Before the fix, the [red regression](<C:/Users/Juraj/Desktop/Remote help/artifacts/native-queued-pump-20260930/native-queued-pump-red-joined.trx>)
+Before the fix, the [red regression](<../artifacts/native-queued-pump-20260930/native-queued-pump-red-joined.trx>)
 failed. Its
-[child diagnostic](<C:/Users/Juraj/Desktop/Remote help/artifacts/production-native-picker-20260929/pwsh-queued-pump-5e81830d9c3d4b009fb5306323766b27/frontier-process-output-0bf4e7e0ac4c4025b7cf07a1a0d96728-0-stderr.log>)
+[child diagnostic](<../artifacts/production-native-picker-20260929/pwsh-queued-pump-5e81830d9c3d4b009fb5306323766b27/frontier-process-output-0bf4e7e0ac4c4025b7cf07a1a0d96728-0-stderr.log>)
 records `read_failed`, `native_sender_source_not_current`, `same_stream=True`,
 `install=3` and `predecessor_readable=False`. The operational log records the
 installation reason `queued_sparse_runtime_work`.
@@ -229,7 +229,7 @@ view and reacquires only when a different view or installation is needed.
 A test reflection lookup was also corrected to inspect the concrete native
 Stream type rather than the Stream base class; no runtime guard was changed.
 
-The [final focused regression](<C:/Users/Juraj/Desktop/Remote help/artifacts/native-queued-pump-20260930/native-queued-pump-green-same-route.trx>)
+The [final focused regression](<../artifacts/native-queued-pump-20260930/native-queued-pump-green-same-route.trx>)
 passes on the default test stack. It proves startup succeeds, held-callback
 fallback installation 3 reads through a fresh native view, and normal pump
 completion followed by queued same-route installation 4 also reacquires a view
@@ -237,17 +237,17 @@ without changing the runtime owner or route publication. Previous views remain
 unreadable; cloned views cannot qualify for reuse. This is a bounded read/handoff
 test, not a complete 256 MB transfer or second-Tuna acceptance proof.
 
-The [native and joined compatibility run](<C:/Users/Juraj/Desktop/Remote help/artifacts/native-queued-pump-20260930/native-queued-pump-native-joined.trx>)
+The [native and joined compatibility run](<../artifacts/native-queued-pump-20260930/native-queued-pump-native-joined.trx>)
 passed all 18 cases: nine native picker cases, including retired/disposed-source
 rejection, and nine joined transport cases, including real-file 256 MiB completion
 over the fake network. No live route-cycle acceptance is inferred from them.
 
 The broader verification gate is not green:
 
-- The [first affected run](<C:/Users/Juraj/Desktop/Remote help/artifacts/native-queued-pump-20260930/native-queued-pump-affected-contracts.trx>)
+- The [first affected run](<../artifacts/native-queued-pump-20260930/native-queued-pump-affected-contracts.trx>)
   recorded 60 passes and two callback-handoff assertion failures, then aborted
   with a stack overflow during a checkpoint handoff test's disposal.
-- An [isolated installer baseline comparison](<C:/Users/Juraj/Desktop/Remote help/artifacts/native-queued-pump-20260930/native-queued-pump-baseline-failures.trx>)
+- An [isolated installer baseline comparison](<../artifacts/native-queued-pump-20260930/native-queued-pump-baseline-failures.trx>)
   temporarily removed only the four new installer lines. That file matched HEAD;
   the unused native predicate and test additions remained. Both callback failures
   reproduced at the same assertions. The checkpoint test failed with
@@ -255,7 +255,7 @@ The broader verification gate is not green:
   during disposal. Thus these three failures do not require the new reopen
   condition. Their underlying causes are not fixed by this change.
 - The installer was restored and its SHA-256 checked against the previously
-  tested content. The [remaining handoff cases](<C:/Users/Juraj/Desktop/Remote help/artifacts/native-queued-pump-20260930/native-queued-pump-remaining-handoff.trx>)
+  tested content. The [remaining handoff cases](<../artifacts/native-queued-pump-20260930/native-queued-pump-remaining-handoff.trx>)
   recorded 50 passes and two further failures: a lost operational-log cursor in
   the regular route-cycle fixture and a wait cancellation in the Tuna switch-off
   recovery fixture. Previously completed methods were excluded from this run.
@@ -267,12 +267,12 @@ production stack change or a default-stack gate pass. Build telemetry was also
 disabled for focused rebuilds with `UsedAvaloniaProducts=` after Avalonia could
 not write its optional log outside the workspace. No test assertion was disabled.
 
-The [two isolated route fixtures](<C:/Users/Juraj/Desktop/Remote help/artifacts/native-queued-pump-20260930/native-queued-pump-isolated-routes.trx>)
+The [two isolated route fixtures](<../artifacts/native-queued-pump-20260930/native-queued-pump-isolated-routes.trx>)
 were then rerun with fresh workspace-owned logging and the diagnostic stack.
 Both still fail waiting for fallback publication: the regular cycle at
 `SessionFileTransferV4SenderTests.cs:10457`, and the initial Tuna switch-off case
 at line 31434. The lost-log-cursor error no longer masks the first wait.
-Their [isolated log](<C:/Users/Juraj/Desktop/Remote help/artifacts/native-queued-pump-20260930/isolated-route-checks/nlink.log>)
+Their [isolated log](<../artifacts/native-queued-pump-20260930/isolated-route-checks/nlink.log>)
 is retained. These two cases have not been baseline-compared or root-caused;
 do not describe them as fixed, harmless or caused by the native-stream change.
 
@@ -285,7 +285,7 @@ stack run and test-only stack qualification remain part of the result.
 ## Next verification boundary
 
 Do not checkpoint for live validation or start another live run yet. The
-[follow-up RCA](<C:/Users/Juraj/Desktop/Remote help/docs/file-transfer-verification-blockers-rca-fix-plan-20260930.md>)
+[follow-up RCA](<file-transfer-verification-blockers-rca-fix-plan-20260930.md>)
 resolves the callback and checkpoint cases and identifies the missing
 correlated-bootstrap prerequisite in the two older route fixtures. Migrate
 those fixtures and rerun their targeted paths without weakening currentness,
@@ -293,4 +293,4 @@ snapshot continuity or route acceptance.
 
 The native-stream fix is retained uncommitted. Its focused regression, source
 pins and wider verification results are recorded in the
-[implementation review](<C:/Users/Juraj/Desktop/Remote help/artifacts/native-queued-pump-20260930/implementation-review.json>).
+[implementation review](<../artifacts/native-queued-pump-20260930/implementation-review.json>).

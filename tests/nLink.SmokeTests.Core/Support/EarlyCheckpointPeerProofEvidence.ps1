@@ -2,8 +2,11 @@ param([string]$RepoRoot, [string]$FixturePath, [string]$OutputRoot, [string]$Emi
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 . (Join-Path $RepoRoot 'tools/FileTransferOps/CoordinatorSnapshotEvidence.ps1')
-$catalog = Get-FileTransferCoordinatorEarlyCheckpointProofCatalog
+$catalog = Get-FileTransferCoordinatorFallbackRepairHandoffCatalog
+$earlyCatalog = Get-FileTransferCoordinatorEarlyCheckpointProofCatalog
 if ($catalog.Version -cne $EmitterProfile -or $catalog.Hash -cne $EmitterHash -or
+    $catalog.ParentCatalogHash -cne $earlyCatalog.Hash -or
+    $earlyCatalog.Hash -cne 'a5589d2ced4470105f2643a73921f2f9918e97804043581b9b10ef2c367c5be4' -or
     (Get-FileTransferCoordinatorEvidenceCatalog).Hash -cne '17b5e4a90a18a5f4173ebd1b2081aeee1db48773b0213f1bb45549e0a0f057e2' -or
     (Get-FileTransferCoordinatorInitialDataSessionCatalog).Hash -cne '90cf0fdafc50d49c866bbb9bdda9097b3306ae5a7fd9d1198b03c02c66ef18ab') {
     throw 'Emitter/catalog mismatch or frozen parent changed.'

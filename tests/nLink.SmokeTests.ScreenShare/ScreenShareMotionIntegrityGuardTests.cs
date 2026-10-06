@@ -152,6 +152,7 @@ public sealed class ScreenShareMotionIntegrityGuardTests
     }
 }
 
+[Trait("Area", "ScreenShare")]
 public sealed class ScreenShareMotionIdrProofTrackerTests
 {
     [Fact]

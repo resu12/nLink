@@ -295,17 +295,17 @@ a fresh portable build, strict preflights and one targeted live-256 attempt with
 new evidence, rather than re-evaluation of the original failed attempt. No live
 run or local commit was made in this follow-up.
 
-[receipt]: <C:/Users/Juraj/Desktop/Remote help/artifacts/frontier-live-checkpoint-20260920/live/20260920T150102Z/regular-v4-live-activation-off-on-off-256mb/filetransfer-retained-analysis-attempt-receipt.json>
-[full]: <C:/Users/Juraj/Desktop/Remote help/artifacts/frontier-live-checkpoint-20260920/live/20260920T150102Z/regular-v4-live-activation-off-on-off-256mb/filetransfer-coordinator-snapshot-full-summary.json>
-[compact]: <C:/Users/Juraj/Desktop/Remote help/artifacts/frontier-live-checkpoint-20260920/live/20260920T150102Z/regular-v4-live-activation-off-on-off-256mb/filetransfer-coordinator-snapshot-compact-summary.json>
-[witnesses]: <C:/Users/Juraj/Desktop/Remote help/artifacts/frontier-live-checkpoint-20260920/rca-root-lifecycle-witnesses.json>
-[projection]: <C:/Users/Juraj/Desktop/Remote help/src/nLink.Core/FileTransfer/FileTransferCoordinator.Snapshots.cs:5823>
-[start]: <C:/Users/Juraj/Desktop/Remote help/src/nLink.Core/FileTransfer/FileTransferCoordinator.cs:24818>
-[leg]: <C:/Users/Juraj/Desktop/Remote help/src/nLink.Core/FileTransfer/FileTransferCoordinator.cs:9539>
-[lifecycle]: <C:/Users/Juraj/Desktop/Remote help/tools/FileTransferOps/CoordinatorSnapshotEvidence.ps1:7429>
-[carry]: <C:/Users/Juraj/Desktop/Remote help/tools/FileTransferOps/CoordinatorSnapshotEvidence.ps1:7594>
-[parent]: <C:/Users/Juraj/Desktop/Remote help/tools/Run-FileTransferRouteAcceptance.ps1:7047>
-[tests]: <C:/Users/Juraj/Desktop/Remote help/tests/nLink.SmokeTests.Core/FileTransferOpsScriptSurfaceTests.cs:6679>
-[fixture]: <C:/Users/Juraj/Desktop/Remote help/tests/nLink.SmokeTests.Core/FileTransferCoordinatorTests.cs:5501>
-[report]: <C:/Users/Juraj/Desktop/Remote help/artifacts/frontier-live-checkpoint-20260920/RESULTS.md>
-[implementation]: <C:/Users/Juraj/Desktop/Remote help/artifacts/terminal-checkpoint-convergence-20260920/RESULTS.md>
+[receipt]: <../artifacts/frontier-live-checkpoint-20260920/live/20260920T150102Z/regular-v4-live-activation-off-on-off-256mb/filetransfer-retained-analysis-attempt-receipt.json>
+[full]: <../artifacts/frontier-live-checkpoint-20260920/live/20260920T150102Z/regular-v4-live-activation-off-on-off-256mb/filetransfer-coordinator-snapshot-full-summary.json>
+[compact]: <../artifacts/frontier-live-checkpoint-20260920/live/20260920T150102Z/regular-v4-live-activation-off-on-off-256mb/filetransfer-coordinator-snapshot-compact-summary.json>
+[witnesses]: <../artifacts/frontier-live-checkpoint-20260920/rca-root-lifecycle-witnesses.json>
+[projection]: <../src/nLink.Core/FileTransfer/FileTransferCoordinator.Snapshots.cs#L5823>
+[start]: <../src/nLink.Core/FileTransfer/FileTransferCoordinator.cs#L24818>
+[leg]: <../src/nLink.Core/FileTransfer/FileTransferCoordinator.cs#L9539>
+[lifecycle]: <../tools/FileTransferOps/CoordinatorSnapshotEvidence.ps1#L7429>
+[carry]: <../tools/FileTransferOps/CoordinatorSnapshotEvidence.ps1#L7594>
+[parent]: <../tools/Run-FileTransferRouteAcceptance.ps1#L7047>
+[tests]: <../tests/nLink.SmokeTests.Core/FileTransferOpsScriptSurfaceTests.cs#L6679>
+[fixture]: <../tests/nLink.SmokeTests.Core/FileTransferCoordinatorTests.cs#L5501>
+[report]: <../artifacts/frontier-live-checkpoint-20260920/RESULTS.md>
+[implementation]: <../artifacts/terminal-checkpoint-convergence-20260920/RESULTS.md>

@@ -134,11 +134,11 @@ trace mapping, the two existing child-output adapters, and Go `bridgeDirection`,
 plus focused tests. Reuse a small private helper for opt-in/bounds/hash formatting;
 do not introduce public DTOs or a general evidence/authority framework.
 
-Source anchors: [queue/write/receive](<C:/Users/Juraj/Desktop/Remote help/src/nLink.Infra.Nkn/NknTunaSidecarClient.cs:129>),
-[Go forwarding](<C:/Users/Juraj/Desktop/Remote help/tools/nkn-tuna-sidecar/main.go:1258>),
-[dialer output](<C:/Users/Juraj/Desktop/Remote help/src/nLink.Infra.Nkn/NknTunaAccelerationLane.cs:404>),
-[listener output](<C:/Users/Juraj/Desktop/Remote help/src/nLink.Infra.Nkn/NknTunaListenerSidecarSupervisor.cs:496>),
-[unchanged off-action branch](<C:/Users/Juraj/Desktop/Remote help/tools/GuiSmoke-Windows.ps1:36494>).
+Source anchors: [queue/write/receive](<../src/nLink.Infra.Nkn/NknTunaSidecarClient.cs#L129>),
+[Go forwarding](<../tools/nkn-tuna-sidecar/main.go#L1258>),
+[dialer output](<../src/nLink.Infra.Nkn/NknTunaAccelerationLane.cs#L404>),
+[listener output](<../src/nLink.Infra.Nkn/NknTunaListenerSidecarSupervisor.cs#L496>),
+[unchanged off-action branch](<../tools/GuiSmoke-Windows.ps1#L36494>).
 
 ## Gate A: separately approve instrumentation and focused tests
 

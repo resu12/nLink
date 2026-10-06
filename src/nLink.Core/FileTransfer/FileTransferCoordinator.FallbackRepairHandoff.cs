@@ -46,15 +46,18 @@ internal static partial class FileTransferCoordinator
     // Source identity is execution evidence, not permission to hold or release repair ownership.
     internal static FileTransferFallbackTailYieldScope? CaptureInboundFallbackRepairWriteScope(
         FileTransferCoordinatorState state)
-        => state.Direction == FileTransferDirection.Inbound &&
-            state.RouteSelection.Route == FileTransferRoute.PostTunaFallbackV6 &&
-            state.RouteSelection.ProtocolVersion == FileTransferProtocol.ProtocolVersionV6 &&
-            IsCurrentPostTunaFallbackLeg(state.CurrentLeg) &&
-            TryCreateCurrentFallbackTailYieldScope(state, out var scope) ? scope : null;
+    {
+        if (state.Direction != FileTransferDirection.Inbound ||
+            state.RouteSelection.Route != FileTransferRoute.PostTunaFallbackV6 ||
+            state.RouteSelection.ProtocolVersion != FileTransferProtocol.ProtocolVersionV6 ||
+            !IsCurrentPostTunaFallbackLeg(state.CurrentLeg)) { return null; }
+        _ = TryCreateCurrentFallbackTailYieldScope(state, out var scope);
+        return scope.HasCompleteWriteSourceScope ? scope : null;
+    }
 
     internal static bool IsInboundFallbackRepairWriteScopeCurrent(FileTransferCoordinatorState state,
         FileTransferFallbackTailYieldScope scope)
-        => scope.Direction == FileTransferDirection.Inbound &&
+        => scope.HasCompleteWriteSourceScope && scope.Direction == FileTransferDirection.Inbound &&
             scope.Route == FileTransferRoute.PostTunaFallbackV6 &&
             scope.ProtocolVersion == FileTransferProtocol.ProtocolVersionV6 &&
             IsCurrentPostTunaFallbackLeg(state.CurrentLeg) && IsFallbackTailYieldScopeCurrent(state, scope, out _);

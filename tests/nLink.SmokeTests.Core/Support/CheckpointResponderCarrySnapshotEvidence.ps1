@@ -5,6 +5,17 @@ $ErrorActionPreference = 'Stop'
 $catalog = Get-FileTransferCoordinatorEvidenceCatalog
 if ($catalog.Hash -cne '17b5e4a90a18a5f4173ebd1b2081aeee1db48773b0213f1bb45549e0a0f057e2') { throw 'Frozen catalog changed.' }
 $envelopes = Get-Content -LiteralPath $FixturePath -Raw | ConvertFrom-Json
+if (@($envelopes.aggregate.operations | Where-Object { Test-FileTransferCoordinatorCheckpointRepairContinuityMarker $_ }).Count -gt 0) {
+    foreach ($envelope in $envelopes) {
+        foreach ($operation in @($envelope.aggregate.operations | Where-Object { Test-FileTransferCoordinatorCheckpointRepairContinuityMarker $_ })) {
+            if (Test-FileTransferCoordinatorCheckpointRepairContinuityOperation $envelope $operation $catalog) {
+                throw 'Base catalog accepted unsupported checkpoint continuity.'
+            }
+        }
+    }
+    $catalog = Get-FileTransferCoordinatorCheckpointRepairContinuityCatalog
+    if ($catalog.Hash -cne 'e6c3b5ff7cf8b44bcde0782ec325d2623cb96ba8ff362edca1902f9a1929059d') { throw 'Frozen continuity catalog changed.' }
+}
 $first = $envelopes[0]
 $prefix = "snapshot_contract_version=1; snapshot_selection_mode=SnapshotV1Authoritative; snapshot_catalog_version=$($catalog.Version); snapshot_catalog_hash=$($catalog.Hash); coordinator_instance_id=$($first.coordinatorInstanceId); session_id=$($first.sessionId); transfer_id=$($first.transferId); direction=$($first.direction)"
 $families = $catalog.RequiredFamilies -join ','

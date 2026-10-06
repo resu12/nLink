@@ -9658,10 +9658,11 @@ public sealed partial class FileTransferCoordinatorTests
 
     [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
     internal static FileTransferCoordinatorTransitionEnvelope[] CreateProofPublicationCancellationSnapshotFixture(
-        long recoveryGeneration, bool heldRecheck = false)
+        long recoveryGeneration, bool heldRecheck = false,
+        Action<FileTransferCoordinatorTransitionEnvelope>? captureInitial = null)
     {
         var fixture = CreateReceiveRecoveryOperationFixture(FileTransferDirection.Inbound,
-            "proof-cancellation-generations", recoveryGeneration - 1);
+            "proof-cancellation-generations", recoveryGeneration - 1, captureInitial);
         return CompleteProofPublicationCancellationSnapshotFixture(fixture, heldRecheck);
     }
 

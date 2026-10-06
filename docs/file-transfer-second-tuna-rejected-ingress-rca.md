@@ -248,13 +248,13 @@ false full/compact/GUI parity claim here.
 
 ## Source references
 
-- [Receive guard and early return](<C:/Users/Juraj/Desktop/Remote help/src/nLink.Infra.Nkn/NknSignalingTransport.FileTransferTransportChannel.cs:2960>)
-- [Incoming secure envelope dispatch](<C:/Users/Juraj/Desktop/Remote help/src/nLink.Infra.Nkn/NknSignalingTransport.FileTransferTransportChannel.cs:4319>)
-- [Captured outgoing authority logging](<C:/Users/Juraj/Desktop/Remote help/src/nLink.Infra.Nkn/NknSignalingTransport.FileTransferTransportChannel.cs:2841>)
-- [Exact rejection/recovery matcher](<C:/Users/Juraj/Desktop/Remote help/tools/FileTransferSoak/ArtifactWriters.ps1:9850>)
-- [Decisive resend/receive requirement](<C:/Users/Juraj/Desktop/Remote help/tools/FileTransferSoak/ArtifactWriters.ps1:10066>)
-- [Candidate and scalar count construction](<C:/Users/Juraj/Desktop/Remote help/tools/FileTransferSoak/ArtifactWriters.ps1:15449>)
-- [Existing rejection regression](<C:/Users/Juraj/Desktop/Remote help/tests/nLink.SmokeTests.Core/NknFileTransferTransportTests.cs:2544>)
-- [Existing second-cycle retained fixture](<C:/Users/Juraj/Desktop/Remote help/tests/nLink.SmokeTests.Core/FileTransferRetainedAuthorityProofAnalyzerTests.cs:1340>)
-- [Final attempt record](<C:/Users/Juraj/Desktop/Remote help/artifacts/validation/consolidation-bounded-20260907/live-retry-confirmation-20260910/RUN.md>)
-- [Immutable selected evidence](<C:/Users/Juraj/Desktop/Remote help/artifacts/filetransfer-route-acceptance/20260910T060311Z/regular-v4-live-activation-off-on-off-256mb/filetransfer-retained-log-slice.log:21716>)
+- [Receive guard and early return](<../src/nLink.Infra.Nkn/NknSignalingTransport.FileTransferTransportChannel.cs#L2960>)
+- [Incoming secure envelope dispatch](<../src/nLink.Infra.Nkn/NknSignalingTransport.FileTransferTransportChannel.cs#L4319>)
+- [Captured outgoing authority logging](<../src/nLink.Infra.Nkn/NknSignalingTransport.FileTransferTransportChannel.cs#L2841>)
+- [Exact rejection/recovery matcher](<../tools/FileTransferSoak/ArtifactWriters.ps1#L9850>)
+- [Decisive resend/receive requirement](<../tools/FileTransferSoak/ArtifactWriters.ps1#L10066>)
+- [Candidate and scalar count construction](<../tools/FileTransferSoak/ArtifactWriters.ps1#L15449>)
+- [Existing rejection regression](<../tests/nLink.SmokeTests.Core/NknFileTransferTransportTests.cs#L2544>)
+- [Existing second-cycle retained fixture](<../tests/nLink.SmokeTests.Core/FileTransferRetainedAuthorityProofAnalyzerTests.cs#L1340>)
+- [Final attempt record](<../artifacts/validation/consolidation-bounded-20260907/live-retry-confirmation-20260910/RUN.md>)
+- [Immutable selected evidence](<../artifacts/filetransfer-route-acceptance/20260910T060311Z/regular-v4-live-activation-off-on-off-256mb/filetransfer-retained-log-slice.log#L21716>)

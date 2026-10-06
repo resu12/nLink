@@ -4,6 +4,7 @@ using NLink.Core.FileTransfer;
 namespace NLink.SmokeTests;
 
 [Collection(FakeNknNetworkCollection.Name)]
+[Trait("Area", "Core")]
 public sealed class FrontierServiceAdmissionTests : FileTransferOpsScriptsTestBase
 {
     [Theory]

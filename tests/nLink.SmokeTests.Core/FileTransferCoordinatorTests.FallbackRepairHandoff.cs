@@ -5,6 +5,52 @@ namespace NLink.SmokeTests;
 
 public sealed partial class FileTransferCoordinatorTests
 {
+    [Theory]
+    [InlineData(0)]
+    [InlineData(1)]
+    [Trait("FileTransferCoordinatorSuite", "FallbackRepairHandoff")]
+    public void FallbackRepairWriteScope_StartupEpochDoesNotGrantTailYieldAuthority(int liveRouteEpoch)
+    {
+        var (source, peer) = CreateInboundRepairHandoffSource();
+        var owner = source.CurrentRuntimeOwner!.Value with { LiveRouteEpoch = liveRouteEpoch };
+        source = source with
+        {
+            CurrentLeg = MutateRepairHandoffLeg(source.CurrentLeg!, "none", liveRouteEpoch),
+            CurrentLiveRouteEpoch = null,
+            CurrentRuntimeOwner = owner,
+            CurrentRoutePublicationToken = source.CurrentRoutePublicationToken!.Value with
+            {
+                RuntimeOwner = owner, LiveRouteEpoch = liveRouteEpoch,
+            },
+        };
+        var scope = Assert.IsType<FileTransferFallbackTailYieldScope>(
+            FileTransferCoordinator.CaptureInboundFallbackRepairWriteScope(source));
+        Assert.Equal(liveRouteEpoch, scope.LiveRouteEpoch);
+        Assert.Equal(liveRouteEpoch > 0, scope.HasCompleteExecutionScope);
+        Assert.True(FileTransferCoordinator.IsInboundFallbackRepairWriteScopeCurrent(source, scope));
+        Assert.False(FileTransferCoordinator.IsInboundFallbackRepairWriteScopeCurrent(source, scope with { LiveRouteEpoch = -1 }));
+        Assert.False(FileTransferCoordinator.IsInboundFallbackRepairWriteScopeCurrent(
+            source with { CurrentDataSessionGeneration = source.CurrentDataSessionGeneration + 1 }, scope));
+        Assert.False(FileTransferCoordinator.IsInboundFallbackRepairWriteScopeCurrent(
+            source with { CurrentRoutePublicationToken = null }, scope));
+        Assert.Null(FileTransferCoordinator.CaptureInboundFallbackRepairWriteScope(
+            source with { CurrentDataSessionGeneration = 0 }));
+        Assert.Null(FileTransferCoordinator.CaptureInboundFallbackRepairWriteScope(
+            source with { IsTerminal = true }));
+        Assert.Null(FileTransferCoordinator.CaptureInboundFallbackRepairWriteScope(
+            source with { Direction = FileTransferDirection.Outbound }));
+        if (liveRouteEpoch == 0)
+        {
+            var receipt = peer with { ObservationScope = scope };
+            Assert.True(receipt.IsDefault);
+            var rejected = FileTransferCoordinator.ApplyFallbackTailPeerProofReceipt(source, receipt);
+            Assert.False(rejected.Accepted, rejected.Reason);
+            Assert.Equal(source.CurrentRuntimeOwner, rejected.State.CurrentRuntimeOwner);
+            Assert.Equal(source.CurrentRoutePublicationToken, rejected.State.CurrentRoutePublicationToken);
+            AssertRejectedRepairHandoff(source, FileTransferCoordinator.PrepareInboundFallbackRepairHandoff(source, receipt));
+        }
+    }
+
     [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
     internal static FileTransferCoordinatorTransitionEnvelope[] CreateRepairHandoffEvidenceFixture(string terminal)
     {
@@ -519,12 +565,12 @@ public sealed partial class FileTransferCoordinatorTests
         FileTransferFallbackRepairHandoffCapture capture)
         => new(capture, capture.InboundWrites, capture.InboundFeedback, capture.Checkpoint, capture.MissingRanges);
 
-    private static FileTransferLeg MutateRepairHandoffLeg(FileTransferLeg leg, string mutation)
+    private static FileTransferLeg MutateRepairHandoffLeg(FileTransferLeg leg, string mutation, int? liveRouteEpoch = null)
         => new()
         {
             LegId = leg.LegId, Generation = leg.Generation + (mutation == "leg-generation" ? 1 : 0),
             RouteSelection = mutation == "route" ? FileTransferRouteResolver.Resolve(FileTransferRoute.FileTunaV4) : leg.RouteSelection,
-            ProtocolVersion = mutation == "protocol" ? 4 : leg.ProtocolVersion, LiveRouteEpochId = leg.LiveRouteEpochId,
+            ProtocolVersion = mutation == "protocol" ? 4 : leg.ProtocolVersion, LiveRouteEpochId = liveRouteEpoch ?? leg.LiveRouteEpochId,
             TransportEpochId = leg.TransportEpochId + (mutation == "transport-epoch" ? 1 : 0), StartedUtc = leg.StartedUtc,
             State = leg.State, StartCommittedChunkIndex = leg.StartCommittedChunkIndex,
             ProvenCommittedChunkIndex = leg.ProvenCommittedChunkIndex, ProvenHighestObservedChunkIndex = leg.ProvenHighestObservedChunkIndex,

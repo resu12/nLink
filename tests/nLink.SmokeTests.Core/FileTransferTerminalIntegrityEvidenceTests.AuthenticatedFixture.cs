@@ -101,10 +101,13 @@ public sealed partial class FileTransferTerminalIntegrityEvidenceTests
                     Assert.Equal("v4_physical_submission", fields.Field("publication_use_kind"));
                     // Preserve the original authenticated record. Seed a new,
                     // explicitly labeled observation while its owner is current.
+                    // Keep the content-evidence suffix last for strict redaction.
                     owner.seededMessage = owner.originalMessage.Replace("; actual_transport=tuna;", "; actual_transport=regular_nkn;")
                         .Replace("; delivery_transport=tuna;", "; delivery_transport=regular_nkn;")
-                        .Replace("; sent_via_acceleration=1;", "; sent_via_acceleration=0;") +
-                        "; offline_fixture_fault=wrong_physical_transport; offline_fixture_scope=authenticated_same_service_transfer";
+                        .Replace("; sent_via_acceleration=1;", "; sent_via_acceleration=0;")
+                        .Replace("event=filetransfer_data_path_send_result;", "event=filetransfer_data_path_send_result; " +
+                            "offline_fixture_fault=wrong_physical_transport; offline_fixture_scope=authenticated_same_service_transfer;");
+                    Assert.Equal(owner.seededMessage, SensitiveDataRedactor.Redact(owner.seededMessage));
                     LocalOperationalLog.Info("SessionSecurity", owner.seededMessage);
                 }
                 release();

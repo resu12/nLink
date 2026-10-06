@@ -8,6 +8,7 @@ using NLink.Infra.Nkn;
 namespace NLink.SmokeTests;
 
 [Trait("FileTransferInfraSuite", "SessionPreparationLane")]
+[Trait("Area", "Core")]
 public sealed class NknTunaLaneOwnershipTests
 {
     [Theory]

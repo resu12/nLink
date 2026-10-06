@@ -1,7 +1,4 @@
-using System.Diagnostics;
-using System.Globalization;
 using System.Text;
-using System.Text.RegularExpressions;
 using NLink.App.Views;
 using NLink.Core.Configuration;
 
@@ -14,9 +11,11 @@ namespace NLink.SmokeTests;
 [Collection(FakeNknNetworkCollection.Name)]
 public sealed class FileTransferPhase5FullMatrixTests : FileTransferAcceptancePhase5TestBase
 {
-    [Fact]
+    [Theory]
     [Trait("Category", "Smoke")]
-    public async Task RunFileTransferRouteAcceptance_Phase5FakeModeProducesPassArtifacts()
+    [InlineData("independent_pairs", true)]
+    [InlineData("independent_missing_receive", false)]
+    public async Task RunFileTransferRouteAcceptance_Phase5FakeModeProducesPassArtifacts(string payloadMode, bool expectedPass)
     {
         if (!OperatingSystem.IsWindows())
         {
@@ -29,6 +28,11 @@ public sealed class FileTransferPhase5FullMatrixTests : FileTransferAcceptancePh
 
         try
         {
+            var environment = BuildFakeRouteAcceptanceEnvironment("phase5-pass");
+            environment["NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_ROUTE_CYCLE_SOURCE"] =
+                await GenerateRouteCycleSourceAsync(repoRoot, Path.Combine(artifactRoot, "peers"), payloadMode);
+            string[] scenarioArguments = expectedPass ? [] :
+                ["-ScenarioName", "regular-v4-live-activation-off-on-off-256mb", "-GoodputOnlyRerunLimit", "0", "-SetupOnlyRerunLimit", "0"];
             var result = await RunPowerShellFileAsync(
                 repoRoot,
                 Path.Combine(repoRoot, "tools", "Run-FileTransferRouteAcceptance.ps1"),
@@ -36,9 +40,20 @@ public sealed class FileTransferPhase5FullMatrixTests : FileTransferAcceptancePh
                     "-MatrixMode", "phase5-analyzer-gui-acceptance",
                     "-ArtifactRoot", artifactRoot,
                     "-TimeoutSeconds", "30",
-                    "-ProgressTimeoutSeconds", "30"
+                    "-ProgressTimeoutSeconds", "30",
+                    ..scenarioArguments
                 ],
-                BuildFakeRouteAcceptanceEnvironment("phase5-pass"));
+                environment);
+
+            if (!expectedPass)
+            {
+                var failed = ReadArtifactReport(runRoot, "phase5-analyzer-gui-acceptance-summary.txt");
+                Assert.NotEqual(0, result.ExitCode);
+                Assert.Equal("FAIL", failed["correctness_verdict"]);
+                Assert.Equal("filetransfer_tuna_activation_delivery_unproven",
+                    failed["regular-v4-live-activation-off-on-off-256mb.runtime_failure_candidate"]);
+                return;
+            }
 
             Assert.True(
                 result.ExitCode == 0,
@@ -52,6 +67,9 @@ public sealed class FileTransferPhase5FullMatrixTests : FileTransferAcceptancePh
             Assert.Equal("PASS", summary["performance_verdict"]);
             Assert.Equal("6", summary["run_count"]);
             Assert.Equal("0", summary["failure_count"]);
+            var snapshot = System.Text.Json.JsonDocument.Parse(File.ReadAllText(Path.Combine(runRoot,
+                "regular-v4-live-activation-off-on-off-256mb", "filetransfer-coordinator-snapshot-full-summary.json")));
+            using (snapshot) { Assert.True(snapshot.RootElement.GetProperty("BoundaryCount").GetInt32() > 0); }
             Assert.Equal("regular_nkn_v4_fast,file_tuna_v4,post_tuna_fallback_v6,file_tuna_v4,post_tuna_fallback_v6", summary["regular-v4-live-activation-off-on-off-256mb.route_sequence"]);
             Assert.Equal("file_tuna_v4,post_tuna_fallback_v6,file_tuna_v4,post_tuna_fallback_v6", summary["regular-v4-live-activation-off-on-off-256mb.live_epoch_route_changes"]);
             Assert.Equal("pass", summary["regular-v4-live-activation-off-on-off-256mb.live_route_epoch_proof_verdict"]);
@@ -72,4 +90,5 @@ public sealed class FileTransferPhase5FullMatrixTests : FileTransferAcceptancePh
             TryDeleteDirectory(artifactRoot);
         }
     }
+
 }

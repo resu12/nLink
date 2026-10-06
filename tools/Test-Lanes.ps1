@@ -73,10 +73,11 @@ function Invoke-DotnetTest {
         [Parameter(Mandatory = $true)][string]$Target,
         [string]$Filter = "",
         [string]$ResultSuffix = "",
+        [string]$TestConfiguration = $Configuration,
         [switch]$EnableGuiSmoke
     )
 
-    $argsList = @("test", $Target, "-c", $Configuration)
+    $argsList = @("test", $Target, "-c", $TestConfiguration)
     if ($NoBuild) {
         $argsList += "--no-build"
     }
@@ -159,7 +160,16 @@ function Invoke-TestLane {
 
     switch ($Name) {
         "Core" {
-            Invoke-DotnetTest -Target (Get-DomainProjectPath -RepoRoot $RepoRoot -ProjectName "nLink.SmokeTests.Core")
+            $coreProject = Get-DomainProjectPath -RepoRoot $RepoRoot -ProjectName "nLink.SmokeTests.Core"
+            if ($Configuration -eq "Release") {
+                # Diagnostic fault profiles deliberately reject Release activation.
+                # Keep Release behavior/guard coverage and execute their positives in Debug.
+                Invoke-DotnetTest -Target $coreProject -Filter "RequiredConfiguration!=Debug" -ResultSuffix "core-release"
+                Invoke-DotnetTest -Target $coreProject -Filter "RequiredConfiguration=Debug" -TestConfiguration "Debug" -ResultSuffix "core-debug"
+            }
+            else {
+                Invoke-DotnetTest -Target $coreProject
+            }
         }
         "Gui" {
             Invoke-DotnetTest -Target (Get-DomainProjectPath -RepoRoot $RepoRoot -ProjectName "nLink.SmokeTests.Gui")

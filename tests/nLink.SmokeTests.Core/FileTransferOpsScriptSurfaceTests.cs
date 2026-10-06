@@ -1,7 +1,11 @@
 using System.Diagnostics;
 using System.Globalization;
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.RegularExpressions;
+using Microsoft.CodeAnalysis;
+using Microsoft.CodeAnalysis.CSharp;
+using Microsoft.CodeAnalysis.CSharp.Syntax;
 using NLink.App.Views;
 using NLink.Core.Configuration;
 
@@ -6181,15 +6185,8 @@ public sealed class FileTransferOpsScriptSurfaceTests : FileTransferOpsScriptsTe
         var sourceDirectory = Path.Combine(repoRoot, "src", "nLink.Core", "FileTransfer");
         var offenders = Directory
             .EnumerateFiles(sourceDirectory, "SessionFileTransferService*.cs")
-            .Where(path => !path.EndsWith(
-                "SessionFileTransferService.CoordinatorSnapshots.cs",
-                StringComparison.OrdinalIgnoreCase))
-            .SelectMany(path => File.ReadLines(path)
-                .Select((line, index) => new { path, line, lineNumber = index + 1 }))
-            .Where(item => item.line.Contains(
-                "CoordinatorPersistentState =",
-                StringComparison.Ordinal))
-            .Select(item => $"{item.path}:{item.lineNumber}")
+            .SelectMany(path => FindUnvalidatedCoordinatorStateWrites(File.ReadAllText(path))
+                .Select(line => $"{path}:{line}"))
             .ToArray();
 
         Assert.True(
@@ -6204,6 +6201,141 @@ public sealed class FileTransferOpsScriptSurfaceTests : FileTransferOpsScriptsTe
             "decision.SnapshotEnvelope is not null",
             serviceText,
             StringComparison.Ordinal);
+    }
+
+    private static int[] FindUnvalidatedCoordinatorStateWrites(string source)
+    {
+        var tree = CSharpSyntaxTree.ParseText(source);
+        Assert.DoesNotContain(tree.GetDiagnostics(), diagnostic => diagnostic.Severity == DiagnosticSeverity.Error);
+        var root = tree.GetRoot();
+        // Freeze the existing initialization/finalization methods and validated gate, not their file.
+        // New direct writes or any executable-token change require an explicit review.
+        var frozenCentralMethods = new HashSet<string>(StringComparer.Ordinal)
+        {
+            "1f42de7d15ebb5a02e9c1baedf62371c9994d38d064f35edc48b6417bd6f68e4",
+            "3f7c8fb417d0b1c5a283d50426beafa9c2ca27b22988df7b17e7a254977ac6a3",
+            "04df784bd0f10651f96c2b174b09b07b98b342a91b331335fa0756487eeba809",
+            "ae7062121b3b5a19f53f1e52ff162e65f0c8ed4eaee27708f3141e604bdd1b79",
+            "f0243b5d7859ca4a034cab936501674310e7a1f66a1a9834945f47edd8b38694",
+            "7a0cae828bdb15a20fa2fe89a13c789422a83d016c3c77dd9c4b6b5fac6baa54",
+            "87d71a5e2a341aa71961742aa4b689940fdeb3be24cc6578aa087141484ef1aa",
+            "423d63fd5135b533737423ebefed10718e781123d1287330f30d567fff5cbfa6",
+            "01cf147bcde0b5d3d0fdbaf016f093e83d8a8fb8668ef417348cac82b00ebb55",
+        };
+        bool FrozenCentralMethod(SyntaxNode node)
+        {
+            var method = node as MethodDeclarationSyntax ?? node.Ancestors().OfType<MethodDeclarationSyntax>().FirstOrDefault();
+            if (method?.Parent is not ClassDeclarationSyntax { Identifier.ValueText: "SessionFileTransferService" }) return false;
+            var tokens = string.Join("\n", method.DescendantTokens().Select(token => token.Text));
+            return frozenCentralMethods.Contains(Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(tokens))).ToLowerInvariant());
+        }
+        bool AdoptionCallback(SyntaxNode node, ExpressionSyntax receiver, ExpressionSyntax value, bool persistentProperty)
+        {
+            var lambda = node.Ancestors().OfType<LambdaExpressionSyntax>().FirstOrDefault();
+            if (lambda?.Parent is not ArgumentSyntax argument || argument.Parent is not ArgumentListSyntax arguments ||
+                arguments.Parent is not InvocationExpressionSyntax { Expression: IdentifierNameSyntax { Identifier.ValueText: "AdoptCoordinatorAuthoredEnvelopeLocked" } } ||
+                arguments.Arguments.Count != 8 || arguments.Arguments[6] != argument || argument.NameColon is not null ||
+                node.Ancestors().TakeWhile(parent => parent != lambda).Any(parent => parent is LocalFunctionStatementSyntax or AnonymousFunctionExpressionSyntax)) return false;
+            var parameter = lambda switch
+            {
+                SimpleLambdaExpressionSyntax simple => simple.Parameter.Identifier.ValueText,
+                ParenthesizedLambdaExpressionSyntax parenthesized when parenthesized.ParameterList.Parameters.Count == 1
+                    => parenthesized.ParameterList.Parameters[0].Identifier.ValueText,
+                _ => "",
+            };
+            if (parameter.Length == 0 || !SyntaxFactory.AreEquivalent(value, SyntaxFactory.ParseExpression(parameter + (persistentProperty ? ".PersistentState" : "")))) return false;
+            foreach (var (index, member) in new[] { (0, "CoordinatorInstanceId"), (1, "SessionId"), (2, "TransferId"), (7, "CoordinatorSnapshotEmitter") })
+            {
+                if (!SyntaxFactory.AreEquivalent(arguments.Arguments[index].Expression, SyntaxFactory.ParseExpression(receiver + "." + member))) return false;
+            }
+            return true;
+        }
+        var assignments = root.DescendantNodes().OfType<AssignmentExpressionSyntax>().Where(assignment =>
+            assignment.Left is MemberAccessExpressionSyntax { Name.Identifier.ValueText: "CoordinatorPersistentState" } or
+                IdentifierNameSyntax { Identifier.ValueText: "CoordinatorPersistentState" });
+        var badAssignments = assignments.Where(assignment => !FrozenCentralMethod(assignment) &&
+            !(assignment.IsKind(SyntaxKind.SimpleAssignmentExpression) && assignment.Left is MemberAccessExpressionSyntax member &&
+                AdoptionCallback(assignment, member.Expression, assignment.Right, persistentProperty: true)));
+        var badPressureAdoptions = root.DescendantNodes().OfType<InvocationExpressionSyntax>().Where(call =>
+            call.Expression is IdentifierNameSyntax { Identifier.ValueText: "AdoptRegularV4FrontierRepairPressureStateLocked" } &&
+            (call.ArgumentList.Arguments.Count != 2 || !AdoptionCallback(call, call.ArgumentList.Arguments[0].Expression,
+                call.ArgumentList.Arguments[1].Expression, persistentProperty: false)));
+        var badAdoptionDefinitions = root.DescendantNodes().Where(node => node switch
+        {
+            MethodDeclarationSyntax { Identifier.ValueText: "AdoptCoordinatorAuthoredEnvelopeLocked" } => !FrozenCentralMethod(node),
+            LocalFunctionStatementSyntax { Identifier.ValueText: "AdoptCoordinatorAuthoredEnvelopeLocked" } or
+                VariableDeclaratorSyntax { Identifier.ValueText: "AdoptCoordinatorAuthoredEnvelopeLocked" } or
+                ParameterSyntax { Identifier.ValueText: "AdoptCoordinatorAuthoredEnvelopeLocked" } or
+                PropertyDeclarationSyntax { Identifier.ValueText: "AdoptCoordinatorAuthoredEnvelopeLocked" } => true,
+            _ => false,
+        });
+        return badAssignments.Cast<SyntaxNode>().Concat(badPressureAdoptions)
+            .Concat(badAdoptionDefinitions)
+            .Select(node => node.GetLocation().GetLineSpan().StartLinePosition.Line + 1).Distinct().ToArray();
+    }
+
+    [Theory]
+    [InlineData("expression", true)]
+    [InlineData("block", true)]
+    [InlineData("parenthesized", true)]
+    [InlineData("multiline", true)]
+    [InlineData("direct", false)]
+    [InlineData("observed-value", false)]
+    [InlineData("other-helper", false)]
+    [InlineData("other-receiver", false)]
+    [InlineData("foreign-context", false)]
+    [InlineData("wrong-slot", false)]
+    [InlineData("nested-lambda", false)]
+    [InlineData("nested-local-function", false)]
+    [InlineData("stored-lambda", false)]
+    [InlineData("lookalike-text", false)]
+    [InlineData("shadowed-helper", false)]
+    [InlineData("shadowed-delegate", false)]
+    [InlineData("pressure-callback", true)]
+    [InlineData("pressure-direct", false)]
+    public void CoordinatorStateWriteGuard_RequiresExactAdoptionCallback(string mutation, bool allowed)
+    {
+        const string assignment = "context.CoordinatorPersistentState = adopted.PersistentState";
+        var callback = mutation switch
+        {
+            "block" => "adopted => { context.DataSession = session; " + assignment + "; }",
+            "parenthesized" => "(adopted) => " + assignment,
+            "observed-value" => "adopted => context.CoordinatorPersistentState = observed.PersistentState",
+            "foreign-context" => "adopted => foreign.CoordinatorPersistentState = adopted.PersistentState",
+            "nested-lambda" => "adopted => { Action late = () => { " + assignment + "; }; }",
+            "nested-local-function" => "adopted => { void Late() { " + assignment + "; } }",
+            "pressure-callback" => "adopted => AdoptRegularV4FrontierRepairPressureStateLocked(context, adopted)",
+            _ => "adopted => " + assignment,
+        };
+        var call = $"AdoptCoordinatorAuthoredEnvelopeLocked(context.CoordinatorInstanceId, context.SessionId, context.TransferId, direction, state, envelope, {callback}, context.CoordinatorSnapshotEmitter);";
+        var body = mutation switch
+        {
+            "direct" => assignment + ";",
+            "other-helper" => call.Replace("AdoptCoordinatorAuthoredEnvelopeLocked", "ObserveTransport", StringComparison.Ordinal),
+            "other-receiver" => "adapter." + call,
+            "multiline" => call.Replace(", ", ",\n    ", StringComparison.Ordinal).Replace(" = adopted", " =\n    adopted", StringComparison.Ordinal),
+            "wrong-slot" => call.Replace($"envelope, {callback}", $"{callback}, envelope", StringComparison.Ordinal),
+            "stored-lambda" => "Action<FileTransferCoordinatorState> later = " + callback + ";",
+            "lookalike-text" => "// " + call + "\nvar text = \"AdoptCoordinatorAuthoredEnvelopeLocked(adopted => context.CoordinatorPersistentState = adopted.PersistentState)\"; " + assignment + ";",
+            "pressure-direct" => "AdoptRegularV4FrontierRepairPressureStateLocked(context, observed);",
+            "shadowed-helper" => "void AdoptCoordinatorAuthoredEnvelopeLocked(object a, object b, object c, object d, object e, object f, Action<FileTransferCoordinatorState> callback, object h) { callback(observed); } " + call,
+            "shadowed-delegate" => "Action<object, object, object, object, object, object, Action<FileTransferCoordinatorState>, object> AdoptCoordinatorAuthoredEnvelopeLocked = (a,b,c,d,e,f,callback,h) => callback(observed); " + call,
+            _ => call,
+        };
+        Assert.Equal(allowed, FindUnvalidatedCoordinatorStateWrites("class SessionFileTransferService { void Fixture() { " + body + " } }").Length == 0);
+    }
+
+    [Fact]
+    public void CoordinatorStateWriteGuard_DoesNotExemptTheCentralFileOrChangedFinalizers()
+    {
+        var source = File.ReadAllText(Path.Combine(FindRepoRoot(), "src", "nLink.Core", "FileTransfer", "SessionFileTransferService.CoordinatorSnapshots.cs"));
+        Assert.Empty(FindUnvalidatedCoordinatorStateWrites(source));
+        var changed = source.Replace("context.CoordinatorPersistentState = snapshot.State.PersistentState;",
+            "context.CoordinatorPersistentState = observed.PersistentState;", StringComparison.Ordinal);
+        Assert.Equal(2, FindUnvalidatedCoordinatorStateWrites(changed).Length);
+        Assert.Single(FindUnvalidatedCoordinatorStateWrites(source.Replace("emitter.ValidateEnvelope(envelope, state);",
+            "// Envelope validation removed", StringComparison.Ordinal)));
+        Assert.Single(FindUnvalidatedCoordinatorStateWrites(source + "\npartial class SessionFileTransferService { void Direct() { context.CoordinatorPersistentState = observed.PersistentState; } }"));
     }
 
     [Fact]
@@ -6566,11 +6698,16 @@ public sealed class FileTransferOpsScriptSurfaceTests : FileTransferOpsScriptsTe
         Directory.CreateDirectory(tempRoot);
         try
         {
-            var envelopes = FileTransferCoordinatorTests.CreateProofPublicationCancellationSnapshotFixture(recoveryGeneration)
+            var startup = new List<NLink.Core.FileTransfer.FileTransferCoordinatorTransitionEnvelope>();
+            var envelopes = FileTransferCoordinatorTests.CreateProofPublicationCancellationSnapshotFixture(
+                    recoveryGeneration, captureInitial: startup.Add)
                 .Select(NLink.Core.FileTransfer.SessionFileTransferService.CreateCoordinatorSnapshotEvidenceForTesting);
             var fixturePath = Path.Combine(tempRoot, "envelopes.json");
             await File.WriteAllTextAsync(fixturePath,
-                "[" + string.Join(",", envelopes.Select(envelope => envelope.ToCanonicalJson())) + "]");
+                "{\"recovery\":[" + string.Join(",", envelopes.Select(envelope => envelope.ToCanonicalJson())) +
+                "],\"startup\":[" + string.Join(",", startup
+                    .Select(NLink.Core.FileTransfer.SessionFileTransferService.CreateCoordinatorSnapshotEvidenceForTesting)
+                    .Select(envelope => envelope.ToCanonicalJson())) + "]}");
             var script = File.ReadAllText(Path.Combine(repoRoot, "tests", "nLink.SmokeTests.Core",
                 "Support", "ProofPublicationCancellationSnapshotEvidence.ps1"));
             var result = await RunPowerShellScriptTextAsync(script, [repoRoot, fixturePath, tempRoot]);

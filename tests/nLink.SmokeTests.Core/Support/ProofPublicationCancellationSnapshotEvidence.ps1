@@ -6,7 +6,8 @@ $catalog = Get-FileTransferCoordinatorEvidenceCatalog
 if ($catalog.Hash -cne '17b5e4a90a18a5f4173ebd1b2081aeee1db48773b0213f1bb45549e0a0f057e2') {
     throw 'Frozen Snapshot V1 catalog changed.'
 }
-$envelopes = Get-Content -LiteralPath $FixturePath -Raw | ConvertFrom-Json
+$fixture = Get-Content -LiteralPath $FixturePath -Raw | ConvertFrom-Json
+$envelopes = @($fixture.recovery)
 function Copy-Value($value) { $value | ConvertTo-Json -Depth 64 -Compress | ConvertFrom-Json }
 function Find-Operation($envelope, [string]$role) {
     $matches = @($envelope.aggregate.operations | Where-Object { $_.operationRole -ceq $role })
@@ -18,10 +19,12 @@ $prefix = "snapshot_contract_version=1; snapshot_selection_mode=SnapshotV1Author
 $families = $catalog.RequiredFamilies -join ','
 $coverage = "emitted_family_coverage=$families; shadow_family_coverage=; authoritative_family_coverage=$families"
 function New-Effect($envelope, $operation, [string]$kind, [long]$sequence) {
-    $scope = $operation.receiveRecovery.sourceBoundary
+    $scope = if ($operation.family -ceq 'route_runtime') { $operation.routeRuntime.boundary }
+        else { $operation.receiveRecovery.sourceBoundary }
     "event=filetransfer_coordinator_authority_effect; $prefix; transition_id=$($envelope.transitionId); coordinator_state_generation=$($envelope.aggregate.afterStateGeneration); operation_family=$($operation.family); operation_key=$($operation.operationKey); operation_authority_id=$($operation.authorityId); operation_generation=$($operation.operationGeneration); effect_kind=$kind; effect_identity=$kind-$($envelope.transitionId); effect_generation=$($operation.receiptGeneration); receipt_identity=$($operation.receiptIdentity); receipt_generation=$($operation.receiptGeneration); receipt_status=$($operation.receiptStatus); receipt_fingerprint=$($operation.receiptFingerprint); route=$($scope.route); protocol_version=$($scope.protocolVersion); live_route_epoch=$($scope.liveRouteEpoch); route_publication_generation=$($scope.routePublicationGeneration); route_commit_generation=$($scope.routeCommitGeneration); runtime_generation=$($scope.runtimeGeneration); terminal_generation=$($scope.terminalGeneration); leg_generation=$($scope.legGeneration); transport_epoch=$($scope.transportEpoch); bridge_recovery_generation=$($scope.bridgeRecoveryGeneration); checkpoint_generation=$($scope.checkpointGeneration); checkpoint_request_id=$($scope.checkpointRequestId); data_session_identity=$($scope.dataSessionIdentity); data_session_generation=$($scope.dataSessionGeneration); authority_effect=applied; log_writer_id=fixture-writer; log_writer_sequence=$sequence"
 }
 function New-Lines([object[]]$records, [bool]$includeProofEffect = $true) {
+    $first = $records[0]
     $lines = [Collections.Generic.List[string]]::new()
     $lines.Add("event=filetransfer_coordinator_snapshot_stream_started; $prefix; initial_state_generation=$($first.aggregate.beforeStateGeneration); initial_state_hash=$($first.aggregate.beforeStateFingerprint); $coverage; authority_effect=none")
     for ($i = 0; $i -lt $records.Count; $i++) {
@@ -44,6 +47,11 @@ function New-Lines([object[]]$records, [bool]$includeProofEffect = $true) {
         if ($kind) {
             $role = if ($kind -ceq 'proof_publication_delivered') { 'proof_publication_terminal' } else { 'operation_current' }
             $lines.Add((New-Effect $envelope (Find-Operation $envelope $role) $kind ($sequence + 1)))
+        }
+        foreach ($publication in @($envelope.aggregate.operations | Where-Object {
+            $_.family -ceq 'route_runtime' -and $_.operationRole -ceq 'route_publication' -and $_.afterState -ceq 'Published'
+        })) {
+            $lines.Add((New-Effect $envelope $publication 'route_publication_forwarded' ($sequence + 1)))
         }
     }
     $last = $records[$records.Count - 1]
@@ -212,14 +220,30 @@ foreach ($name in @('New-TunaGuiFileTransferFailureClassificationResult',
     if ($definitions.Count -ne 1) { throw "GUI function not unique: $name" }
     . ([scriptblock]::Create($definitions[0].Extent.Text))
 }
-foreach ($case in @(@{Lines=$compactLines; Evaluation=$compact}, @{Lines=$openLines; Evaluation=$open})) {
+$path = Join-Path $OutputRoot 'gui-evidence.log'
+# Recovery-only evidence is sufficient for the cancellation evaluator, but the
+# whole GUI classifier also requires coordinator-published route history.
+[IO.File]::WriteAllLines($path, [string[]]$compactLines)
+$missingRoute = Get-TunaGuiFileTransferSetupFailureClassification -Bookmark 0 -ErrorMessage 'diagnostic evidence evaluation' `
+    -RouteMode 'regular-v4-live-activation-off-on-off-256mb' -ImmutableEvidencePaths @($path)
+if ($null -eq $missingRoute -or $missingRoute.ClassificationSource -cne 'coordinator_snapshot_authority_v1_route_consistency' -or
+    $missingRoute.Reason -cne 'snapshot_authoritative_route_consistency_invalid') { throw 'Missing coordinator route history passed.' }
+foreach ($case in @(@{Records=@($fixture.startup) + $envelopes; Open=$false},
+    @{Records=@($fixture.startup) + $envelopes[0..4]; Open=$true})) {
+    $guiLines = @(New-Lines $case.Records)
+    $guiFull = Get-FileTransferCoordinatorSnapshotEvaluation -Lines (@('event=unrelated') + $guiLines)
+    $guiCompact = Get-FileTransferCoordinatorSnapshotEvaluation -Lines $guiLines
+    if ($guiFull.ArtifactEvidenceVerdict -cne 'pass' -or
+        (Compare-FileTransferCoordinatorSnapshotEvaluations -Full $guiFull -Compact $guiCompact).Verdict -cne 'pass' -or
+        (Get-FileTransferCoordinatorSnapshotRouteConsistency -Evaluation $guiFull).Verdict -cne 'pass' -or
+        (Test-Open $guiFull) -ne $case.Open) { throw 'Complete GUI cancellation fixture invalid.' }
     $path = Join-Path $OutputRoot 'gui-evidence.log'
-    [IO.File]::WriteAllLines($path, [string[]]$case.Lines)
+    [IO.File]::WriteAllLines($path, [string[]]$guiLines)
     $gui = Get-TunaGuiFileTransferSetupFailureClassification -Bookmark 0 -ErrorMessage 'diagnostic evidence evaluation' `
         -RouteMode 'regular-v4-live-activation-off-on-off-256mb' -ImmutableEvidencePaths @($path)
-    $boundary = $case.Evaluation.FirstUnresolvedBoundary
+    $boundary = $guiCompact.FirstUnresolvedBoundary
     if ($null -eq $boundary) {
-        if ($null -ne $gui) { throw 'GUI reopened cancelled arm.' }
+        if ($null -ne $gui) { throw "GUI reopened cancelled arm: $($gui | ConvertTo-Json -Depth 8 -Compress)" }
     }
     elseif ($gui.CoordinatorBoundaryHash -cne $boundary.boundaryHash -or
         $gui.CoordinatorBoundaryId -cne $boundary.boundaryId -or

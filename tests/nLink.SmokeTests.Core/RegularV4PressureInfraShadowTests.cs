@@ -4,6 +4,7 @@ using NLink.Infra.Nkn;
 
 namespace NLink.SmokeTests;
 
+[Trait("Area", "Core")]
 public sealed class RegularV4PressureInfraShadowTests
 {
     [Trait("Category", "LegacySmoke")]

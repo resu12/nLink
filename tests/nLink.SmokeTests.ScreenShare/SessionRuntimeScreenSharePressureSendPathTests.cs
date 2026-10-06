@@ -1150,11 +1150,6 @@ public sealed class SessionRuntimeScreenSharePressureSendPathTests : ScreenShare
             ScreenShareTransportBoundaryTestBase.SetPrivateField(sessionRuntime, "helperRemoteLastApplyCadenceMs", 120L);
             ScreenShareTransportBoundaryTestBase.SetPrivateField(sessionRuntime, "helperRemoteApplyCadenceObserved", 16L);
             ScreenShareTransportBoundaryTestBase.SetPrivateField(sessionRuntime, "helperRemoteTotalApplyCadenceMs", 1920L);
-            ScreenShareTransportBoundaryTestBase.SetPrivateField(sessionRuntime, "helperRemoteRecoveryWindowActive", true);
-            ScreenShareTransportBoundaryTestBase.SetPrivateField(sessionRuntime, "helperRemoteRecoveryWindowEpoch", 1L);
-            ScreenShareTransportBoundaryTestBase.SetPrivateField(sessionRuntime, "helperRemoteRecoveryWindowRecoveryFrameId", 19L);
-            ScreenShareTransportBoundaryTestBase.SetPrivateField(sessionRuntime, "helperRemoteRecoveryWindowLastContiguousFrameId", 19L);
-            ScreenShareTransportBoundaryTestBase.SetPrivateField(sessionRuntime, "helperRemoteRecoveryWindowContiguousFollowerApplyCount", 0);
             ScreenShareTransportBoundaryTestBase.SetPrivateField(sessionRuntime, "helperRemoteContinuityRecoveryActive", true);
             ScreenShareTransportBoundaryTestBase.SetPrivateField(sessionRuntime, "helperRemoteContinuityRecoveryEpoch", 1L);
             ScreenShareTransportBoundaryTestBase.SetPrivateField(sessionRuntime, "helperRemoteContinuityRecoveryStartedUtc", now.AddMilliseconds(-500.0));

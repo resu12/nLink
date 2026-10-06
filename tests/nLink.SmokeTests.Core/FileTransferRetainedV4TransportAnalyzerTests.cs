@@ -66,10 +66,12 @@ public sealed class FileTransferRetainedV4TransportAnalyzerTests : FileTransferO
         }
     }
 
-    [Fact]
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
     [Trait("RetainedV4Suite", "Efficiency")]
     [Trait("Category", "Smoke")]
-    public async Task AnalyzeRetained_EfficiencySummary_CleanRegularV4ReportsPass()
+    public async Task AnalyzeRetained_EfficiencySummary_CleanRegularV4ReportsPass(bool includeAcknowledgedBytes)
     {
         if (!OperatingSystem.IsWindows())
         {
@@ -77,13 +79,14 @@ public sealed class FileTransferRetainedV4TransportAnalyzerTests : FileTransferO
         }
 
         const string transferId = "transfer_efficiency_regular_v4";
+        var acknowledgedBytes = includeAcknowledgedBytes ? "; bytes_acknowledged_by_receiver=64512" : string.Empty;
         var lines = new[]
         {
             LogLine($"event=filetransfer_route_selected; direction=outbound; transfer_id={transferId}; session_id=sess_a; route=regular_nkn_v4_fast; protocol_version=4; runtime_profile=regular_nkn_v4_fast; frame_family=v4; handoff_kind=none; bridge_recovery_policy=regular_nkn_v4_fast; liveness_terminal_policy=regular_nkn_v4_fast; selection_reason=regular_nkn_default_v4; file_tuna_active=0; post_tuna_fallback_active=0; diagnostic_regular_nkn_v6=0; transport_profile=nkn", secondsOffset: 0),
             LogLine($"event=filetransfer_route_selected; direction=inbound; transfer_id={transferId}; session_id=sess_a; route=regular_nkn_v4_fast; protocol_version=4; runtime_profile=regular_nkn_v4_fast; frame_family=v4; handoff_kind=none; bridge_recovery_policy=regular_nkn_v4_fast; liveness_terminal_policy=regular_nkn_v4_fast; selection_reason=regular_nkn_default_v4; file_tuna_active=0; post_tuna_fallback_active=0; diagnostic_regular_nkn_v6=0; transport_profile=nkn", secondsOffset: 0),
             LogLine($"event=filetransfer_runtime_started; direction=outbound; role=sender; transfer_id={transferId}; session_id=sess_a; route=regular_nkn_v4_fast; protocol_version=4; runtime_profile=regular_nkn_v4_fast; frame_family=v4; bridge_recovery_policy=regular_nkn_v4_fast; live_route_epoch=0", secondsOffset: 1),
             LogLine($"event=filetransfer_v4_state_sent; transfer_id={transferId}; session_id=sess_a; epoch=1; contiguous_committed_chunk_index=0; durable_received_highest_chunk_index=-1; credit_until_chunk_index_exclusive=3; missing_range_count=0; bytes_committed=0", secondsOffset: 2),
-            LogLine($"event=filetransfer_v4_state_received; transfer_id={transferId}; session_id=sess_a; epoch=1; contiguous_committed_chunk_index=3; durable_received_highest_chunk_index=2; credit_until_chunk_index_exclusive=3; missing_range_count=0", secondsOffset: 3),
+            LogLine($"event=filetransfer_v4_state_received; direction=outbound; transfer_id={transferId}; session_id=sess_a; epoch=1; contiguous_committed_chunk_index=3; durable_received_highest_chunk_index=2; credit_until_chunk_index_exclusive=3; missing_range_count=0{acknowledgedBytes}", secondsOffset: 3),
             LogLine($"event=filetransfer_v4_sender_throughput_summary; transfer_id={transferId}; session_id=sess_a; sample_window_ms=2000; raw_bytes_sent=64512; raw_bytes_per_second=32256; chunk_count_sent=3", secondsOffset: 4),
             LogLine($"event=file_transfer_inbound_terminal; role=helper; session_id=sess_a; transfer_id={transferId}; state=Completed; error_code=(none); saved_path=(none); integrity_ok=1", secondsOffset: 10),
             LogLine($"event=file_transfer_outbound_terminal; role=helpee; session_id=sess_a; transfer_id={transferId}; state=Completed; error_code=(none); integrity_ok=1", secondsOffset: 10)
@@ -107,7 +110,8 @@ public sealed class FileTransferRetainedV4TransportAnalyzerTests : FileTransferO
         Assert.Equal("regular_nkn_v4_fast", efficiency["route_epoch.0.route"]);
         Assert.Equal("4", efficiency["route_epoch.0.protocol_version"]);
         Assert.Equal("regular_v4", efficiency["route_epoch.0.runtime_family"]);
-        Assert.Equal("available", efficiency["route_epoch.0.bytes_attribution_status"]);
+        Assert.Equal(includeAcknowledgedBytes ? "available" : "unavailable", efficiency["route_epoch.0.bytes_attribution_status"]);
+        Assert.Equal(includeAcknowledgedBytes ? "64512" : "0", efficiency["route_epoch.0.bytes_attributed"]);
     }
 
     [Fact]
@@ -799,11 +803,61 @@ public sealed class FileTransferRetainedV4TransportAnalyzerTests : FileTransferO
         Assert.Equal(0, result.Script.ExitCode);
         var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
         Assert.NotEqual("regular_v4_frontier_repair_stalled", verdict["recovery_failure_class"]);
+        Assert.Equal("1", verdict["regular_v4_frontier_repair_stalled_recovered_count"]);
+        Assert.Equal("0", verdict["regular_v4_frontier_repair_stalled_unresolved_count"]);
         if (!compact)
         {
             Assert.Equal("1", verdict["regular_v4_frontier_repair_stalled_count"]);
             Assert.Equal("pass", verdict["regular_v4_frontier_repair_verdict"]);
         }
+    }
+
+    [Theory]
+    [InlineData(false, "missing_payload")]
+    [InlineData(true, "missing_payload")]
+    [InlineData(false, "payload_gap")]
+    [InlineData(true, "payload_gap")]
+    [InlineData(false, "wrong_writer")]
+    [InlineData(true, "wrong_writer")]
+    [InlineData(false, "stale_state")]
+    [InlineData(true, "stale_state")]
+    [Trait("RetainedV4Suite", "FrontierRepairLifecycle")]
+    public async Task AnalyzeRetained_RegularV4FutureOnlyTailCatchUpRequiresExactPayloadAndAppliedState(
+        bool compact,
+        string mutation)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var lines = BuildRegularV4FutureOnlyTailCatchUpFixture(
+            "transfer_regular_v4_future_tail_missing_proof",
+            skippedFutureCount: 12,
+            skippedObsoleteCount: 0,
+            missingRangeCount: 0)
+            .Where(line => mutation != "missing_payload" || !line.Contains("event=filetransfer_data_path_send_result;", StringComparison.Ordinal))
+            .Where(line => mutation != "payload_gap" || !line.Contains("start_chunk_index=1182;", StringComparison.Ordinal))
+            .Select(line => mutation == "wrong_writer" && line.Contains("event=filetransfer_data_path_send_result;", StringComparison.Ordinal)
+                ? line.Replace("log_writer_id=writer_future_tail", "log_writer_id=other_writer", StringComparison.Ordinal)
+                : mutation == "stale_state"
+                    ? line.Replace("applied=1; stale=0;", "applied=1; stale=1;", StringComparison.Ordinal)
+                    : line)
+            .ToArray();
+
+        var result = await RunAnalyzeFixtureAsync(
+            lines,
+            ["-LiveRouteProofMode", "None"],
+            environment: compact
+                ? new Dictionary<string, string> { ["NLINK_FILETRANSFER_RETAINED_ANALYSIS_COMPACT"] = "1" }
+                : null);
+
+        Assert.Equal(0, result.Script.ExitCode);
+        var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+        Assert.Equal("regular_v4_frontier_repair_stalled", verdict["recovery_failure_class"]);
+        Assert.Equal("0", verdict["regular_v4_frontier_repair_stalled_recovered_count"]);
+        Assert.Equal("1", verdict["regular_v4_frontier_repair_stalled_unresolved_count"]);
+        Assert.Equal("fail", verdict["regular_v4_frontier_repair_stalled_verdict"]);
     }
 
     [Theory]

@@ -8,6 +8,8 @@ using NLink.Tests;
 namespace NLink.SmokeTests;
 
 [Collection(FakeNknNetworkCollection.Name)]
+[Trait("Area", "Core")]
+[Trait("RequiredConfiguration", "Debug")]
 public sealed class AttemptCanonicalPrefixBarrierTests : IDisposable
 {
     private const long Boundary = AttemptCanonicalTailProfile.PrefixBytes;

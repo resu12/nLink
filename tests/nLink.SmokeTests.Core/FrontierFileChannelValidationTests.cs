@@ -2,6 +2,7 @@ using NLink.Tools;
 
 namespace NLink.SmokeTests;
 
+[Trait("Area", "Core")]
 public sealed class FrontierFileChannelValidationTests : FileTransferOpsScriptsTestBase
 {
     [Theory]

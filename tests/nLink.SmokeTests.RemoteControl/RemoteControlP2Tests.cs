@@ -458,7 +458,64 @@ public sealed class RemoteControlP2Tests
 
     [Trait("Category", "Smoke")]
     [Fact]
-    public async Task RemoteControl_ApprovalExpiredWhileActive_SendsSecurityStop_AndTurnsBothSidesOff()
+    public async Task RemoteControl_ApprovalExpiredWhileAuthenticatedAndActive_RenewsBothGrantsWithoutStoppingControl()
+    {
+        var nowUtc = DateTimeOffset.UtcNow;
+        var helperTransport = new LinkedRemoteControlTransport("helper-peer");
+        var helpeeTransport = new LinkedRemoteControlTransport("helpee-peer");
+        helperTransport.Peer = helpeeTransport;
+        helpeeTransport.Peer = helperTransport;
+
+        using var helperRuntime = new SessionRuntime(
+            () => helperTransport, SessionRuntimeWatchdogOptions.Default, nowProvider: () => nowUtc);
+        using var helpeeRuntime = new SessionRuntime(
+            () => helpeeTransport, SessionRuntimeWatchdogOptions.Default, nowProvider: () => nowUtc);
+
+        AttachConnectedRuntime(helperRuntime, helperTransport, SessionRuntimeRole.Helper);
+        AttachConnectedRuntime(helpeeRuntime, helpeeTransport, SessionRuntimeRole.Helpee);
+
+        Assert.True(await helperRuntime.RequestRemoteControlAsync());
+        await WaitUntilAsync(() => helpeeRuntime.HasPendingRemoteControlConsentPrompt, TimeSpan.FromSeconds(2));
+        Assert.True(await helpeeRuntime.RespondToRemoteControlRequestAsync(allow: true));
+        await WaitUntilAsync(
+            () => helperRuntime.ControlState == ControlState.Active &&
+                  helpeeRuntime.ControlState == ControlState.Active,
+            TimeSpan.FromSeconds(2));
+
+        var helperGrant = Assert.IsType<SessionGrant>(helperRuntime.CurrentSessionGrant);
+        var helpeeGrant = Assert.IsType<SessionGrant>(helpeeRuntime.CurrentSessionGrant);
+        var requestId = helperRuntime.CurrentControlRequestId;
+        nowUtc = (helperGrant.ExpiresAtUtc > helpeeGrant.ExpiresAtUtc
+            ? helperGrant.ExpiresAtUtc
+            : helpeeGrant.ExpiresAtUtc).AddSeconds(1);
+
+        Assert.True(helperGrant.IsExpired(nowUtc));
+        Assert.True(helpeeGrant.IsExpired(nowUtc));
+        Assert.True(helperRuntime.CanPerform(SessionCapability.RemoteControl));
+        Assert.True(helpeeRuntime.CanPerform(SessionCapability.RemoteControl));
+        var renewedExpiry = nowUtc.Add(SessionSecurityDefaults.GrantLifetime);
+        Assert.Equal(helperGrant with { ExpiresAtUtc = renewedExpiry }, helperRuntime.CurrentSessionGrant);
+        Assert.Equal(helpeeGrant with { ExpiresAtUtc = renewedExpiry }, helpeeRuntime.CurrentSessionGrant);
+        Assert.True(helperRuntime.SecurityState.IsApprovalActive(nowUtc));
+        Assert.True(helpeeRuntime.SecurityState.IsApprovalActive(nowUtc));
+        Assert.Equal(ControlState.Active, helperRuntime.ControlState);
+        Assert.Equal(ControlState.Active, helpeeRuntime.ControlState);
+        Assert.Equal(requestId, helperRuntime.CurrentControlRequestId);
+        Assert.Equal(requestId, helpeeRuntime.CurrentControlRequestId);
+        Assert.Empty(helperTransport.SentControlStops);
+        Assert.Empty(helpeeTransport.SentControlStops);
+    }
+
+    [Trait("Category", "Smoke")]
+    [Theory]
+    [InlineData(nameof(SessionSecurityState.SessionId))]
+    [InlineData(nameof(SessionSecurityState.HelperAddress))]
+    [InlineData(nameof(SessionSecurityState.InviteValidated))]
+    [InlineData(nameof(SessionSecurityState.HandshakeCompleted))]
+    [InlineData(nameof(SessionSecurityState.HandshakeState))]
+    [InlineData(nameof(SessionSecurityState.ApprovalGranted))]
+    [InlineData(nameof(SessionSecurityState.ApprovedCapabilities))]
+    public async Task RemoteControl_NonRenewableApprovalExpiredWhileActive_SendsSecurityStop_AndTurnsBothSidesOff(string invalidBinding)
     {
         var helperTransport = new LinkedRemoteControlTransport("helper-peer");
         var helpeeTransport = new LinkedRemoteControlTransport("helpee-peer");
@@ -485,9 +542,26 @@ public sealed class RemoteControlP2Tests
             TimeSpan.FromSeconds(2));
 
         var requestId = helperTransport.SentControlRequests.Single().RequestId;
+        var securityState = helperRuntime.SecurityState;
+        var invalidState = invalidBinding switch
+        {
+            nameof(SessionSecurityState.SessionId) => securityState with { SessionId = new SessionId("different-session") },
+            nameof(SessionSecurityState.HelperAddress) => securityState with { HelperAddress = new PeerAddress("different-helper") },
+            nameof(SessionSecurityState.InviteValidated) => securityState with { InviteValidated = false },
+            nameof(SessionSecurityState.HandshakeCompleted) => securityState with { HandshakeCompleted = false },
+            nameof(SessionSecurityState.HandshakeState) => securityState with { HandshakeState = SessionHandshakeState.Pending },
+            nameof(SessionSecurityState.ApprovalGranted) => securityState with { ApprovalGranted = false },
+            nameof(SessionSecurityState.ApprovedCapabilities) => securityState with { ApprovedCapabilities = CapabilityGrant.None },
+            _ => throw new ArgumentOutOfRangeException(nameof(invalidBinding)),
+        };
+        // Isolate expiry evaluation from the separate transport-security update path.
+        SetPrivateField(helperRuntime, "sessionSecurityState", invalidState);
         ForceCurrentGrantExpiry(helperRuntime, DateTimeOffset.UtcNow.AddMilliseconds(-1));
         _ = InvokePrivateMethod(helperRuntime, "EnsureApprovalGrantActive");
 
+        Assert.Equal(ControlState.Off, helperRuntime.ControlState);
+        Assert.Null(helperRuntime.CurrentSessionGrant);
+        Assert.False(helperRuntime.CanPerform(SessionCapability.RemoteControl));
         await WaitUntilAsync(
             () => helperRuntime.ControlState == ControlState.Off &&
                   helpeeRuntime.ControlState == ControlState.Off,
@@ -542,7 +616,7 @@ public sealed class RemoteControlP2Tests
 
     [Trait("Category", "Smoke")]
     [Fact]
-    public async Task RemoteControl_ApprovalExpired_WhenStopSendFails_TurnsLocalSideOffImmediately()
+    public async Task RemoteControl_NonRenewableApprovalExpired_WhenStopSendFails_TurnsLocalSideOffImmediately()
     {
         var helperTransport = new LinkedRemoteControlTransport("helper-peer")
         {
@@ -569,12 +643,13 @@ public sealed class RemoteControlP2Tests
                   helpeeRuntime.ControlState == ControlState.Active,
             TimeSpan.FromSeconds(2));
 
+        SetPrivateField(helperRuntime, "sessionSecurityState", helperRuntime.SecurityState with { ApprovalGranted = false });
         ForceCurrentGrantExpiry(helperRuntime, DateTimeOffset.UtcNow.AddMilliseconds(-1));
         _ = InvokePrivateMethod(helperRuntime, "EnsureApprovalGrantActive");
 
-        await WaitUntilAsync(
-            () => helperRuntime.ControlState == ControlState.Off,
-            TimeSpan.FromSeconds(1));
+        Assert.Equal(ControlState.Off, helperRuntime.ControlState);
+        Assert.Null(helperRuntime.CurrentSessionGrant);
+        Assert.False(helperRuntime.CanPerform(SessionCapability.RemoteControl));
 
         await WaitUntilAsync(
             () => helperTransport.SentControlStops.Any(

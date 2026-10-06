@@ -3,6 +3,7 @@ using System.Text;
 namespace NLink.SmokeTests;
 
 [Collection(FakeNknNetworkCollection.Name)]
+[Trait("Area", "Core")]
 public sealed class FileTransferCheckpointRepairContinuityEvidenceTests : FileTransferOpsScriptsTestBase
 {
     private static readonly Lazy<Task<IReadOnlyList<string>>> Evidence = new(

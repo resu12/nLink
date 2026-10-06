@@ -1,4 +1,5 @@
-param([string]$RepoRoot,[string]$Directory,[string]$RunId,[string]$ScenarioId,[switch]$ExpectMissingSecurityCapture,[switch]$ExpectWriterBudgetOmission,[AllowNull()]$NativeFiles=$null)
+param([string]$RepoRoot,[string]$Directory,[string]$RunId,[string]$ScenarioId,[switch]$ExpectMissingSecurityCapture,[switch]$ExpectWriterBudgetOmission,[AllowNull()]$NativeFiles=$null,
+    [ValidateSet('None','RegularActivationCycle')][string]$LiveRouteProofMode='RegularActivationCycle')
 $ErrorActionPreference='Stop'; Set-StrictMode -Version Latest
 if($env:NLINK_TEST_MEMBERSHIP_BORROWER_CASE -cnotin @('active','dispose','unavailable')) {throw 'selected_native_case'}
 $env:NLINK_TEST_SELECTED_NATIVE_WRITER='1'; $env:NLINK_TEST_NATIVE_WITNESS_ADAPTER='1'
@@ -42,7 +43,7 @@ try {
     }
     $process=[Diagnostics.Process]::new(); $process.StartInfo.FileName=(Get-Process -Id $PID).Path
     $worker=Join-Path $PSScriptRoot 'PublicationLivePrimaryWorker.ps1'
-    $process.StartInfo.Arguments='-NoProfile -ExecutionPolicy Bypass -File "'+$worker+'" -Mode AnalyzeRetained -LogPath "'+$completion.Outputs[3].Path+'" -ArtifactDir "'+$output+'" -TailMinutes 0 -LiveRouteProofMode RegularActivationCycle'
+    $process.StartInfo.Arguments='-NoProfile -ExecutionPolicy Bypass -File "'+$worker+'" -Mode AnalyzeRetained -LogPath "'+$completion.Outputs[3].Path+'" -ArtifactDir "'+$output+'" -TailMinutes 0 -LiveRouteProofMode '+$LiveRouteProofMode
     $process.StartInfo.UseShellExecute=$false; $process.StartInfo.CreateNoWindow=$true
     $process.StartInfo.RedirectStandardOutput=$true; $process.StartInfo.RedirectStandardError=$true; $process.StartInfo.RedirectStandardInput=$true
     $process.StartInfo.EnvironmentVariables['NLINK_RETAINED_SOURCE_REQUEST']=$request.Name

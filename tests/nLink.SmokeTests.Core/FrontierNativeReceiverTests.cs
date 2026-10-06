@@ -4,6 +4,7 @@ using NLink.Core.FileTransfer;
 namespace NLink.SmokeTests;
 
 [Collection(FakeNknNetworkCollection.Name)]
+[Trait("Area", "Core")]
 public sealed class FrontierNativeReceiverTests : FileTransferOpsScriptsTestBase
 {
     internal static bool Automatic => Environment.GetEnvironmentVariable("NLINK_TEST_NATIVE_RECEIVER") == "1";

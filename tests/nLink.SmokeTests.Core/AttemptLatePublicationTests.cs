@@ -10,6 +10,7 @@ using Stamp = NLink.Core.FileTransfer.FileTransferCoordinator.FrontierPublicatio
 
 namespace NLink.SmokeTests;
 
+[Trait("Area", "Core")]
 public sealed class AttemptLatePublicationTests
 {
     private static Stamp Stall() => new(Environment.ProcessId, 1, Guid.NewGuid(), Guid.NewGuid(), 1,
@@ -153,6 +154,7 @@ public sealed class AttemptLatePublicationTests
 
     [Theory]
     [InlineData(false)] [InlineData(true)]
+    [Trait("RequiredConfiguration", "Debug")]
     public async Task HoldBudget_ReadAndReleaseDoNotRenewOriginalDeadline(bool latePublication)
     {
         using var schedule = new AttemptOfflineFrameSchedule("source", "s", "t", CancellationToken.None, latePublication);

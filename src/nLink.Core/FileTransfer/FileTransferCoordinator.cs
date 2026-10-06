@@ -576,18 +576,27 @@ internal readonly record struct FileTransferFallbackTailYieldScope(
     string OwnerKey,
     string PairKey)
 {
-    public bool IsDefault =>
+    private bool HasInvalidSourceIdentity =>
         string.IsNullOrWhiteSpace(SessionId) ||
         string.IsNullOrWhiteSpace(TransferId) ||
         RuntimeOwner.IsDefault ||
         string.IsNullOrWhiteSpace(RouteToken) ||
         ProtocolVersion <= 0 ||
-        LiveRouteEpoch <= 0 ||
         LegGeneration <= 0 ||
         TransportEpoch <= 0 ||
         string.IsNullOrWhiteSpace(CheckpointRequestIdSnapshot) ||
         string.IsNullOrWhiteSpace(OwnerKey) ||
         string.IsNullOrWhiteSpace(PairKey);
+
+    public bool IsDefault => HasInvalidSourceIdentity || LiveRouteEpoch <= 0;
+
+    // Initial fallback has epoch zero. Its writes need exact source identity,
+    // but that identity must not authorize a tail yield or repair handoff.
+    internal bool HasCompleteWriteSourceScope =>
+        !HasInvalidSourceIdentity && LiveRouteEpoch >= 0 &&
+        RoutePublication is { IsDefault: false } &&
+        !string.IsNullOrWhiteSpace(DataSessionIdentity) &&
+        DataSessionGeneration > 0;
 
     public bool HasCompleteExecutionScope =>
         !IsDefault &&

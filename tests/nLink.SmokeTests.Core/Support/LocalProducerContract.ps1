@@ -26,6 +26,15 @@ function Assignment($Ast,[string]$Variable) {
     if($found.Count -ne 1) { throw "Missing or ambiguous assignment: $Variable" }
     return $found[0].Extent.Text
 }
+function AttemptInitialization($Parent) {
+    $bodies=@($Parent.Body.EndBlock.Statements | Where-Object { $_ -is [Management.Automation.Language.TryStatementAst] })
+    if($bodies.Count -ne 1) { throw 'Missing or ambiguous parent attempt body' }
+    $found=@($bodies[0].Body.Statements | Where-Object {
+        $_ -is [Management.Automation.Language.AssignmentStatementAst] -and $_.Left.Extent.Text -ceq '$attemptId'
+    })
+    if($found.Count -ne 1) { throw 'Missing or ambiguous attempt initializer' }
+    return $found[0].Extent.Text
+}
 function SameLines([string[]]$Expected,[string[]]$Actual) {
     if($Expected.Count -ne $Actual.Count) { throw 'Native input count changed' }
     for($i=0; $i -lt $Expected.Count; $i++) {
@@ -152,11 +161,26 @@ $other=Join-Path $ArtifactRoot 'same-lines-different-bytes.log'
 if((NativeHash ([IO.File]::ReadAllLines($source))) -cne (NativeHash ([IO.File]::ReadAllLines($other))) -or
     (Hash ([IO.File]::ReadAllBytes($other))) -ceq $originHash) { throw 'Native and original file-byte identities conflated' }
 
+$selectorControls=0
+foreach($case in @(
+    @{Source={function Parent {try {$attemptId='initial'; if($prepared) {$attemptId='prepared'}; function Nested {$attemptId='nested'}} finally {}}};Accept=$true},
+    @{Source={function Parent {try {if($prepared) {$attemptId='prepared'}} finally {}}};Accept=$false},
+    @{Source={function Parent {try {$attemptId='initial'; $attemptId='duplicate'} finally {}}};Accept=$false},
+    @{Source={function Parent {try {$attemptId='initial'} finally {}; try {$attemptId='other'} finally {}}};Accept=$false}
+)) {
+    $selected=$null; $rejected=$false
+    try { $selected=AttemptInitialization (Definition $case.Source.Ast 'Parent') } catch { $rejected=$true }
+    if($case.Accept) {
+        if($rejected -or $selected -cne '$attemptId=''initial''') { throw 'Attempt initializer selector admitted a nested assignment' }
+    }
+    elseif(-not $rejected) { throw 'Attempt initializer selector admitted missing or ambiguous initialization' }
+    $selectorControls++
+}
 $attempts=0
 foreach($pair in @(@('tools/Run-FileTransferRouteAcceptance.ps1','Invoke-RouteAcceptanceRetainedAnalysis'),
     @('tools/Run-FileTransferTunaGuiSmoke.ps1','Invoke-TunaGuiRetainedAnalysis'))) {
     $parent=Definition (Parse (Join-Path $RepoRoot $pair[0])) $pair[1]
-    Invoke-Expression (Assignment $parent '$attemptId')
+    Invoke-Expression (AttemptInitialization $parent)
     $request=[guid]::ParseExact($attemptId,'N').ToString('D')
     if([guid]::ParseExact($request,'D').ToString('N') -cne $attemptId -or $request -ceq $attemptId) { throw 'Attempt/request identity conversion changed' }
     $attempts++
@@ -164,5 +188,6 @@ foreach($pair in @(@('tools/Run-FileTransferRouteAcceptance.ps1','Invoke-RouteAc
 'local-producer-contract='+(ConvertTo-Json -InputObject ([ordered]@{
     InputAssemblyCases=$rows.Count;Rows=@($rows.ToArray());ParserPhysicalLines=@(3,4);SyntheticRecords=2
     NativeDomain='nlink-ordered-utf16le-v1';NativeVectors=$hashes;InvalidNativeInputs=$invalid
-    ParentIdentityMappings=$attempts;AuthorityEvaluations=0;ProductionCaller=$false;ProducerCompletionBinding='not_implemented'
+    ParentIdentityMappings=$attempts;AttemptSelectorControls=$selectorControls
+    AuthorityEvaluations=0;ProductionCaller=$false;ProducerCompletionBinding='not_implemented'
 }) -Depth 8 -Compress)

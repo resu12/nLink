@@ -4,6 +4,7 @@ using NLink.Tests;
 
 namespace NLink.SmokeTests;
 
+[Trait("Area", "Core")]
 public sealed class AttemptNknFrameHoldTests
 {
     [Theory]
