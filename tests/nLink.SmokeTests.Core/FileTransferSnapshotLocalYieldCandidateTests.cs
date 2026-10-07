@@ -7,6 +7,15 @@ namespace NLink.SmokeTests;
 public sealed class FileTransferSnapshotLocalYieldCandidateTests : FileTransferOpsScriptsTestBase
 {
     [Fact]
+    public async Task SnapshotLocalYieldCandidates_CheckpointSupersessionRequiresFreshConsumedSuccessor()
+    {
+        if (!OperatingSystem.IsWindows()) { return; }
+        await RunHarnessAsync("""
+            . (Join-Path $RepoRoot 'tests/nLink.SmokeTests.Core/TestData/SnapshotLocalYieldCheckpointSupersession.ps1')
+            """);
+    }
+
+    [Fact]
     public async Task SnapshotLocalYieldCandidates_EmptyAndIneligibleInputsDoNotBuildCandidates()
     {
         if (!OperatingSystem.IsWindows()) { return; }

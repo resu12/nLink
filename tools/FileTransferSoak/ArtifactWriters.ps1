@@ -33461,6 +33461,7 @@ function Get-FileTransferRuntimeUnlockRetryFallbackTailUnblockRecheckCorrelation
                     (Get-FallbackTailRecheckExactField -Event $_ -Names @('repair_generation')),
                     (Get-FallbackTailRecheckExactField -Event $_ -Names @('release_authority_id')),
                     (Get-FallbackTailRecheckExactField -Event $_ -Names @('release_generation')),
+                    (Get-FallbackTailRecheckExactField -Event $_ -Names @('pairing_generation')),
                     (Get-FallbackTailRecheckExactField -Event $_ -Names @('hold_generation')),
                     (Get-FallbackTailRecheckExactField -Event $_ -Names @('contract_generation')),
                     (Get-FallbackTailRecheckExactField -Event $_ -Names @('retired_offer_generation')),
@@ -33711,21 +33712,9 @@ function Get-FileTransferRuntimeUnlockRetryFallbackTailUnblockRecheckCorrelation
             return $false
         }
 
-        $holdSourceReason = Get-FallbackTailRecheckExactField `
-            -Event $Hold `
-            -Names @('source_coordinator_decision_reason')
-        $grantSourceReason = Get-FallbackTailRecheckExactField `
-            -Event $Grant `
-            -Names @('source_publication_reason')
-        if (-not [string]::Equals(
-                $holdSourceReason,
-                $grantSourceReason,
-                [System.StringComparison]::OrdinalIgnoreCase) -and
-            -not ($holdSourceReason -eq 'fallback_paired_tail_yield' -and
-                $grantSourceReason -eq 'peer_post_tuna_fallback_v6_proof')) {
-            return $false
-        }
-
+        # Match the coordinator's publication identity. The request can carry a
+        # decision reason override; the grant retains the publication's reason.
+        # The install proof separately requires its complete tuple to stay exact.
         return $true
     }
 
@@ -34918,6 +34907,10 @@ function Get-FileTransferRuntimeUnlockRetryFallbackTailUnblockRecheckCorrelation
             Get-FallbackTailRecheckField -Event $recoveryHoldBinding[0] -Names @('release_generation')
         }
         else { '' }
+        $pairingGeneration = if ($recoveryHoldBinding.Count -eq 1) {
+            Get-FallbackTailRecheckExactField -Event $recoveryHoldBinding[0] -Names @('pairing_generation')
+        }
+        else { '' }
         $recheckDecisionCandidates = @($recheckDecidedEvents | Where-Object {
             $recheck.Count -eq 1 -and $republished.Count -eq 1 -and
             $recoveryHoldBinding.Count -eq 1 -and
@@ -34969,6 +34962,7 @@ function Get-FileTransferRuntimeUnlockRetryFallbackTailUnblockRecheckCorrelation
         }
         $reservation = @($releaseReservationEvents | Where-Object {
             $republished.Count -eq 1 -and
+            $pairingGeneration -match '^[1-9][0-9]*$' -and
             $_.EventName -eq 'filetransfer_fallback_tail_paired_release_reserved' -and
             [int64]$_.Sequence -gt [int64]$republished[0].Sequence -and
             (Get-FallbackTailRecheckField -Event $_ -Names @('log_writer_id')) -eq $writerId -and
@@ -34976,7 +34970,9 @@ function Get-FileTransferRuntimeUnlockRetryFallbackTailUnblockRecheckCorrelation
             (Get-FallbackTailRecheckField -Event $_ -Names @('transfer_id')) -eq $transferId -and
             (Get-FallbackTailRecheckField -Event $_ -Names @('direction')) -eq 'outbound' -and
             (Get-FallbackTailRecheckField -Event $_ -Names @('authority_id')) -eq $releaseAuthority -and
-            (Get-FallbackTailRecheckField -Event $_ -Names @('pairing_generation')) -eq $releaseGeneration -and
+            # ReleaseGeneration is the local YieldGeneration, not PairingGeneration.
+            (Get-FallbackTailRecheckExactField -Event $_ -Names @('yield_generation')) -eq $releaseGeneration -and
+            (Get-FallbackTailRecheckExactField -Event $_ -Names @('pairing_generation')) -eq $pairingGeneration -and
             (Get-FallbackTailRecheckField -Event $_ -Names @('decision_status')) -in @('Accepted', 'Applied', 'Idempotent')
         } | Sort-Object Sequence | Select-Object -First 1)
         $effectiveGrantCandidates = @($EffectiveGrantEvents | Where-Object {
@@ -35056,7 +35052,8 @@ function Get-FileTransferRuntimeUnlockRetryFallbackTailUnblockRecheckCorrelation
             (Get-FallbackTailRecheckField -Event $_ -Names @('transfer_id')) -eq $transferId -and
             (Get-FallbackTailRecheckField -Event $_ -Names @('direction')) -eq 'outbound' -and
             (Get-FallbackTailRecheckField -Event $_ -Names @('authority_id')) -eq $releaseAuthority -and
-            (Get-FallbackTailRecheckField -Event $_ -Names @('pairing_generation')) -eq $releaseGeneration -and
+            (Get-FallbackTailRecheckExactField -Event $_ -Names @('yield_generation')) -eq $releaseGeneration -and
+            (Get-FallbackTailRecheckExactField -Event $_ -Names @('pairing_generation')) -eq $pairingGeneration -and
             (Get-FallbackTailRecheckField -Event $_ -Names @('retry_authority_id')) -eq
                 (Get-FallbackTailRecheckField -Event $effectiveGrant[0] -Names @('authority_id')) -and
             (Get-FallbackTailRecheckField -Event $_ -Names @('install_generation')) -match '^[1-9][0-9]*$' -and

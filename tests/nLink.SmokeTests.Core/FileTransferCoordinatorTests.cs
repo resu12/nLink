@@ -21038,7 +21038,8 @@ public sealed partial class FileTransferCoordinatorTests
 
     internal static FileTransferCoordinatorTransitionEnvelope[]
         CreatePeerFirstFailedYieldSnapshotFixture(
-            FileTransferDirection direction)
+            FileTransferDirection direction,
+            bool advanceCheckpoint = false)
     {
         var fallback = FileTransferRouteResolver.Resolve(
             FileTransferRoute.PostTunaFallbackV6);
@@ -21088,6 +21089,37 @@ public sealed partial class FileTransferCoordinatorTests
         var retainedEnvelope = Assert.IsType<
             FileTransferCoordinatorTransitionEnvelope>(
             retained.SnapshotEnvelope);
+
+        if (advanceCheckpoint)
+        {
+            var requested = RequestFallbackCheckpoint(
+                retained.State, fallback, "peer-first-failed-next-checkpoint",
+                retained.State.CurrentLeg!.TransportEpochId);
+            Assert.Null(requested.MutationRejectedReason);
+            var accepted = AcceptFallbackCheckpoint(
+                requested.State, fallback, "peer-first-failed-next-checkpoint",
+                retained.State.CurrentLeg.TransportEpochId, 6, 6);
+            Assert.Null(accepted.MutationRejectedReason);
+            var staleFailed = MarkFallbackTailFailed(
+                accepted.State, fallback, accepted.State.CurrentLeg!.TransportEpochId);
+            var staleOperation = Assert.IsType<FileTransferFallbackTailYieldOperation>(
+                FileTransferCoordinator.GetFallbackTailYieldSubstate(staleFailed.State)
+                    .CurrentOperation);
+            Assert.Null(staleOperation.PeerProof);
+            Assert.Equal(FileTransferFallbackTailYieldPairingState.YieldIssued,
+                staleOperation.PairingState);
+            Assert.Equal(receipt.ObservationScope.CheckpointGeneration + 1,
+                staleOperation.Scope.CheckpointGeneration);
+            Assert.Null(FileTransferCoordinator.GetFallbackTailYieldSubstate(staleFailed.State)
+                .PendingPeerProofBeforeLocalYield);
+            return
+            [
+                retainedEnvelope,
+                Assert.IsType<FileTransferCoordinatorTransitionEnvelope>(requested.SnapshotEnvelope),
+                Assert.IsType<FileTransferCoordinatorTransitionEnvelope>(accepted.SnapshotEnvelope),
+                Assert.IsType<FileTransferCoordinatorTransitionEnvelope>(staleFailed.SnapshotEnvelope),
+            ];
+        }
 
         var failed = MarkFallbackTailFailed(
             retained.State,

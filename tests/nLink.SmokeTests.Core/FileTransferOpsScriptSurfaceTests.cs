@@ -1869,6 +1869,7 @@ public sealed class FileTransferOpsScriptSurfaceTests : FileTransferOpsScriptsTe
                     'Test-FileTransferFallbackTailSnapshotPairingRecovery',
                     'Test-FileTransferFallbackTailSnapshotPeerFirstYieldCarry',
                     'Test-FileTransferFallbackTailSnapshotLineageBoundary',
+                    'Get-FileTransferFallbackTailSnapshotCheckpointSupersessionRecovery',
                     'Get-FileTransferFallbackTailSnapshotLocalYieldMissingCorrelation')) {
                 $definitions = @($ast.FindAll({ param($node)
                     $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
@@ -7117,6 +7118,36 @@ public sealed class FileTransferOpsScriptSurfaceTests : FileTransferOpsScriptsTe
                 [repoRoot, fixturePath, tempRoot]);
             Assert.True(
                 result.ExitCode == 0,
+                $"STDOUT:{result.Stdout}{Environment.NewLine}STDERR:{result.Stderr}");
+        }
+        finally { TryDeleteDirectory(tempRoot); }
+    }
+
+    [Theory]
+    [InlineData(NLink.Core.FileTransfer.FileTransferDirection.Inbound)]
+    [InlineData(NLink.Core.FileTransfer.FileTransferDirection.Outbound)]
+    public async Task FileTransferOps_FailedYieldRetiresCheckpointStalePeerProof(
+        NLink.Core.FileTransfer.FileTransferDirection direction)
+    {
+        if (!OperatingSystem.IsWindows()) { return; }
+        var repoRoot = FindRepoRoot();
+        var tempRoot = Path.Combine(Path.GetTempPath(),
+            "nlink-checkpoint-stale-failed-yield", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(tempRoot);
+        try
+        {
+            var fixtures = new[] { false, true }.Select(advanceCheckpoint =>
+                "[" + string.Join(",", FileTransferCoordinatorTests
+                    .CreatePeerFirstFailedYieldSnapshotFixture(direction, advanceCheckpoint)
+                    .Select(NLink.Core.FileTransfer.SessionFileTransferService
+                        .CreateCoordinatorSnapshotEvidenceForTesting)
+                    .Select(envelope => envelope.ToCanonicalJson())) + "]");
+            var fixturePath = Path.Combine(tempRoot, "envelopes.json");
+            await File.WriteAllTextAsync(fixturePath, "[" + string.Join(",", fixtures) + "]");
+            var script = File.ReadAllText(Path.Combine(repoRoot, "tests",
+                "nLink.SmokeTests.Core", "Support", "CheckpointStaleFailedYieldSnapshotEvidence.ps1"));
+            var result = await RunPowerShellScriptTextAsync(script, [repoRoot, fixturePath]);
+            Assert.True(result.ExitCode == 0,
                 $"STDOUT:{result.Stdout}{Environment.NewLine}STDERR:{result.Stderr}");
         }
         finally { TryDeleteDirectory(tempRoot); }

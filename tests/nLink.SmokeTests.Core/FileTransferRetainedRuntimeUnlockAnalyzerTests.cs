@@ -13788,10 +13788,38 @@ public sealed class FileTransferRetainedRuntimeUnlockAnalyzerTests : FileTransfe
     [InlineData(true, false, "redacted_recheck")]
     [InlineData(false, false, "production_redacted_recheck")]
     [InlineData(true, false, "production_redacted_recheck")]
+    [InlineData(false, false, "production_bootstrap_recheck")]
+    [InlineData(true, false, "production_bootstrap_recheck")]
+    [InlineData(false, false, "production_bootstrap_wrong_publication")]
+    [InlineData(true, false, "production_bootstrap_wrong_publication")]
+    [InlineData(false, false, "production_bootstrap_wrong_request")]
+    [InlineData(true, false, "production_bootstrap_wrong_request")]
+    [InlineData(false, false, "production_bootstrap_inconsistent_install_reason")]
+    [InlineData(true, false, "production_bootstrap_inconsistent_install_reason")]
     [InlineData(false, false, "wrong_recheck_authority")]
     [InlineData(true, false, "wrong_recheck_authority")]
     [InlineData(false, false, "ambiguous_redacted_recheck")]
     [InlineData(true, false, "ambiguous_redacted_recheck")]
+    [InlineData(false, false, "reserved_yield_missing")]
+    [InlineData(true, false, "reserved_yield_missing")]
+    [InlineData(false, false, "reserved_yield_wrong")]
+    [InlineData(true, false, "reserved_yield_wrong")]
+    [InlineData(false, false, "reserved_pairing_missing")]
+    [InlineData(true, false, "reserved_pairing_missing")]
+    [InlineData(false, false, "reserved_pairing_wrong")]
+    [InlineData(true, false, "reserved_pairing_wrong")]
+    [InlineData(false, false, "consumed_yield_missing")]
+    [InlineData(true, false, "consumed_yield_missing")]
+    [InlineData(false, false, "consumed_yield_wrong")]
+    [InlineData(true, false, "consumed_yield_wrong")]
+    [InlineData(false, false, "consumed_pairing_missing")]
+    [InlineData(true, false, "consumed_pairing_missing")]
+    [InlineData(false, false, "consumed_pairing_wrong")]
+    [InlineData(true, false, "consumed_pairing_wrong")]
+    [InlineData(false, false, "binding_pairing_missing")]
+    [InlineData(true, false, "binding_pairing_missing")]
+    [InlineData(false, false, "binding_pairing_ambiguous")]
+    [InlineData(true, false, "binding_pairing_ambiguous")]
     public async Task AnalyzeRetained_FallbackTailRepairSettlementExactRecheckBeforeSymptomQueue_RecoversCandidate(
         bool compact,
         bool omitSuccessorBindingAndRecheck,
@@ -13888,6 +13916,53 @@ public sealed class FileTransferRetainedRuntimeUnlockAnalyzerTests : FileTransfe
             LogLine($"event=file_transfer_outbound_terminal; session_id={sessionId}; transfer_id={transferId}; state=Completed", 27),
         };
 
+        // ReleaseGeneration is YieldGeneration, not PairingGeneration. Keep them
+        // different, as in the retained route-cycle run, throughout the proof chain.
+        for (var index = 0; index < lines.Count; index++)
+        {
+            lines[index] = lines[index]
+                .Replace("release_generation=1", "release_generation=2", StringComparison.Ordinal)
+                .Replace("yield_generation=1", "yield_generation=2", StringComparison.Ordinal);
+            if (lines[index].Contains("event=filetransfer_fallback_tail_paired_release_", StringComparison.Ordinal))
+            {
+                lines[index] = lines[index].Replace(
+                    "pairing_generation=1",
+                    "yield_generation=2; pairing_generation=1",
+                    StringComparison.Ordinal);
+            }
+        }
+
+        var releaseGenerationInvalid = successorBindingMutation.StartsWith("reserved_", StringComparison.Ordinal) ||
+            successorBindingMutation.StartsWith("consumed_", StringComparison.Ordinal) ||
+            successorBindingMutation == "binding_pairing_missing";
+        if (releaseGenerationInvalid)
+        {
+            var mutation = successorBindingMutation.Split('_');
+            var eventName = mutation[0] == "binding"
+                ? "runtime_unlock_retry_dispatch_fallback_tail_hold_binding_decided"
+                : $"filetransfer_fallback_tail_paired_release_{mutation[0]}";
+            var field = $"{mutation[1]}_generation";
+            var expected = mutation[1] == "yield" ? "2" : "1";
+            for (var index = 0; index < lines.Count; index++)
+            {
+                if (lines[index].Contains($"event={eventName};", StringComparison.Ordinal))
+                {
+                    lines[index] = lines[index].Replace(
+                        $"{field}={expected}; ",
+                        mutation[2] == "missing" ? "" : $"{field}=9; ",
+                        StringComparison.Ordinal);
+                }
+            }
+        }
+        else if (successorBindingMutation == "binding_pairing_ambiguous")
+        {
+            var bindingIndex = lines.FindIndex(line => line.Contains(
+                $"binding_transition_identity=successor:{repairAuthority}:1:Accepted", StringComparison.Ordinal));
+            Assert.True(bindingIndex >= 0);
+            lines.Insert(bindingIndex + 1, lines[bindingIndex].Replace(
+                "pairing_generation=1", "pairing_generation=9", StringComparison.Ordinal));
+        }
+
         if (omitSuccessorBindingAndRecheck)
         {
             lines.RemoveAll(line =>
@@ -13953,9 +14028,9 @@ public sealed class FileTransferRetainedRuntimeUnlockAnalyzerTests : FileTransfe
                     StringComparison.Ordinal));
         }
 
-        if (successorBindingMutation is
+        var productionRecheck = successorBindingMutation.StartsWith("production_", StringComparison.Ordinal);
+        if (productionRecheck || successorBindingMutation is
             "redacted_recheck" or
-            "production_redacted_recheck" or
             "ambiguous_redacted_recheck")
         {
             for (var index = 0; index < lines.Count; index++)
@@ -13990,10 +14065,7 @@ public sealed class FileTransferRetainedRuntimeUnlockAnalyzerTests : FileTransfe
             }
         }
 
-        if (string.Equals(
-                successorBindingMutation,
-                "production_redacted_recheck",
-                StringComparison.Ordinal))
+        if (productionRecheck)
         {
             for (var index = 0; index < lines.Count; index++)
             {
@@ -14035,9 +14107,37 @@ public sealed class FileTransferRetainedRuntimeUnlockAnalyzerTests : FileTransfe
                 {
                     lines[index] = lines[index].Replace(
                         "source_publication_reason=fallback_paired_tail_yield",
-                        "source_publication_reason=peer_post_tuna_fallback_v6_proof",
+                        successorBindingMutation == "production_redacted_recheck"
+                            ? "source_publication_reason=peer_post_tuna_fallback_v6_proof"
+                            : "source_publication_reason=bootstrap_correlated_exchange_completed",
                         StringComparison.Ordinal);
+
+                    if (successorBindingMutation == "production_bootstrap_wrong_publication")
+                    {
+                        lines[index] = lines[index]
+                            .Replace("route_publication_generation=3", "route_publication_generation=4", StringComparison.Ordinal)
+                            .Replace("source_publication_generation=3", "source_publication_generation=4", StringComparison.Ordinal);
+                    }
+                    else if (successorBindingMutation == "production_bootstrap_inconsistent_install_reason" &&
+                        lines[index].Contains("event=runtime_unlock_retry_dispatch_install_committed;", StringComparison.Ordinal))
+                    {
+                        lines[index] = lines[index].Replace(
+                            "source_publication_reason=bootstrap_correlated_exchange_completed",
+                            "source_publication_reason=mutated_install_reason",
+                            StringComparison.Ordinal);
+                    }
                 }
+            }
+
+            if (successorBindingMutation == "production_bootstrap_wrong_request")
+            {
+                var republishedIndex = lines.FindLastIndex(line => line.Contains(
+                    "event=runtime_unlock_retry_dispatch_authority_request_published;", StringComparison.Ordinal));
+                Assert.True(republishedIndex >= 0);
+                lines[republishedIndex] = lines[republishedIndex].Replace(
+                    "source_coordinator_decision_reason=fallback_paired_tail_yield",
+                    "source_coordinator_decision_reason=mutated_request_reason",
+                    StringComparison.Ordinal);
             }
 
             var candidateIndex = lines.FindLastIndex(line =>
@@ -14065,6 +14165,7 @@ public sealed class FileTransferRetainedRuntimeUnlockAnalyzerTests : FileTransfe
         Assert.Equal("1", verdict["runtime_unlock_retry_dispatch_fallback_frontier_repair_settlement_recheck_missing_distinct_count"]);
         var bindingInvalid = omitSuccessorBindingAndRecheck ||
             mutatesSuccessorBinding ||
+            successorBindingMutation == "binding_pairing_ambiguous" ||
             string.Equals(
                 successorBindingMutation,
                 "ambiguous_redacted_recheck",
@@ -14073,7 +14174,11 @@ public sealed class FileTransferRetainedRuntimeUnlockAnalyzerTests : FileTransfe
             successorBindingMutation,
             "wrong_recheck_authority",
             StringComparison.Ordinal);
-        if (bindingInvalid || decisionInvalid)
+        var publicationInvalid = successorBindingMutation is
+            "production_bootstrap_wrong_publication" or
+            "production_bootstrap_wrong_request" or
+            "production_bootstrap_inconsistent_install_reason";
+        if (bindingInvalid || decisionInvalid || releaseGenerationInvalid || publicationInvalid)
         {
             Assert.Equal("0", verdict["runtime_unlock_retry_dispatch_fallback_frontier_repair_settlement_recheck_missing_recovered_count"]);
             Assert.Equal("1", verdict["runtime_unlock_retry_dispatch_fallback_frontier_repair_settlement_recheck_missing_unresolved_count"]);
@@ -14086,6 +14191,11 @@ public sealed class FileTransferRetainedRuntimeUnlockAnalyzerTests : FileTransfe
                 Assert.Equal("unbound_held_fallback_tail_retry_could_not_recheck_after_blocking_repair_settlement", verdict["first_proof_chain_failure_reason"]);
             }
             Assert.Equal("fail", verdict["runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_verdict"]);
+            if (successorBindingMutation == "production_bootstrap_inconsistent_install_reason")
+            {
+                Assert.Equal("0", verdict["runtime_unlock_retry_dispatch_authority_granted_count"]);
+                Assert.Equal("1", verdict["runtime_unlock_retry_dispatch_install_grant_evidence_incomplete_unresolved_count"]);
+            }
         }
         else
         {
