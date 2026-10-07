@@ -850,6 +850,7 @@ public sealed class FileTransferSoakRunnerTests : CoreSmokeTestsBase
         const string envName = "NLINK_FILETRANSFER_V4_MIXED_SCREENSHARE";
         var previousValue = Environment.GetEnvironmentVariable(envName);
         Environment.SetEnvironmentVariable(envName, null);
+        var testSucceeded = false;
 
         try
         {
@@ -873,6 +874,16 @@ public sealed class FileTransferSoakRunnerTests : CoreSmokeTestsBase
                 error,
                 CancellationToken.None);
 
+            if (exitCode != 0)
+            {
+                throw new XunitException(BuildSoakFailureMessage(
+                    artifactDir,
+                    exitCode,
+                    output.ToString(),
+                    error.ToString(),
+                    "local-mixed with default V4 screen share returned a nonzero exit code"));
+            }
+
             await AssertLocalV4SoakSuccessAsync(artifactDir, exitCode, "local-mixed", "ScreenSharePressure");
             var summary = ReadArtifactReport(artifactDir, "filetransfer-local-soak-summary.txt");
             Assert.Equal("4", summary["data_protocol_version"]);
@@ -889,11 +900,15 @@ public sealed class FileTransferSoakRunnerTests : CoreSmokeTestsBase
             Assert.Contains("event=filetransfer_v4_mixed_screenshare_enabled", logSlice, StringComparison.Ordinal);
             Assert.Contains("mixed_screenshare=1", logSlice, StringComparison.Ordinal);
             Assert.DoesNotContain("v4_file_only_required", logSlice, StringComparison.Ordinal);
+            testSucceeded = true;
         }
         finally
         {
             Environment.SetEnvironmentVariable(envName, previousValue);
-            TryDeleteDirectory(artifactDir);
+            if (testSucceeded)
+            {
+                TryDeleteDirectory(artifactDir);
+            }
         }
     }
 
@@ -978,7 +993,7 @@ public sealed class FileTransferSoakRunnerTests : CoreSmokeTestsBase
         return string.Join(
             Environment.NewLine,
             [
-                "File transfer local-fast soak failed.",
+                "File transfer local soak failed.",
                 $"Assertion: {assertionMessage}",
                 $"ExitCode: {exitCode}",
                 $"ArtifactDir: {artifactDir}",
