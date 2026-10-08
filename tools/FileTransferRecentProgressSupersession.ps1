@@ -65,7 +65,7 @@ function Get-FileTransferRecentProgressSupersessionClosure {
             (F $root 'data_session_generation') -cne $Episode.DataSessionGeneration -or
             (N $root 'checkpoint_generation') -ne $owner.retainedLegCheckpointGeneration -or
             (ConvertTo-FileTransferCoordinatorEvidenceToken (F $root 'checkpoint_request_id')) -cne $owner.retainedLegCheckpointRequestId -or
-            (ConvertTo-FileTransferCoordinatorEvidenceToken (F $root 'data_session_identity')) -cne $owner.boundary.dataSessionIdentity -or
+            (Get-FileTransferDiagnosticScopeEvidenceToken $root 'data_session_identity') -cne $owner.boundary.dataSessionIdentity -or
             (N $root 'data_session_generation') -ne $owner.boundary.dataSessionGeneration -or
             $deadline -ne $progress+[TimeSpan]::TicksPerSecond -or $progress -le 0 -or
             (N $Episode.Progress 'log_writer_attempt_utc_ticks') -lt $progress -or
@@ -75,6 +75,7 @@ function Get-FileTransferRecentProgressSupersessionClosure {
         foreach ($arm in @($root)+@($arms | Where-Object { [long]$_.Sequence -gt [long]$root.Sequence })) {
             $next=N $arm 'wake_generation';$nextHighest=N $arm 'highest_received_chunk_index';$time=N $arm 'log_writer_attempt_utc_ticks'
             if (-not (Equal $arm $root $wakeNames) -or (F $arm 'authority_effect') -cne 'none' -or
+                (Get-FileTransferDiagnosticScopeEvidenceToken $arm 'data_session_identity') -cne $owner.boundary.dataSessionIdentity -or
                 (F $arm 'decision_status') -cnotin @('held','rearmed') -or $next -le 0 -or $time -ge $deadline -or
                 $time -lt $progress -or $time -lt $ticks -or ($generation -gt 0 -and
                     ($next -ne $generation+1 -or $nextHighest -le $highest -or (F $arm 'decision_status') -cne 'rearmed'))) {
@@ -86,16 +87,21 @@ function Get-FileTransferRecentProgressSupersessionClosure {
         $boundaries=@($SnapshotEvidence.Boundaries | Where-Object { $_.writer -ceq $Episode.Writer -and
             $_.coordinatorInstanceId -ceq $repair.Boundary.coordinatorInstanceId -and $_.sessionId -ceq $repair.Boundary.sessionId -and
             $_.transferId -ceq $repair.Boundary.transferId -and $_.direction -ceq 'inbound' -and
-            $_.decisionKind -ceq 'CommitFileTransferRouteTransition' -and
+            $_.decisionKind -ceq 'CommitFileTransferRouteTransition' -and $_.decisionStatus -ceq 'Committed' -and
             @($_.operations | Where-Object { $_.family -ceq 'route_transition' -and $_.operationRole -ceq 'terminal' -and
-                $_.authorityId -ceq $id -and $_.operationGeneration -eq (N $commit 'transition_generation') }).Count -eq 1 })
+                $_.authorityId -ceq $id -and $_.operationGeneration -eq (N $commit 'transition_generation') -and
+                $_.beforeState -ceq 'None' -and $_.afterState -ceq 'Committed' -and $_.stateApplied -and
+                $_.receiptValidated -and $_.receiptStatus -ceq 'Committed' }).Count -eq 1 })
         if ($boundaries.Count -ne 1) { throw 'recent_supersession_commit_unbound' }
         $boundary=$boundaries[0]
         if (-not (Test-FileTransferCheckpointRepairContinuityAggregateScope $owner $boundary.beforeBoundary) -or
             $repair.Boundary.afterStateGeneration -gt $boundary.beforeStateGeneration) { throw 'recent_supersession_source_changed' }
         $why='';$proof=Get-FileTransferCoordinatorTunaSupersessionProof $SnapshotEvidence $boundary.boundaryId ([ref]$why) $Events
         if ($null -eq $proof) { throw "recent_supersession_target_unproven:$why" }
-        $typed=@($boundary.operations | Where-Object { $_.family -ceq 'route_transition' -and $_.operationRole -ceq 'terminal' })[0].routeTransition
+        $typed=@($boundary.operations | Where-Object { $_.family -ceq 'route_transition' -and $_.operationRole -ceq 'terminal' -and
+            $_.authorityId -ceq $id -and $_.operationGeneration -eq (N $commit 'transition_generation') -and
+            $_.beforeState -ceq 'None' -and $_.afterState -ceq 'Committed' -and $_.stateApplied -and
+            $_.receiptValidated -and $_.receiptStatus -ceq 'Committed' })[0].routeTransition
         $map=@{route='route';protocol_version='protocolVersion';live_route_epoch='liveRouteEpoch';runtime_generation='runtimeGeneration';
             terminal_generation='terminalGeneration';leg_generation='legGeneration';route_publication_generation='routePublicationGeneration';
             route_commit_generation='routeCommitGeneration';transport_epoch='transportEpoch';bridge_recovery_generation='bridgeRecoveryGeneration'}

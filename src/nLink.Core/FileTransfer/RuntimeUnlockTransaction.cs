@@ -412,7 +412,9 @@ internal static class RuntimeUnlockTransaction
             {
                 ObservedSend = true,
                 ObservedLane = NormalizeNullable(transactionEvent.ObservedLane),
-                State = RuntimeUnlockTransactionState.OfferSentObserved,
+                State = current.State == RuntimeUnlockTransactionState.OfferPreparing
+                    ? RuntimeUnlockTransactionState.OfferSentObserved
+                    : current.State,
                 UpdatedUtcMs = nowMs,
             },
             RuntimeUnlockTransactionEventKind.PeerReceived => current with

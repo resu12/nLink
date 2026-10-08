@@ -613,6 +613,13 @@ public sealed partial class NknSignalingTransport
         AwaitingHandoffDisposition = 1,
     }
 
+    private sealed record RuntimeUnlockDeferredDispatchAnswer(
+        string Source,
+        Envelope Envelope,
+        TransportAccelerationAnswerPayload Answer,
+        RuntimeUnlockOfferAuthorityBoundary Boundary,
+        RuntimeUnlockRetryDispatchSettlementReport Settlement);
+
     private enum RuntimeUnlockRetiredAnswerHandoffDisposition
     {
         Rejected = 0,
@@ -1269,6 +1276,8 @@ public sealed partial class NknSignalingTransport
         public RuntimeUnlockRetryDispatchContract? DispatchPredecessorContract { get; set; }
 
         public RuntimeUnlockRetryDispatchSettlementReport? PendingDispatchSettlementReport { get; set; }
+
+        public RuntimeUnlockDeferredDispatchAnswer? DeferredDispatchAnswer { get; set; }
 
         public RuntimeUnlockRetryDispatchSettlementReport? LastAppliedDispatchSettlementReport { get; set; }
 
@@ -23644,6 +23653,7 @@ public sealed partial class NknSignalingTransport
     bool IRuntimeUnlockRetryDispatchAuthorityBridge.ObserveRuntimeUnlockRetryDispatchSettlementDecision(
         RuntimeUnlockRetryDispatchSettlementDecision decision)
     {
+        RuntimeUnlockDeferredDispatchAnswer? deferredAnswer = null;
         RuntimeUnlockRetryDispatchSuccessorEvaluation? successorEvaluation = null;
         RuntimeUnlockRetryDispatchContract? predecessor = null;
         string? staleReason = null;
@@ -24086,6 +24096,26 @@ public sealed partial class NknSignalingTransport
         }
         }
 
+        lock (accelerationGate)
+        {
+            if (runtimeUnlockRecoveryRetryState is { DeferredDispatchAnswer: { } held } state &&
+                held.Settlement == decision.Report)
+            {
+                state.DeferredDispatchAnswer = null;
+                if (accepted && staleReason is null &&
+                    state.LastAppliedDispatchSettlementReport == held.Settlement &&
+                    held.Settlement.Outcome == RuntimeUnlockRetryDispatchSettlementOutcome.DispatchObserved &&
+                    state.ContractState is not (SessionRecoveryContractState.Completed or SessionRecoveryContractState.Failed))
+                {
+                    deferredAnswer = held;
+                }
+                else
+                {
+                    LogDeferredRuntimeUnlockAnswerDiscarded("settlement_not_applied");
+                }
+            }
+        }
+
         if (staleReason is not null)
         {
             LocalOperationalLog.Info(
@@ -24148,6 +24178,11 @@ public sealed partial class NknSignalingTransport
             }
         }
 
+        if (deferredAnswer is not null)
+        {
+            HandleValidatedTransportAccelerationAnswer(deferredAnswer.Source, deferredAnswer.Envelope,
+                deferredAnswer.Answer, deferredAnswer.Boundary);
+        }
         return accepted;
     }
 
@@ -24547,6 +24582,11 @@ public sealed partial class NknSignalingTransport
         RuntimeUnlockRecoveryRetryState state,
         string reason)
     {
+        if (state.DeferredDispatchAnswer is not null)
+        {
+            state.DeferredDispatchAnswer = null;
+            LogDeferredRuntimeUnlockAnswerDiscarded(reason);
+        }
         state.RetryQueued = false;
         state.RetryDispatching = false;
         state.RetryDispatched = false;
@@ -25081,6 +25121,11 @@ public sealed partial class NknSignalingTransport
         RuntimeUnlockRecoveryRetryState state,
         string decisionReason)
     {
+        if (state.DeferredDispatchAnswer is not null)
+        {
+            state.DeferredDispatchAnswer = null;
+            LogDeferredRuntimeUnlockAnswerDiscarded(decisionReason);
+        }
         state.DispatchContract = null;
         state.DispatchPredecessorContract = null;
         state.PendingDispatchSettlementReport = null;
@@ -37068,6 +37113,37 @@ public sealed partial class NknSignalingTransport
             $"event=tuna_acceleration_lifecycle_ack_sent; message_type={SanitizeLogToken(messageType)}; msg_id={SanitizeLogToken(env.MessageId)}");
     }
 
+    private static void LogDeferredRuntimeUnlockAnswerDiscarded(string reason)
+        => LocalOperationalLog.Info("NKN.Tuna",
+            $"event=runtime_unlock_answer_dispatch_settlement_discarded; authority_effect=none; reason={SanitizeLogToken(reason)}");
+
+    private bool TryDeferRuntimeUnlockAnswerForDispatchSettlementUnsafe(string source, Envelope envelope,
+        TransportAccelerationAnswerPayload answer, RuntimeUnlockOfferAuthorityBoundary boundary)
+    {
+        var nowMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+        if (boundary.Mode != RuntimeUnlockOfferAuthorityMode.InstalledRetry ||
+            boundary.InstallReceipt is not { } receipt ||
+            outboundRuntimeUnlockOfferAuthorityBoundary != boundary ||
+            runtimeUnlockRetryDispatchInstallShadow.LastCommittedReceipt != receipt ||
+            runtimeUnlockRetryDispatchInstallShadow.PendingScopeInvalidationCommand is not null ||
+            runtimeUnlockRecoveryRetryState is not { PendingDispatchSettlementReport: { } report } state ||
+            report.Authority != receipt.Authority ||
+            report.Outcome != RuntimeUnlockRetryDispatchSettlementOutcome.DispatchObserved ||
+            state.AuthorityFailureReason is not null ||
+            state.ContractState is SessionRecoveryContractState.Completed or SessionRecoveryContractState.Failed ||
+            answer.SessionId != boundary.SessionId || answer.Nonce != boundary.Nonce ||
+            answer.PayerDecisionId != boundary.PayerDecisionId ||
+            nowMs >= boundary.EnvelopeExpiresAtUnixMs || nowMs >= answer.ExpiresAtUnixMs)
+        {
+            return false;
+        }
+
+        state.DeferredDispatchAnswer ??= new(source, envelope, answer, boundary, report);
+        LocalOperationalLog.Info("NKN.Tuna",
+            $"event=runtime_unlock_answer_dispatch_settlement_deferred; offer_generation={boundary.OfferGeneration}; authority_effect=none; reason=exact_dispatch_observed_settlement_pending");
+        return true;
+    }
+
     private void HandleTransportAccelerationAnswer(string source, Envelope env)
     {
         LocalOperationalLog.Info(
@@ -37092,6 +37168,12 @@ public sealed partial class NknSignalingTransport
 
         SendAccelerationLifecycleAckIfValid(source, env, "transport_acceleration_answer");
 
+        HandleValidatedTransportAccelerationAnswer(source, env, answer);
+    }
+
+    private void HandleValidatedTransportAccelerationAnswer(string source, Envelope env,
+        TransportAccelerationAnswerPayload answer, RuntimeUnlockOfferAuthorityBoundary? deferredBoundary = null)
+    {
         string? expectedNonce;
         string? expectedTrigger;
         RuntimeUnlockRetryDispatchInstallReceipt? expectedInstallReceipt;
@@ -37161,6 +37243,15 @@ public sealed partial class NknSignalingTransport
             }
         }
 
+        if (deferredBoundary is not null &&
+            (expectedOfferAuthorityBoundary != deferredBoundary ||
+             DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() >= deferredBoundary.EnvelopeExpiresAtUnixMs ||
+             ValidateAccelerationAnswer(source, answer, requireAcceptedLanes: answer.Accepted).IsHardReject))
+        {
+            LogDeferredRuntimeUnlockAnswerDiscarded("scope_replaced_or_expired");
+            return;
+        }
+
         if (string.IsNullOrWhiteSpace(expectedNonce) ||
             !string.Equals(expectedNonce, answerNonce, StringComparison.Ordinal))
         {
@@ -37178,17 +37269,26 @@ public sealed partial class NknSignalingTransport
             matchedRetiredOffer &&
             expectedOfferAuthorityBoundary?.Mode ==
                 RuntimeUnlockOfferAuthorityMode.InitialActivation;
-        if (isRuntimeUnlockOffer &&
-            !(retainedInitialActivationAnswer
-                ? ValidateRuntimeUnlockRetiredPendingAnswerBoundary(
-                    expectedOfferAuthorityBoundary!,
-                    "answer_received")
-                : ValidateRuntimeUnlockOfferAuthorityBoundary(
-                    expectedOfferAuthorityBoundary,
-                    "answer_received",
-                    allowDispatchObservedSettlement: true)))
+        if (retainedInitialActivationAnswer && !ValidateRuntimeUnlockRetiredPendingAnswerBoundary(
+                expectedOfferAuthorityBoundary!, "answer_received"))
         {
             return;
+        }
+        if (isRuntimeUnlockOffer && !retainedInitialActivationAnswer)
+        {
+            lock (accelerationGate)
+            {
+                // Retention is evidence only. Validation cannot race the creation
+                // of a pending report and discard an answer between its two states.
+                if (TryDeferRuntimeUnlockAnswerForDispatchSettlementUnsafe(
+                        source, env, answer, expectedOfferAuthorityBoundary!)) { return; }
+                if (!ValidateRuntimeUnlockOfferAuthorityBoundary(expectedOfferAuthorityBoundary,
+                        "answer_received", allowDispatchObservedSettlement: true))
+                {
+                    if (deferredBoundary is not null) { LogDeferredRuntimeUnlockAnswerDiscarded("scope_not_current"); }
+                    return;
+                }
+            }
         }
 
         if (matchedRetiredRuntimeUnlockGeneration)

@@ -38,6 +38,11 @@ public sealed partial class NknAccelerationTransportTests
     public Task JoinedFallbackRetry_RecentProgressIsSupersededBeforeGraceDeadline()
         => RunJoinedFallbackRetryAsync(withStalledRepair: true, withRecentProgress: true);
 
+    [Fact]
+    [Trait("FileTransferRuntimeSuite", "RecentProgressSupersession")]
+    public Task JoinedFallbackRetry_RecentProgressWithProductionRedactionIsSupersededBeforeGraceDeadline()
+        => RunJoinedFallbackRetryAsync(withStalledRepair: true, withRecentProgress: true, productionRedaction: true);
+
     [Theory]
     [InlineData("sidecar_tuna_stream_eof")]
     [InlineData("listener_terminal_tuna_stream_eof")]
@@ -88,7 +93,7 @@ public sealed partial class NknAccelerationTransportTests
     private async Task RunJoinedFallbackRetryAsync(bool withStalledRepair, string? sidecarFailureReason = null,
         string? failureControl = null, bool continueAfterEof = false, bool withRecentProgress = false,
         bool delayReceiverSnapshots = false, bool notifyResponderFromPeer = false,
-        string? responderFailureControl = null, bool dialFailureBeforeProbe = false)
+        string? responderFailureControl = null, bool dialFailureBeforeProbe = false, bool productionRedaction = false)
     {
         // Initial fallback contexts are an explicit fixture baseline. There is
         // no file-I/O/live acceptance claim. After the baseline, all authority,
@@ -167,7 +172,7 @@ public sealed partial class NknAccelerationTransportTests
             {
                 await helper.SendChatMessageAsync(new byte[] { 1 }, timeout.Token);
             }
-            const string transferId = "transfer_joined_retry_continuation";
+            var transferId = productionRedaction ? Guid.NewGuid().ToString("N") : "transfer_joined_retry_continuation";
             // Register the real protocol transfer on both transports before
             // attaching Services to the seeded, already-open fallback baseline.
             var fileOffer = new TaskCompletionSource<FileTransferOfferV2>(TaskCreationOptions.RunContinuationsAsynchronously);

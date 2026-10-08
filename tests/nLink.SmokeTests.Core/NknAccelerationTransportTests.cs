@@ -23700,11 +23700,16 @@ public sealed partial class NknAccelerationTransportTests : CoreSmokeTestsBase, 
     [InlineData(false, false)]
     [InlineData(false, true)]
     [InlineData(true, true)]
+    [InlineData(false, false, "accepted")]
+    [InlineData(false, false, "rejected")]
+    [InlineData(false, false, "scope_replaced")]
+    [InlineData(false, false, "expired")]
     [Trait("Category", "Smoke")]
     [Trait("FileTransferInfraSuite", "RuntimeUnlockRetryDispatch")]
     public async Task RuntimeUnlockRetryDispatch_ActiveInstalledRetryAnswerDefersGenericAndSuccessorUntilExactHandoffDisposition(
         bool postFallback,
-        bool answerBeforeLocalObservedSend)
+        bool answerBeforeLocalObservedSend,
+        string? pendingSettlementDisposition = null)
     {
         FakeNknClient.ResetNetwork();
         var previousHelpeePriorityDelay =
@@ -23719,6 +23724,8 @@ public sealed partial class NknAccelerationTransportTests : CoreSmokeTestsBase, 
         NknSignalingTransport
             .RuntimeUnlockRecoverySoftSettleDelayOverrideForTests =
             TimeSpan.Zero;
+        var settlementEntered = new TaskCompletionSource<object?>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseSettlement = new TaskCompletionSource<object?>(TaskCreationOptions.RunContinuationsAsynchronously);
         try
         {
             using var cts =
@@ -23821,7 +23828,17 @@ public sealed partial class NknAccelerationTransportTests : CoreSmokeTestsBase, 
             }
             else
             {
-                InstallRuntimeUnlockRetryDispatchCoordinatorForTests(host);
+                InstallRuntimeUnlockRetryDispatchCoordinatorForTests(host,
+                    settlementDecisionTransform: decision =>
+                    {
+                        if (pendingSettlementDisposition is null || decision.Report.Outcome !=
+                            RuntimeUnlockRetryDispatchSettlementOutcome.DispatchObserved) { return decision; }
+                        settlementEntered.TrySetResult(null);
+                        releaseSettlement.Task.Wait(cts.Token);
+                        return pendingSettlementDisposition == "rejected"
+                            ? decision with { Status = RuntimeUnlockRetryDispatchSettlementDecisionStatus.Rejected }
+                            : decision;
+                    });
                 TrackAuthorizedRegularV4RouteForTests(host, transferId);
                 InvokePrivateMethod(
                     host,
@@ -23860,7 +23877,11 @@ public sealed partial class NknAccelerationTransportTests : CoreSmokeTestsBase, 
                     host));
 
             Envelope? duplicateAnswerEnvelope = null;
-            if (answerBeforeLocalObservedSend)
+            if (pendingSettlementDisposition is not null)
+            {
+                await settlementEntered.Task.WaitAsync(TimeSpan.FromSeconds(8), cts.Token);
+            }
+            else if (answerBeforeLocalObservedSend)
             {
                 try
                 {
@@ -23928,6 +23949,10 @@ public sealed partial class NknAccelerationTransportTests : CoreSmokeTestsBase, 
                 accepted: true,
                 supportedLanes: ["file"],
                 payerDecisionId: payerDecisionId);
+            if (pendingSettlementDisposition == "expired")
+            {
+                answer.ExpiresAtUnixMs = DateTimeOffset.UtcNow.AddSeconds(1).ToUnixTimeMilliseconds();
+            }
             duplicateAnswerEnvelope = BuildSecureAccelerationEnvelope(
                 helper,
                 MsgType.TransportAccelerationAnswer,
@@ -23937,12 +23962,47 @@ public sealed partial class NknAccelerationTransportTests : CoreSmokeTestsBase, 
                 sequence: 919);
 
             var answerLogStart = GetOperationalLogLength();
+            var transactionBeforeAnswer = GetPrivateField(host, "runtimeUnlockTransactionState");
+            var leaseBeforeAnswer = GetPrivateField(host, "runtimeUnlockTunaPathLeaseState");
 
             InvokePrivateMethod(
                 host,
                 "HandleTransportAccelerationAnswer",
                 helperClient.Address,
                 duplicateAnswerEnvelope);
+
+            if (pendingSettlementDisposition is not null)
+            {
+                Assert.Contains("event=runtime_unlock_answer_dispatch_settlement_deferred;",
+                    ReadOperationalLogTail(answerLogStart), StringComparison.Ordinal);
+                Assert.False(answerAckEntered.Task.IsCompleted);
+                Assert.Null(GetPrivateField(host, "runtimeUnlockRetiredAnswerBarrier"));
+                Assert.Equal(transactionBeforeAnswer, GetPrivateField(host, "runtimeUnlockTransactionState"));
+                Assert.Equal(leaseBeforeAnswer, GetPrivateField(host, "runtimeUnlockTunaPathLeaseState"));
+                if (pendingSettlementDisposition == "scope_replaced")
+                {
+                    lock (GetPrivateField(host, "accelerationGate")!)
+                    {
+                        InvokePrivateMethod(host, "ClearOutboundAccelerationOfferLocked");
+                    }
+                }
+                else if (pendingSettlementDisposition == "expired")
+                {
+                    await Task.Delay(1100, cts.Token);
+                }
+                releaseSettlement.TrySetResult(null);
+                if (pendingSettlementDisposition != "accepted")
+                {
+                    await WaitUntilAsync(() => ReadOperationalLogTail(answerLogStart).Contains(
+                        "event=runtime_unlock_answer_dispatch_settlement_discarded;", StringComparison.Ordinal),
+                        TimeSpan.FromSeconds(3));
+                    Assert.False(answerAckEntered.Task.IsCompleted);
+                    Assert.Null(GetPrivateField(host, "runtimeUnlockRetiredAnswerBarrier"));
+                    Assert.DoesNotContain("event=runtime_unlock_answer_ack_probe_barrier_released;",
+                        ReadOperationalLogTail(answerLogStart), StringComparison.Ordinal);
+                    return;
+                }
+            }
 
             await answerAckEntered.Task.WaitAsync(
                 TimeSpan.FromSeconds(5),
@@ -24117,6 +24177,7 @@ public sealed partial class NknAccelerationTransportTests : CoreSmokeTestsBase, 
         }
         finally
         {
+            releaseSettlement.TrySetResult(null);
             NknSignalingTransport
                 .HelperPaidOfferHelpeePriorityDelayOverrideForTests =
                 previousHelpeePriorityDelay;

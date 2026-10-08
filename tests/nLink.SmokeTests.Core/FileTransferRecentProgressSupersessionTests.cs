@@ -7,7 +7,30 @@ public sealed class FileTransferRecentProgressSupersessionTests : FileTransferOp
 {
     [Fact]
     [Trait("OpsSuite", "RecentProgressSupersession")]
-    public async Task RecentProgress_ActualJoinedCaptureAndReportsHaveCrossHostParity()
+    public async Task RecentProgress_CommitSelectionDistinguishesCommitFromRetirement()
+    {
+        if (!OperatingSystem.IsWindows()) { return; }
+        var root = FindRepoRoot();
+        const string script = """
+            param([string]$RepoRoot)
+            & (Join-Path $RepoRoot 'tests/nLink.SmokeTests.Core/TestData/RecentProgressCommitSelection.ps1') -RepoRoot $RepoRoot
+            """;
+        string? previous = null;
+        foreach (var host in new[] { "powershell", "pwsh" })
+        {
+            var result = await RunPowerShellScriptTextAsync(script, [root], host);
+            Assert.True(result.ExitCode == 0, $"{host}: {result.Stdout}{Environment.NewLine}{result.Stderr}");
+            Assert.Contains("recent-progress-commit-selection-ok", result.Stdout, StringComparison.Ordinal);
+            if (previous is not null) { Assert.Equal(previous, result.Stdout.Trim()); }
+            previous = result.Stdout.Trim();
+        }
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    [Trait("OpsSuite", "RecentProgressSupersession")]
+    public async Task RecentProgress_ActualJoinedCaptureAndReportsHaveCrossHostParity(bool productionRedaction)
     {
         if (!OperatingSystem.IsWindows()) { return; }
         var root = FindRepoRoot();
@@ -26,7 +49,9 @@ public sealed class FileTransferRecentProgressSupersessionTests : FileTransferOp
             };
             foreach (var argument in new[] { "test", "tests/nLink.SmokeTests.Core/nLink.SmokeTests.Core.csproj",
                 "--no-build", "--no-restore", "--filter",
-                "FullyQualifiedName=NLink.SmokeTests.NknAccelerationTransportTests.JoinedFallbackRetry_RecentProgressIsSupersededBeforeGraceDeadline",
+                "FullyQualifiedName=NLink.SmokeTests.NknAccelerationTransportTests." + (productionRedaction
+                    ? "JoinedFallbackRetry_RecentProgressWithProductionRedactionIsSupersededBeforeGraceDeadline"
+                    : "JoinedFallbackRetry_RecentProgressIsSupersededBeforeGraceDeadline"),
                 "--verbosity", "quiet" }) { start.ArgumentList.Add(argument); }
             start.Environment["NLINK_FILETRANSFER_SOAK_ARTIFACT_DIR"] = directory;
             start.Environment["NLINK_FILETRANSFER_ACCEPTANCE_LOG_PATH"] = path;
@@ -40,6 +65,14 @@ public sealed class FileTransferRecentProgressSupersessionTests : FileTransferOp
             catch { if (!child.HasExited) { child.Kill(entireProcessTree: true); } throw; }
             Assert.True(child.ExitCode == 0, $"Joined fixture: {await stdout}{Environment.NewLine}{await stderr}");
             Assert.True(File.Exists(path), "Actual joined capture was not emitted.");
+            if (productionRedaction)
+            {
+                var capture = await File.ReadAllTextAsync(path);
+                Assert.True(capture.Contains("session_id=sess_[redacted];", StringComparison.Ordinal) ||
+                    capture.Contains("session_id=[redacted];", StringComparison.Ordinal));
+                Assert.Contains("transfer_id=[redacted];", capture, StringComparison.Ordinal);
+                Assert.Contains("data_session_identity=[redacted]:1;", capture, StringComparison.Ordinal);
+            }
             const string script = """
                 param([string]$RepoRoot,[string]$InputPath,[string]$OutputRoot)
                 $ErrorActionPreference='Stop'

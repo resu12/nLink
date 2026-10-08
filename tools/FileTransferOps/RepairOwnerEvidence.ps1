@@ -120,6 +120,24 @@ function Get-FileTransferRepairOwnerEvidence {
     [pscustomobject]@{ CatalogVersion=$Catalog.Version; CatalogHash=$Catalog.Hash; Bindings=$bindings; Errors=@($errors.ToArray()) }
 }
 
+# Diagnostic association only; the caller must bind this token to its receipt.
+function Get-FileTransferDiagnosticScopeEvidenceToken {
+    param($Event,[string]$Name)
+    $raw=[string]$Event.Fields[$Name]
+    $stable=[string]$Event.Fields["frontier_scope_$Name"]
+    if ([string]::IsNullOrWhiteSpace($raw) -or $raw -ceq '(none)') { return '' }
+    $redacted=$raw -ceq '[redacted]' -or ($Name -ceq 'session_id' -and $raw -ceq 'sess_[redacted]') -or
+        ($Name -ceq 'data_session_identity' -and $raw -cmatch '^\[redacted\]:[1-9][0-9]*$')
+    if (-not $redacted -and $raw.Contains('[redacted]')) { return '' }
+    $projected=if ($redacted) { '' } else { ConvertTo-FileTransferCoordinatorEvidenceToken $raw }
+    if ($Event.Fields.ContainsKey("frontier_scope_$Name")) {
+        if ($stable -cnotmatch '^fte1-[0-9a-f]{24}$' -or (-not $redacted -and $stable -cne $projected)) { return '' }
+        return $stable
+    }
+    if ($redacted) { return '' }
+    return $projected
+}
+
 # Returns an issuance-time attestation, including on a later settlement log.
 # It does not assert that the repair is still current or authorize any effect.
 function Resolve-FileTransferRepairOwnerEvidence {
@@ -147,9 +165,7 @@ function Resolve-FileTransferRepairOwnerEvidence {
     if ($binding.Boundary.afterStateGeneration -ne $generation -or (F 'direction') -cne $p.direction -or
         ((F 'continuity_coordinator_id') -ne '' -and (F 'continuity_coordinator_id') -cne $p.coordinatorInstanceId)) { return $null }
     foreach ($pair in @(@('session_id',$p.sessionId),@('transfer_id',$p.transferId))) {
-        $raw=F $pair[0]
-        if ([string]::IsNullOrWhiteSpace($raw) -or ($raw -cne '[redacted]' -and
-            (ConvertTo-FileTransferCoordinatorEvidenceToken $raw) -cne $pair[1])) { return $null }
+        if ((Get-FileTransferDiagnosticScopeEvidenceToken $Event $pair[0]) -cne $pair[1]) { return $null }
     }
     $tokens=@{ authority_id='authorityId'; predecessor_authority_id='predecessorAuthorityId'; repair_request_key='canonicalRepairKey';
         range_fingerprint='rangeFingerprint'; protocol_repair_request_id='protocolRepairRequestId'; request_correlation_id='requestCorrelationId';

@@ -194,14 +194,20 @@ function Get-FileTransferCoordinatorTunaSupersessionProof {
             # route authority. Indexed partitions supply the full peer input.
             foreach ($event in $EvidenceEvents) {
                 $f=$event.Fields
-                if ([string]$f['log_writer_id'] -cne $pair.Writer -or [string]$f['direction'] -cne $pair.Direction -or
-                    (ConvertTo-FileTransferCoordinatorEvidenceToken ([string]$f['transfer_id'])) -cne $pair.TransferId) { continue }
+                if ([string]$f['log_writer_id'] -cne $pair.Writer -or [string]$f['direction'] -cne $pair.Direction) { continue }
+                if ([string]$f['transfer_paused'] -cne '1' -and [string]$f['event'] -cnotin @(
+                    'file_transfer_inbound_terminal','filetransfer_live_route_epoch_terminal','filetransfer_terminalized_by_session_end',
+                    'filetransfer_data_session_removed','filetransfer_data_session_recreated')) { continue }
                 $sequence=0L
                 if (-not [long]::TryParse([string]$f['log_writer_sequence'],[ref]$sequence)) { throw 'peer_poison_sequence_missing' }
                 if ($sequence -le $pair.TransitionSequence -or $sequence -ge [long]$disposition.Boundary.writerSequence) { continue }
-                if ([string]$f['transfer_paused'] -ceq '1' -or [string]$f['event'] -cin @(
-                    'file_transfer_inbound_terminal','filetransfer_live_route_epoch_terminal','filetransfer_terminalized_by_session_end',
-                    'filetransfer_data_session_removed','filetransfer_data_session_recreated')) { throw 'peer_source_interval_poisoned' }
+                $transferToken=Get-FileTransferDiagnosticScopeEvidenceToken $event 'transfer_id'
+                if ($transferToken -cne $pair.TransferId) {
+                    if ($transferToken -ceq '' -or
+                        ([string]$f['transfer_id']).Contains('[redacted]')) { throw 'peer_poison_identity_unbound' }
+                    continue
+                }
+                throw 'peer_source_interval_poisoned'
             }
             return [pscustomobject]@{CoordinatorInstanceId=$commit.coordinatorInstanceId;Direction=$commit.direction;
                 PairedReleaseAuthorityId=$pair.PairedReleaseAuthorityId;PairedReleaseGeneration=$pair.PairedReleaseGeneration;

@@ -16,7 +16,7 @@ $lines=[IO.File]::ReadAllLines($InputPath)
 $snapshot=Get-FileTransferCoordinatorSnapshotEvaluation -Lines $lines
 Check ($snapshot.ArtifactEvidenceVerdict -ceq 'pass' -and $snapshot.StreamComplete) $snapshot.ArtifactEvidenceFailureReason
 Check ($snapshot.CatalogVersion -ceq $script:FileTransferCoordinatorFallbackRepairHandoffCatalogVersion -and
-    $snapshot.CatalogHash -ceq (Get-FileTransferCoordinatorEarlyCheckpointProofCatalog).Hash) 'Fresh producer must use the exact current catalog.'
+    $snapshot.CatalogHash -ceq (Get-FileTransferCoordinatorFallbackRepairHandoffCatalog).Hash) 'Fresh producer must use the exact current catalog.'
 $events=@(Parse $lines)
 $holds=@($events | Where-Object EventName -CEQ 'filetransfer_v6_receiver_state_deferred')
 Check ($holds.Count -ge 1) 'Fresh fixture must open a recent-progress episode.'
@@ -89,6 +89,41 @@ try { $script:FileTransferFallbackFrontierGracePartitionWidth=1; Verify 'narrow-
 finally { $script:FileTransferFallbackFrontierGracePartitionWidth=$oldWidth }
 $duplicate=@($compact)+@((Copy-Value $arms[0]))
 Verify 'identical-copy' $duplicate $snapshot $true -Gui
+
+if ($arms[0].Fields.data_session_identity.Contains('[redacted]')) {
+    foreach ($case in @('grant-session-missing','grant-session-foreign','grant-transfer-conflict',
+            'arm-data-missing','arm-data-foreign','rearm-data-conflict')) {
+        $copy=@(Copy-Value $compact)
+        $grant=@($copy | Where-Object { $_.EventName -ceq 'filetransfer_fallback_frontier_repair_authority_granted' -and
+            $_.Fields.direction -ceq 'inbound' })[0]
+        $arm=@($copy | Where-Object EventName -CEQ 'filetransfer_v6_frontier_recent_progress_grace_deferred')[0]
+        $rearm=@($copy | Where-Object EventName -CEQ 'filetransfer_v6_frontier_recent_progress_grace_deferred')[1]
+        switch ($case) {
+            'grant-session-missing' { $grant.Fields.Remove('frontier_scope_session_id') }
+            'grant-session-foreign' { $grant.Fields.frontier_scope_session_id='fte1-'+('0'*24) }
+            'grant-transfer-conflict' { $grant.Fields.frontier_scope_transfer_id='fte1-'+('0'*24) }
+            'arm-data-missing' { $arm.Fields.Remove('frontier_scope_data_session_identity') }
+            'arm-data-foreign' { $arm.Fields.frontier_scope_data_session_identity='fte1-'+('0'*24) }
+            'rearm-data-conflict' { $rearm.Fields.frontier_scope_data_session_identity='fte1-'+('0'*24) }
+        }
+        Verify $case $copy $snapshot $false -Gui
+    }
+    $peerBoundary=@($snapshot.Boundaries | Where-Object boundaryId -CEQ $proof.PeerTarget.CommitBoundaryId)[0]
+    $peerDisposition=@($snapshot.Boundaries | Where-Object boundaryId -CEQ $proof.PeerTarget.DispositionBoundaryId)[0]
+    foreach ($kind in @('pause','terminal','data-replacement')) {
+        foreach ($identity in @('matching','missing','foreign')) {
+            $extra=Copy-Value @($compact | Where-Object { $_.EventName -ceq 'filetransfer_route_transition_committed' -and
+                $_.Fields.direction -ceq 'outbound' })[0]
+            $extra.Sequence++;$extra.LineNumber++
+            $extra.Fields.log_writer_sequence=[string]([long]$peerDisposition.writerSequence-1)
+            $extra.EventName=if($kind -ceq 'pause'){'filetransfer_v6_receiver_state_sent'}elseif($kind -ceq 'terminal'){'filetransfer_live_route_epoch_terminal'}else{'filetransfer_data_session_recreated'}
+            $extra.Fields.event=$extra.EventName
+            if ($kind -ceq 'pause') { $extra.Fields.transfer_paused='1' }
+            if ($identity -cne 'missing') { $extra.Fields.frontier_scope_transfer_id=if($identity -ceq 'matching'){$peerBoundary.transferId}else{'fte1-'+('0'*24)} }
+            Verify "redacted-peer-$kind-$identity" (@(Copy-Value $compact)+@($extra)) $snapshot $false
+        }
+    }
+}
 
 # Mutations below are negative consumer tests, not valid producer evidence.
 foreach($case in @('arm-missing','arm-data','arm-checkpoint','arm-frontier','arm-runtime','arm-deadline','arm-authority',

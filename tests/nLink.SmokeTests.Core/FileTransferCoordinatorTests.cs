@@ -17965,6 +17965,131 @@ public sealed partial class FileTransferCoordinatorTests
         Assert.Equal("paired_fallback_tail_yield_missing", rejectionReason);
     }
 
+    [Theory]
+    [InlineData(false, 0)]
+    [InlineData(true, 0)]
+    [InlineData(false, 1)]
+    [InlineData(true, 1)]
+    [InlineData(false, 2)]
+    [InlineData(true, 2)]
+    [InlineData(false, 3)]
+    [InlineData(true, 3)]
+    public void RuntimeUnlockTransaction_ObservedSendPreservesPeerProofPhase(bool sendFirst, int proofStage)
+    {
+        var transactionEvent = new RuntimeUnlockTransactionEvent(
+            RuntimeUnlockTransactionEventKind.OfferGenerationCreated,
+            "session", "transfer", TransactionGeneration: 1, OfferGeneration: 10,
+            Reason: "ordering_regression", UtcMs: 100,
+            ObservedLane: "control_priority", PathProbeId: "probe-10",
+            PathProbeTransport: FileTransferTransportKind.Tuna);
+        var transaction = RuntimeUnlockTransaction.Apply(
+            transactionEvent, RuntimeUnlockTransactionSnapshot.Idle).State;
+        var observedSend = transactionEvent with
+        {
+            Kind = RuntimeUnlockTransactionEventKind.ObservedSend,
+            UtcMs = 200,
+        };
+        if (sendFirst)
+        {
+            transaction = RuntimeUnlockTransaction.Apply(observedSend, transaction).State;
+        }
+        if (proofStage >= 1)
+        {
+            transaction = RuntimeUnlockTransaction.Apply(transactionEvent with
+            {
+                Kind = RuntimeUnlockTransactionEventKind.PeerReceived,
+            }, transaction).State;
+        }
+        if (proofStage >= 2)
+        {
+            transaction = RuntimeUnlockTransaction.Apply(transactionEvent with
+            {
+                Kind = RuntimeUnlockTransactionEventKind.AnswerReceived,
+            }, transaction).State;
+        }
+        if (proofStage >= 3)
+        {
+            transaction = RuntimeUnlockTransaction.Apply(transactionEvent with
+            {
+                Kind = RuntimeUnlockTransactionEventKind.PathProbeStarted,
+            }, transaction).State;
+            transaction = RuntimeUnlockTransaction.Apply(transactionEvent with
+            {
+                Kind = RuntimeUnlockTransactionEventKind.PathProbeAcked,
+            }, transaction).State;
+        }
+
+        var decision = RuntimeUnlockTransaction.Apply(observedSend, transaction);
+
+        Assert.Equal(transaction with
+        {
+            ObservedSend = true,
+            ObservedLane = "control_priority",
+            State = proofStage == 0 ? RuntimeUnlockTransactionState.OfferSentObserved : transaction.State,
+            UpdatedUtcMs = 200,
+        }, decision.State);
+        Assert.False(decision.RouteCommitRequired);
+        Assert.False(decision.RouteCommitted);
+        Assert.False(decision.OfferGenerationRetired);
+    }
+
+    [Theory]
+    [InlineData("session")]
+    [InlineData("transfer")]
+    [InlineData("transaction")]
+    [InlineData("offer")]
+    [InlineData("committed")]
+    [InlineData("failed")]
+    [InlineData("retired")]
+    public void RuntimeUnlockTransaction_ObservedSendWithStaleOrTerminalScopeIsInert(string boundary)
+    {
+        var transactionEvent = new RuntimeUnlockTransactionEvent(
+            RuntimeUnlockTransactionEventKind.OfferGenerationCreated,
+            "session", "transfer", TransactionGeneration: 1, OfferGeneration: 10,
+            Reason: "ordering_regression", UtcMs: 100);
+        var transaction = RuntimeUnlockTransaction.Apply(
+            transactionEvent, RuntimeUnlockTransactionSnapshot.Idle).State;
+        transaction = RuntimeUnlockTransaction.Apply(transactionEvent with
+        {
+            Kind = RuntimeUnlockTransactionEventKind.AnswerReceived,
+        }, transaction).State;
+        var observedSend = transactionEvent with
+        {
+            Kind = RuntimeUnlockTransactionEventKind.ObservedSend,
+            UtcMs = 200,
+            ObservedLane = "control_priority",
+        };
+        observedSend = boundary switch
+        {
+            "session" => observedSend with { SessionId = "other-session" },
+            "transfer" => observedSend with { TransferId = "other-transfer" },
+            "transaction" => observedSend with { TransactionGeneration = 2 },
+            "offer" => observedSend with { OfferGeneration = 11 },
+            _ => observedSend,
+        };
+        transaction = boundary switch
+        {
+            "committed" => RuntimeUnlockTransaction.Apply(transactionEvent with
+                { Kind = RuntimeUnlockTransactionEventKind.RouteCommitted }, transaction).State,
+            "failed" => RuntimeUnlockTransaction.Apply(transactionEvent with
+                { Kind = RuntimeUnlockTransactionEventKind.Failed }, transaction).State,
+            "retired" => RuntimeUnlockTransaction.Apply(transactionEvent with
+                { Kind = RuntimeUnlockTransactionEventKind.Retired }, transaction).State,
+            _ => transaction,
+        };
+
+        var decision = RuntimeUnlockTransaction.Apply(observedSend, transaction);
+
+        Assert.Equal(transaction, decision.State);
+        Assert.False(decision.RouteCommitRequired);
+        Assert.False(decision.RouteCommitted);
+        Assert.False(decision.OfferGenerationRetired);
+        if (!transaction.IsTerminal)
+        {
+            Assert.Equal("stale_runtime_unlock_transaction", decision.Reason);
+        }
+    }
+
     [Fact]
     public void RuntimeUnlockTransaction_LocalObservedSendCannotCommitRoute()
     {

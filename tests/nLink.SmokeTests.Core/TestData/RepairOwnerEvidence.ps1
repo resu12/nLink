@@ -34,6 +34,28 @@ $binding=Resolve-FileTransferRepairOwnerEvidence $baseline $event
 Check ($null -ne $binding) 'exact grant reference rejected'
 Check ($binding.Operation.repairOwner.scope.leaseGeneration -eq 0 -and
     $binding.Operation.repairOwner.scope.boundary.checkpointGeneration -eq 0) 'active lease role changed'
+# Consumer controls over the real emitted receipt, not new producer authority.
+$redacted=$event.Fields.Clone()
+$redacted.session_id='sess_[redacted]';$redacted.transfer_id='[redacted]'
+$redacted.frontier_scope_session_id=$binding.Operation.repairOwner.sessionId
+$redacted.frontier_scope_transfer_id=$binding.Operation.repairOwner.transferId
+Check ($null -ne (Resolve-FileTransferRepairOwnerEvidence $baseline ([pscustomobject]@{Fields=$redacted}))) 'redacted exact grant reference rejected'
+foreach ($field in @('frontier_scope_session_id','frontier_scope_transfer_id')) {
+    foreach ($value in @($null,'wrong','fte1-'+('0'*24))) {
+        $copy=$redacted.Clone()
+        if ($null -eq $value) { $copy.Remove($field) } else { $copy[$field]=$value }
+        Check ($null -eq (Resolve-FileTransferRepairOwnerEvidence $baseline ([pscustomobject]@{Fields=$copy}))) "redacted identity accepted:$field/$value"
+    }
+}
+$data=[pscustomobject]@{Fields=@{data_session_identity='[redacted]:1';
+    frontier_scope_data_session_identity=$binding.Operation.repairOwner.scope.boundary.dataSessionIdentity}}
+Check ((Get-FileTransferDiagnosticScopeEvidenceToken $data 'data_session_identity') -ceq
+    $binding.Operation.repairOwner.scope.boundary.dataSessionIdentity) 'redacted data identity rejected'
+$data.Fields.Remove('frontier_scope_data_session_identity')
+Check ((Get-FileTransferDiagnosticScopeEvidenceToken $data 'data_session_identity') -ceq '') 'missing redacted data identity accepted'
+$data.Fields.data_session_identity='unredacted-data'
+$data.Fields.frontier_scope_data_session_identity='fte1-'+('0'*24)
+Check ((Get-FileTransferDiagnosticScopeEvidenceToken $data 'data_session_identity') -ceq '') 'conflicting raw/stable data identity accepted'
 foreach ($field in $catalog.RepairOwnerCatalog.diagnosticFields) {
     $fields=$event.Fields.Clone(); $fields.Remove($field)
     Check ($null -eq (Resolve-FileTransferRepairOwnerEvidence $baseline ([pscustomobject]@{Fields=$fields}))) "missing:$field"
