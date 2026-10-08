@@ -20,6 +20,10 @@ internal sealed class FileTransferSessionPreparationExecution
 
     public FileTransferSessionPreparationPermit Permit { get; }
     public CancellationToken Cancellation => cancellation.Token;
+    public FileTransferSessionPreparationAdmission? Admission
+    {
+        get { lock (gate) return admission; }
+    }
     public bool AllowsPreparation
     {
         get { lock (gate) return IsResourceCurrentUnsafe() && admission is null; }
@@ -45,11 +49,16 @@ internal sealed class FileTransferSessionPreparationExecution
                 expiresUtc = readiness?.ExpiresUtc ?? state.Handshake?.DeadlineUtc ?? Permit.DeadlineUtc;
             }
             else if (state.Phase == FileTransferSessionPreparationPhase.AdmissionReserved &&
-                readiness is not null && ReferenceEquals(state.Admission?.Readiness, readiness))
+                state.Admission is { } reserved)
             {
+                admission = reserved;
+                if (readiness is null || !ReferenceEquals(reserved.Readiness, readiness))
+                {
+                    RetireUnsafe();
+                    return;
+                }
                 // Admission closes all preparation callbacks, but preserves
                 // completed resources for this exact Core reservation to claim.
-                admission = state.Admission;
             }
             else
             {

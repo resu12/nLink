@@ -44,6 +44,9 @@ internal interface IFileTransferSessionPreparationAuthority
     FileTransferSessionPreparationAdmissionLease? BindAdmission(FileTransferSessionPreparationAttachment attachment,
         FileTransferSessionPreparationSecurityEpoch epoch, FileTransferSessionPreparationAdmission admission,
         FileTransferInitialTunaReadinessEvidence evidence) => null;
+    CancellationToken? BindAdmissionActivationLifetime(FileTransferSessionPreparationAttachment attachment,
+        FileTransferSessionPreparationSecurityEpoch epoch, FileTransferSessionPreparationAdmission admission,
+        FileTransferRoutePublicationAuthority publication) => null;
     FileTransferSessionPreparationDecision Retire(FileTransferSessionPreparationAttachment attachment,
         FileTransferSessionPreparationSecurityEpoch epoch, FileTransferSessionPreparationPermit permit);
     FileTransferSessionPreparationObservation? Observe(FileTransferSessionPreparationAttachment attachment,

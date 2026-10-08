@@ -11304,6 +11304,7 @@ public sealed partial class NknSignalingTransport
         }
 
         RecordTunaFallbackNknFrame("received", MsgType.FileTransferDataFrame, channel, payloadBytes, sessionId);
+        RecheckSessionPreparationAdmissionFromRegularFrame(frame);
         if (TryMapFileTransferFallbackNknProofKind(frame, out var proofKind))
         {
             _ = CompleteFileTransferFallbackNknProofIfPending(proofKind, sessionId, frame);
@@ -14489,7 +14490,8 @@ public sealed partial class NknSignalingTransport
         RuntimeUnlockRetryDispatchInstallReceipt? expectedInstallReceipt = null,
         bool requireRuntimeUnlockRetryDispatchInstall = false,
         bool runtimeUnlockActivation = false,
-        long reservedSlotGeneration = 0)
+        long reservedSlotGeneration = 0,
+        SessionPreparationActivationHandoff? preparationHandoff = null)
     {
         runtimeUnlockActivation |= requireRuntimeUnlockRetryDispatchInstall;
         void ReleaseReservedSlot(string releaseReason)
@@ -14518,6 +14520,7 @@ public sealed partial class NknSignalingTransport
         }
 
         if (disposed ||
+            preparationHandoff is not null && !IsSessionPreparationActivationHandoffLifetimeCurrent(preparationHandoff) ||
             accelerationLane is not INknTunaAccelerationSession ||
             IsAccelerationUserStoppedForCurrentSession() ||
             !IsSessionAccelerationEligible(out _))
@@ -14539,6 +14542,7 @@ public sealed partial class NknSignalingTransport
 
         if (HasPendingOutboundAccelerationOffer() || HasPendingAccelerationAnswerAck())
         {
+            if (preparationHandoff is not null) return;
             if (runtimeUnlockActivation &&
                 TryQueueRuntimeUnlockNegotiationBehindPendingGeneration(
                     reason,
@@ -14610,6 +14614,7 @@ public sealed partial class NknSignalingTransport
             if (!TryAcquireGenericAccelerationNegotiationSlot(
                     out negotiationSlotGeneration))
             {
+                if (preparationHandoff is not null) return;
                 SchedulePendingRuntimeUnlockRetryNegotiationIntent(
                     "generic_negotiation_deferred_for_retry_intent");
                 if (runtimeUnlockActivation)
@@ -14673,6 +14678,12 @@ public sealed partial class NknSignalingTransport
                 var dispositionReason = "negotiation_operation_completed";
                 try
                 {
+                    if (preparationHandoff is not null)
+                    {
+                        if (SessionPreparationBeforeTransferActivationOfferForTests is { } beforeOffer)
+                            await beforeOffer().ConfigureAwait(false);
+                        if (!IsSessionPreparationActivationHandoffLifetimeCurrent(preparationHandoff)) return;
+                    }
                     if (!MarkRuntimeUnlockRecoveryContractRetryDispatched(
                             reason,
                             expectedInstallReceipt,
@@ -14684,14 +14695,18 @@ public sealed partial class NknSignalingTransport
                         return;
                     }
 
+                    using var handoffCancellation = preparationHandoff is not null
+                        ? CancellationTokenSource.CreateLinkedTokenSource(preparationHandoff.Cancellation,
+                            preparationHandoff.TransferLifetime!.Value) : null;
                     await TrySendAccelerationOfferAsync(
                             reason,
                             payerDecisionId,
                             scheduledOperationGeneration,
-                            CancellationToken.None,
+                            handoffCancellation?.Token ?? CancellationToken.None,
                             expectedInstallReceipt,
                             requireRuntimeUnlockRetryDispatchInstall,
-                            runtimeUnlockActivation)
+                            runtimeUnlockActivation,
+                            preparationHandoff)
                         .ConfigureAwait(false);
                     (disposition, dispositionReason) =
                         requireRuntimeUnlockRetryDispatchInstall
@@ -15481,7 +15496,8 @@ public sealed partial class NknSignalingTransport
         CancellationToken ct,
         RuntimeUnlockRetryDispatchInstallReceipt? expectedInstallReceipt = null,
         bool requireRuntimeUnlockRetryDispatchInstall = false,
-        bool runtimeUnlockActivation = false)
+        bool runtimeUnlockActivation = false,
+        SessionPreparationActivationHandoff? preparationHandoff = null)
     {
         if (!requireRuntimeUnlockRetryDispatchInstall ||
             expectedInstallReceipt is not { } installReceipt)
@@ -15493,7 +15509,8 @@ public sealed partial class NknSignalingTransport
                     expectedInstallReceipt,
                     requireRuntimeUnlockRetryDispatchInstall,
                     runtimeUnlockActivation,
-                    physicalSendScope: null)
+                    physicalSendScope: null,
+                    preparationHandoff)
                 .ConfigureAwait(false);
             return;
         }
@@ -15586,7 +15603,8 @@ public sealed partial class NknSignalingTransport
         RuntimeUnlockRetryDispatchInstallReceipt? expectedInstallReceipt,
         bool requireRuntimeUnlockRetryDispatchInstall,
         bool runtimeUnlockActivation,
-        RuntimeUnlockRetryPhysicalSendScope? physicalSendScope)
+        RuntimeUnlockRetryPhysicalSendScope? physicalSendScope,
+        SessionPreparationActivationHandoff? preparationHandoff = null)
     {
         var offerAuthorityMode = requireRuntimeUnlockRetryDispatchInstall
             ? RuntimeUnlockOfferAuthorityMode.InstalledRetry
@@ -15598,14 +15616,15 @@ public sealed partial class NknSignalingTransport
             offerAuthorityMode == RuntimeUnlockOfferAuthorityMode.InstalledRetry;
 
         bool ValidateOfferAuthority(string boundary)
-            => offerAuthorityMode is { } mode
+            => (preparationHandoff is null || IsSessionPreparationActivationHandoffLifetimeCurrent(preparationHandoff)) &&
+                (offerAuthorityMode is { } mode
                 ? ValidatePendingRuntimeUnlockOfferAuthority(
                     mode,
                     expectedInstallReceipt,
                     boundary)
                 : ValidateRuntimeUnlockRetryDispatchInstallReceiptBoundary(
                     expectedInstallReceipt,
-                    boundary);
+                    boundary));
 
         bool ScheduleOfferRetry(string retryReason)
             => offerAuthorityMode switch
@@ -15771,6 +15790,10 @@ public sealed partial class NknSignalingTransport
                 return;
             }
 
+            if (preparationHandoff is not null && capturedOwnerAuthority != preparationHandoff.Publication)
+            {
+                return;
+            }
             runtimeUnlockFileTransferOwnerAuthority = capturedOwnerAuthority;
             LogRuntimeUnlockFileTransferOwnerAcceptedBeforePathLease(
                 capturedOwnerAuthority,

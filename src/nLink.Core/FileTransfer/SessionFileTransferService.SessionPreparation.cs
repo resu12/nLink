@@ -324,6 +324,34 @@ public sealed partial class SessionFileTransferService : IFileTransferSessionPre
         }
     }
 
+    CancellationToken? IFileTransferSessionPreparationAuthority.BindAdmissionActivationLifetime(
+        FileTransferSessionPreparationAttachment attachment, FileTransferSessionPreparationSecurityEpoch epoch,
+        FileTransferSessionPreparationAdmission admission, FileTransferRoutePublicationAuthority publication)
+    {
+        lock (gate)
+        {
+            CancellationToken? result = null;
+            epoch.TryUse(() =>
+            {
+                if (preparationAdmission is not { } capture || !ReferenceEquals(capture.Attachment, attachment) ||
+                    !ReferenceEquals(capture.Epoch, epoch) || !ReferenceEquals(capture.Admission, admission) ||
+                    admission.Readiness is not null || !IsPreparationCaptureCurrentLocked(capture) ||
+                    !epoch.Security!.HasCapability(CapabilityGrant.FileTransfer, DateTimeOffset.UtcNow)) return;
+                var state = CaptureFallbackListenerPreparationStateLocked();
+                if (state?.CurrentRoutePublicationToken is not { } token || token.SessionId != admission.Scope.SessionId ||
+                    token.TransferId != admission.TransferId || token.Direction != admission.Direction ||
+                    token.Route != FileTransferRoute.RegularNknV4Fast || token.ProtocolVersion != 4 ||
+                    !FileTransferCoordinator.IsRoutePublicationTokenCurrent(state, token, out _) ||
+                    !FileTransferCoordinator.MatchesRoutePublicationAuthority(publication, token)) return;
+                // Borrow the real transfer lifetime, never the adapter's route-cache lifetime.
+                result = admission.Direction == FileTransferDirection.Outbound
+                    ? outboundTransfer!.LifetimeCts.Token : inboundTransfer!.LifetimeCts.Token;
+                if (result.Value.IsCancellationRequested) result = null;
+            });
+            return result;
+        }
+    }
+
     FileTransferSessionPreparationObservation? IFileTransferSessionPreparationAuthority.Observe(
         FileTransferSessionPreparationAttachment attachment, FileTransferSessionPreparationSecurityEpoch epoch,
         FileTransferDirection direction, DateTimeOffset requestedUtc)

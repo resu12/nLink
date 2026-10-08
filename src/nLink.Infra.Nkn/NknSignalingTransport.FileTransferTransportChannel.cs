@@ -2817,6 +2817,7 @@ public sealed partial class NknSignalingTransport : IFileTransferControlPlanePhy
             NotifyTransportAccelerationStateChanged("post_tuna_fallback_route_active");
         }
 
+        ContinueSessionPreparationAfterAdmission(authority);
     }
 
     private bool TryGetFileTransferDataPathRouteAuthority(
