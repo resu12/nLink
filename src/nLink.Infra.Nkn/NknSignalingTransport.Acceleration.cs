@@ -16977,6 +16977,7 @@ public sealed partial class NknSignalingTransport
             }
         }
 
+        PendingAckWait? offerAckWait = null;
         Task<AccelerationControlSendResult> SendCurrentOfferEnvelopeAsync(
             RuntimeUnlockInitialActivationReceiveRecoveryHoldPrevalidation?
                 holdPrevalidation = null)
@@ -17052,7 +17053,8 @@ public sealed partial class NknSignalingTransport
                             sendCt,
                             peerVisibleAuthorityBoundary,
                             drainChildrenOnCompletion:
-                                physicalSendScope is not null)
+                                physicalSendScope is not null,
+                            registeredAck: offerAckWait)
                          : null,
                     expectedInstallReceipt: isRuntimeUnlockActivation
                         ? expectedInstallReceipt
@@ -17067,6 +17069,23 @@ public sealed partial class NknSignalingTransport
         AccelerationControlSendResult offerSend;
         try
         {
+            if (usesInstalledRetryAuthority &&
+                ShouldRequireSynchronousRuntimeUnlockPeerVisibleOfferConfirmation(
+                    sessionId,
+                    "offer"))
+            {
+                // All copies share this message ID; the peer ACKs only its first copy.
+                offerAckWait = new PendingAckWait(
+                    remoteEndpoint,
+                    envelope.Type,
+                    new TaskCompletionSource<AckWaitOutcome>(
+                        TaskCreationOptions.RunContinuationsAsynchronously));
+                if (!pendingAcks.TryAdd(envelope.MessageId, offerAckWait))
+                {
+                    throw new InvalidOperationException("pending_ack_exists");
+                }
+            }
+
             offerSend =
                 await SendCurrentOfferEnvelopeAsync(
                         initialOfferPrevalidation.IsReleased
@@ -17078,6 +17097,15 @@ public sealed partial class NknSignalingTransport
         {
             ResumeActivationPauseIfNeeded("tuna_activation_failed_regular_v4_resumed", "offer_send_failed");
             throw;
+        }
+        finally
+        {
+            if (offerAckWait is not null)
+            {
+                ((ICollection<KeyValuePair<string, PendingAckWait>>)pendingAcks)
+                    .Remove(new(envelope.MessageId, offerAckWait));
+                offerAckWait.TryCancel();
+            }
         }
 
         while (!offerSend.Succeeded &&
@@ -36235,7 +36263,8 @@ public sealed partial class NknSignalingTransport
         string trigger,
         CancellationToken ct,
         RuntimeUnlockOfferAuthorityBoundary expectedOfferAuthorityBoundary,
-        bool drainChildrenOnCompletion)
+        bool drainChildrenOnCompletion,
+        PendingAckWait? registeredAck = null)
     {
         if (expectedOfferAuthorityBoundary.Mode !=
                 RuntimeUnlockOfferAuthorityMode.InstalledRetry ||
@@ -36274,7 +36303,8 @@ public sealed partial class NknSignalingTransport
                 trigger,
                 ct,
                 expectedOfferAuthorityBoundary,
-                drainChildrenOnCompletion)
+                drainChildrenOnCompletion,
+                registeredAck)
             .ConfigureAwait(false);
         if (!peerVisible)
         {
@@ -36543,7 +36573,8 @@ public sealed partial class NknSignalingTransport
         string trigger,
         CancellationToken ct,
         RuntimeUnlockOfferAuthorityBoundary expectedOfferAuthorityBoundary,
-        bool drainChildrenOnCompletion)
+        bool drainChildrenOnCompletion,
+        PendingAckWait? registeredAck = null)
     {
         if (!ValidateRuntimeUnlockOfferAuthorityBoundary(
                 expectedOfferAuthorityBoundary,
@@ -36584,7 +36615,8 @@ public sealed partial class NknSignalingTransport
                         DrainChildrenOnCompletion:
                             drainChildrenOnCompletion),
                     envelope,
-                    ct)
+                    ct,
+                    registeredAck)
                 .ConfigureAwait(false);
         }
         catch (OperationCanceledException) when (!ct.IsCancellationRequested)

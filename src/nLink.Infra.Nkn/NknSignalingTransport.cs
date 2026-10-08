@@ -2371,13 +2371,15 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
     private async Task<LifecycleDeliveryResult> SendLifecycleEnvelopeAsync(
         LifecycleDeliveryOptions options,
         Envelope envelope,
-        CancellationToken ct)
-        => await SendLifecycleEnvelopeAsync(options, new LifecycleEnvelopeSet(envelope, null), ct).ConfigureAwait(false);
+        CancellationToken ct,
+        PendingAckWait? registeredAck = null)
+        => await SendLifecycleEnvelopeAsync(options, new LifecycleEnvelopeSet(envelope, null), ct, registeredAck).ConfigureAwait(false);
 
     private async Task<LifecycleDeliveryResult> SendLifecycleEnvelopeAsync(
         LifecycleDeliveryOptions options,
         LifecycleEnvelopeSet envelopes,
-        CancellationToken ct)
+        CancellationToken ct,
+        PendingAckWait? registeredAck = null)
     {
         var callerCt = options.IgnoreCallerCancellation
             ? CancellationToken.None
@@ -2392,7 +2394,7 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
         Task<LifecycleCopySendResult>? controlAckTask = null;
         if (options.UseControlAckRetry)
         {
-            controlAckTask = SendLifecycleControlAckCopyAsync(options, controlEnvelope, effectiveCt);
+            controlAckTask = SendLifecycleControlAckCopyAsync(options, controlEnvelope, effectiveCt, registeredAck);
         }
 
         var controlCopyTask = SendLifecyclePeerCopyAttemptsAsync(
@@ -2604,7 +2606,8 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
     private async Task<LifecycleCopySendResult> SendLifecycleControlAckCopyAsync(
         LifecycleDeliveryOptions options,
         Envelope envelope,
-        CancellationToken ct)
+        CancellationToken ct,
+        PendingAckWait? registeredAck)
     {
         if (TryCreateLifecyclePreSendValidationFailure(options, "control_ack") is { } validationFailure)
         {
@@ -2613,7 +2616,9 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
 
         try
         {
-            await SendEnvelopeWithAckRetryAsync(options.ControlDestination, envelope, ct).ConfigureAwait(false);
+            await SendEnvelopeWithAckRetryAsync(
+                options.ControlDestination, envelope, ct,
+                registeredAck: registeredAck).ConfigureAwait(false);
             return new LifecycleCopySendResult("control_ack", true, null);
         }
         catch (Exception ex)

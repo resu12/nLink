@@ -2465,11 +2465,15 @@ public sealed partial class NknSignalingTransport
         string destination,
         Envelope envelope,
         CancellationToken ct,
-        Action? afterPendingAckRegistered = null)
+        Action? afterPendingAckRegistered = null,
+        PendingAckWait? registeredAck = null)
     {
-        var ackWait = new TaskCompletionSource<AckWaitOutcome>(TaskCreationOptions.RunContinuationsAsynchronously);
-        var pendingAck = new PendingAckWait(destination, envelope.Type, ackWait);
-        if (!pendingAcks.TryAdd(envelope.MessageId, pendingAck))
+        var pendingAck = registeredAck ?? new PendingAckWait(
+            destination, envelope.Type,
+            new TaskCompletionSource<AckWaitOutcome>(TaskCreationOptions.RunContinuationsAsynchronously));
+        var ackWait = pendingAck.Completion;
+        if (registeredAck is null &&
+            !pendingAcks.TryAdd(envelope.MessageId, pendingAck))
         {
             throw new InvalidOperationException("pending_ack_exists");
         }
@@ -2519,7 +2523,11 @@ public sealed partial class NknSignalingTransport
         }
         finally
         {
-            pendingAcks.TryRemove(envelope.MessageId, out _);
+            if (registeredAck is null)
+            {
+                ((ICollection<KeyValuePair<string, PendingAckWait>>)pendingAcks)
+                    .Remove(new(envelope.MessageId, pendingAck));
+            }
         }
     }
 

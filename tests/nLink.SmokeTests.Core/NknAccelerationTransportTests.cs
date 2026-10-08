@@ -13560,7 +13560,40 @@ public sealed partial class NknAccelerationTransportTests : CoreSmokeTestsBase, 
             using var helper = new NknSignalingTransport(
                 helperClient,
                 options,
-                new NknIdentity("helper-runtime-unlock-post-tuna-dispatch-id", helperClient.Address));
+                new NknIdentity("helper-runtime-unlock-post-tuna-dispatch-id", helperClient.Address),
+                NknTunaAccelerationOptions.Disabled,
+                new RetryableTunaAccelerationSession(canListen: false, failedDialAttemptsBeforeSuccess: 0));
+
+            var firstOffer = new TaskCompletionSource<(string MessageId, bool AckRegistered)>(
+                TaskCreationOptions.RunContinuationsAsynchronously);
+            var wrongSourceAckRejected = new TaskCompletionSource<bool>(
+                TaskCreationOptions.RunContinuationsAsynchronously);
+            hostClient.BeforeSendCoreAsync = (_, payload, _, _) =>
+            {
+                if (EnvelopeCodec.TryDeserialize(payload, out var sent) &&
+                    sent.Type == MsgType.TransportAccelerationOffer)
+                {
+                    var pending = Assert.IsAssignableFrom<System.Collections.IDictionary>(
+                        GetPrivateField(host, "pendingAcks"));
+                    firstOffer.TrySetResult((sent.MessageId, pending.Contains(sent.MessageId)));
+                }
+
+                return Task.CompletedTask;
+            };
+            helperClient.BeforeSendCoreAsync = async (_, payload, _, _) =>
+            {
+                if (EnvelopeCodec.TryDeserialize(payload, out var sent) &&
+                    sent.Type == MsgType.Ack &&
+                    firstOffer.Task.IsCompletedSuccessfully &&
+                    sent.ReplyTo == (await firstOffer.Task).MessageId)
+                {
+                    InvokePrivateMethod(host, "HandleAck", "unexpected.sender." + new string('f', 64), sent);
+                    wrongSourceAckRejected.TrySetResult(
+                        Assert.IsAssignableFrom<System.Collections.IDictionary>(
+                            GetPrivateField(host, "pendingAcks")).Contains(sent.ReplyTo));
+                }
+
+            };
 
             var sessionId = await ApproveNknSessionAsync(
                 host,
@@ -13586,22 +13619,10 @@ public sealed partial class NknAccelerationTransportTests : CoreSmokeTestsBase, 
                 TimeSpan.FromSeconds(8));
 
             AssertRuntimeUnlockDispatchGrantBeforeSchedule(ReadOperationalLogTail(logStart));
-            InvokePrivateMethod(host, "MarkRuntimeUnlockRecoveryContractRetryDispatched", "runtime_unlock");
-            var manuallyBound = BindRuntimeUnlockRetryDispatchOfferAliasAndObserveForTests(
-                host,
-                403L,
-                "test-post-tuna-dispatch");
-            if (manuallyBound)
-            {
-                Assert.True(BeginRuntimeUnlockRetryDispatchSendAndObserveForTests(host));
-
-                InvokePrivateMethod(
-                    host,
-                    "MarkRuntimeUnlockRecoveryContractRetryObserved",
-                    sessionId,
-                    403L,
-                    "bulk_queue_fallback");
-            }
+            var firstSentOffer = await firstOffer.Task.WaitAsync(cts.Token);
+            Assert.True(firstSentOffer.AckRegistered,
+                "The exact offer ACK waiter must be registered before any physical copy is delivered.");
+            Assert.True(await wrongSourceAckRejected.Task.WaitAsync(cts.Token));
 
             await WaitUntilAsync(
                 () => ReadOperationalLogTail(logStart).Contains(
@@ -13618,6 +13639,14 @@ public sealed partial class NknAccelerationTransportTests : CoreSmokeTestsBase, 
             Assert.Contains("runtime_generation=1", tail, StringComparison.Ordinal);
             Assert.Contains("terminal_generation=0", tail, StringComparison.Ordinal);
             Assert.Contains("leg_generation=1", tail, StringComparison.Ordinal);
+            Assert.Contains("event=runtime_unlock_control_plane_delivery_result;", tail, StringComparison.Ordinal);
+            Assert.Contains("control_ack=1", tail, StringComparison.Ordinal);
+            var sendStarted = tail.IndexOf("event=session_recovery_contract_retry_authority_send_started;", StringComparison.Ordinal);
+            var observed = tail.IndexOf("event=runtime_unlock_retry_dispatch_observed;", StringComparison.Ordinal);
+            Assert.True(sendStarted >= 0 && observed > sendStarted);
+            Assert.False(Assert.IsAssignableFrom<System.Collections.IDictionary>(
+                GetPrivateField(host, "pendingAcks")).Contains(firstSentOffer.MessageId));
+            Assert.DoesNotContain("dispatch_missing_successor_intent_created", tail, StringComparison.Ordinal);
             Assert.DoesNotContain("event=runtime_unlock_retry_dispatch_authority_rejected;", tail, StringComparison.Ordinal);
         }
         finally
@@ -21062,7 +21091,8 @@ public sealed partial class NknAccelerationTransportTests : CoreSmokeTestsBase, 
                         generation,
                         "runtime_unlock",
                         CancellationToken.None,
-                        boundary));
+                        boundary,
+                        false));
 
                 await sendEntered.Task.WaitAsync(
                     TimeSpan.FromSeconds(2),
