@@ -16,7 +16,9 @@ File-transfer control stays on current NKN. Offer, accept, decline, session-open
 
 ## Production Routes
 
-Route selection is centralized in `FileTransferRouteResolver`. Sender offer, receiver accept, session-open, runtime start, telemetry, and bridge recovery policy are expected to consume the same `FileTransferRouteSelection`.
+`FileTransferRouteResolver` computes route metadata; it is not a route-authority grantor. `FileTransferCoordinator` and coordinator-issued DTOs/tokens alone authorize route ownership, preparation/unlock, retry dispatch, commit/publication, Tuna-active state, fallback ownership, repair/replay, liveness deferral, and bridge recovery. Sender offer, receiver accept, session-open, runtime start, telemetry, and bridge recovery consume the coordinator-approved selection.
+
+Listener readiness, answer ACKs, route caches, adapter dictionaries, queue/send acceptance, and transport observations are evidence only. Rejected or stale callbacks must not publish routes, mark Tuna active, mutate progress, schedule repair, or grant any runtime effect.
 
 | Route | Token | Protocol | Runtime profile | Frame family | Bridge policy |
 | --- | --- | --- | --- | --- | --- |
@@ -55,6 +57,8 @@ Tuna configured, eligible, unlocked, funded, inactive, or failed without fallbac
 
 ### Core Contracts And Models
 
+- `src/nLink.Core/FileTransfer/FileTransferCoordinator.cs` and its partial files
+  Own authority decisions and scoped grants for preparation, route transition/publication, dispatch, fallback, recovery, and terminal handling.
 - `src/nLink.Core/FileTransfer/FileTransferRoute.cs`
   Defines route status inputs, route tokens, route metadata, and the pure resolver.
 - `src/nLink.Core/FileTransfer/IFileTransferSignalingTransport.cs`
@@ -90,6 +94,8 @@ Tuna configured, eligible, unlocked, funded, inactive, or failed without fallbac
   Wires file-transfer requests, incoming offers, accept/decline, safe destination planning, and visible session state.
 - `src/nLink.App/ViewModels/FileTransferPanelItemViewModel.cs`
   Presents progress, pause/resume/cancel state, and terminal status.
+- `src/nLink.App/ViewModels/FileTransferProgressPresentation.cs` and `src/nLink.App/Views/FileTransferProgressView.cs`
+  Smooth peer-comparable reported progress over a bounded presentation interval. They never estimate future bytes or feed visual progress back into transfer authority. ACK latency can still briefly separate the peer displays; 100% is not a replacement for SHA/terminal proof.
 - `src/nLink.App/Views/ChatView.axaml`
   Hosts the visible file-transfer panel inside the chat/session UI.
 - `src/nLink.App/Views/HelperPageView.axaml.cs` and `src/nLink.App/Views/HelpeePageView.axaml.cs`
@@ -204,7 +210,7 @@ The live fallback model is epoch-based:
 
 Fallback speed is informational. Survival, route correctness, integrity, and clean terminal completion are the gate.
 
-Do not promote `post_tuna_fallback_v6` to a sticky or performance route. V4 remains the faster production path for regular NKN and active Tuna; V6 fallback is accepted for recovery survival even when its goodput is below the V4/Tuna baselines.
+Do not promote `post_tuna_fallback_v6` to a sticky or performance route. V4 remains the production default for regular NKN and active Tuna; V6 fallback is retained for recovery survival, not as a throughput optimization or guarantee.
 
 The V6 fallback survival path logs:
 
@@ -298,14 +304,14 @@ For deterministic local regression checks:
 powershell -ExecutionPolicy Bypass -File .\tools\FileTransfer-Ops.ps1 -Mode LocalFast
 ```
 
-Before installer creation, Phase 4 route acceptance must pass:
+Before release sign-off, run the strict six-scenario `phase5-analyzer-gui-acceptance` gate with `-StrictCampaignPreflight`. Rebuild the portable package before runtime validation and run live GUI/network preflights outside the restricted sandbox with explicit escalation. A failed preflight stops execution. Commands and evidence requirements are in [file-transfer-soak.md](file-transfer-soak.md).
 
 - regular NKN 64 MiB: `regular_nkn_v4_fast`, protocol `4`, SHA OK, completed terminals, no regular bridge bulk failures, and no warning evidence.
-- active Tuna 64 MiB: `file_tuna_v4`, protocol `4`, SHA OK, completed terminals, and no active `file_tuna_v6` evidence.
+- active Tuna 64 MiB: coordinator-published `file_tuna_v4`, protocol `4`, actual authenticated Tuna payload delivery, SHA OK, completed terminal GUIs, and no active `file_tuna_v6` evidence.
 - live switch-off from each side: final `post_tuna_fallback_v6`, protocol `6`, explicit live-route epoch started/recovered proof, SHA OK, completed terminals, hard failures `0`, and warning caps not exceeded.
-- live off/on/off: route sequence `file_tuna_v4 -> post_tuna_fallback_v6 -> file_tuna_v4 -> post_tuna_fallback_v6` with strictly ordered live-route epoch proof.
+- regular/live activation off/on/off 256 MiB: coordinator-published `regular_nkn_v4_fast -> file_tuna_v4 -> post_tuna_fallback_v6 -> file_tuna_v4 -> post_tuna_fallback_v6` with strictly ordered live-route epoch proof and authenticated Tuna payload delivery at both activations. SHA or fallback completion alone cannot prove the second activation.
 - second transfer after live reactivation: first transfer proves `post_tuna_fallback_v6 -> file_tuna_v4`, then the next transfer selects `file_tuna_v4`, protocol `4`.
 
-Goodput is compared to the locked Phase 0 baseline with one rerun for goodput-only misses. A persistent goodput miss is a performance acceptance failure; it is not treated as route/runtime correctness failure when SHA, terminal, route, protocol, hard-failure, warning-cap, and live-epoch proof are all clean.
+Phase 5 records correctness separately from performance under the existing acceptance policy. Retain performance failures, warnings, and contaminated measurements; do not change baselines/limits or relabel failures as passes. Legacy/Phase 4 performance gates remain distinct. Neither local tests nor synthetic Tuna benchmarks establish authenticated live application delivery.
 
 For operator flow and artifact interpretation, use [`docs/file-transfer-operability.md`](file-transfer-operability.md).

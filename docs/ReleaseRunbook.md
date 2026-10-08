@@ -2,9 +2,25 @@
 
 This runbook describes the version-neutral steps to ship `v<version>` from a clean Windows release shell.
 
+It is the canonical release process; use [rc-validation-checklist.md](release/rc-validation-checklist.md) for sign-off. A successful build, source checkpoint, or operator-analyzer PASS does not by itself qualify a release. Do not tag or publish before mandatory security/route proofs, payload provenance, packaging checks, and CI sign-off are established.
+
+## 0.7.0 Candidate Evidence (2026-10-08)
+
+`0.7.0` remains an unpublished candidate. Retained evidence applies to the covered source, contracts, and exact payload, not automatically to later builds:
+
+- **GUI correctness PASS / performance FAIL:** all six strict Phase 5 scenarios passed on runtime source `bd177028c47cee6bb992b6f505dad7ff803d1532` on October 7. Evidence root: `artifacts/final-gui-matrix-bd177028-20261007/20261007T175211Z/`; read `phase5-analyzer-gui-acceptance-summary.txt/.json` and `route-acceptance-run-manifest.json`. This proves actual delivery, SHA integrity, coordinator-published routes, authenticated Tuna delivery (including both cycle activations), fallback, and terminal GUIs for those runs. It is not a throughput guarantee or coverage of every topology.
+- **Qualified package:** `artifacts/release-candidate-20261008/830a695c/assets/0.7.0/` contains installer, portable ZIP, and `SHA256SUMS.txt`. `package-provenance.json` in the candidate root binds packaging checkpoint `830a695c` to the exact GUI-qualified 14-file payload. Runtime/route-contract source was unchanged from the qualified checkpoint. Do not substitute the older default `artifacts/releases/0.7.0/` contents.
+- **Separate rebuild is unqualified:** the candidate root's `portable/nLink/win-x64/` rebuild has different executable/sidecar hashes and is not exact-binary GUI-qualified. Its `installer/` output is not the selected release asset. Preserve it as build evidence, not a replacement pass.
+- **New payer-handoff fix is pending live qualification:** `artifacts/payer-handoff-fix-20261008/` contains the listener-start collision regression, 96 passing focused checks, and a verified portable rebuild/self-test. App SHA-256 is `5b8a3e2f24c737f6d677d1256b0af215ba69c50acb6e24494e179f917312147b`. It is not the qualified installer payload and does not inherit the October 7 matrix PASS. The next targeted check is helper-paid Tuna -> explicit off/fallback -> helpee-paid reactivation, with authenticated Tuna delivery, coordinator-published protocol-4 routes, SHA integrity, and terminal GUI completion.
+- **Installer lifecycle PASS:** isolated Windows Sandbox validated public `0.6.2` -> candidate `0.7.0` upgrade, two app self-tests, all 14 installed hashes, locked bundled-Node handling, uninstall, and preservation of synthetic identity/reliability/log/hang fixtures. Evidence: `qualification/guest-evidence/installer-validation.json` under the candidate root. This did not modify the host installation and does not prove all real user settings migrations.
+- **Wizard inspection:** the 0.7.0 destination page opened in Windows Sandbox; no interactive install was performed. The separate exit record is launch/cleanup evidence, not a second installation pass.
+- **Remaining sign-off:** CI for the final reviewed checkpoint is not established. The current CI workflow has `workflow_dispatch`; a push to `v0.7.0` alone does not trigger it. Unsigned Windows artifacts are the already accepted 0.7.0 exception, not an Authenticode pass. Approved optional diagnostic-test deferrals remain explicitly recorded in [test-lanes.md](test-lanes.md).
+
+These local artifacts are not public downloads. Preserve their original failures, warnings, manifests, and checksums; publishing needs a separate release decision.
+
 ## Preflight
 
-Run from the repo root:
+For a planned broad release regression gate, run from the repo root. During implementation, select only focused affected tests and applicable retained coverage; do not automatically continue through Core batches or repeatedly run aggregate analyzer/contract lanes.
 
 ```powershell
 dotnet build .\nLink.sln -c Release -m:1 -nr:false -p:UseSharedCompilation=false
@@ -13,13 +29,14 @@ powershell -ExecutionPolicy Bypass -File .\tools\BetaReadiness-Check.ps1
 dotnet build-server shutdown
 ```
 
-Optional GUI smoke requires an interactive Windows desktop:
+Optional GUI smoke requires an interactive Windows desktop. Live NKN/GUI scenarios additionally need escalated execution outside a restricted sandbox and successful live preflights:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\tools\Test-Lanes.ps1 -Lane GuiSmoke -Configuration Release
 ```
 
 Expected outcome:
+
 - build passes
 - deterministic contract, analyzer, fake-acceptance, and compatibility smoke lanes pass
 - GUI smoke passes when run
@@ -108,32 +125,36 @@ Transport abuse-resistance limit matrix:
 - release validation must review both transport-local queue limits and lower-layer payload limits together
 
 File-transfer release gate:
-- run the full six-scenario `phase5-analyzer-gui-acceptance` route gate with `-StrictCampaignPreflight` before installer creation after rebuilding the portable bridge/runtime bundle; run live-network preflights and GUI validation outside the restricted sandbox with explicit escalation, and never bypass a failed preflight
+- run the route acceptance gate before installer creation: select the full six-scenario `phase5-analyzer-gui-acceptance` mode with `-StrictCampaignPreflight` after rebuilding the portable bridge/runtime bundle; run live-network preflights and GUI validation outside the restricted sandbox with explicit escalation, and never bypass a failed preflight
 - verify regular NKN completion/integrity on route `regular_nkn_v4_fast` protocol `4`, no `filetransfer_data_session_overflow`, no `filetransfer_message_rejected`, no bridge stdout protocol violations, no regular-NKN bridge bulk send/clear failures, and no unexpected diagnostic V6 route
-- verify actual authenticated Tuna payload delivery, SHA integrity, and terminal GUI completion on coordinator-published route `file_tuna_v4` protocol `4`; active `file_tuna_v6` is invalid
+- verify active Tuna completion/integrity on route `file_tuna_v4` protocol `4`, including actual authenticated Tuna payload delivery, coordinator publication, SHA integrity, and terminal GUI completion; active `file_tuna_v6` is invalid
 - verify live fallback completion/integrity on final route `post_tuna_fallback_v6` protocol `6` with explicit live-route epoch proof; fallback speed is separated as performance variance; verify the following new transfer resolves from current transport state when the fallback transfer completed successfully
 - the 256 MiB route-cycle scenario must prove coordinator-published `regular_nkn_v4_fast,file_tuna_v4,post_tuna_fallback_v6,file_tuna_v4,post_tuna_fallback_v6`, including authenticated Tuna payload delivery at both activations; SHA OK or fallback completion alone cannot substitute for the second Tuna publication and delivery
 - Phase 5 release correctness remains strict for coordinator authority, authentication, route/protocol invariants, payload delivery, integrity, and terminal GUI completion; performance is a separate verdict, not a throughput guarantee. Retain performance FAIL, warnings, and contaminated measurements without relabeling them as passes or changing numeric baselines and limits
 - `post_completion_late_sender_frame` ignored frames are allowed only when they occur after terminal completion for a recently completed transfer; retain the count from the soak summary with the release evidence
-- retain the Phase 5 summary, run manifest, scenario artifacts, `filetransfer-live-nkn-summary.txt`, `filetransfer-live-nkn-cycles.jsonl`, and retained log slices with the release evidence
+- retain `filetransfer-live-nkn-summary.txt`, `filetransfer-live-nkn-cycles.jsonl`, and the retained log slice with the release evidence, together with the Phase 5 summary, run manifest, full scenario artifacts, and both peers' retained slices
 
 ## Packaging
 
-Build the bundled bridge, portable ZIP, and installer:
+Build the portable payload before GUI qualification:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\installer\Build-BridgeBundle.ps1 -Runtime win-x64
 powershell -ExecutionPolicy Bypass -File .\installer\Build-Portable.ps1 -Runtime win-x64
-powershell -ExecutionPolicy Bypass -File .\installer\Build-Installer.ps1 -Runtime win-x64
 ```
 
-Preferred one-shot validation and packaging path:
+The portable builder publishes the app, builds the pinned bridge and Go Tuna sidecar, validates the package, and creates the ZIP by default. It needs .NET 8 and Go; installer compilation also needs Inno Setup 6. Helper/helpee alias folders are optional. A standalone `Build-Installer.ps1 -Runtime win-x64` calls the portable builder again before compiling, rather than merely packaging the prior stage.
+
+Planned one-shot validation and packaging path:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\tools\PreRelease-Check.ps1 -RunGuiSmoke -RunBetaReadiness -RunFileTransferRouteAcceptanceGate
 ```
 
 Use this one-shot path for a planned final regression gate, not repeated diagnostic batches. During bounded qualification, retain applicable evidence for unchanged code and contracts and run only missing or affected checks through their named tools; mandatory security and route proofs still require sign-off.
+
+Supply a low-balance test wallet via `-FileTransferRouteAcceptanceWalletPath` when not using the default fixture path, and provide the session-only password to that scoped process through `NLINK_TUNA_TEST_WALLET_PASSWORD`; do not put a password literal in a saved command or log. Clear it after the run. Omitting `-RunFileTransferRouteAcceptanceGate` explicitly skips route qualification.
+
+Exact-payload caution: the one-shot script rebuilds during installer creation after the GUI gate. Compare final app, bridge, sidecar, and package hashes with the qualified payload before signing off; source equality alone does not make different bytes exact-binary qualified. If hashes differ, keep the rebuild unqualified and either validate that final payload or package the proven payload with reviewed provenance. Do not silently transfer a PASS to it.
 
 Expected release outputs:
 - `artifacts\releases\<version>\nLink-Portable-win-x64-<version>.zip`
@@ -151,9 +172,8 @@ Packaging robustness checks:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\build\verify-package-manifest.ps1 -StageDir .\artifacts\portable\nLink\win-x64 -ManifestPath .\installer\package-manifest.win-x64.txt
-powershell -ExecutionPolicy Bypass -File .\build\verify-package-manifest.ps1 -StageDir .\artifacts\portable\helper\win-x64 -ManifestPath .\installer\package-manifest.win-x64.txt
 Get-AuthenticodeSignature .\artifacts\releases\<version>\nLink-Setup-win-x64-<version>.exe | Format-List Status,StatusMessage,SignerCertificate
-Get-AuthenticodeSignature .\artifacts\portable\helper\win-x64\nLink.exe | Format-List Status,StatusMessage,SignerCertificate
+Get-AuthenticodeSignature .\artifacts\portable\nLink\win-x64\nLink.exe | Format-List Status,StatusMessage,SignerCertificate
 ```
 
 Bridge supply-chain checks:
@@ -171,7 +191,7 @@ Signing policy:
 - preferred public release artifacts are Authenticode-signed before publish
 - at minimum, signed releases verify:
   - `artifacts\releases\<version>\nLink-Setup-win-x64-<version>.exe`
-  - `artifacts\portable\helper\win-x64\nLink.exe`
+  - `artifacts\portable\nLink\win-x64\nLink.exe`
 - local/manual packaging runs may remain unsigned until the signing step
 - for `0.7.0`, unsigned public Windows artifacts are an accepted release exception; record that exception in release evidence and do not claim Authenticode signing for those artifacts
 
@@ -181,12 +201,12 @@ Expected outcome:
 - packaged app contains and uses the bundled `bridge\win-x64\node.exe` and `bridge\win-x64\index.js` without relying on `NLINK_NKN_NODE_PATH` or `NLINK_NKN_BRIDGE_PATH`
 - packaged app uses the documented file-transfer queue bounds and bridge binary caps
 - Authenticode status is `Valid` for the public installer and installed app binary, or the unsigned-artifact exception is explicitly recorded for this release
-- installer remains per-user and non-admin (`{localappdata}\Programs\nLink Helper`, `PrivilegesRequired=lowest`)
+- installer remains per-user and non-admin (`{localappdata}\Programs\nLink`, `PrivilegesRequired=lowest`)
 - no release packaging step depends on `NLINK_INVITE_MODE=legacy_signed`
 
 ## Git Tag
 
-Create and push the release tag:
+After mandatory sign-off and explicit publication approval, create and push the release tag. Do not use the tag itself to establish CI: check the current workflow triggers first.
 
 ```powershell
 git tag v<version>
@@ -232,14 +252,13 @@ Verify:
 - uninstall leaves no running processes from the install directory
 
 Safe invite flow sanity check:
-- Helper-bound invite flow is active by default:
-  - helper waiting screen shows a copyable helper address before any invite is shared
-  - helper waiting screen does not show a separate address-derived verification code
-  - helpee waiting screen does not show share/copy actions until a valid helper address is entered
-  - after entering a valid helper address, share/copy/refresh invite-code actions appear
-  - helpee waiting screen shows the bound helper address and helper identity tag
-  - helpee waiting screen shows an invite code by default; raw invite token is only available in technical details
-  - approval screens on both sides show the same five-symbol handshake-derived verification sequence before allow/accept completes
+
+- Normal helper-bound request flow is active by default:
+  - helper waiting screen shows a copyable helper address
+  - helpee enters that address and clicks `Request help`
+  - helper accepts the incoming request
+  - both sides compare the same five-symbol handshake-derived verification sequence before the helpee clicks `Allow`
+  - QR/share/copy technical paths must not bypass binding, approval, or verification
 - Options -> Diagnostics -> Copy diagnostics includes:
   - `invite_security_mode: issued_one_time_secret_invites`
   - `invite_signing_configuration: not_used_in_issued_secret_mode`
@@ -252,7 +271,7 @@ Safe invite flow sanity check:
   - `high_priority_control_coalesced:`
   - `high_priority_control_dropped_for_stop:`
 - Security wording sanity check:
-  - README and release notes may describe chat, remote control, screen share, and lifecycle traffic as nLink-managed post-approval application-layer protected traffic
+  - README and release notes may describe chat, remote control, screen share, file transfer, and lifecycle traffic as nLink-managed post-approval application-layer protected traffic
   - transport-level encryption claims are kept distinct from app-layer security claims
   - docs still mention the remaining trust boundary around the bundled NKN bridge/runtime and reported source identities
 - Outside scoped child-process harnesses, the operator's release shell has none of:

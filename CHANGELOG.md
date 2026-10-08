@@ -1,11 +1,11 @@
 # Changelog
 
-## [0.7.0] - 2026-05-05
+## [0.7.0] - Unreleased
 
 ### Added
 
 - Experimental NKN Tuna acceleration research artifacts, sidecar tooling, and opt-in manual benchmark coverage.
-- Diagnostics now includes a visible `Tuna (experimental)` wallet-linking section for local wallet status, balance validation, address copy, and unlinking.
+- Options -> Wallet includes a visible `Tuna (experimental)` section for local wallet status, balance validation, address copy, session unlock, spending caps, and unlinking.
 - Safe `wallet-status` validation mode in the Tuna sidecar unlocks a linked wallet for one balance check and exits without starting a paid listener or spending NKN.
 - Phase 3 benchmark artifacts and acceptance gates compare current NKN and Tuna for file, screen, and reconnect behavior.
 - Route-aware file-transfer protocol guardrails, hard-priority lifecycle/liveness handling, controlled V6 fallback support, and paid Tuna route gate tooling.
@@ -13,9 +13,9 @@
 ### Changed
 
 - Release version sources and packaging defaults now resolve to `0.7.0`.
-- README and release-facing documentation now reflect `0.7.0` as the current release.
+- README and release-facing documentation distinguish the `0.7.0` candidate from published releases and record correctness separately from performance qualification.
 - Packaging now rejects stale bridge manifests whose `appVersion` does not match `VERSION`, so bridge bundles must be regenerated after version bumps.
-- Tuna remains default-off and developer-gated; a linked or funded wallet does not change runtime transport behavior by itself.
+- Tuna remains default-off and explicitly opt-in through advanced Options or developer controls; a linked or funded wallet does not change runtime transport behavior by itself.
 - Diagnostics copy/export redaction now covers Tuna wallet paths, wallet addresses, password-like fields, seeds, and private-key material.
 - File transfer route selection is explicit: regular NKN uses V4, active file Tuna uses V4, controlled post-Tuna fallback uses one-shot V6, and diagnostic regular-NKN V6 requires unsafe developer/test opt-in.
 - Obsolete V5 data frames and legacy active `file_tuna_v6` route tokens are rejected instead of treated as release-compatible paths.
@@ -24,12 +24,15 @@
 
 - Tuna negotiation is bound to the approved, verified nLink session and silently falls back to the current NKN transport on address, session, nonce, version, expiry, lane, or sidecar mismatches.
 - Sidecar and benchmark failure handling was tightened so disconnects and listener shutdowns mark acceleration unavailable without ending the approved nLink session.
-- Active file Tuna now stays on the V4 data path; disabling Tuna during a live transfer recovers the same transfer over V4 regular NKN, while controlled post-Tuna fallback starts a fresh one-shot V6 fallback transfer and then returns the next transfer to regular V4.
+- Active file Tuna uses V4. Disabling Tuna during a live transfer moves that same transfer to controlled V6 fallback over regular NKN; explicit reactivation can return it to Tuna V4. After successful final fallback completion, the next transfer resolves from current transport state rather than stale fallback state.
+- File-transfer progress presentation uses peer-comparable accepted progress and bounded smoothing, rather than locally queued bytes or predicted future delivery.
+- Tuna startup status and fish pulsing share the connection-state presentation; an attempt is not displayed as proof of active delivery.
+- Listener retries no longer supersede an in-flight Tuna lane start. Focused startup/IPC payload regressions pass; live helper-to-helpee payer-switch validation remains pending.
 
 ### Packaging
 
 - Windows installer and portable release assets for `0.7.0` are prepared together with `SHA256SUMS.txt`.
-- The Tuna sidecar verifier is bundled under `tuna/win-x64/` so Diagnostics wallet validation works in packaged builds while runtime acceleration remains default-off.
+- The Tuna sidecar verifier is bundled under `tuna/win-x64/` so Options -> Wallet validation works in packaged builds while runtime acceleration remains default-off.
 - Public Windows artifacts are unsigned for this release as an accepted exception.
 
 ## [0.6.2] - 2026-05-01

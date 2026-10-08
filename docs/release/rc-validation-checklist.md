@@ -1,5 +1,7 @@
 # RC Validation Checklist
 
+This is a sign-off template, not a record that unchecked items failed or passed. Current `0.7.0` candidate evidence is in [ReleaseRunbook.md](../ReleaseRunbook.md#070-candidate-evidence-2026-10-08); copy only applicable source/contract/payload-bound results into an approved release sign-off. Keep remaining CI and unqualified rebuilds explicit.
+
 ## Build & Packaging
 
 - [ ] CI is green for smoke, reliability gate, packaging, and `installer_smoke`.
@@ -8,6 +10,8 @@
 - [ ] `artifacts/releases/<version>/` contains `nLink-Portable-win-x64-<version>.zip`.
 - [ ] `artifacts/releases/<version>/` contains `nLink-Setup-win-x64-<version>.exe`.
 - [ ] `artifacts/releases/<version>/` contains `SHA256SUMS.txt`.
+- [ ] Final packaged runtime/bridge/sidecar hashes match the qualified payload, or that final payload has its own runtime qualification. A later rebuild does not inherit exact-binary GUI proof merely because source is unchanged.
+- [ ] Candidate asset/provenance paths are identified explicitly; stale default release-folder contents are not uploaded accidentally.
 
 ## Install / Uninstall
 
@@ -19,6 +23,7 @@
 
 - [ ] Previous supported public installer -> current RC in-place upgrade was tested.
 - [ ] Settings or local runtime data were preserved where applicable.
+- [ ] Preservation scope is recorded (synthetic fixtures versus real user settings), without overclaiming migration coverage.
 
 ## UI Sanity
 
@@ -32,6 +37,7 @@
 - [ ] File transfer is validated as shipped scope only: single-file, explicit accept/decline, route-aware, session-envelope protected, and source/session validated.
 - [ ] Live NKN file-transfer soak passed on the packaged app with route `regular_nkn_v4_fast`, protocol `4`, integrity OK, and no `filetransfer_data_session_overflow`, `filetransfer_message_rejected`, bridge stdout protocol-violation, or regular-NKN bridge bulk send/clear failure events.
 - [ ] Full six-scenario Phase 5 route correctness passed with strict campaign preflights before installer creation: regular NKN 64 MiB uses coordinator-published `regular_nkn_v4_fast` protocol `4`; active Tuna 64 MiB proves authenticated payload delivery on `file_tuna_v4` protocol `4`; live switch-off from each side ends on `post_tuna_fallback_v6` protocol `6`; the 256 MiB route cycle proves `regular_nkn_v4_fast,file_tuna_v4,post_tuna_fallback_v6,file_tuna_v4,post_tuna_fallback_v6` with authenticated Tuna payload delivery at both activations; the second transfer after live reactivation selects `file_tuna_v4` protocol `4`. All scenarios require actual delivery, SHA/integrity OK, terminal GUI completion, hard failures `0`, no active `file_tuna_v6`, and strict coordinator route proof. SHA OK or fallback completion alone does not prove the second Tuna activation.
+- [ ] Live validation used a rebuilt portable package, explicit escalation outside a restricted sandbox, and passing preflights; no failed preflight was bypassed.
 - [ ] The separate performance verdict, warnings, and measurement contamination are recorded without relabeling failures as passes. Existing Phase 5 policy separates performance from release correctness; numeric baselines and limits remain unchanged, and no Tuna or fallback throughput is guaranteed. Bridge tuning requires a separate decision.
 - [ ] Any `post_completion_late_frame_ignored_count` evidence is reviewed as benign authenticated NKN late delivery after successful terminal completion, not as a protocol reject.
 - [ ] Any `post_terminal_late_sender_frame_*` evidence after declined, canceled, or failed transfers is treated as a protocol/integrity gate failure.
@@ -53,4 +59,5 @@
 
 - [ ] `VERSION` matches the intended tag.
 - [ ] Release notes are ready under `docs/releases/<version>.md`.
+- [ ] Candidate/draft wording is changed to published wording only when publication is actually approved; changelog release date is not invented in advance.
 - [ ] Support guidance still points to `docs/supportability.md` and Diagnostics / Hang Report capture.

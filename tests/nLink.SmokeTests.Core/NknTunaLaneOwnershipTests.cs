@@ -187,6 +187,58 @@ public sealed class NknTunaLaneOwnershipTests
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
+    public async Task ListenerRetry_DuringPeerPaidDialerStartupCannotRetireStartOrDropPayload(bool listenerConfigured)
+    {
+        using var lifetime = new CancellationTokenSource(TimeSpan.FromSeconds(8));
+        var server = new TcpListener(IPAddress.Loopback, 0);
+        server.Start();
+        try
+        {
+            using var supervisor = new ExactSupervisor(initiallyIdle: true);
+            using var lane = CreateLane(listenerConfigured ? supervisor : null);
+            using var client = new NknTunaSidecarClient(NknAccelerationLaneKind.File, 16);
+            using var owner = Owner();
+            // Hold the same non-preparation slot used by StartDialerSidecarAsync
+            // while its real IPC client is still waiting for sidecar status.
+            var dialStart = Begin(lane);
+            var pendingDial = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            Set(lane, "dialerStartTask", pendingDial.Task);
+            var connect = client.ConnectAsync(((IPEndPoint)server.LocalEndpoint).ToString(),
+                TimeSpan.FromSeconds(8), lifetime.Token);
+            using var connection = await server.AcceptTcpClientAsync(lifetime.Token);
+
+            for (var i = 0; i < 3; i++)
+            {
+                Assert.False(await lane.EnsureListenerSidecarConnectedAsync(supervisor.Request, lifetime.Token));
+                Assert.Same(dialStart, Field(lane, "pendingLaneStart"));
+                Assert.Equal(0, supervisor.GlobalStops);
+            }
+
+            await WriteStatusAsync(connection, lifetime.Token);
+            await connect.WaitAsync(lifetime.Token);
+            Assert.True(Install(lane, client, false, owner, dialStart));
+            Finish(lane, dialStart);
+            pendingDial.SetResult(true);
+            Set(lane, "dialerStartTask", null!);
+            var lease = Assert.IsType<NknTunaLaneLease>(lane.CaptureCurrentLaneLease());
+
+            var payload = Enumerable.Repeat((byte)7, 64 * 1024).ToArray();
+            Assert.True(await lane.TrySendAsync(NknBridgeChannel.Bulk, payload, lifetime.Token));
+            var frame = await NknTunaSidecarFrameProtocol.ReadFrameAsync(connection.GetStream(), lifetime.Token);
+            if (frame.Type == NknTunaSidecarFrameType.Ping)
+                frame = await NknTunaSidecarFrameProtocol.ReadFrameAsync(connection.GetStream(), lifetime.Token);
+            Assert.Equal(NknTunaSidecarFrameType.Data, frame.Type);
+            Assert.Equal(NknTunaSidecarLane.Bulk, frame.Lane);
+            Assert.Equal(payload, frame.Payload);
+            Assert.Equal(lease, lane.CaptureCurrentLaneLease());
+            Assert.Equal(0, supervisor.GlobalStops);
+        }
+        finally { server.Stop(); }
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
     public async Task RealListenerConnect_StopOrCancelWhileWaitingForStatusCannotPublish(bool cancel)
     {
         using var lifetime = new CancellationTokenSource(TimeSpan.FromSeconds(8));

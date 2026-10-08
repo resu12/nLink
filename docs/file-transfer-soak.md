@@ -12,19 +12,19 @@ V5 and legacy active `file_tuna_v6` evidence are obsolete protocol inputs and sh
 ## Guardrails
 
 - Production bridge defaults remain unchanged.
-- Regular NKN control remains authoritative for lifecycle, liveness, route negotiation, V6 fallback proof, and terminalization.
+- Regular NKN carries control; `FileTransferCoordinator` and its issued DTOs/tokens alone authorize lifecycle, liveness, route publication, V6 fallback, and recovery effects. Readiness, ACKs, send acceptance, and transport observations are evidence only.
 - Tuna remains experimental and default-off unless explicitly enabled for a test or session.
 - Do not redesign screen sharing, wallet UX, payer policy, caps, sidecar startup, installer behavior, or Diagnostics/Options UI while tuning file-transfer soak.
 - All generated artifacts must stay under repo `artifacts/`. Manual scripts and runbooks must never delete or clean Downloads or other user data folders.
 - Run .NET tests serially on Windows to avoid DLL file locks; see `docs/build-test-lock-avoidance.md`.
 - Regular NKN promotion uses a `1.5 MB/s` app-goodput target. Prefer stability, terminal correctness, and payload efficiency over chasing higher burst speed on variable public NKN paths.
-- Active Tuna no-fault acceptance uses a strict `> 4,000,000 B/s` goodput floor.
-- Controlled fallback has no speed floor; survival, SHA/integrity, terminals, and route correctness are the gate.
+- Record active Tuna goodput against the existing locked baseline and numeric performance policy. Phase 5 records performance separately from strict correctness; retain a performance **FAIL**, warnings, and contaminated measurements. This does not change legacy/Phase 4 gates or promise throughput.
+- Controlled fallback speed is not a Phase 5 correctness requirement; retain its separate performance warnings. Survival, SHA/integrity, terminals, and route correctness remain strict.
 - A successful final `post_tuna_fallback_v6` completion must consume the post-fallback state; the next new file transfer resolves from current transport state (`file_tuna_v4` when Tuna is active, otherwise `regular_nkn_v4_fast`), not stale fallback state.
 
 ## Common Runs
 
-Use `FileTransfer-Ops.ps1` as the normal non-paid entry point:
+Use focused affected tests during implementation. `FileTransfer-Ops.ps1 -Mode Test` is a broader deterministic operator check, not a prerequisite for every small diagnostic change:
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\FileTransfer-Ops.ps1 -Mode Test
@@ -43,7 +43,7 @@ Supported operator modes:
 Local route/runtime proof:
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\FileTransfer-Ops.ps1 -Mode LocalFast -PayloadSizes 16MiB -Cycles 1 -Build -FailOnGate
+powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\FileTransfer-Ops.ps1 -Mode LocalFast -PayloadSizes 16MiB -Cycles 1 -FailOnGate
 ```
 
 Guarded mixed proof:
@@ -52,14 +52,16 @@ Guarded mixed proof:
 powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\FileTransfer-Ops.ps1 -Mode NknMixed -Build -PayloadSizes 64MiB -Cycles 1 -PayloadEfficiencyProfile Auto -TimeoutSeconds 1800 -ProgressTimeoutSeconds 120 -FailOnGate
 ```
 
-Run the three-cycle public NKN proof only after a shorter mixed proof is clean.
+Local modes build by default; `-Build` belongs only to live modes. Run only a necessary targeted live scenario after focused regressions and a portable rebuild. Reserve broad matrices for a stable candidate, not automatic continuation through diagnostic batches.
+
+All live examples below require an interactive Windows desktop and explicit escalation outside a restricted sandbox, including bridge/network readiness preflights. Never bypass a failed preflight. Use a freshly rebuilt packaged executable, not an old `bin` output, for runtime qualification.
 
 ## Regular NKN Regression Evidence
 
 Use the regular-NKN GUI soak when the installed app appears slow:
 
 ```powershell
-.\tools\Run-FileTransferNknSoak.ps1 -Mode nkn-fast -ExePath ".\src\nLink.App\bin\Release\net8.0\nLink.exe" -PayloadSizes "128MB" -Cycles 1 -Direction helpee-to-helper -CycleTimeoutSeconds 240 -ProgressTimeoutSeconds 90 -TimeoutSeconds 360 -ExternalTopologyProfile Default -PayloadEfficiencyProfile Auto -FailOnGate
+.\tools\Run-FileTransferNknSoak.ps1 -Mode nkn-fast -ExePath ".\artifacts\portable\nLink\win-x64\nLink.exe" -PayloadSizes "128MB" -Cycles 1 -Direction helpee-to-helper -CycleTimeoutSeconds 240 -ProgressTimeoutSeconds 90 -TimeoutSeconds 360 -ExternalTopologyProfile Default -PayloadEfficiencyProfile Auto -FailOnGate
 ```
 
 Read `filetransfer-live-nkn-summary.txt`, `transfer-terminal-summary.txt`, `throughput-summary.txt`, `payload-efficiency-summary.txt`, and `filetransfer-route-consistency-summary.txt` together.
@@ -74,42 +76,49 @@ Clean regular-NKN evidence should show:
 - no regular-NKN bridge queue clear,
 - average goodput recorded against the `1,500,000 B/s` target (historical baseline: nLink 0.6.2); on public NKN, below-target goodput is triage evidence rather than an automatic release blocker when route, integrity, terminal, and bridge-failure gates pass.
 
-Recent route reference cells:
+Historical May route reference cells (not current-code qualification):
 
 - `artifacts/filetransfer-route-ab/fallback-improvement-final-20260522T204000Z/regular-nkn-v4-64mb-r2/`: regular NKN V4 passed with SHA OK, completed terminals, no bridge bulk send failures, and `1,769,711 B/s`.
 - `artifacts/filetransfer-route-ab/fallback-improvement-final-20260522T204000Z/tuna-v4-64mb-r2/`: active Tuna V4 passed with SHA OK, completed terminals, and `4,087,486 B/s`.
-- `artifacts/filetransfer-route-ab/fallback-improvement-final-20260522T204000Z/tuna-fallback-64mb/`: historical restart-style fallback reference. Keep it for regression history only; current Phase 4 acceptance requires live-route epoch proof on the same transfer.
+- `artifacts/filetransfer-route-ab/fallback-improvement-final-20260522T204000Z/tuna-fallback-64mb/`: historical restart-style fallback reference. Keep it for regression history only; current Phase 5 acceptance requires live-route epoch proof on the same transfer.
 
 Older V6 regular-NKN artifacts remain useful as regression history only. They are not current production-route baselines.
 
 ## Route Acceptance Gate
 
-Before installer creation, run the route acceptance gate from an interactive Windows desktop with a packaged app, sidecar, and test wallet:
+Before release sign-off, run the strict Phase 5 gate with a rebuilt packaged app, sidecar, reviewed clean checkpoint, and low-balance test wallet. Supply a session-only password through the scoped `NLINK_TUNA_TEST_WALLET_PASSWORD` environment variable, not a command-line literal or committed script; clear it afterward. Rebuild command:
 
 ```powershell
-$env:NLINK_TUNA_TEST_WALLET_PASSWORD = "<session-only test wallet password>"
-powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\Run-FileTransferRouteAcceptance.ps1 `
-  -ExePath ".\artifacts\portable\nLink\win-x64\nLink.exe" `
-  -WalletPath ".\artifacts\tuna-poc\wallet-test-nkn.json" `
-  -SidecarPath ".\artifacts\portable\nLink\win-x64\tuna\win-x64\nlink-tuna-sidecar.exe" `
-  -FallbackMaxAttempts 2 `
-  -AllowExternalTransportWarnings $true
+powershell -NoProfile -ExecutionPolicy Bypass -File .\installer\Build-Portable.ps1 -Runtime win-x64
 ```
 
-The gate writes `route-acceptance-summary.txt` and `route-acceptance-summary.json` under `artifacts/filetransfer-route-acceptance/<timestamp>/`.
+Run outside the restricted sandbox with explicit escalation. With the password already supplied to that process:
 
-When running this gate from Codex or another sandboxed automation shell, use an unsandboxed/elevated execution path for the GUI wrapper, bridge readiness preflight, and live NKN connectivity checks. Restricted sandboxes can block outbound TCP and make NKN bridge bootstrap fail with host-ready/connect errors even when the host machine can reach the public NKN endpoints. Do not classify a sandbox-only bridge bootstrap failure as route/runtime evidence until it is confirmed outside the sandbox.
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\Run-FileTransferRouteAcceptance.ps1 `
+  -MatrixMode phase5-analyzer-gui-acceptance `
+  -StrictCampaignPreflight `
+  -ExePath ".\artifacts\portable\nLink\win-x64\nLink.exe" `
+  -WalletPath ".\artifacts\tuna-poc\wallet-test-nkn.json" `
+  -SidecarPath ".\artifacts\portable\nLink\win-x64\tuna\win-x64\nlink-tuna-sidecar.exe"
+```
 
-Required Phase 4 matrix:
+Phase 5 writes `phase5-analyzer-gui-acceptance-summary.txt/.json` and `route-acceptance-run-manifest.json` under `artifacts/filetransfer-route-acceptance/<timestamp>/`. The wrapper defaults to `legacy` without `-MatrixMode`; that is not the current release gate. Do not override limits or acceptance switches to manufacture a pass.
+
+When running this gate from sandboxed automation, explicitly escalate the GUI wrapper, bridge readiness preflight, and live NKN connectivity checks outside that sandbox. This does not mean the per-user app/installer needs administrator rights. Restricted sandboxes can block outbound TCP and cause false bootstrap failures; confirm such failures outside the sandbox before attributing them to runtime code. Never bypass a failed Phase 5 preflight.
+
+Required Phase 5 matrix (all require actual delivery, SHA integrity, terminal GUIs, strict coordinator route/protocol proof, and no unresolved hard failures):
 
 - regular NKN 64 MiB: `regular_nkn_v4_fast`, protocol `4`,
-- active Tuna V4 64 MiB: `file_tuna_v4`, protocol `4`,
+- active Tuna V4 64 MiB: authenticated Tuna delivery on `file_tuna_v4`, protocol `4`,
 - live switch-off from helpee: final `post_tuna_fallback_v6`, protocol `6`,
 - live switch-off from helper: final `post_tuna_fallback_v6`, protocol `6`,
-- live off/on/off: route changes `post_tuna_fallback_v6,file_tuna_v4,post_tuna_fallback_v6`,
+- `regular-v4-live-activation-off-on-off-256mb`: coordinator-published `regular_nkn_v4_fast,file_tuna_v4,post_tuna_fallback_v6,file_tuna_v4,post_tuna_fallback_v6`, including authenticated Tuna payload delivery at both activations; SHA or fallback completion cannot replace the second publication/delivery proof,
 - second transfer after live reactivation: first transfer proves `post_tuna_fallback_v6,file_tuna_v4`, then the next transfer selects `file_tuna_v4`, protocol `4`.
 
 Fallback retry is allowed only for retryable pre-measured failures, such as measured fallback never starting or a progress timeout before measured fallback produced terminal/integrity evidence. Route mismatch, protocol mismatch, missing `filetransfer_route_selected`, SHA failure, terminal failure, zombie terminal, diagnostic V6 during acceptance, or regular-NKN bridge bulk failure must not be retried into a pass.
+
+For remediation, add `-ScenarioName <existing-scenario-name>` to select only the failing scenario after rebuilding and rerunning affected tests. Omit that filter for the final six-scenario gate. After two focused fix-and-validation iterations without closing the blocker, stop patch expansion and review the implicated architectural boundary. Current dated results and exact payload provenance are in [ReleaseRunbook.md](ReleaseRunbook.md#070-candidate-evidence-2026-10-08).
 
 ## Paid Tuna GUI Smoke
 
@@ -149,7 +158,7 @@ For active Tuna, required evidence includes:
 - protocol `4`,
 - V4 sender/receiver start,
 - `tuna_acceleration_negotiated`,
-- Tuna-accelerated file frame evidence,
+- authenticated Tuna-accelerated file payload delivery and coordinator publication (negotiation/counters alone are insufficient),
 - terminal sender/receiver completion,
 - SHA match.
 
@@ -166,7 +175,7 @@ For live fallback, required evidence includes:
 - SHA match,
 - next-transfer route resolves from current transport state after successful fallback completion.
 
-The measured retained slice and live-route epoch proof are authoritative for fallback gating:
+The measured retained slice and coordinator-owned live-route epoch proof are required evidence for fallback gating, not independent runtime authority:
 
 - `filetransfer-retained-log-slice-full.log` keeps the complete run,
 - `filetransfer-setup-retained-log-slice.log` keeps setup evidence,

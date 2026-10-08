@@ -1,6 +1,6 @@
 # NKN Tuna Implementation
 
-This document describes the current nLink NKN Tuna integration. It covers the developer POC, the app sidecar path, wallet linking, session-bound negotiation, runtime unlock behavior, payer selection, spending caps, fallback rules, and the current test expectations.
+This document describes the current nLink NKN Tuna integration: app sidecar, wallet linking, session-bound negotiation, runtime unlock, payer selection, spending caps, fallback, and test expectations. Start with [file-transfer-operability.md](file-transfer-operability.md) for usage and support triage. The standalone POC and historical benchmarks below are experimental references, not application release proof.
 
 Tuna remains experimental and default-off. The normal NKN bridge is still the canonical transport for discovery, approval, handshake, chat, remote control, control messages, and fallback.
 
@@ -15,7 +15,7 @@ Related app-payload references:
 - Keep nLink's existing consent, session binding, replay protection, sequencing, and application-level encryption authoritative.
 - Avoid mandatory token payment in the default consumer flow.
 - Make paid Tuna use explicit, bounded, observable, and reversible.
-- Keep failure behavior simple: silently fall back to current NKN and keep the approved session alive.
+- Keep the approved session and regular NKN control alive on Tuna failure; preserve visible status and coordinator-controlled recovery for active file transfers.
 
 ## Non-Goals
 
@@ -69,6 +69,8 @@ The main runtime pieces are:
 - `TunaWalletSidecarVerifier`: runs `wallet-status` for one-shot validation.
 - `DiagnosticsPageViewModel`: backs the user-facing Options page.
 - `SessionHeaderView`: shows the Tuna status pictogram and session-only unlock switch.
+
+For file-transfer route/runtime effects, `FileTransferCoordinator` and its issued DTOs/tokens remain the only authority. Tuna runtime orchestration, sidecar readiness, listener/dialer observations, ACKs, and queue acceptance do not independently authorize route publication, bulk dispatch, Tuna-active state, repair, fallback, or recovery. Stale/rejected callbacks are diagnostic-only.
 
 ## Routing Rules
 
@@ -238,7 +240,7 @@ Current payer rules:
 - If both sides are unlocked, helpee pays and listens.
 - If helper has already started a paid listener and helpee unlocks before Tuna becomes active, helper yields, stops its listener, and becomes the free dialer.
 - If the selected payer toggles off before Tuna becomes active, the other unlocked side may try to pay.
-- If active Tuna is stopped by user intent, Tuna falls back to current NKN for the rest of that session and does not auto-reselect a new payer.
+- If active Tuna is stopped by user intent, Tuna falls back to current NKN and does not auto-reselect a payer. A fresh explicit session unlock can request reactivation; this is not automatic payer failover.
 
 Local runtime off means "do not pay." The app may still act as the free dialer when the peer is paying.
 
@@ -285,7 +287,7 @@ File-transfer routing is explicit:
 
 When Tuna stops during an active `file_tuna_v4` transfer, nLink live-transitions that same transfer into `post_tuna_fallback_v6` over regular NKN. If Tuna comes back during the same transfer, a later live route epoch can return it to `file_tuna_v4`; another switch-off can transition it back to `post_tuna_fallback_v6`. That V6 route is a one-shot recovery route: after final fallback completion succeeds, the fallback state is consumed and the next new file transfer resolves from current transport state (`file_tuna_v4` when Tuna is active, otherwise `regular_nkn_v4_fast`).
 
-The measured fallback V6 transfer uses transport-epoch proof. New tail traffic on the target transport is blocked until the receiver proves the exact committed frontier can advance there. Generic bridge `Ready` or Tuna `Ready` is not enough to mark the transfer recovered.
+The same-transfer fallback V6 path uses coordinator-owned transport-epoch proof. New tail traffic on the target transport is blocked until the receiver proves the exact committed frontier can advance there. Generic bridge `Ready` or Tuna `Ready` is not enough to mark the transfer recovered.
 
 The V6 epoch states are:
 
@@ -374,13 +376,9 @@ Diagnostics copy/export redacts wallet paths, wallet addresses, passwords, seeds
 
 ## Performance Expectations
 
-Phase 3 benchmark work compared current NKN and Tuna using app-level file, screen, and reconnect profiles.
+Historical Phase 3 benchmarks compared NKN and Tuna using synthetic file, screen, and reconnect profiles. Their approximately 1.8x file-transfer estimate is not a current application throughput claim or release gate.
 
-Current user-facing estimate:
-
-> File transfer about 1.8x in Phase 3 benchmark; screen stability improved, latency roughly similar.
-
-This is an estimate, not a guarantee. Tuna remains experimental until installed-app testing confirms:
+The October 7 candidate GUI matrix passed strict file-transfer correctness; its performance verdict remained **FAIL**, including repair-contaminated active-Tuna measurements and fallback warnings. See the [release runbook](ReleaseRunbook.md#070-candidate-evidence-2026-10-08) for exact payload provenance. Numeric baselines and limits are unchanged. Tuna remains experimental; promotion beyond that status would need separate evidence that:
 
 - file-transfer throughput remains materially better,
 - screen-share p95 latency does not materially regress,
@@ -420,6 +418,8 @@ Useful environment overrides for developer tests:
 
 The advanced Options runtime pilot can also enable Tuna locally without changing default startup behavior. The paid listener now requires full provider readiness before advertising Tuna as usable for the session. Recent GUI/NKN runs showed that degraded 3-path startup can connect and then fail almost immediately with `remote_closed` / `terminal_tuna_write_failed`, so degraded provider readiness is now diagnostic-only. `NLINK_NKN_TUNA_ALLOW_DEGRADED_PROVIDER_READY=1` re-enables degraded readiness for explicit A/B experiments, while `NLINK_NKN_TUNA_REQUIRE_STRICT_PROVIDER_READY=1` keeps strict readiness even if that diagnostic override is present. `NLINK_NKN_TUNA_DEGRADED_PROVIDER_GRACE_SECONDS` is diagnostic-only and defaults to `0`; when set with degraded readiness enabled, nLink waits that many seconds for full 4-path readiness after 3-path degraded readiness appears.
 
+These unsafe developer overrides require `NLINK_UNSAFE_DEVELOPER_MODE=1` in a scoped Release test process; do not set them in the public release shell. Deterministic tests stay in the normal sandbox. Paid/manual GUI and live NKN checks require explicit escalation outside a restricted sandbox, approved low-balance test-wallet use, and live preflights. Rebuild the portable package before each runtime GUI rerun; never run scenarios after a failed preflight.
+
 Run focused paid Tuna route checks from a developer machine:
 
 ```powershell
@@ -431,7 +431,7 @@ dotnet test tests\nLink.OptInTests.BridgeManual\nLink.OptInTests.BridgeManual.cs
 dotnet build-server shutdown
 ```
 
-The historical Phase 6 short matrix writes artifacts under `artifacts/tuna-sidecar/phase6-short-<timestamp>/`. Read `phase6-operator-verdict.txt` first when reviewing those artifacts. New pre-installer release evidence should use `tools\Run-FileTransferRouteAcceptance.ps1`, which validates regular NKN V4, active Tuna V4, and controlled post-Tuna V6 fallback. Repeated paid cells should use the build-once plus `--no-build --no-restore` pattern from `docs/build-test-lock-avoidance.md` to avoid Windows generated-output locks. For provider-path troubleshooting, compare `provider-quality-report.json` across strict readiness (`NLINK_TUNA_TEST_REQUIRE_PROVIDER_READY=1`, `NLINK_TUNA_TEST_PROVIDER_READY_ATTEMPTS=3`) and explicit degraded diagnostic runs (`NLINK_TUNA_TEST_DEGRADED_PROVIDER_GRACE_SECONDS=20`).
+The historical Phase 6 short matrix writes artifacts under `artifacts/tuna-sidecar/phase6-short-<timestamp>/`. Read `phase6-operator-verdict.txt` first when reviewing those artifacts. Release evidence uses `tools\Run-FileTransferRouteAcceptance.ps1 -MatrixMode phase5-analyzer-gui-acceptance -StrictCampaignPreflight`, not the wrapper's legacy default. The six-scenario gate requires actual authenticated Tuna payload delivery, coordinator-published routes, SHA integrity, fallback, repeated activation, and terminal GUIs. See [file-transfer-soak.md](file-transfer-soak.md) for the complete command. Repeated paid diagnostic cells should use the build-once plus `--no-build --no-restore` pattern from [build-test-lock-avoidance.md](build-test-lock-avoidance.md). Provider A/B diagnostics are optional and do not replace mandatory delivery/security proof. Clear password environment variables after each scoped manual run; never log or commit them.
 
 Historical local Phase 6 file-transfer reference run:
 
@@ -474,6 +474,8 @@ Automated coverage should include:
 - wrong session/source/nonce/version/expiry messages cannot enable Tuna or tear down the session,
 - payment telemetry updates local nLink Tuna spend,
 - diagnostics redaction removes wallet paths, wallet addresses, passwords, seeds, and private keys.
+
+The following installed-app checks are a feature/risk checklist, not an instruction to start every optional matrix automatically. Select missing or affected coverage; the strict file-transfer release matrix is defined in the runbook.
 
 Manual installed-app coverage should include:
 

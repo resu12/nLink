@@ -164,6 +164,8 @@ internal sealed partial class NknTunaAccelerationLane : INknTunaAccelerationSess
             {
                 return true;
             }
+            // Listener retries must not supersede an in-flight dialer or listener start.
+            if (pendingLaneStart is not null || dialerStartTask is not null) return false;
             operation = BeginLaneStartUnsafe();
         }
 

@@ -9,6 +9,10 @@ File sharing is route-aware. Keep stabilization work focused on the current prod
 
 ## Principles
 
+- `FileTransferCoordinator` and its issued DTOs/tokens are the only route/runtime authority. Listener readiness, ACKs, transport observations, pressure, and queue acceptance are evidence, not grants. Rejected/stale callbacks are diagnostic-only and must not cause runtime effects.
+- Fix only the first demonstrated missing authority-to-delivery edge. Keep security, coordinator publication, protocol, integrity, and terminal GUI proofs strict; keep performance separate.
+- Run focused affected tests first, rebuild the portable package before targeted GUI validation, and use escalated live preflights outside restricted sandboxes. Never bypass failed preflights. Reserve the full matrix for a stable release candidate.
+- After at most two focused fix-and-validation iterations without closing a blocker, stop expanding patches and review the implicated architectural boundary. Do not turn optional shadow/companion analysis into automatic release prerequisites; approved dispositions are in [test-lanes.md](test-lanes.md).
 - Keep the bridge default stable on the observed V4/V6-parity topology: control/media/bulk `4/8/4`, bulk concurrency `4`, fanout mode. Use alternate bridge profiles only as explicit operator A/B diagnostics with live evidence.
 - Keep mixed screen-share transfer guarded by the legacy-named `NLINK_FILETRANSFER_V4_MIXED_SCREENSHARE=1` until that flag is renamed.
 - Keep file-only V4 behavior unchanged while tuning mixed transfer.
