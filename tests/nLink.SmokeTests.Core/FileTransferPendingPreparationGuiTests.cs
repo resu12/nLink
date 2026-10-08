@@ -72,9 +72,12 @@ public sealed class FileTransferPendingPreparationGuiTests : FileTransferOpsScri
                 if ($Bookmark -ne 17 -or ($Needles -join ',') -cne 'event=session_preparation_transfer_activation_requested,reason=pending_preparation_admitted,authority_effect=none') { throw 'handoff witness weakened' }
                 return 'handoff'
             }
-            function Wait-TunaGuiFileTunaV4PublicationAfterBookmark {
-                param($Bookmark, $TimeoutMs, $Description)
-                if ($Bookmark -ne 17) { throw 'route witness outside transfer window' }
+            function Wait-TunaGuiFileTunaV4PublicationAfterBookmark { throw 'prepared-only publication selector used for initial handoff' }
+            function Wait-TunaGuiLiveRouteEpochEvidence {
+                param($Bookmark, $Route, $ProtocolVersion, $HandoffKind, $TargetTransport, $EventName, [switch]$RequireAuthoritativeProjection, $TimeoutMs, $Description)
+                if ($Bookmark -ne 17 -or $Route -cne 'file_tuna_v4' -or $ProtocolVersion -ne 4 -or
+                    $HandoffKind -cne 'normal_to_tuna_activation' -or $TargetTransport -cne 'tuna' -or
+                    $EventName -cne 'filetransfer_live_route_epoch_started' -or -not $RequireAuthoritativeProjection) { throw 'initial handoff witness weakened' }
                 return 'coordinator-publication'
             }
             Invoke-Expression $pendingBodies[0]

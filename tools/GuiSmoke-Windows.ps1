@@ -37635,7 +37635,9 @@ function Invoke-FileTransferTunaHandoffFallbackCycle {
         ) -TimeoutMs 90000 -Description 'exact pending-preparation admission handoff for the only GUI transfer')
         $observedEvidenceLines.Add($handoffLine) | Out-Null
         $pendingPreparationHandoffObserved = $true
-        $routeLine = [string](Wait-TunaGuiFileTunaV4PublicationAfterBookmark -Bookmark $bookmark -TimeoutMs 90000 -Description 'pending-preparation coordinator-authorized file Tuna V4 publication')
+        $routeLine = [string](Wait-TunaGuiLiveRouteEpochEvidence -Bookmark $bookmark -Route 'file_tuna_v4' -ProtocolVersion 4 `
+            -HandoffKind 'normal_to_tuna_activation' -TargetTransport 'tuna' -EventName 'filetransfer_live_route_epoch_started' `
+            -RequireAuthoritativeProjection -TimeoutMs 90000 -Description 'pending-preparation coordinator-authorized file Tuna V4 commit/publication/payload')
         $observedEvidenceLines.Add($routeLine) | Out-Null
         $fileTunaV4PublicationObserved = $true
         $timingSelectedRouteLine = $routeLine
