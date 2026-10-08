@@ -329,6 +329,8 @@ try {
                 -WalletPassword $acceptancePassword `
                 -SidecarPath $packagedSidecar `
                 -Runtime $Runtime `
+                -MatrixMode phase5-analyzer-gui-acceptance `
+                -StrictCampaignPreflight `
                 -ArtifactRoot $FileTransferRouteAcceptanceArtifactRoot `
                 -TimeoutSeconds $FileTransferRouteAcceptanceTimeoutSeconds `
                 -ProgressTimeoutSeconds $FileTransferRouteAcceptanceProgressTimeoutSeconds `

@@ -108,12 +108,14 @@ Transport abuse-resistance limit matrix:
 - release validation must review both transport-local queue limits and lower-layer payload limits together
 
 File-transfer release gate:
-- run the route acceptance gate before installer creation after building the bridge/runtime bundle
+- run the full six-scenario `phase5-analyzer-gui-acceptance` route gate with `-StrictCampaignPreflight` before installer creation after rebuilding the portable bridge/runtime bundle; run live-network preflights and GUI validation outside the restricted sandbox with explicit escalation, and never bypass a failed preflight
 - verify regular NKN completion/integrity on route `regular_nkn_v4_fast` protocol `4`, no `filetransfer_data_session_overflow`, no `filetransfer_message_rejected`, no bridge stdout protocol violations, no regular-NKN bridge bulk send/clear failures, and no unexpected diagnostic V6 route
-- verify active Tuna completion/integrity on route `file_tuna_v4` protocol `4` with goodput above the active-Tuna floor
+- verify actual authenticated Tuna payload delivery, SHA integrity, and terminal GUI completion on coordinator-published route `file_tuna_v4` protocol `4`; active `file_tuna_v6` is invalid
 - verify live fallback completion/integrity on final route `post_tuna_fallback_v6` protocol `6` with explicit live-route epoch proof; fallback speed is separated as performance variance; verify the following new transfer resolves from current transport state when the fallback transfer completed successfully
+- the 256 MiB route-cycle scenario must prove coordinator-published `regular_nkn_v4_fast,file_tuna_v4,post_tuna_fallback_v6,file_tuna_v4,post_tuna_fallback_v6`, including authenticated Tuna payload delivery at both activations; SHA OK or fallback completion alone cannot substitute for the second Tuna publication and delivery
+- Phase 5 release correctness remains strict for coordinator authority, authentication, route/protocol invariants, payload delivery, integrity, and terminal GUI completion; performance is a separate verdict, not a throughput guarantee. Retain performance FAIL, warnings, and contaminated measurements without relabeling them as passes or changing numeric baselines and limits
 - `post_completion_late_sender_frame` ignored frames are allowed only when they occur after terminal completion for a recently completed transfer; retain the count from the soak summary with the release evidence
-- retain `filetransfer-live-nkn-summary.txt`, `filetransfer-live-nkn-cycles.jsonl`, and the retained log slice with the release evidence
+- retain the Phase 5 summary, run manifest, scenario artifacts, `filetransfer-live-nkn-summary.txt`, `filetransfer-live-nkn-cycles.jsonl`, and retained log slices with the release evidence
 
 ## Packaging
 
@@ -128,8 +130,10 @@ powershell -ExecutionPolicy Bypass -File .\installer\Build-Installer.ps1 -Runtim
 Preferred one-shot validation and packaging path:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\tools\PreRelease-Check.ps1 -RunGuiSmoke -RunBetaReadiness
+powershell -ExecutionPolicy Bypass -File .\tools\PreRelease-Check.ps1 -RunGuiSmoke -RunBetaReadiness -RunFileTransferRouteAcceptanceGate
 ```
+
+Use this one-shot path for a planned final regression gate, not repeated diagnostic batches. During bounded qualification, retain applicable evidence for unchanged code and contracts and run only missing or affected checks through their named tools; mandatory security and route proofs still require sign-off.
 
 Expected release outputs:
 - `artifacts\releases\<version>\nLink-Portable-win-x64-<version>.zip`

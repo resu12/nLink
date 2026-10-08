@@ -7618,6 +7618,10 @@ public sealed class FileTransferOpsScriptSurfaceTests : FileTransferOpsScriptsTe
         Assert.True(portableIndex >= 0, "Expected portable build step.");
         Assert.True(routeAcceptanceIndex > portableIndex, "Expected route acceptance after portable build.");
         Assert.True(installerIndex > routeAcceptanceIndex, "Expected installer build after route acceptance.");
+        var routeAcceptanceBlock = scriptText[routeAcceptanceIndex..installerIndex];
+        Assert.Contains("-MatrixMode phase5-analyzer-gui-acceptance", routeAcceptanceBlock, StringComparison.Ordinal);
+        Assert.Contains("-StrictCampaignPreflight", routeAcceptanceBlock, StringComparison.Ordinal);
+        Assert.DoesNotContain("-ScenarioName", routeAcceptanceBlock, StringComparison.Ordinal);
         Assert.Contains("RunFileTransferRouteAcceptanceGate", scriptText, StringComparison.Ordinal);
         Assert.Contains("File transfer route acceptance gate: SKIPPED", scriptText, StringComparison.Ordinal);
         Assert.Contains("Run-FileTransferRouteAcceptance.ps1", scriptText, StringComparison.Ordinal);
