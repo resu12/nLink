@@ -370,7 +370,7 @@ internal sealed class NknTunaListenerSidecarSupervisor : INknTunaListenerSidecar
         {
             if (!string.IsNullOrWhiteSpace(e.Data))
             {
-                LocalOperationalLog.Info("NKN.Tuna", $"event=tuna_listener_sidecar_stderr; line_len={e.Data.Length}");
+                HandleOwnedListenerStderr(owner, e.Data);
             }
         };
         nextProcess.Exited += (_, _) =>
@@ -1043,12 +1043,19 @@ internal sealed class NknTunaListenerSidecarSupervisor : INknTunaListenerSidecar
     private static string FormatBool(bool value)
         => value ? "true" : "false";
 
+    private static void HandleOwnedListenerStderr(NknTunaSidecarProcessOwner? owner, string line)
+    {
+        owner?.SetupDiagnostics.StreamErrorLine(line);
+        LocalOperationalLog.Info("NKN.Tuna", $"event=tuna_listener_sidecar_stderr; line_len={line.Length}");
+    }
+
     private static void LogBridgeTerminal(JsonElement root)
     {
         LocalOperationalLog.Warn(
             "NKN.Tuna",
             "event=tuna_listener_bridge_terminal" +
             $"; terminal_reason={SanitizeLogToken(TryGetString(root, "terminalReason") ?? TryGetString(root, "reason"))}" +
+            $"; stream_error_category={NknTunaSetupDiagnostics.StreamErrorCategory(TryGetString(root, "rawReason"))}" +
             $"; role={SanitizeLogToken(TryGetString(root, "role"))}" +
             $"; direction={SanitizeLogToken(TryGetString(root, "direction"))}" +
             $"; stage={SanitizeLogToken(TryGetString(root, "stage"))}" +

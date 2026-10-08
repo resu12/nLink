@@ -17,11 +17,15 @@ internal sealed class NknTunaSetupDiagnostics(string role, int pid, Guid runId, 
     private static readonly Regex DialError = new(
         @"\A(?:[0-9]{4}/[0-9]{2}/[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2} )?Tuna session dial to ip (?<ip>[0-9a-fA-F:.]+) port (?<port>[1-9][0-9]{0,4}) err: (?<error>[^\r\n]+)\z",
         RegexOptions.CultureInvariant | RegexOptions.NonBacktracking);
+    private static readonly Regex StreamError = new(
+        @"\A(?:[0-9]{4}/[0-9]{2}/[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2} )?(?<operation>handle msg|Write message|Read message) error: (?<error>[^\r\n]+)\z",
+        RegexOptions.CultureInvariant | RegexOptions.NonBacktracking);
     private readonly object gate = new();
     private int records;
     private int details;
     private bool capped;
     private bool stopped;
+    private bool streamErrorObserved;
 
     internal void ProviderLine(string line)
     {
@@ -84,6 +88,43 @@ internal sealed class NknTunaSetupDiagnostics(string role, int pid, Guid runId, 
             // This is an at-stop snapshot, not proof that asynchronous output is fully drained.
             Write($"kind=stop_snapshot; records={records}; details={details}; truncated={(capped ? 1 : 0)}; diagnostic_status={(details == 0 ? "no_details_at_stop" : "details_observed")}");
         }
+    }
+
+    internal void StreamErrorLine(string line)
+    {
+        if (role is not ("listener" or "dialer") || line.Length > LineLimit) return;
+        var match = StreamError.Match(line);
+        if (!match.Success) return;
+        var operation = match.Groups["operation"].Value == "Write message" ? "write" : "read";
+        lock (gate)
+        {
+            if (streamErrorObserved) return;
+            streamErrorObserved = true;
+            Record($"kind=stream_error; operation={operation}; error_category={StreamErrorCategory(match.Groups["error"].Value)}", detail: true);
+        }
+    }
+
+    internal static string StreamErrorCategory(string? error)
+    {
+        if (error is null) return "unavailable";
+        if (string.IsNullOrWhiteSpace(error)) return "none";
+        if (error.Length > LineLimit || error.Contains('\r') || error.Contains('\n')) return "other";
+        return error.Trim() switch
+        {
+            "session closed" => "session_closed",
+            "EOF" => "eof",
+            "unexpected EOF" => "unexpected_eof",
+            "context canceled" => "context_canceled",
+            "context deadline exceeded" or "read deadline exceeded" or "write deadline exceeded" or "i/o timeout" => "timeout",
+            "decrypt message failed" => "decrypt_failed",
+            "io: read/write on closed pipe" => "closed_pipe",
+            var value when value.EndsWith(": i/o timeout", StringComparison.Ordinal) => "timeout",
+            var value when value.EndsWith("use of closed network connection", StringComparison.Ordinal) => "connection_closed",
+            var value when value.EndsWith("connection reset by peer", StringComparison.Ordinal) ||
+                value.EndsWith("An existing connection was forcibly closed by the remote host.", StringComparison.Ordinal) => "connection_reset",
+            var value when value.EndsWith("broken pipe", StringComparison.Ordinal) => "broken_pipe",
+            _ => "other",
+        };
     }
 
     private static string ReadHash(JsonElement root, string name)

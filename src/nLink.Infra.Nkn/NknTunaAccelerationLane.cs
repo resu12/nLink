@@ -995,6 +995,7 @@ internal sealed partial class NknTunaAccelerationLane : INknTunaAccelerationSess
     private static void HandleOwnedDialerStderr(NknTunaSidecarProcessOwner? owner, string line)
     {
         owner?.SetupDiagnostics.DialErrorLine(line);
+        owner?.SetupDiagnostics.StreamErrorLine(line);
         LocalOperationalLog.Info("NKN.Tuna", $"event=tuna_dialer_sidecar_stderr; line_len={line.Length}");
     }
 
@@ -1008,6 +1009,7 @@ internal sealed partial class NknTunaAccelerationLane : INknTunaAccelerationSess
                 "NKN.Tuna",
                 "event=tuna_dialer_bridge_terminal" +
                 $"; terminal_reason={SanitizeSidecarReason(TryGetString(root, "terminalReason") ?? TryGetString(root, "reason")) ?? "unknown"}" +
+                $"; stream_error_category={NknTunaSetupDiagnostics.StreamErrorCategory(TryGetString(root, "rawReason"))}" +
                 $"; role={SanitizeSidecarReason(TryGetString(root, "role")) ?? "unknown"}" +
                 $"; direction={SanitizeSidecarReason(TryGetString(root, "direction")) ?? "unknown"}" +
                 $"; stage={SanitizeSidecarReason(TryGetString(root, "stage")) ?? "unknown"}" +

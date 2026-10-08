@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Reflection;
+using System.Text.Json;
 using NLink.Infra.Nkn;
 
 namespace NLink.SmokeTests;
@@ -205,7 +206,103 @@ public sealed class NknTunaSetupDiagnosticsTests
     {
         var diagnostics = new NknTunaSetupDiagnostics("dialer", 42, Guid.NewGuid(), _ => throw new IOException("sink failure"));
         for (var i = 0; i < 100; i++) diagnostics.DialErrorLine(DialLine);
+        diagnostics.StreamErrorLine("handle msg error: decrypt message failed");
         diagnostics.ObserveStop();
+    }
+
+    [Theory]
+    [InlineData(null, "unavailable")]
+    [InlineData("", "none")]
+    [InlineData("session closed", "session_closed")]
+    [InlineData("EOF", "eof")]
+    [InlineData("unexpected EOF", "unexpected_eof")]
+    [InlineData("context canceled", "context_canceled")]
+    [InlineData("context deadline exceeded", "timeout")]
+    [InlineData("read deadline exceeded", "timeout")]
+    [InlineData("write deadline exceeded", "timeout")]
+    [InlineData("decrypt message failed", "decrypt_failed")]
+    [InlineData("io: read/write on closed pipe", "closed_pipe")]
+    [InlineData("write tcp secret:123->private:456: i/o timeout", "timeout")]
+    [InlineData("write tcp secret:123->private:456: use of closed network connection", "connection_closed")]
+    [InlineData("write tcp secret:123->private:456: connection reset by peer", "connection_reset")]
+    [InlineData("read tcp secret:123->private:456: wsarecv: An existing connection was forcibly closed by the remote host.", "connection_reset")]
+    [InlineData("write tcp secret:123->private:456: broken pipe", "broken_pipe")]
+    [InlineData("seed=secret; event=authoritative", "other")]
+    [InlineData("EOF\nsecret", "other")]
+    public void StreamCategory_EmitsOnlyAllowlistedToken(string? error, string category)
+        => Assert.Equal(category, NknTunaSetupDiagnostics.StreamErrorCategory(error));
+
+    [Theory]
+    [InlineData("listener", false)]
+    [InlineData("listener", true)]
+    [InlineData("dialer", false)]
+    [InlineData("dialer", true)]
+    public void StreamCallback_RetainsOnlyFirstCategoryOnCapturedOwner(string role, bool stopped)
+    {
+        using var process = new Process();
+        using var owner = Owner(role, process);
+        if (stopped) owner.Stop("retired_before_output");
+        var type = role == "listener" ? typeof(NknTunaListenerSidecarSupervisor) : typeof(NknTunaAccelerationLane);
+        var callback = type.GetMethod(role == "listener" ? "HandleOwnedListenerStderr" : "HandleOwnedDialerStderr",
+            BindingFlags.Static | BindingFlags.NonPublic)!;
+        const string input = "2026/10/08 12:32:34 handle msg error: decrypt message failed";
+        var logStart = CoreSmokeTestsBase.GetOperationalLogLength();
+        callback.Invoke(null, [owner, input]);
+        callback.Invoke(null, [owner, "Write message error: write tcp secret:123: i/o timeout"]);
+        var log = CoreSmokeTestsBase.ReadOperationalLogTail(logStart);
+        var line = Assert.Single(log.Split('\n').Where(value => value.Contains("kind=stream_error;", StringComparison.Ordinal)));
+        Assert.Contains("run_id=" + Guid.Parse(owner.RunId).ToString("D"), line, StringComparison.Ordinal);
+        Assert.Contains("after_stop=" + (stopped ? "1" : "0"), line, StringComparison.Ordinal);
+        Assert.Contains("operation=read; error_category=decrypt_failed", line, StringComparison.Ordinal);
+        Assert.Contains($"event=tuna_{role}_sidecar_stderr; line_len={input.Length}", log, StringComparison.Ordinal);
+        Assert.DoesNotContain("secret", log, StringComparison.Ordinal);
+        Assert.DoesNotContain(input, log, StringComparison.Ordinal);
+        Assert.False(owner.IsRunning);
+    }
+
+    [Theory]
+    [InlineData("listener", "session closed", "session_closed")]
+    [InlineData("dialer", "session closed", "session_closed")]
+    [InlineData("listener", "secret; event=authoritative", "other")]
+    [InlineData("dialer", "secret; event=authoritative", "other")]
+    public void TerminalProjection_AddsCategoryWithoutChangingTerminalReason(string role, string error, string category)
+    {
+        var input = JsonSerializer.Serialize(new { terminalReason = "tuna_write_failed", rawReason = error, role });
+        var logStart = CoreSmokeTestsBase.GetOperationalLogLength();
+        if (role == "listener")
+        {
+            using var document = JsonDocument.Parse(input);
+            typeof(NknTunaListenerSidecarSupervisor).GetMethod("LogBridgeTerminal", BindingFlags.Static | BindingFlags.NonPublic)!
+                .Invoke(null, [document.RootElement]);
+        }
+        else
+            typeof(NknTunaAccelerationLane).GetMethod("LogBridgeTerminal", BindingFlags.Static | BindingFlags.NonPublic)!
+                .Invoke(null, [input]);
+        var log = CoreSmokeTestsBase.ReadOperationalLogTail(logStart);
+        Assert.Contains("terminal_reason=tuna_write_failed; stream_error_category=" + category, log, StringComparison.Ordinal);
+        Assert.DoesNotContain(error, log, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void StreamParser_IsBoundedAndDoesNotCaptureUnrecognizedOutput()
+    {
+        var lines = new List<string>();
+        var diagnostics = new NknTunaSetupDiagnostics("listener", 42, Guid.NewGuid(), lines.Add);
+        diagnostics.StreamErrorLine("unrecognized handle msg error: secret");
+        diagnostics.StreamErrorLine("handle msg error: EOF\nsecret");
+        diagnostics.StreamErrorLine("handle msg error: " + new string('x', NknTunaSetupDiagnostics.LineLimit));
+        Assert.Empty(lines);
+        Parallel.For(0, 100, _ => diagnostics.StreamErrorLine("Write message error: session closed"));
+        Assert.Contains("operation=write; error_category=session_closed", Assert.Single(lines), StringComparison.Ordinal);
+        Assert.Equal("other", NknTunaSetupDiagnostics.StreamErrorCategory(new string('x', NknTunaSetupDiagnostics.LineLimit + 1)));
+
+        lines.Clear();
+        diagnostics = new("listener", 42, Guid.NewGuid(), lines.Add);
+        for (var i = 0; i < NknTunaSetupDiagnostics.RecordLimit; i++) diagnostics.ProviderLine(ProviderLine);
+        diagnostics.StreamErrorLine("Read message error: EOF");
+        Assert.Equal(NknTunaSetupDiagnostics.RecordLimit + 1, lines.Count);
+        Assert.Contains("kind=truncated; reason=record_limit; limit=64", lines[^1], StringComparison.Ordinal);
+        Assert.DoesNotContain(lines, line => line.Contains("kind=stream_error;", StringComparison.Ordinal));
     }
 
     private static NknTunaSidecarProcessOwner Owner(string role, Process process)
