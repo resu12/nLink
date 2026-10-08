@@ -5489,6 +5489,7 @@ public sealed partial class SessionFileTransferService
             fallbackV6ProofBootstrapRecheck = null;
         string? fallbackV6ProofBootstrapRecheckStatus = null;
         string? fallbackV6ProofBootstrapRecheckResult = null;
+        string? recentProgressCommitEvidence = null;
         lock (gate)
         {
             if (writeSource is not null && (!IsInboundBootstrapWriteSourceCurrentLocked(context, writeSource) ||
@@ -5500,6 +5501,7 @@ public sealed partial class SessionFileTransferService
                 return;
             }
 
+            InboundV6FrontierRecentProgressGraceWake? recentProgressWake = null;
             previousCommittedChunkIndex = context.NextChunkIndex;
             foreach (var (chunkIndex, chunkBytes) in acceptedChunks)
             {
@@ -5508,6 +5510,14 @@ public sealed partial class SessionFileTransferService
                     continue;
                 }
 
+                // The physical write is complete. Validate the original wake
+                // after removing pending presence, before committing the frontier.
+                if (chunkIndex == previousCommittedChunkIndex &&
+                    context.CurrentV6FrontierRecentProgressGraceWake is { } currentWake &&
+                    IsInboundV6FrontierRecentProgressGraceWakeCurrentLocked(context, currentWake, out _))
+                {
+                    recentProgressWake = currentWake;
+                }
                 context.BufferedBytes = Math.Max(0, context.BufferedBytes - chunkBytes.Length);
                 if (!context.ReceiverSparseChunksWritten[chunkIndex])
                 {
@@ -5527,6 +5537,11 @@ public sealed partial class SessionFileTransferService
             context.FrontierBoundaryObservation?.Write(context, previousCommittedChunkIndex, committedChunkCount, "v6_sparse");
             if (committedChunkCount > 0)
             {
+                if (recentProgressWake is { } wake)
+                {
+                    recentProgressCommitEvidence =
+                        $"; commit_decision_utc={FormatProtocolLogValue(progressUtc.ToString("O"))}; commit_source_status=current; authority_effect=none; {FileTransferDiagnosticScopeEvidence.FormatDataSession(wake.DataSessionIdentity)}direction=inbound; route={FormatProtocolLogValue(wake.RouteToken)}; protocol_version={wake.ProtocolVersion}; live_route_epoch={wake.LiveRouteEpoch}; runtime_generation={wake.RuntimeGeneration}; terminal_generation={wake.TerminalGeneration}; leg_generation={wake.LegGeneration}; transport_epoch={wake.TransportEpoch}; bridge_recovery_generation={wake.BridgeRecoveryGeneration}; bridge_decision_generation={wake.BridgeDecisionGeneration}; checkpoint_request_id={FormatProtocolLogValue(wake.CheckpointRequestId)}; checkpoint_generation={wake.CheckpointGeneration}; route_publication_generation={wake.RoutePublicationGeneration}; route_commit_generation={wake.RouteCommitGeneration}; data_session_identity={FormatProtocolLogValue(wake.DataSessionIdentity)}; data_session_generation={wake.DataSessionGeneration}; frontier_chunk_index={wake.FrontierChunkIndex}; wake_generation={wake.WakeGeneration}; committed_progress_utc={FormatProtocolLogValue(wake.CommittedProgressUtc.ToString("O"))}; wake_deadline_utc={FormatProtocolLogValue(wake.DueUtc.ToString("O"))}";
+                }
                 context.PullLastCommittedProgressUtc = progressUtc;
                 fallbackFrontierProgressReceipt = TrySettleInboundFallbackFrontierProgressLocked(
                     context,
@@ -5632,7 +5647,7 @@ public sealed partial class SessionFileTransferService
             $"event=filetransfer_v6_chunk_batch_received; transfer_id={context.TransferId}; session_id={context.SessionId}; mode=sparse_seekable; start_chunk_index={batch.StartChunkIndex}; batch_chunk_count={batch.ChunkCount}; accepted_chunk_count={acceptedChunks.Count}; raw_bytes={chunks.Sum(static item => item.ChunkBytes.Length)}");
         LocalOperationalLog.Info(
             "FileTransferService",
-            $"event=filetransfer_v6_sparse_write_committed; {FileTransferDiagnosticScopeEvidence.Format(context.SessionId, context.TransferId)}transfer_id={context.TransferId}; session_id={context.SessionId}; written_chunk_count={acceptedChunks.Count}; written_bytes={writtenBytes}; contiguous_chunks_committed={committedChunkCount}; contiguous_bytes_committed={committedByteCount}; write_duration_ms={writeStopwatch.ElapsedMilliseconds}; next_chunk_index={nextChunkIndexAfterCommit}; highest_received_chunk_index={highestReceivedChunkIndexAfterCommit}; pending_bytes={context.BufferedBytes}");
+            $"event=filetransfer_v6_sparse_write_committed; {FileTransferDiagnosticScopeEvidence.Format(context.SessionId, context.TransferId)}transfer_id={context.TransferId}; session_id={context.SessionId}; written_chunk_count={acceptedChunks.Count}; written_bytes={writtenBytes}; contiguous_chunks_committed={committedChunkCount}; contiguous_bytes_committed={committedByteCount}; write_duration_ms={writeStopwatch.ElapsedMilliseconds}; next_chunk_index={nextChunkIndexAfterCommit}; highest_received_chunk_index={highestReceivedChunkIndexAfterCommit}; pending_bytes={context.BufferedBytes}{recentProgressCommitEvidence}");
         if (postTunaFallbackRepairProgressObserved &&
             !(IsStrictFallbackFrontierRuntime(context) &&
               context.CurrentFallbackFrontierRepairContract?.Lifecycle.SettlementOutcome ==

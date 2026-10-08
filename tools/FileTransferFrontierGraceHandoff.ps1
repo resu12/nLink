@@ -1401,6 +1401,98 @@ function Get-FileTransferStallGraceDispatchedProgressClosure {
 # A fulfilled recent-progress wake transfers the obligation to the ordinary
 # stall grace. Natural progress can close that grace without repair authority,
 # but a sparse write alone is not publication proof.
+function Get-FileTransferRecentProgressCommitClockClosure {
+    param([object[]]$Events, [Parameter(Mandatory = $true)]$Episode)
+
+    function Field($Event, [string]$Name) { return [string]$Event.Fields[$Name] }
+    function Number($Event, [string]$Name) {
+        $value = 0L
+        if (-not [long]::TryParse((Field $Event $Name), [ref]$value)) { return -1L }
+        return $value
+    }
+    function Ticks($Event, [string]$Name) {
+        $value = [DateTimeOffset]::MinValue
+        if (-not [DateTimeOffset]::TryParse((Field $Event $Name), [ref]$value)) { return 0L }
+        return $value.UtcTicks
+    }
+    function Equal($Left, $Right, [string[]]$Names) {
+        foreach ($name in $Names) {
+            $value = Field $Left $name
+            if ([string]::IsNullOrWhiteSpace($value) -or $value -cne (Field $Right $name)) { return $false }
+        }
+        return $true
+    }
+    # This narrow branch covers one unchanged, pre-diagnostic wake only.
+    # A stale callback or a later clock cannot supply closure authority.
+    $scoped = @($Events | Where-Object {
+        (Field $_ 'log_writer_id') -ceq $Episode.Writer -and
+        (Field $_ 'session_id') -ceq $Episode.Session -and (Field $_ 'transfer_id') -ceq $Episode.Transfer
+    } | Sort-Object Sequence, LineNumber)
+    $commits = @($scoped | Where-Object {
+        [long]$_.Sequence -gt [long]$Episode.Event.Sequence -and
+        (Field $_ 'event') -ceq 'filetransfer_v6_sparse_write_committed' -and
+        ($_.Fields.ContainsKey('commit_decision_utc') -or $_.Fields.ContainsKey('commit_source_status'))
+    } | Select-Object -First 1)
+    if ($commits.Count -ne 1) { return $null }
+    $commit = $commits[0]
+    $arms = @($scoped | Where-Object {
+        [long]$_.Sequence -lt [long]$commit.Sequence -and
+        (Number $_ 'frontier_chunk_index') -eq $Episode.Frontier -and
+        (Field $_ 'event') -ceq 'filetransfer_v6_frontier_recent_progress_grace_deferred'
+    } | Select-Object -Last 1)
+    if ($arms.Count -ne 1 -or [long]$arms[0].Sequence -gt [long]$Episode.Event.Sequence) { return $null }
+    $arm = $arms[0]
+    $scope = @('direction', 'route', 'protocol_version', 'live_route_epoch', 'runtime_generation',
+        'terminal_generation', 'leg_generation', 'transport_epoch', 'bridge_recovery_generation',
+        'bridge_decision_generation', 'checkpoint_request_id', 'checkpoint_generation',
+        'route_publication_generation', 'route_commit_generation', 'frontier_scope_session_id',
+        'frontier_scope_transfer_id', 'frontier_scope_data_session_identity')
+    foreach ($name in $scope) {
+        $expected = Field $Episode.Progress $name
+        if (-not [string]::IsNullOrWhiteSpace($expected) -and $expected -cne (Field $arm $name)) { return $null }
+    }
+    if (-not (Equal $arm $commit ($scope + @('data_session_identity', 'data_session_generation',
+        'frontier_chunk_index', 'highest_received_chunk_index', 'wake_generation', 'committed_progress_utc', 'wake_deadline_utc'))) -or
+        (Field $commit 'commit_source_status') -cne 'current' -or (Field $commit 'authority_effect') -cne 'none' -or
+        (Field $arm 'authority_effect') -cne 'none' -or (Field $arm 'decision_status') -cnotin @('held', 'rearmed') -or
+        (Field $arm 'data_session_identity') -cne $Episode.DataSessionIdentity -or
+        (Field $arm 'data_session_generation') -cne $Episode.DataSessionGeneration -or
+        (Number $arm 'wake_generation') -le 0 -or (Number $arm 'frontier_chunk_index') -ne $Episode.Frontier -or
+        (Number $arm 'highest_received_chunk_index') -lt $Episode.Highest -or
+        (Number $commit 'contiguous_chunks_committed') -le 0 -or
+        (Number $commit 'next_chunk_index') -ne ($Episode.Frontier + (Number $commit 'contiguous_chunks_committed'))) { return $null }
+    $progress = Ticks $arm 'committed_progress_utc'
+    $deadline = Ticks $arm 'wake_deadline_utc'
+    $decision = Ticks $commit 'commit_decision_utc'
+    $armDecision = Ticks $arm 'arm_decision_utc'
+    if ($progress -le 0 -or $deadline -ne ($progress + [TimeSpan]::TicksPerSecond) -or
+        $Episode.DueTicks -le 0 -or $deadline -gt $Episode.DueTicks -or
+        $armDecision -lt $progress -or $armDecision -ge $deadline -or
+        $armDecision -gt (Number $arm 'log_writer_attempt_utc_ticks') -or
+        (Number $Episode.Event 'log_writer_attempt_utc_ticks') -ge $deadline -or
+        $decision -lt (Number $Episode.Event 'log_writer_attempt_utc_ticks') -or $decision -gt $deadline -or
+        $decision -gt (Number $commit 'log_writer_attempt_utc_ticks')) { return $null }
+    # Do not hide conflicting copies behind a changed transfer identity.
+    foreach ($event in $Events) {
+        if ((Field $event 'log_writer_id') -cne $Episode.Writer) { continue }
+        foreach ($selected in @($arm, $commit)) {
+            if ((Field $event 'log_writer_sequence') -cne (Field $selected 'log_writer_sequence')) { continue }
+            $names = @($selected.Fields.Keys | Where-Object { $_ -ne 'gui_evidence_sequence' })
+            if ($names.Count -ne @($event.Fields.Keys | Where-Object { $_ -ne 'gui_evidence_sequence' }).Count -or
+                -not (Equal $selected $event $names)) { return $null }
+        }
+    }
+    $intervening = @($scoped | Where-Object {
+        [long]$_.Sequence -gt [long]$arm.Sequence -and [long]$_.Sequence -lt [long]$commit.Sequence -and
+        ((Field $_ 'event') -in @('file_transfer_inbound_terminal', 'filetransfer_live_route_epoch_terminal',
+            'filetransfer_terminalized_by_session_end', 'filetransfer_route_selected', 'filetransfer_live_route_epoch_recovered',
+            'filetransfer_route_hint_authorized_publication_accepted', 'filetransfer_data_session_recreated', 'filetransfer_data_session_removed') -or
+            (Field $_ 'transfer_paused') -eq '1')
+    })
+    if ($intervening.Count -gt 0) { return $null }
+    return $commit
+}
+
 function Get-FileTransferRecentProgressGraceStallProgressClosure {
     param([object[]]$Events, [Parameter(Mandatory = $true)]$Episode)
 

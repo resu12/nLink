@@ -2323,10 +2323,10 @@ public sealed class SessionFileTransferV6RuntimeTests : SessionFileTransferServi
         {
             using var destination = new NonDisposingMemoryStream();
             using var senderTransport = new LoopbackFileTransferTransport(sessionId);
-            using var receiverTransport = new LoopbackFileTransferTransport(sessionId);
+            using var receiverTransport = new GraceWakeReceiverTransport(sessionId);
             receiverTransport.OutboundDataFrameDeliveryOverrideAsync = async (_, frame, _) =>
             {
-                if (frame is FileTransferReceiverStateFrameV6 &&
+                if (frame is FileTransferReceiverStateFrameV6 { ContiguousCommittedChunkIndex: 1, BytesCommitted: chunkSize } &&
                     Interlocked.CompareExchange(ref blockNextReceiverState, 0, 1) == 1)
                 {
                     receiverStateBlocked.TrySetResult();
@@ -2364,6 +2364,12 @@ public sealed class SessionFileTransferV6RuntimeTests : SessionFileTransferServi
                     sha256),
                 CancellationToken.None);
             await WaitUntilAsync(() => receiverTransport.SentDataFrames.OfType<FileTransferReceiverStateFrameV6>().Any());
+
+            var receiverContext = GetPrivateField(receiver, "inboundTransfer")!;
+            var receiverDataSession = (IFileTransferDataSession)receiverContext.GetType()
+                .GetProperty("DataSession", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)!
+                .GetValue(receiverContext)!;
+            Assert.True(Assert.IsAssignableFrom<IFileTransferDataSessionGenerationProvider>(receiverDataSession).Generation > 0);
 
             await senderSession.SendAsync(
                 new FileTransferChunkBatchFrameV6
@@ -2403,6 +2409,7 @@ public sealed class SessionFileTransferV6RuntimeTests : SessionFileTransferServi
                 CancellationToken.None);
             await receiverStateBlocked.Task.WaitAsync(TimeSpan.FromSeconds(5));
             Assert.Equal(1, receiver.Snapshot.Inbound?.ChunksTransferred);
+            Assert.Equal(payload.Take(chunkSize), destination.ToArray().Take(chunkSize));
 
             if (adoptValueEquivalentCoordinatorState)
             {
@@ -5054,6 +5061,38 @@ public sealed class SessionFileTransferV6RuntimeTests : SessionFileTransferServi
                 return batch;
             }
         }
+    }
+
+    private sealed class GraceWakeReceiverTransport(string sessionId)
+        : LoopbackFileTransferTransport(sessionId), IFileTransferSignalingTransport
+    {
+        private long sessionGeneration;
+
+        async Task<IFileTransferDataSession> IFileTransferSignalingTransport.OpenFileTransferDataSessionAsync(
+            string session, string transfer, CancellationToken ct)
+            => new GraceWakeReceiverDataSession(await OpenFileTransferDataSessionAsync(session, transfer, ct),
+                Interlocked.Increment(ref sessionGeneration));
+    }
+
+    private sealed class GraceWakeReceiverDataSession(IFileTransferDataSession inner, long generation)
+        : IFileTransferDataSession, IFileTransferDataSessionGenerationProvider, IFileTransferDataPathAuthoritySession
+    {
+        public string SessionId => inner.SessionId;
+        public string TransferId => inner.TransferId;
+        public long Generation => generation;
+        public bool IsAvailable => inner.IsAvailable;
+        public event EventHandler<FileTransferDataSessionAvailabilityChangedEventArgs>? AvailabilityChanged
+        {
+            add => inner.AvailabilityChanged += value;
+            remove => inner.AvailabilityChanged -= value;
+        }
+        public ValueTask<FileTransferDataFrame> ReceiveAsync(CancellationToken ct) => inner.ReceiveAsync(ct);
+        public ValueTask<FileTransferReceivedDataFrame> ReceiveWithMetadataAsync(CancellationToken ct)
+            => inner.ReceiveWithMetadataAsync(ct);
+        public Task SendAsync(FileTransferDataFrame frame, CancellationToken ct) => inner.SendAsync(frame, ct);
+        public Task SendAsync(FileTransferDataFrame frame, FileTransferDataPathSendAuthority authority, CancellationToken ct)
+            => ((IFileTransferDataPathAuthoritySession)inner).SendAsync(frame, authority, ct);
+        public void Dispose() => inner.Dispose();
     }
 
     private static async Task<IFileTransferDataSession> StartManualInboundV6ReceiverAsync(

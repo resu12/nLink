@@ -59940,6 +59940,9 @@ function Get-FileTransferFallbackFrontierRecentProgressGraceRecheckCorrelation {
                     })
             } | Select-Object -First 1)
         $recoveryEvent = if ($naturalProgress.Count -eq 1) { $naturalProgress[0] } else { $null }
+        if ($null -eq $recoveryEvent) {
+            $recoveryEvent = Get-FileTransferRecentProgressCommitClockClosure -Events $ordered -Episode $incident
+        }
 
         if ($null -eq $recoveryEvent) {
             [object[]]$recheck = @($recentRechecks | Where-Object {

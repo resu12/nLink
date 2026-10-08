@@ -259,7 +259,9 @@ function Get-FileTransferFallbackFrontierGracePartitionSlice {
             $copies = @($candidate)
             $Index.BoundedLookupVisitCount++
             $writer = Get-FileTransferEventField -Event $candidate -Name 'log_writer_id' -Default ''
-            if ($IncludeWriterCopies -and $Index.EventsByWriterIdentity.ContainsKey("$writer|$writerSequence")) {
+            $boundCommit = $candidate.EventName -eq 'filetransfer_v6_sparse_write_committed' -and
+                ($candidate.Fields.ContainsKey('commit_decision_utc') -or $candidate.Fields.ContainsKey('commit_source_status'))
+            if (($IncludeWriterCopies -or $boundCommit) -and $Index.EventsByWriterIdentity.ContainsKey("$writer|$writerSequence")) {
                 $copies = $Index.EventsByWriterIdentity["$writer|$writerSequence"].ToArray()
             }
             elseif ($Index.EventsByWriterSequence.ContainsKey("$TransferKey|$writerSequence")) {

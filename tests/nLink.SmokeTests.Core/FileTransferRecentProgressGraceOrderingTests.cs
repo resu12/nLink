@@ -8,6 +8,31 @@ public sealed class FileTransferRecentProgressGraceOrderingTests : FileTransferO
     [Theory]
     [InlineData("powershell")]
     [InlineData("pwsh")]
+    [Trait("RetainedFallbackSuite", "RecentProgressCommitClock")]
+    public async Task RecentProgressCommit_ActualCaptureRequiresExactWakeScopeAndUnchangedDeadline(string host)
+    {
+        if (!OperatingSystem.IsWindows()) { return; }
+        var lines = await SessionFileTransferV4SenderTests.CreateRecentProgressCommitClockEvidenceFixtureAsync(delayLog: true);
+        var directory = Path.Combine(Path.GetTempPath(), "nlink-recent-commit-clock-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(directory);
+        try
+        {
+            var sourcePath = Path.Combine(directory, "service.log");
+            await File.WriteAllLinesAsync(sourcePath, lines, new UTF8Encoding(false));
+            const string script = """
+                param([string]$RepoRoot, [string]$SourcePath)
+                & (Join-Path $RepoRoot 'tests/nLink.SmokeTests.Core/TestData/RecentProgressCommitClock.ps1') -RepoRoot $RepoRoot -SourcePath $SourcePath
+                """;
+            var result = await RunPowerShellScriptTextAsync(script, [FindRepoRoot(), sourcePath], host);
+            Assert.True(result.ExitCode == 0, $"{host}: {result.Stdout}{Environment.NewLine}{result.Stderr}");
+            Assert.Contains("recent-progress-commit-clock-ok:", result.Stdout, StringComparison.Ordinal);
+        }
+        finally { Directory.Delete(directory, recursive: true); }
+    }
+
+    [Theory]
+    [InlineData("powershell")]
+    [InlineData("pwsh")]
     [Trait("RetainedFallbackSuite", "RecentProgressGraceOrdering")]
     public Task RecentProgressGrace_RearmChainPreservesExactScopeAndPublicationDeadline(string host)
         => RunOrderingAsync(host, watchdogFirst: false);

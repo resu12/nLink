@@ -16419,6 +16419,9 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
                 } | Select-Object -First 1)
             $recovered = $natural.Count -eq 1
             if (-not $recovered) {
+                $recovered = $null -ne (Get-FileTransferRecentProgressCommitClockClosure -Events $records.ToArray() -Episode $episode)
+            }
+            if (-not $recovered) {
                 [object[]]$recheck = @($recentRechecks | Where-Object {
                         $_.Sequence -gt $episode.Event.Sequence -and (& $sameSource $_) -and
                         (Get-GuiRecentInt $_ 'frontier_chunk_index') -eq $episode.Frontier -and
