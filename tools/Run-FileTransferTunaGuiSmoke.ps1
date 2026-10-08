@@ -6,7 +6,7 @@ param(
     [string]$PayerMode = "helpee",
     [ValidateSet("none", "switch-off", "sidecar-kill")]
     [string]$Fault = "switch-off",
-    [ValidateSet("handoff-fallback", "preactivated", "post-fallback", "v4-restart-v6-fallback", "live-v4-switch-off", "live-multi-toggle", "live-reactivation-second-transfer", "live-regular-activation-cycle")]
+    [ValidateSet("handoff-fallback", "preactivated", "pending-preparation", "post-fallback", "v4-restart-v6-fallback", "live-v4-switch-off", "live-multi-toggle", "live-reactivation-second-transfer", "live-regular-activation-cycle")]
     [string]$RouteMode = "handoff-fallback",
     [string]$LiveToggleSequence = "",
     [ValidateSet("helpee-to-helper", "helper-to-helpee")]
@@ -1844,6 +1844,7 @@ function Invoke-TunaGuiLiveRetainedAnalysisBestEffort {
     )
 
     if ($RouteMode -ne 'preactivated' -and
+        $RouteMode -ne 'pending-preparation' -and
         $RouteMode -ne 'live-v4-switch-off' -and
         $RouteMode -ne 'live-multi-toggle' -and
         $RouteMode -ne 'live-reactivation-second-transfer' -and
@@ -2755,7 +2756,7 @@ try {
         }
         Update-TunaGuiControlledRestartSummary -ArtifactDir $resolvedArtifactDir -FilteredSetupCleanupLineCount ([int]$slices.FilteredSetupCleanupLineCount)
     }
-    elseif ($RetainedAnalysisOwner -eq 'Wrapper' -and ($RouteMode -eq 'preactivated' -or $RouteMode -eq 'live-v4-switch-off' -or $RouteMode -eq 'live-multi-toggle' -or $RouteMode -eq 'live-reactivation-second-transfer' -or $RouteMode -eq 'live-regular-activation-cycle')) {
+    elseif ($RetainedAnalysisOwner -eq 'Wrapper' -and ($RouteMode -eq 'preactivated' -or $RouteMode -eq 'pending-preparation' -or $RouteMode -eq 'live-v4-switch-off' -or $RouteMode -eq 'live-multi-toggle' -or $RouteMode -eq 'live-reactivation-second-transfer' -or $RouteMode -eq 'live-regular-activation-cycle')) {
         $retainedPath = Join-Path $resolvedArtifactDir 'filetransfer-retained-log-slice.log'
         $liveRouteProofMode = if ($RouteMode -eq 'live-v4-switch-off') { 'SwitchOff' } elseif ($RouteMode -eq 'live-multi-toggle') { 'MultiToggle' } elseif ($RouteMode -eq 'live-regular-activation-cycle') { 'RegularActivationCycle' } else { 'None' }
         Merge-TunaGuiMilestoneEvidenceIntoRetainedLogSlice -ArtifactDir $resolvedArtifactDir

@@ -33829,8 +33829,8 @@ function Get-TunaGuiRouteMode {
     if ([string]::IsNullOrWhiteSpace($value)) { return 'handoff-fallback' }
 
     $normalized = $value.Trim().ToLowerInvariant()
-    if ($normalized -in @('handoff-fallback', 'preactivated', 'post-fallback', 'v4-restart-v6-fallback', 'live-v4-switch-off', 'live-multi-toggle', 'live-reactivation-second-transfer', 'live-regular-activation-cycle')) { return $normalized }
-    throw "Invalid NLINK_TUNA_GUI_ROUTE_MODE '$value'. Use handoff-fallback, preactivated, post-fallback, v4-restart-v6-fallback, live-v4-switch-off, live-multi-toggle, live-reactivation-second-transfer, or live-regular-activation-cycle."
+    if ($normalized -in @('handoff-fallback', 'preactivated', 'pending-preparation', 'post-fallback', 'v4-restart-v6-fallback', 'live-v4-switch-off', 'live-multi-toggle', 'live-reactivation-second-transfer', 'live-regular-activation-cycle')) { return $normalized }
+    throw "Invalid NLINK_TUNA_GUI_ROUTE_MODE '$value'. Use handoff-fallback, preactivated, pending-preparation, post-fallback, v4-restart-v6-fallback, live-v4-switch-off, live-multi-toggle, live-reactivation-second-transfer, or live-regular-activation-cycle."
 }
 
 function Get-TunaGuiLiveMultiToggleSequence {
@@ -36867,6 +36867,7 @@ function Invoke-FileTransferTunaHandoffFallbackCycle {
     $observedEvidenceLines = New-Object System.Collections.Generic.List[string]
     $tunaNegotiatedObserved = $false
     $diagnosticTunaReadinessObserved = $false
+    $pendingPreparationHandoffObserved = $false
     $fileTunaV4PublicationObserved = $false
     $activationEpochStartedObserved = $false
     $activationEpochRecoveredObserved = $false
@@ -36978,6 +36979,19 @@ function Invoke-FileTransferTunaHandoffFallbackCycle {
     }
 
     $sendButton = Wait-ControlEnabledStateByAutomationId -Window $senderWindow -AutomationId 'Chat.SendFile' -IsEnabled $true -TimeoutMs ([Math]::Min(15000, $StartupTimeoutMs))
+    if ($RouteMode -eq 'pending-preparation') {
+        if ($FaultMode -ne 'none' -or $PayerMode -ne 'helpee') {
+            throw 'pending-preparation requires a no-fault, helpee-paid transfer.'
+        }
+        # Payload generation and the Send control lookup precede unlock. Do not
+        # wait for paired readiness: the exact admission handoff below proves
+        # that preparation was unfinished when this transfer was admitted.
+        Unlock-TunaPayers -Context $Context -PayerMode $PayerMode -Password $WalletPassword
+        $preparationStartLine = [string](Wait-AppLogContainsAllAfterBookmark -Bookmark $bookmark -Needles @(
+            'event=tuna_sidecar_process_started', 'role=listener'
+        ) -TimeoutMs 45000 -Description 'preparation listener process started before early Send (evidence only)')
+        $observedEvidenceLines.Add($preparationStartLine) | Out-Null
+    }
     Click-Element $sendButton
 
     $acceptButton = Wait-TunaGuiFileTransferAcceptOrThrow -Window $receiverWindow -Bookmark $bookmark -TimeoutMs $StartupTimeoutMs -RouteMode $RouteMode
@@ -37615,6 +37629,18 @@ function Invoke-FileTransferTunaHandoffFallbackCycle {
             }
         }
     }
+    elseif ($RouteMode -eq 'pending-preparation') {
+        $handoffLine = [string](Wait-AppLogContainsAllAfterBookmark -Bookmark $bookmark -Needles @(
+            'event=session_preparation_transfer_activation_requested', 'reason=pending_preparation_admitted', 'authority_effect=none'
+        ) -TimeoutMs 90000 -Description 'exact pending-preparation admission handoff for the only GUI transfer')
+        $observedEvidenceLines.Add($handoffLine) | Out-Null
+        $pendingPreparationHandoffObserved = $true
+        $routeLine = [string](Wait-TunaGuiFileTunaV4PublicationAfterBookmark -Bookmark $bookmark -TimeoutMs 90000 -Description 'pending-preparation coordinator-authorized file Tuna V4 publication')
+        $observedEvidenceLines.Add($routeLine) | Out-Null
+        $fileTunaV4PublicationObserved = $true
+        $timingSelectedRouteLine = $routeLine
+        $timingRouteObservedElapsedMs = $sw.Elapsed.TotalMilliseconds
+    }
     elseif ($RouteMode -eq 'handoff-fallback') {
         [void](Wait-FileTransferTerminalOrProgressBeforeAction -Bookmark $bookmark -ProgressTimeoutMs $ProgressTimeoutMs -MinProgressEvents 2 -TimeoutMs 60000)
 
@@ -37755,8 +37781,8 @@ function Invoke-FileTransferTunaHandoffFallbackCycle {
         $observedEvidenceLines.Add(("[{0}] [INFO] [GuiSmoke] event=filetransfer_tuna_gui_phase_marker; phase=measured_post_tuna_fallback_v6_terminal; inbound_state={1}; outbound_state={2}; inbound_error={3}; outbound_error={4}; integrity_ok={5}" -f ([datetime]::UtcNow.ToString('yyyy-MM-dd HH:mm:ssZ')), $inboundState, $outboundState, $inboundError, $outboundError, ($(if ($integrityOk) { 1 } else { 0 })))) | Out-Null
     }
     $goodputBytesPerSecond = if ($sw.Elapsed.TotalSeconds -gt 0) { [Math]::Round($PayloadSizeBytes / $sw.Elapsed.TotalSeconds, 3) } else { 0D }
-    $expectedMeasuredRoute = if ($RouteMode -eq 'preactivated' -or $RouteMode -eq 'live-reactivation-second-transfer') { 'file_tuna_v4' } elseif ($RouteMode -eq 'handoff-fallback') { '(handoff)' } else { 'post_tuna_fallback_v6' }
-    $measuredPhaseName = if ($RouteMode -eq 'preactivated') { 'measured_file_tuna_v4' } elseif ($RouteMode -eq 'live-v4-switch-off') { 'measured_live_post_tuna_fallback_v6' } elseif ($RouteMode -eq 'live-multi-toggle') { 'measured_live_multi_toggle' } elseif ($RouteMode -eq 'live-reactivation-second-transfer') { 'measured_live_reactivation_file_tuna_v4' } elseif ($RouteMode -eq 'live-regular-activation-cycle') { 'measured_live_regular_activation_cycle' } elseif ($RouteMode -eq 'v4-restart-v6-fallback') { 'measured_post_tuna_fallback_v6' } elseif ($RouteMode -eq 'post-fallback') { 'measured_post_tuna_fallback_v6' } else { 'measured_handoff_fallback' }
+    $expectedMeasuredRoute = if ($RouteMode -eq 'preactivated' -or $RouteMode -eq 'pending-preparation' -or $RouteMode -eq 'live-reactivation-second-transfer') { 'file_tuna_v4' } elseif ($RouteMode -eq 'handoff-fallback') { '(handoff)' } else { 'post_tuna_fallback_v6' }
+    $measuredPhaseName = if ($RouteMode -eq 'pending-preparation') { 'measured_pending_preparation_file_tuna_v4' } elseif ($RouteMode -eq 'preactivated') { 'measured_file_tuna_v4' } elseif ($RouteMode -eq 'live-v4-switch-off') { 'measured_live_post_tuna_fallback_v6' } elseif ($RouteMode -eq 'live-multi-toggle') { 'measured_live_multi_toggle' } elseif ($RouteMode -eq 'live-reactivation-second-transfer') { 'measured_live_reactivation_file_tuna_v4' } elseif ($RouteMode -eq 'live-regular-activation-cycle') { 'measured_live_regular_activation_cycle' } elseif ($RouteMode -eq 'v4-restart-v6-fallback') { 'measured_post_tuna_fallback_v6' } elseif ($RouteMode -eq 'post-fallback') { 'measured_post_tuna_fallback_v6' } else { 'measured_handoff_fallback' }
     $measuredRoute = Get-GuiSmokeFieldValue -Fields $outbound -Name 'route' -Default (Get-GuiSmokeFieldValue -Fields $inbound -Name 'route' -Default $expectedMeasuredRoute)
     $defaultMeasuredProtocol = if ($measuredRoute -eq 'post_tuna_fallback_v6') { 6 } elseif ($measuredRoute -eq 'file_tuna_v4') { 4 } else { 0 }
     $measuredProtocol = ConvertTo-GuiSmokeInt -Value (Get-GuiSmokeFieldValue -Fields $outbound -Name 'protocol_version' -Default (Get-GuiSmokeFieldValue -Fields $inbound -Name 'protocol_version' -Default ([string]$defaultMeasuredProtocol))) -Default $defaultMeasuredProtocol
@@ -37846,6 +37872,7 @@ function Invoke-FileTransferTunaHandoffFallbackCycle {
     $summary = [ordered]@{
         event = 'filetransfer_tuna_gui_handoff_fallback_summary'
         routeMode = $RouteMode
+        pendingPreparationHandoffObserved = $pendingPreparationHandoffObserved
         direction = $Direction
         payerMode = $PayerMode
         faultMode = $FaultMode
@@ -38184,6 +38211,13 @@ function Invoke-FileTransferTunaHandoffFallbackCycle {
         $fallbackRequirementSatisfied = $FaultMode -eq 'none' -or ($evidence.fallbackEpochStarted -and ($evidence.fallbackEpochRecovered -or $evidence.fallbackEpochWaiting))
         if (-not $evidence.tunaNegotiated -or -not $evidence.activationEpochStarted -or -not $activationOrEarlyFallbackProved -or -not $fallbackRequirementSatisfied) {
             throw "Tuna GUI file-transfer missing required V6 handoff/fallback evidence. Summary: $($evidence | ConvertTo-Json -Compress)"
+        }
+    }
+    elseif ($RouteMode -eq 'pending-preparation') {
+        if (-not $pendingPreparationHandoffObserved -or -not $evidence.fileTunaV4PublicationObserved -or
+            -not $evidence.peerVisibleTunaPayloadObserved -or $evidence.missingTunaDataPathProof -or
+            $evidence.fallbackEpochStarted -or $evidence.fallbackEpochRecovered -or $evidence.fallbackEpochWaiting) {
+            throw "Tuna GUI pending-preparation transfer did not prove the no-fault handoff and Tuna delivery. Summary: $($evidence | ConvertTo-Json -Compress)"
         }
     }
     elseif ($RouteMode -eq 'preactivated') {

@@ -4702,7 +4702,10 @@ function Assert-Phase4ScenarioRun {
     }
 
     Assert-Phase4RouteSummary -Result $result -ExpectedRouteChanges $expectedRouteChanges
-    if ($Scenario.Kind -eq 'tuna' -and $expectedRouteChanges.Count -gt 1) {
+    # Pending preparation uses the initial Regular V4 -> Tuna V4 publication
+    # boundary, not a V6 live-route epoch cycle. The selected route sequence
+    # above and the Phase 5 coordinator/security proofs still apply.
+    if ($Scenario.Kind -eq 'tuna' -and $expectedRouteChanges.Count -gt 1 -and $Scenario.RouteMode -ne 'pending-preparation') {
         $expectedLiveRouteChanges = @($expectedRouteChanges | Select-Object -Skip 1)
         $expectedLiveText = Join-RouteAcceptanceTokenList -Values $expectedLiveRouteChanges
         $actualLiveText = Join-RouteAcceptanceTokenList -Values $result.liveRouteEpochRouteChanges
@@ -4829,6 +4832,12 @@ function Assert-Phase4ScenarioRun {
 
         if (Assert-RouteAcceptanceFileExists -Result $result -RelativePath 'filetransfer-tuna-gui-summary.json') {
             $summary = Get-Content -LiteralPath (Join-Path $ArtifactDir 'filetransfer-tuna-gui-summary.json') -Raw | ConvertFrom-Json
+            if ($Scenario.RouteMode -eq 'pending-preparation') {
+                $pendingHandoff = Get-JsonPropertyValue -Object $summary -Name 'pendingPreparationHandoffObserved' -DefaultValue $false
+                if ($pendingHandoff -isnot [bool] -or -not $pendingHandoff) {
+                    Add-RouteAcceptanceFailure -Result $result -Message 'pending-preparation admission handoff proof is missing'
+                }
+            }
             $result.terminalCompletedBeforeFault = ConvertTo-RouteAcceptanceBool -Value (Get-JsonPropertyValue -Object $summary -Name 'terminalCompletedBeforeFault' -DefaultValue $false)
             $result.faultActionClaimed = ConvertTo-RouteAcceptanceBool -Value (Get-JsonPropertyValue -Object $summary -Name 'faultActionClaimed' -DefaultValue $false)
             $result.faultActionInvoked = ConvertTo-RouteAcceptanceBool -Value (Get-JsonPropertyValue -Object $summary -Name 'faultActionInvoked' -DefaultValue $false)
@@ -8849,6 +8858,7 @@ function Test-Phase5ScenarioRequiresIsolation {
 
     return @(
         'active-tuna-v4-64mb',
+        'pending-preparation-tuna-v4-64mb',
         'live-switch-off-helpee-64mb',
         'live-switch-off-helper-64mb',
         'regular-v4-live-activation-off-on-off-256mb',
@@ -9620,7 +9630,7 @@ function Get-Phase4RouteAcceptanceScenarios {
 }
 
 function Get-Phase5RouteAcceptanceScenarios {
-    param([Parameter(Mandatory = $true)]$BaselineManifest)
+    param([Parameter(Mandatory = $true)]$BaselineManifest, [switch]$IncludePendingPreparation)
 
     $baselines = $BaselineManifest.Scenarios
     return @(
@@ -9630,6 +9640,9 @@ function Get-Phase5RouteAcceptanceScenarios {
         (New-Phase4RouteAcceptanceScenario -Name 'live-switch-off-helper-64mb' -Kind 'tuna' -ExpectedRouteChanges @('file_tuna_v4', 'post_tuna_fallback_v6') -PayloadBytes 67108864L -BaselineScenario 'live-switch-off-helper-64mb' -Baseline $baselines['live-switch-off-helper-64mb'] -RouteMode 'live-v4-switch-off' -Fault 'switch-off' -PayerMode 'helper' -LiveProofMode 'SwitchOff')
         (New-Phase4RouteAcceptanceScenario -Name 'regular-v4-live-activation-off-on-off-256mb' -Kind 'tuna' -ExpectedRouteChanges @('regular_nkn_v4_fast', 'file_tuna_v4', 'post_tuna_fallback_v6', 'file_tuna_v4', 'post_tuna_fallback_v6') -PayloadBytes 268435456L -RouteMode 'live-regular-activation-cycle' -Fault 'switch-off' -PayerMode 'helpee' -LiveToggleSequence 'on,off,on,off' -LiveProofMode 'RegularActivationCycle')
         (New-Phase4RouteAcceptanceScenario -Name 'second-transfer-after-reactivation' -Kind 'tuna' -ExpectedRouteChanges @('file_tuna_v4', 'post_tuna_fallback_v6', 'file_tuna_v4') -PayloadBytes 134217728L -RouteMode 'live-reactivation-second-transfer' -Fault 'switch-off' -PayerMode 'helpee' -LiveToggleSequence 'off,on' -LiveProofMode 'None')
+        if ($IncludePendingPreparation) {
+            (New-Phase4RouteAcceptanceScenario -Name 'pending-preparation-tuna-v4-64mb' -Kind 'tuna' -ExpectedRouteChanges @('regular_nkn_v4_fast', 'file_tuna_v4') -PayloadBytes 67108864L -RouteMode 'pending-preparation' -Fault 'none' -PayerMode 'helpee')
+        }
     )
 }
 
@@ -14642,7 +14655,7 @@ try {
         $baseline = Read-RouteAcceptanceBaselineManifest -RepoRoot $repoRoot -Path $BaselineManifestPath
         $acceptancePhase = if ($MatrixMode -eq 'phase5-analyzer-gui-acceptance') { 'phase5' } else { 'phase4' }
         $scenarios = if ($acceptancePhase -eq 'phase5') {
-            @(Get-Phase5RouteAcceptanceScenarios -BaselineManifest $baseline)
+            @(Get-Phase5RouteAcceptanceScenarios -BaselineManifest $baseline -IncludePendingPreparation:($ScenarioName -contains 'pending-preparation-tuna-v4-64mb'))
         }
         else {
             @(Get-Phase4RouteAcceptanceScenarios -BaselineManifest $baseline)
