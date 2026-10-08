@@ -6802,10 +6802,12 @@ function Test-FileTransferCoordinatorSnapshotRepairReplayResponderScopeInvalidat
             [string]$_.family -ceq 'responder_probe_handoff'
         })
     $currentOperations = @($responderOperations | Where-Object {
-            [string]$_.operationRole -ceq 'handoff_current' -and
+            (([string]$_.operationRole -ceq 'handoff_current' -and
+              [string]$_.beforeState -ceq 'Accepted') -or
+             ([string]$_.operationRole -ceq 'owner_work_hold' -and
+              [string]$_.beforeState -ceq 'Held')) -and
             [string]$_.operationKind -ceq
                 'ResponderPeerProbeRouteTransitionHandoff' -and
-            [string]$_.beforeState -ceq 'Accepted' -and
             [string]$_.afterState -ceq 'None' -and
             [bool]$_.stateApplied
         })
@@ -6825,6 +6827,12 @@ function Test-FileTransferCoordinatorSnapshotRepairReplayResponderScopeInvalidat
 
     $current = $currentOperations[0]
     $terminal = $terminalOperations[0]
+    $held = [string]$current.operationRole -ceq 'owner_work_hold'
+    $currentStatus = if ($held) { 'Held' } else { 'Accepted' }
+    $currentReason = if ($held) {
+        'runtime_unlock_responder_peer_probe_handoff_owner_work_pending'
+    } else { 'runtime_unlock_responder_peer_probe_handoff_bound' }
+    $currentReceiptStage = if ($held) { 'handoff_hold' } else { 'handoff_bind' }
     if ([string]$current.authorityId -in @('', '(none)') -or
         [string]$terminal.authorityId -cne [string]$current.authorityId -or
         [long]$current.operationGeneration -le 0 -or
@@ -6833,7 +6841,7 @@ function Test-FileTransferCoordinatorSnapshotRepairReplayResponderScopeInvalidat
         [string]$current.predecessorAuthorityId -cne '(none)' -or
         [string]$terminal.predecessorAuthorityId -cne '(none)' -or
         [string]$current.operationKey -cne
-            "responder_probe_handoff|handoff_current|$($current.authorityId)|$($current.operationGeneration)|ResponderPeerProbeRouteTransitionHandoff" -or
+            "responder_probe_handoff|$($current.operationRole)|$($current.authorityId)|$($current.operationGeneration)|ResponderPeerProbeRouteTransitionHandoff" -or
         [string]$terminal.operationKey -cne
             "responder_probe_handoff|handoff_terminal|$($terminal.authorityId)|$($terminal.operationGeneration)|ResponderPeerProbeRouteTransitionHandoff" -or
         $null -eq $current.responderProbeHandoff -or
@@ -6843,11 +6851,10 @@ function Test-FileTransferCoordinatorSnapshotRepairReplayResponderScopeInvalidat
 
     $currentPayload = $current.responderProbeHandoff
     $terminalPayload = $terminal.responderProbeHandoff
-    if ([string]$currentPayload.role -cne 'handoff_current' -or
+    if ([string]$currentPayload.role -cne [string]$current.operationRole -or
         [string]$terminalPayload.role -cne 'handoff_terminal' -or
-        [string]$currentPayload.decisionStatus -cne 'Accepted' -or
-        [string]$currentPayload.decisionReason -cne
-            'runtime_unlock_responder_peer_probe_handoff_bound' -or
+        [string]$currentPayload.decisionStatus -cne $currentStatus -or
+        [string]$currentPayload.decisionReason -cne $currentReason -or
         [string]$terminalPayload.decisionStatus -cne 'Invalidated' -or
         [string]$terminalPayload.decisionReason -cne
             'runtime_unlock_responder_peer_probe_handoff_scope_replaced' -or
@@ -6966,8 +6973,8 @@ function Test-FileTransferCoordinatorSnapshotRepairReplayResponderScopeInvalidat
     }
     $currentReceipt = $currentReceipts[0]
     $terminalReceipt = $terminalReceipts[0]
-    if ([string]$currentReceipt.stage -cne 'handoff_bind' -or
-        [string]$currentReceipt.receiptStatus -cne 'Accepted' -or
+    if ([string]$currentReceipt.stage -cne $currentReceiptStage -or
+        [string]$currentReceipt.receiptStatus -cne $currentStatus -or
         [string]$currentReceipt.receiptReason -cne
             [string]$currentPayload.decisionReason -or
         -not [bool]$currentReceipt.receiptValidated -or

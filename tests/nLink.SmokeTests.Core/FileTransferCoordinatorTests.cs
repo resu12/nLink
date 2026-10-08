@@ -23007,14 +23007,14 @@ public sealed partial class FileTransferCoordinatorTests
         => CreatePairedResponderHandoffForCheckpoint();
 
     [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
-    private static FileTransferCoordinatorState CreatePairedResponderHandoffForCheckpoint()
+    private static FileTransferCoordinatorState CreatePairedResponderHandoffForCheckpoint(bool ownerWorkHeld = false)
     {
         var fallback = FileTransferRouteResolver.Resolve(
             FileTransferRoute.PostTunaFallbackV6);
         var state = ActiveFallbackStateWithoutCheckpoint(
             FileTransferDirection.Inbound);
         var (bound, pairedRelease, observation, admission, pending, peerReceiveScope) = CreatePairedResponderHandoffBinding(state, fallback);
-        return CompletePairedResponderHandoffForCheckpoint(bound, pairedRelease, observation, admission, pending, peerReceiveScope);
+        return CompletePairedResponderHandoffForCheckpoint(bound, pairedRelease, observation, admission, pending, peerReceiveScope, ownerWorkHeld);
     }
 
     [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
@@ -23173,10 +23173,20 @@ public sealed partial class FileTransferCoordinatorTests
         RuntimeUnlockResponderPeerProbeRouteTransitionObservation observation,
         RuntimeUnlockAdmissionToken admission,
         RuntimeUnlockPendingPreCommitProbeRequest pending,
-        RuntimeUnlockPeerPreCommitAnswerAcceptanceScope peerReceiveScope)
+        RuntimeUnlockPeerPreCommitAnswerAcceptanceScope peerReceiveScope,
+        bool ownerWorkHeld = false)
     {
         var responderAuthority = AssertBoundResponderHandoffDuplicates(bound, observation, admission, pending);
         AssertResponderHandoffRejections(bound, observation, admission, pending, peerReceiveScope, responderAuthority);
+        if (ownerWorkHeld)
+        {
+            var held = FileTransferCoordinator.HoldRuntimeUnlockResponderPeerProbeRouteTransitionHandoffForOwnerWork(
+                bound.State,
+                responderAuthority,
+                "runtime_unlock_responder_peer_probe_handoff_owner_work_pending");
+            Assert.Equal(RuntimeUnlockResponderPeerProbeRouteTransitionHandoffStatus.Held, held.Status);
+            bound = bound with { State = held.State };
+        }
         return CommitPairedResponderHandoffForCheckpoint(bound, pairedRelease, observation, admission, pending, responderAuthority);
     }
 
@@ -23647,24 +23657,26 @@ public sealed partial class FileTransferCoordinatorTests
         return envelopes;
     }
 
-    [Fact]
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
     [Trait("FileTransferCoordinatorSuite", "CoordinatorSnapshots")]
     [Trait("FileTransferCoordinatorSuite", "ResponderProbeHandoff")]
     [Trait("FileTransferCoordinatorSuite", "RegularV4FrontierRepairPressure")]
-    public void ResponderHandoff_RepairReplayAtomicallyInvalidatesCurrentScope()
-        => CreateRepairReplayResponderScopeInvalidationSnapshotFixture();
+    public void ResponderHandoff_RepairReplayAtomicallyInvalidatesCurrentScope(bool ownerWorkHeld)
+        => CreateRepairReplayResponderScopeInvalidationSnapshotFixture(ownerWorkHeld);
 
     [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
     internal static FileTransferCoordinatorTransitionEnvelope
-        CreateRepairReplayResponderScopeInvalidationSnapshotFixture()
+        CreateRepairReplayResponderScopeInvalidationSnapshotFixture(bool ownerWorkHeld = false)
     {
-        var state = CreatePairedResponderHandoffForCheckpoint();
-        return CompleteRepairReplayResponderScopeInvalidationSnapshotFixture(state);
+        var state = CreatePairedResponderHandoffForCheckpoint(ownerWorkHeld);
+        return CompleteRepairReplayResponderScopeInvalidationSnapshotFixture(state, ownerWorkHeld);
     }
 
     [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
     private static FileTransferCoordinatorTransitionEnvelope
-        CompleteRepairReplayResponderScopeInvalidationSnapshotFixture(FileTransferCoordinatorState state)
+        CompleteRepairReplayResponderScopeInvalidationSnapshotFixture(FileTransferCoordinatorState state, bool ownerWorkHeld)
     {
         var beforeGeneration = state.PersistentState.SnapshotStateGeneration;
         var repair = FileTransferCoordinator.AuthorizeAction(
@@ -23694,13 +23706,12 @@ public sealed partial class FileTransferCoordinatorTests
             operation => operation is
             {
                 Family: "responder_probe_handoff",
-                OperationRole: "handoff_current",
                 OperationKind:
                     "ResponderPeerProbeRouteTransitionHandoff",
-                BeforeState: "Accepted",
                 AfterState: "None",
                 StateApplied: true,
-            });
+            } && operation.OperationRole == (ownerWorkHeld ? "owner_work_hold" : "handoff_current") &&
+                 operation.BeforeState == (ownerWorkHeld ? "Held" : "Accepted"));
         var terminal = Assert.Single(
             envelope.Aggregate.Operations,
             operation => operation is

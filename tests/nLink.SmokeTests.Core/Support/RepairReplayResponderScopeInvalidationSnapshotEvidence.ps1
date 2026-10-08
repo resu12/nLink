@@ -23,7 +23,7 @@ function Responder-Operations($value) {
 }
 function Current($value) {
     @(Responder-Operations $value | Where-Object {
-            $_.operationRole -ceq 'handoff_current'
+            $_.operationRole -in @('handoff_current', 'owner_work_hold')
         })[0]
 }
 function Terminal($value) {
@@ -118,6 +118,21 @@ $mutations = [ordered]@{
         $copy.family = 'receive_recovery'
         $e.aggregate.operations += $copy }
     wrong_current_state = { param($e) (Current $e).beforeState = 'None' }
+    wrong_current_receipt_stage = { param($e)
+        (Current $e).responderProbeHandoff.receipts[0].stage = 'handoff_invalidation' }
+    wrong_current_status = { param($e)
+        (Current $e).responderProbeHandoff.decisionStatus = 'Invalidated' }
+    wrong_current_reason = { param($e)
+        (Current $e).responderProbeHandoff.decisionReason = 'wrong' }
+    unvalidated_current_receipt = { param($e)
+        (Current $e).responderProbeHandoff.receipts[0].receiptValidated = $false }
+    wrong_current_role = { param($e)
+        $current = Current $e
+        $current.operationRole = if ($current.operationRole -ceq 'handoff_current') {
+            'owner_work_hold'
+        } else { 'handoff_current' }
+        $current.responderProbeHandoff.role = $current.operationRole
+        $current.operationKey = "responder_probe_handoff|$($current.operationRole)|$($current.authorityId)|$($current.operationGeneration)|ResponderPeerProbeRouteTransitionHandoff" }
     wrong_terminal_state = { param($e) (Terminal $e).afterState = 'Accepted' }
     wrong_authority = { param($e) (Terminal $e).authorityId = 'fte1-wrong' }
     wrong_generation = { param($e) (Terminal $e).operationGeneration++ }

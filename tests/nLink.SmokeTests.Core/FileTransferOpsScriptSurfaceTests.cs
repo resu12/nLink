@@ -6982,8 +6982,10 @@ public sealed class FileTransferOpsScriptSurfaceTests : FileTransferOpsScriptsTe
         finally { TryDeleteDirectory(tempRoot); }
     }
 
-    [Fact]
-    public async Task FileTransferOps_RepairReplayResponderScopeInvalidationUsesExactCrossFamilyCatalog()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task FileTransferOps_RepairReplayResponderScopeInvalidationUsesExactCrossFamilyCatalog(bool ownerWorkHeld)
     {
         if (!OperatingSystem.IsWindows()) { return; }
         var repoRoot = FindRepoRoot();
@@ -6997,7 +6999,7 @@ public sealed class FileTransferOpsScriptSurfaceTests : FileTransferOpsScriptsTe
             var envelope = NLink.Core.FileTransfer.SessionFileTransferService
                 .CreateCoordinatorSnapshotEvidenceForTesting(
                     FileTransferCoordinatorTests
-                        .CreateRepairReplayResponderScopeInvalidationSnapshotFixture());
+                        .CreateRepairReplayResponderScopeInvalidationSnapshotFixture(ownerWorkHeld));
             var fixturePath = Path.Combine(tempRoot, "envelope.json");
             await File.WriteAllTextAsync(
                 fixturePath,
