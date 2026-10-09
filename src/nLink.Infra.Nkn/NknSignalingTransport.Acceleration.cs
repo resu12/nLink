@@ -30052,7 +30052,8 @@ public sealed partial class NknSignalingTransport
 
         if (validation.IsValid)
         {
-            ClearAccelerationUserStoppedForFreshPeerMessage("offer", offer.Trigger, offer.SentAtUnixMs);
+            ClearAccelerationUserStoppedForFreshPeerMessage(
+                "offer", offer.Trigger, offer.SentAtUnixMs, offer, pairedRetryScope);
         }
 
         if (validation.IsValid && IsAccelerationUserStoppedForCurrentSession())
@@ -41644,10 +41645,19 @@ public sealed partial class NknSignalingTransport
         }
     }
 
-    private void ClearAccelerationUserStoppedForFreshPeerMessage(string messageType, string? trigger, long sentAtUnixMs)
+    private void ClearAccelerationUserStoppedForFreshPeerMessage(
+        string messageType,
+        string? trigger,
+        long sentAtUnixMs,
+        TransportAccelerationOfferPayload? pairedRetryOffer = null,
+        InboundPostFallbackPairedRetryOfferScope? pairedRetryScope = null)
     {
         if (sentAtUnixMs <= 0 ||
-            !IsRuntimeUnlockNegotiationReason(trigger))
+            (!IsRuntimeUnlockNegotiationReason(trigger) &&
+             !(pairedRetryOffer is not null &&
+               pairedRetryScope is { IsDefault: false } paired &&
+               string.Equals(SanitizeLogToken(trigger), "fallback_paired_tail_yield", StringComparison.Ordinal) &&
+               TryRecaptureInboundPostFallbackPairedRetryOfferScope(pairedRetryOffer, paired, out _))))
         {
             return;
         }

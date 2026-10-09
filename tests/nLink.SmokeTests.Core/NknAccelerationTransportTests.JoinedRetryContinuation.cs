@@ -272,6 +272,17 @@ public sealed partial class NknAccelerationTransportTests
             inbound = await SessionFileTransferV4SenderTests.CreateJoinedNknFallbackContextForTestAsync(
                 receiver, receiverData, sessionId, transferId, FileTransferDirection.Inbound, withStalledRepair, withRecentProgress,
                 withoutFrontierGap: continueAfterEof || dialFailureBeforeProbe);
+            if (payerHandoff)
+            {
+                // Exercise the former payer's real stop after the declared
+                // baseline is installed, before the new payer re-arms it.
+                host.SetAccelerationAcceptedForTests(NknAccelerationLaneKind.File, sessionId);
+                helper.SetAccelerationAcceptedForTests(NknAccelerationLaneKind.File, sessionId);
+                await helper.StopAccelerationAsync("header_switch_off", timeout.Token);
+                await WaitUntilAsync(() => Equals(sessionId,
+                    GetPrivateField(host, "accelerationPeerUserStoppedSessionId")), TimeSpan.FromSeconds(3));
+                Assert.True(helper.IsAccelerationUserStoppedForCurrentSessionForTests);
+            }
             var senderInitial = SessionFileTransferV4SenderTests.CaptureJoinedNknStateForTest(sender, outbound);
             var receiverInitial = SessionFileTransferV4SenderTests.CaptureJoinedNknStateForTest(receiver, inbound);
             if (payerHandoff)
@@ -691,7 +702,9 @@ public sealed partial class NknAccelerationTransportTests
                 Assert.Equal("fallback_payer_handoff_prior_dialer", hostLane.LastStopReason);
                 Assert.True(hostLane.IsLocalPaidListenerActive);
                 Assert.False(helperLane.IsLocalPaidListenerActive);
-                Assert.Equal(1, hostLane.StopCalls);
+                Assert.False(helper.IsAccelerationUserStoppedForCurrentSessionForTests);
+                Assert.Equal(2, hostLane.StopCalls); // Peer stop, then exact prior-dialer retirement.
+                Assert.Equal(1, helperLane.StopCalls);
                 var bytes = Enumerable.Range(0, 21 * 1024).Select(index => (byte)(index * 17)).ToArray();
                 var publication = SessionFileTransferV4SenderTests.CaptureJoinedNknStateForTest(sender, outbound)
                     .CurrentRoutePublicationToken!.Value;

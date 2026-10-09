@@ -9,9 +9,13 @@ namespace NLink.SmokeTests;
 
 public sealed partial class NknAccelerationTransportTests
 {
-    [Fact]
+    [Theory]
+    [InlineData("not_stopped")]
+    [InlineData("fresh_offer")]
+    [InlineData("pre_stop_offer")]
+    [InlineData("binding_retired_after_capture")]
     [Trait("FileTransferInfraSuite", "RuntimeUnlockResponderPeerProbe")]
-    public async Task PostFallbackPairedRetryOffer_CheckpointAcceptanceRefreshesExactPublishedScope()
+    public async Task PostFallbackPairedRetryOffer_CheckpointAcceptanceRefreshesExactPublishedScope(string stopControl)
     {
         FakeNknClient.ResetNetwork();
         try
@@ -237,11 +241,44 @@ public sealed partial class NknAccelerationTransportTests
             observations.Clear();
             var beforeTransaction = Assert.IsType<RuntimeUnlockTransactionSnapshot>(
                 GetPrivateField(transport, "runtimeUnlockTransactionState"));
+            if (stopControl != "not_stopped")
+            {
+                InvokePrivateMethod(transport, "MarkAccelerationUserStoppedForCurrentSession", sessionId);
+                var stoppedAt = Assert.IsType<long>(GetPrivateField(transport, "accelerationUserStoppedUtcMs"));
+                offer.SentAtUnixMs = stopControl == "pre_stop_offer" ? stoppedAt - 1 : stoppedAt;
+                Assert.True(transport.IsAccelerationUserStoppedForCurrentSessionForTests);
+            }
+            if (stopControl == "binding_retired_after_capture")
+            {
+                var bindingRequests = 0;
+                bridge.RuntimeUnlockPostFallbackPairedRetryOfferBindingRequested += (_, args) =>
+                {
+                    if (++bindingRequests > 1)
+                    {
+                        args.Decision = new(RuntimeUnlockPostFallbackPairedRetryOfferBindingStatus.Stale,
+                            "paired_retry_offer_binding_source_not_current");
+                    }
+                };
+            }
             var logStart = GetOperationalLogLength();
             var handleOffer = Assert.IsAssignableFrom<Task>(InvokePrivateMethod(transport,
                 "HandleTransportAccelerationOfferAsync", peerClient.Address, offer,
                 "checkpoint-accepted-real-paired-offer", cts.Token));
             await handleOffer.WaitAsync(TimeSpan.FromSeconds(3), cts.Token);
+            if (stopControl is "pre_stop_offer" or "binding_retired_after_capture")
+            {
+                Assert.True(transport.IsAccelerationUserStoppedForCurrentSessionForTests);
+                Assert.Equal(beforeTransaction, GetPrivateField(transport, "runtimeUnlockTransactionState"));
+                Assert.Equal(0, lane.StartDialerCalls);
+                Assert.Equal(publication, State().CurrentRoutePublicationToken);
+                Assert.Equal(owner, State().CurrentRuntimeOwner);
+                var stoppedLog = ReadOperationalLogTail(logStart);
+                Assert.Contains("event=tuna_acceleration_offer_rejected; reason=user_stopped_tuna", stoppedLog,
+                    StringComparison.Ordinal);
+                Assert.DoesNotContain("event=tuna_acceleration_user_stop_cleared;", stoppedLog, StringComparison.Ordinal);
+                return;
+            }
+            Assert.False(transport.IsAccelerationUserStoppedForCurrentSessionForTests);
             Assert.Contains(observations, item => item.Decision.Accepted &&
                 item.Request.CheckpointRequestId == "(none)" &&
                 item.Decision.Receipt.AcceptanceScope == observed.Decision.Receipt.AcceptanceScope);
