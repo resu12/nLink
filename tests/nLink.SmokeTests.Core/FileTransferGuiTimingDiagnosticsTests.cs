@@ -366,7 +366,8 @@ public sealed class FileTransferGuiTimingDiagnosticsTests : FileTransferOpsScrip
         Assert.Contains("durationMs = [Math]::Round($sw.Elapsed.TotalMilliseconds, 3)", cycle, StringComparison.Ordinal);
         Assert.Contains("goodputMeasurementScope = 'gui_end_to_end'", cycle, StringComparison.Ordinal);
         Assert.Contains("-RouteLine $timingSelectedRouteLine -OutboundTerminalLine $terminal.OutboundLine", cycle, StringComparison.Ordinal);
-        Assert.Equal(3, System.Text.RegularExpressions.Regex.Matches(cycle, @"\$timingSelectedRouteLine = \$routeLine").Count);
+        // Pending preparation adds a fourth branch that captures the selected route evidence.
+        Assert.Equal(4, System.Text.RegularExpressions.Regex.Matches(cycle, @"\$timingSelectedRouteLine = \$routeLine").Count);
         Assert.Equal(1, System.Text.RegularExpressions.Regex.Matches(cycle, "Get-GuiSmokeRouteToTerminalTimingDiagnostic").Count);
         Assert.DoesNotContain("Get-AppLog", helperText, StringComparison.Ordinal);
         Assert.DoesNotContain("Coordinator", helperText, StringComparison.Ordinal);
