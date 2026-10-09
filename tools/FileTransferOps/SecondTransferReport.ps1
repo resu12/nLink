@@ -176,11 +176,29 @@ function Write-FileTransferSecondTransferReport {
         $fields = $payload[0].Fields
         $lastTerminalOrdinal = [Math]::Max($lastTerminalOrdinal, $source[[string]$completed[0].RawLine])
         $chunks = if ($direction -ceq 'outbound') { [long]$fields.remote_frontier_chunk_index } else { [long]$fields.next_chunk_index }
+        $terminalSummaryOrdered = [long]$fields.log_writer_sequence -gt [long]$terminal[0].writerSequence
+        if (-not $terminalSummaryOrdered) {
+            # Snapshot emission is queued: writer order need not be decision
+            # order. Only the accepted, same-writer coordinator boundary can
+            # establish that this metric followed terminalization.
+            $summaryTicks = 0L
+            $decisionMilliseconds = 0L
+            if ($fields.ContainsKey('log_writer_attempt_utc_ticks') -and
+                $terminal[0].PSObject.Properties.Name -contains 'decisionUtcMilliseconds' -and
+                [long]::TryParse([string]$fields.log_writer_attempt_utc_ticks, [ref]$summaryTicks) -and
+                [long]::TryParse([string]$terminal[0].decisionUtcMilliseconds, [ref]$decisionMilliseconds) -and
+                $summaryTicks -gt 0 -and $summaryTicks -le [DateTime]::MaxValue.Ticks -and $decisionMilliseconds -gt 0) {
+                $summaryMilliseconds = [DateTimeOffset]::new([DateTime]::new($summaryTicks, [DateTimeKind]::Utc)).ToUnixTimeMilliseconds()
+                $terminalSummaryOrdered = $summaryMilliseconds -ge $decisionMilliseconds
+            }
+        }
         if ($fields.terminal_state -cne 'completed' -or
             $fields.route -cne 'file_tuna_v4' -or [int]$fields.protocol_version -ne 4 -or
             [long]$fields.file_size_bytes -le 0 -or [long]$fields.bytes_transferred -ne [long]$fields.file_size_bytes -or
             $chunks -le 0 -or
-            [long]$fields.log_writer_sequence -le [long]$terminal[0].writerSequence) {
+            -not $terminalSummaryOrdered -or
+            [long]$fields.log_writer_sequence -le [long]$route[0].writerSequence -or
+            [long]$fields.log_writer_sequence -ge [long]$completed[0].Fields.log_writer_sequence) {
             throw 'second_transfer_terminal_data_path_invalid'
         }
         $terminalProof.Add([pscustomobject]@{ direction=$direction; writer=$writer; boundaryId=$terminal[0].boundaryId;

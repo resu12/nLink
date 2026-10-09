@@ -11,7 +11,7 @@ New-Item -ItemType Directory -Path $root | Out-Null
 $env:NLINK_FILETRANSFER_ACCEPTANCE_RUN_ID = 'report-fixture-run'
 $env:NLINK_FILETRANSFER_SCENARIO_RUN_ID = 'report-fixture-run:second-transfer-after-reactivation:1'
 
-function New-Fixture([string]$Name) {
+function New-Fixture([string]$Name, [switch]$DelayedTerminalSnapshot) {
     $dir = Join-Path $root $Name
     New-Item -ItemType Directory -Path $dir | Out-Null
     $lines = [Collections.Generic.List[string]]::new()
@@ -23,6 +23,7 @@ function New-Fixture([string]$Name) {
             $writer = 'writer-' + $direction
             $instance = "$transfer-$direction"
             $seq = if ($transfer -ceq 'first') { 1 } else { 101 }
+            $summaryWritten = $false
             $scope = "session_id=session; transfer_id=$transfer; direction=$direction; coordinator_instance_id=$instance; log_writer_id=$writer"
             $part = @("event=filetransfer_coordinator_snapshot_stream_started; $scope; log_writer_sequence=$seq")
             foreach ($kind in @('StartTransfer','RoutePublication','Terminalized')) {
@@ -31,13 +32,19 @@ function New-Fixture([string]$Name) {
                     $eventName = if ($direction -ceq 'outbound') {'filetransfer_data_path_send_result'} else {'filetransfer_data_path_receive_result'}
                     $delivery = if ($direction -ceq 'outbound') {'sent'} else {'received'}
                     $part += "event=$eventName; $scope; log_writer_sequence=$seq; frame_type=filetransfer.chunk_batch.v4; actual_transport=tuna; delivery_result=$delivery; raw_payload_bytes=64512; data_path_session_id=session; data_path_transfer_id=$transfer; publication_evidence_boundary_id=$instance-RoutePublication; publication_evidence_operation_key=op-$instance; route_publication_generation=1; route=file_tuna_v4; protocol_version=4; data_path_envelope_fingerprint=envelope-$transfer; security_payload_fingerprint=payload-$transfer; receive_disposition=dispatch_entered"
+                    if ($DelayedTerminalSnapshot -and $transfer -ceq 'second') {
+                        $ticks = [DateTimeOffset]::FromUnixTimeMilliseconds(1700000000001).UtcDateTime.Ticks
+                        $seq++
+                        $part += "event=filetransfer_v4_efficiency_summary; session_id=sess_[redacted]; transfer_id=[redacted]; direction=$direction; log_writer_id=$writer; log_writer_sequence=$seq; log_writer_attempt_utc_ticks=$ticks; file_size_bytes=16777216; bytes_transferred=16777216; remote_frontier_chunk_index=781; next_chunk_index=781; terminal_state=completed; route=file_tuna_v4; protocol_version=4"
+                        $summaryWritten = $true
+                    }
                 }
                 $seq++
                 $part += "event=filetransfer_coordinator_transition_snapshot; $scope; log_writer_sequence=$seq"
                 $id = "$instance-$kind"
                 $boundaries += [pscustomobject]@{ sessionId='session'; transferId=$transfer; direction=$direction; writer=$writer;
                     coordinatorInstanceId=$instance; writerSequence=$seq; boundaryId=$id; boundaryHash="hash-$id";
-                    decisionKind=$kind; decisionStatus='Accepted'; unresolvedCount=0; afterBoundary=[pscustomobject]@{terminalGeneration=$(if ($kind -ceq 'Terminalized') {1} else {0})} }
+                    decisionKind=$kind; decisionStatus='Accepted'; decisionUtcMilliseconds=1700000000000L; unresolvedCount=0; afterBoundary=[pscustomobject]@{terminalGeneration=$(if ($kind -ceq 'Terminalized') {1} else {0})} }
                 if ($kind -ceq 'RoutePublication') {
                     $routes += [pscustomobject]@{ sessionId='session'; transferId=$transfer; direction=$direction; writer=$writer; writerSequence=$seq;
                         boundaryId=$id; boundaryHash="hash-$id"; route='file_tuna_v4'; protocolVersion=4; publicationGeneration=1; operationKey="op-$instance" }
@@ -45,8 +52,10 @@ function New-Fixture([string]$Name) {
             }
             $seq++
             $part += "event=filetransfer_coordinator_snapshot_stream_completed; $scope; log_writer_sequence=$seq"
-            $seq++
-            $part += "event=filetransfer_v4_efficiency_summary; session_id=sess_[redacted]; transfer_id=[redacted]; direction=$direction; log_writer_id=$writer; log_writer_sequence=$seq; file_size_bytes=16777216; bytes_transferred=16777216; remote_frontier_chunk_index=781; next_chunk_index=781; terminal_state=completed; route=file_tuna_v4; protocol_version=4"
+            if (-not $summaryWritten) {
+                $seq++
+                $part += "event=filetransfer_v4_efficiency_summary; session_id=sess_[redacted]; transfer_id=[redacted]; direction=$direction; log_writer_id=$writer; log_writer_sequence=$seq; file_size_bytes=16777216; bytes_transferred=16777216; remote_frontier_chunk_index=781; next_chunk_index=781; terminal_state=completed; route=file_tuna_v4; protocol_version=4"
+            }
             $seq++
             $part += "event=file_transfer_${direction}_terminal; session_id=sess_[redacted]; transfer_id=[redacted]; log_writer_id=$writer; log_writer_sequence=$seq; state=Completed; error_code=(none)"
             foreach ($line in $part) { $lines.Add($line); if ($transfer -ceq 'second') { $second.Add($line) } }
@@ -112,13 +121,23 @@ $cases = @('wrong_run','wrong_scenario','wrong_input','wrong_slice','wrong_direc
     'warning_cap','parity','route_parity','route_failure','incomplete_stream','snapshot_failure','unresolved','missing_direction',
     'missing_terminal','missing_boundary','wrong_session','first_overlap','redacted_identity','wrong_protocol','fallback','tuna_v6',
     'missing_publication','wrong_publication_source','reordered','changed','foreign','gap','duplicate','terminal_bytes','terminal_route','missing_prior',
-    'missing_send','missing_receive','unpaired_payload','bad_sha','bad_size','incomplete_gui','wrong_gui_hash')
+    'missing_send','missing_receive','unpaired_payload','bad_sha','bad_size','incomplete_gui','wrong_gui_hash',
+    'delayed_before_decision','delayed_missing_time','delayed_invalid_time','delayed_missing_decision_time','delayed_rejected_terminal',
+    'delayed_missing_send','delayed_unpaired_payload','delayed_bad_sha')
 foreach ($case in $cases) {
-    $f = New-Fixture $case
+    $f = New-Fixture $case -DelayedTerminalSnapshot:($case -like 'delayed_*')
     $slice = Join-Path $f.ArtifactDir 'filetransfer-second-transfer-retained-log-slice.log'
     $sliceLines = [IO.File]::ReadAllLines($slice)
     $updateSlice = $false
     switch ($case) {
+        'delayed_before_decision' { $ticks=[DateTimeOffset]::FromUnixTimeMilliseconds(1699999999999).UtcDateTime.Ticks; $sliceLines=$sliceLines -replace 'log_writer_attempt_utc_ticks=\d+',"log_writer_attempt_utc_ticks=$ticks"; $updateSlice=$true }
+        'delayed_missing_time' { $sliceLines=$sliceLines -replace '; log_writer_attempt_utc_ticks=\d+',''; $updateSlice=$true }
+        'delayed_invalid_time' { $sliceLines=$sliceLines -replace 'log_writer_attempt_utc_ticks=\d+','log_writer_attempt_utc_ticks=9223372036854775807'; $updateSlice=$true }
+        'delayed_missing_decision_time' { $f.Full.Boundaries | Where-Object { $_.transferId -ceq 'second' -and $_.decisionKind -ceq 'Terminalized' } | ForEach-Object { $_.PSObject.Properties.Remove('decisionUtcMilliseconds') } }
+        'delayed_rejected_terminal' { $f.Full.Boundaries | Where-Object { $_.transferId -ceq 'second' -and $_.decisionKind -ceq 'Terminalized' } | ForEach-Object { $_.decisionStatus='Rejected' } }
+        'delayed_missing_send' { $sliceLines=@($sliceLines | Where-Object { $_ -notmatch 'event=filetransfer_data_path_send_result' }); $updateSlice=$true }
+        'delayed_unpaired_payload' { $sliceLines=@($sliceLines | ForEach-Object { if ($_ -match 'event=filetransfer_data_path_receive_result') { $_ -replace 'security_payload_fingerprint=payload-second','security_payload_fingerprint=foreign' } else { $_ } }); $updateSlice=$true }
+        'delayed_bad_sha' { $f.Gui.secondTransfer.receivedSha256='b'*64 }
         'wrong_run' { $f.Request.acceptanceRunId='wrong' }
         'wrong_scenario' { $f.Request.scenarioRunId='wrong' }
         'wrong_input' { $f.Request.inputSha256='wrong' }
@@ -164,7 +183,7 @@ foreach ($case in $cases) {
     if ($updateSlice) { $sliceLines | Set-Content $slice -Encoding UTF8; $f.Request.sliceSha256=(Get-FileHash $slice).Hash.ToLowerInvariant() }
     # Some controls preserve source membership so they reach the semantic proof
     # checks rather than being rejected only for a different raw line.
-    if ($case -in @('wrong_session','redacted_identity','missing_terminal','missing_direction','terminal_bytes','terminal_route','missing_send','missing_receive','unpaired_payload')) {
+    if ($case -like 'delayed_*' -or $case -in @('wrong_session','redacted_identity','missing_terminal','missing_direction','terminal_bytes','terminal_route','missing_send','missing_receive','unpaired_payload')) {
         $start = @($f.Index.AllEvents | Where-Object { $_.EventName -ceq 'filetransfer_coordinator_snapshot_stream_started' -and $_.Fields.transfer_id -ceq 'second' })[0]
         $newLines = @($f.Index.AllEvents | Where-Object { $_.Sequence -lt $start.Sequence } | ForEach-Object RawLine) + $sliceLines
         $inputPath = Join-Path $f.ArtifactDir 'filetransfer-retained-log-slice.log'
@@ -176,7 +195,20 @@ foreach ($case in $cases) {
     }
     $rejected = $false
     try { Write-FileTransferSecondTransferReport @f }
-    catch { if ($_.Exception.Message -notlike 'second_transfer_*') { throw }; $rejected=$true }
+    catch {
+        if ($_.Exception.Message -notlike 'second_transfer_*') { throw }
+        if ($case -like 'delayed_*') {
+            $expected = switch ($case) {
+                'delayed_rejected_terminal' { 'second_transfer_lifecycle_incomplete' }
+                'delayed_missing_send' { 'second_transfer_positive_data_path_missing' }
+                'delayed_unpaired_payload' { 'second_transfer_paired_data_path_missing' }
+                'delayed_bad_sha' { 'second_transfer_integrity_evidence_invalid' }
+                default { 'second_transfer_terminal_data_path_invalid' }
+            }
+            if ($_.Exception.Message -cne $expected) { throw }
+        }
+        $rejected=$true
+    }
     if (-not $rejected -or (Test-Path (Join-Path $f.ArtifactDir 'second-transfer-analysis/primary-derived-report.json'))) { throw "negative_control_accepted:$case" }
 }
 

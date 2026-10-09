@@ -12,9 +12,11 @@ namespace NLink.SmokeTests;
 public sealed class FileTransferSecondTransferReportTests : FileTransferOpsScriptsTestBase
 {
     [Theory]
-    [InlineData("powershell")]
-    [InlineData("pwsh")]
-    public async Task SecondTransferReport_FreshCoordinatorStreamsAreReused(string host)
+    [InlineData("powershell", false)]
+    [InlineData("pwsh", false)]
+    [InlineData("powershell", true)]
+    [InlineData("pwsh", true)]
+    public async Task SecondTransferReport_FreshCoordinatorStreamsAreReused(string host, bool delayedTerminalSnapshot)
     {
         if (!OperatingSystem.IsWindows()) { return; }
         var dir = Path.Combine(FindRepoRoot(), "artifacts", "second-transfer-report-implementation-20260924", "fresh", Guid.NewGuid().ToString("N"));
@@ -26,11 +28,11 @@ public sealed class FileTransferSecondTransferReportTests : FileTransferOpsScrip
             await File.WriteAllLinesAsync(Path.Combine(dir, $"{transfer}-{direction}.log"), lines, new UTF8Encoding(false));
         }
         const string script = """
-            param([string]$RepoRoot, [string]$Directory)
+            param([string]$RepoRoot, [string]$Directory, [string]$DelayedTerminalSnapshot)
             $ErrorActionPreference = 'Stop'
-            & (Join-Path $RepoRoot 'tests/nLink.SmokeTests.Core/Support/SecondTransferReportFresh.ps1') -RepoRoot $RepoRoot -Directory $Directory
+            & (Join-Path $RepoRoot 'tests/nLink.SmokeTests.Core/Support/SecondTransferReportFresh.ps1') -RepoRoot $RepoRoot -Directory $Directory -DelayedTerminalSnapshot ($DelayedTerminalSnapshot -ceq 'true')
             """;
-        var result = await RunPowerShellScriptTextAsync(script, [FindRepoRoot(), dir], host, initializeHostModulePath: true);
+        var result = await RunPowerShellScriptTextAsync(script, [FindRepoRoot(), dir, delayedTerminalSnapshot ? "true" : "false"], host, initializeHostModulePath: true);
         Assert.True(result.ExitCode == 0, $"{host}: {result.Stdout}{Environment.NewLine}{result.Stderr}");
         Assert.Contains("second-transfer-fresh-ok", result.Stdout, StringComparison.Ordinal);
     }

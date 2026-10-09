@@ -1,4 +1,4 @@
-param([string]$RepoRoot, [string]$Directory)
+param([string]$RepoRoot, [string]$Directory, [bool]$DelayedTerminalSnapshot = $false)
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 . (Join-Path $RepoRoot 'tools/FileTransferOps/AnalyzerOrchestration.ps1')
@@ -13,6 +13,7 @@ foreach ($transfer in @('first','second')) {
     foreach ($direction in @('outbound','inbound')) {
         $part = [Collections.Generic.List[string]]::new()
         $publication = $null
+        $summaryWritten = $false
         foreach ($line in [IO.File]::ReadAllLines((Join-Path $Directory "$transfer-$direction.log"))) {
             $parsed = ConvertFrom-FileTransferLogLine -Line $line -FilePath 'fresh' -LineNumber 1 -Sequence 1
             if ($parsed.EventName -ceq 'filetransfer_coordinator_transition_snapshot') {
@@ -26,13 +27,23 @@ foreach ($transfer in @('first','second')) {
                     $sequences[$direction]++
                     # Modeled observational delivery, keyed to the real projected publication.
                     $part.Add("event=$eventName; direction=$direction; log_writer_id=writer-$direction; log_writer_sequence=$($sequences[$direction]); frame_type=filetransfer.chunk_batch.v4; actual_transport=tuna; delivery_result=$delivery; raw_payload_bytes=64512; data_path_session_id=$($publication.sessionId); data_path_transfer_id=$($publication.transferId); publication_evidence_boundary_id=$($publication.transitionId); publication_evidence_operation_key=$($operation.operationKey); route_publication_generation=1; route=file_tuna_v4; protocol_version=4; data_path_envelope_fingerprint=envelope-$transfer; security_payload_fingerprint=payload-$transfer; receive_disposition=dispatch_entered")
+                    if ($DelayedTerminalSnapshot -and $transfer -ceq 'second' -and $direction -ceq 'outbound') {
+                        # The real coordinator decision precedes the metric, but
+                        # its queued snapshot reaches the writer afterward.
+                        $ticks = [DateTimeOffset]::FromUnixTimeMilliseconds([long]$envelope.decisionUtcMilliseconds + 1).UtcDateTime.Ticks
+                        $sequences[$direction]++
+                        $part.Add("event=filetransfer_v4_efficiency_summary; session_id=sess_[redacted]; transfer_id=[redacted]; direction=$direction; log_writer_id=writer-$direction; log_writer_sequence=$($sequences[$direction]); log_writer_attempt_utc_ticks=$ticks; file_size_bytes=16777216; bytes_transferred=16777216; remote_frontier_chunk_index=781; next_chunk_index=781; terminal_state=completed; route=file_tuna_v4; protocol_version=4")
+                        $summaryWritten = $true
+                    }
                 }
             }
             $sequences[$direction]++
             $part.Add("$line; log_writer_id=writer-$direction; log_writer_sequence=$($sequences[$direction])")
         }
-        $sequences[$direction]++
-        $part.Add("event=filetransfer_v4_efficiency_summary; session_id=sess_[redacted]; transfer_id=[redacted]; direction=$direction; log_writer_id=writer-$direction; log_writer_sequence=$($sequences[$direction]); file_size_bytes=16777216; bytes_transferred=16777216; remote_frontier_chunk_index=781; next_chunk_index=781; terminal_state=completed; route=file_tuna_v4; protocol_version=4")
+        if (-not $summaryWritten) {
+            $sequences[$direction]++
+            $part.Add("event=filetransfer_v4_efficiency_summary; session_id=sess_[redacted]; transfer_id=[redacted]; direction=$direction; log_writer_id=writer-$direction; log_writer_sequence=$($sequences[$direction]); file_size_bytes=16777216; bytes_transferred=16777216; remote_frontier_chunk_index=781; next_chunk_index=781; terminal_state=completed; route=file_tuna_v4; protocol_version=4")
+        }
         $sequences[$direction]++
         $part.Add("event=file_transfer_${direction}_terminal; session_id=sess_[redacted]; transfer_id=[redacted]; log_writer_id=writer-$direction; log_writer_sequence=$($sequences[$direction]); state=Completed; error_code=(none)")
         foreach ($line in $part) { $all.Add($line); if ($transfer -ceq 'second') { $second.Add($line) } }
@@ -79,6 +90,11 @@ Write-FileTransferSecondTransferReport @reportArgs
 if ((@($full,$compact,$parity,$route,$events) | ConvertTo-Json -Depth 64 -Compress) -cne $before) { throw 'fresh_parent_mutated' }
 $report = Get-Content (Join-Path $Directory 'second-transfer-analysis/primary-derived-report.json') -Raw | ConvertFrom-Json
 if ($report.routes.Count -ne 2 -or $report.terminals.Count -ne 2 -or $report.pairedPayloadCount -ne 1 -or $report.operatorVerdict -cne 'PASS') { throw 'fresh_report_incorrect' }
+if ($DelayedTerminalSnapshot) {
+    $outbound = @($report.terminals | Where-Object direction -CEQ 'outbound')[0]
+    $terminal = @($full.Boundaries | Where-Object { $_.boundaryId -ceq $outbound.boundaryId })[0]
+    if ([long]$outbound.writerSequence -ge [long]$terminal.writerSequence) { throw 'fixture_did_not_delay_terminal_snapshot' }
+}
 
 # Exercise the real primary receipt and live split-proof consumer. Supporting
 # process artifacts below model a completed offline worker, not a GUI run.
