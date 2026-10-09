@@ -23624,7 +23624,8 @@ public sealed partial class FileTransferCoordinatorTests
         RuntimeUnlockResponderPeerProbeRouteTransitionObservation observation,
         RuntimeUnlockAdmissionToken admission,
         RuntimeUnlockPendingPreCommitProbeRequest pending,
-        RuntimeUnlockResponderPeerProbeRouteTransitionHandoffAuthority responderAuthority)
+        RuntimeUnlockResponderPeerProbeRouteTransitionHandoffAuthority responderAuthority,
+        Action<FileTransferCoordinatorTransitionEnvelope>? capture = null)
     {
         var transaction = BuildCommitReadyRuntimeUnlockTransaction(
             bound.State,
@@ -23685,7 +23686,8 @@ public sealed partial class FileTransferCoordinatorTests
             bound.State,
             request,
             finalProof,
-            invalidateRuntimeUnlockRetryLifecycle: false);
+            invalidateRuntimeUnlockRetryLifecycle: false,
+            capture: capture);
         Assert.Equal(FileTransferRoute.FileTunaV4, committed.State.RouteSelection.Route);
         Assert.Null(
             FileTransferCoordinator.GetFallbackTailYieldSubstate(committed.State)
@@ -23722,19 +23724,56 @@ public sealed partial class FileTransferCoordinatorTests
         => CreateCheckpointResponderCarrySnapshotFixture();
 
     [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
-    internal static IReadOnlyList<FileTransferCoordinatorTransitionEnvelope> CreateCheckpointResponderCarrySnapshotFixture()
+    internal static IReadOnlyList<FileTransferCoordinatorTransitionEnvelope> CreateCheckpointResponderCarrySnapshotFixture(bool includeHeldHistory = false)
     {
+        if (includeHeldHistory)
+        {
+            return CreateHeldCheckpointResponderCarrySnapshotFixture();
+        }
         var setup = CreatePairedResponderHandoffForCheckpoint();
         return CompleteCheckpointResponderCarrySnapshotFixture(setup);
     }
 
     [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private static IReadOnlyList<FileTransferCoordinatorTransitionEnvelope> CreateHeldCheckpointResponderCarrySnapshotFixture()
+    {
+        var fallback = FileTransferRouteResolver.Resolve(FileTransferRoute.PostTunaFallbackV6);
+        var (bound, pairedRelease, observation, admission, pending, _) = CreatePairedResponderHandoffBinding(
+            ActiveFallbackStateWithoutCheckpoint(FileTransferDirection.Inbound), fallback);
+        var envelopes = new List<FileTransferCoordinatorTransitionEnvelope> { bound.SnapshotEnvelope! };
+        var held = FileTransferCoordinator.HoldRuntimeUnlockResponderPeerProbeRouteTransitionHandoffForOwnerWork(
+            bound.State, bound.Authority!.Value, "runtime_unlock_responder_peer_probe_handoff_owner_work_pending");
+        Assert.Equal(RuntimeUnlockResponderPeerProbeRouteTransitionHandoffStatus.Held, held.Status);
+        envelopes.Add(held.SnapshotEnvelope!);
+        return CompleteHeldCheckpointResponderCarrySnapshotFixture(bound with { State = held.State },
+            pairedRelease, observation, admission, pending, envelopes);
+    }
+
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private static IReadOnlyList<FileTransferCoordinatorTransitionEnvelope> CompleteHeldCheckpointResponderCarrySnapshotFixture(
+        RuntimeUnlockResponderPeerProbeRouteTransitionHandoffDecision held,
+        FileTransferFallbackTailPairedReleaseReceipt pairedRelease,
+        RuntimeUnlockResponderPeerProbeRouteTransitionObservation observation,
+        RuntimeUnlockAdmissionToken admission, RuntimeUnlockPendingPreCommitProbeRequest pending,
+        List<FileTransferCoordinatorTransitionEnvelope> envelopes)
+    {
+        var committed = CommitPairedResponderHandoffForCheckpoint(held,
+            pairedRelease, observation, admission, pending, held.Authority!.Value, envelopes.Add);
+        var invalidated = FileTransferCoordinator.BindRuntimeUnlockResponderPeerProbeRouteTransitionHandoff(
+            committed, observation, admission, pending);
+        Assert.Equal(RuntimeUnlockResponderPeerProbeRouteTransitionHandoffStatus.Invalidated, invalidated.Status);
+        envelopes.Add(invalidated.SnapshotEnvelope!);
+        return CompleteCheckpointResponderCarrySnapshotFixture(invalidated.State, envelopes);
+    }
+
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
     private static IReadOnlyList<FileTransferCoordinatorTransitionEnvelope>
-        CompleteCheckpointResponderCarrySnapshotFixture(FileTransferCoordinatorState setup)
+        CompleteCheckpointResponderCarrySnapshotFixture(FileTransferCoordinatorState setup,
+            List<FileTransferCoordinatorTransitionEnvelope>? priorEnvelopes = null)
     {
         // Begin this contract stream on the already established Tuna route. The
         // paired authority itself retains its exact historical PostFallback scope.
-        var state = setup with { PersistentState = setup.PersistentState with
+        var state = priorEnvelopes is not null ? setup : setup with { PersistentState = setup.PersistentState with
         {
             CoordinatorInstanceId = "checkpoint-responder-carry",
             SnapshotStateGeneration = 0,
@@ -23742,15 +23781,17 @@ public sealed partial class FileTransferCoordinatorTests
             FileTransferRouteTransition = default,
             FallbackTailYield = default,
         } };
-        var envelopes = new List<FileTransferCoordinatorTransitionEnvelope>();
+        var envelopes = priorEnvelopes ?? new List<FileTransferCoordinatorTransitionEnvelope>();
         void Capture(FileTransferCoordinatorTransitionEnvelope envelope) => envelopes.Add(envelope);
         var fallback = FileTransferRouteResolver.Resolve(FileTransferRoute.PostTunaFallbackV6);
         state = FallBack(state, fallback, 5, 17, Capture).State;
-        var original = Assert.Single(envelopes[0].Aggregate.Operations, operation => operation.OperationRole == "handoff_terminal" &&
+        var originalEnvelope = envelopes.First(envelope => envelope.Aggregate.Operations.Any(operation =>
+            operation.OperationRole == "handoff_terminal" && operation.AfterState == "Invalidated"));
+        var original = Assert.Single(originalEnvelope.Aggregate.Operations, operation => operation.OperationRole == "handoff_terminal" &&
             operation.OperationKind == "ResponderPeerProbeRouteTransitionHandoff");
-        Assert.Equal("None", original.BeforeState);
+        Assert.Equal(priorEnvelopes is null ? "None" : "Held", original.BeforeState);
         Assert.Equal("Invalidated", original.AfterState);
-        var originalJson = envelopes[0].ToCanonicalJson();
+        var originalJson = originalEnvelope.ToCanonicalJson();
         if (state.CurrentFallbackCheckpointLease is { } bootstrap)
         {
             var bootstrapAccepted = AcceptFallbackCheckpoint(state, fallback, bootstrap.CheckpointRequestId,
@@ -23778,7 +23819,7 @@ public sealed partial class FileTransferCoordinatorTests
             Assert.Equal(envelope.Aggregate.BeforeStateGeneration + 1, envelope.Aggregate.AfterStateGeneration);
             Assert.NotEqual(envelope.Aggregate.BeforeStateFingerprint, envelope.Aggregate.AfterStateFingerprint);
         }
-        Assert.Equal(originalJson, envelopes[0].ToCanonicalJson());
+        Assert.Equal(originalJson, originalEnvelope.ToCanonicalJson());
         return envelopes;
     }
 

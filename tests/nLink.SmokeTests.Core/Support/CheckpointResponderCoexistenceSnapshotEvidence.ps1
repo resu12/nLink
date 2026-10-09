@@ -1,4 +1,5 @@
-param([string]$RepoRoot, [string]$InputPath, [string]$OutputRoot)
+param([string]$RepoRoot, [string]$InputPath, [string]$OutputRoot,
+    [Parameter(Mandatory = $true)][ValidateSet('handoff','barrier-and-history')][string]$CaseGroup)
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 . (Join-Path $RepoRoot 'tools/FileTransferOps/CoordinatorSnapshotEvidence.ps1')
@@ -91,6 +92,12 @@ $cases = @('exact', 'reordered', 'exact_duplicate', 'duplicate_handoff', 'compet
     'barrier_role', 'barrier_kind', 'barrier_receipt', 'barrier_source', 'barrier_effective',
     'missing_handoff_birth', 'missing_barrier_birth', 'handoff_retirement_aba', 'barrier_retirement_aba',
     'generation_gap', 'terminal_poison', 'replacement', 'missing_handoff_effect', 'conflicting_snapshot')
+$cases = @($cases | Where-Object {
+    $handoffCase = $_ -cin @('reordered','exact_duplicate','duplicate_handoff','competing_handoff') -or
+        ($_.StartsWith('handoff_', [StringComparison]::Ordinal) -and $_ -cne 'handoff_retirement_aba')
+    $_ -ceq 'exact' -or $handoffCase -eq ($CaseGroup -ceq 'handoff')
+})
+if ($cases.Count -ne $(if ($CaseGroup -ceq 'handoff') { 16 } else { 17 })) { throw 'Coexistence case-group coverage changed.' }
 $outputs = [Collections.Generic.List[object]]::new()
 $baselineBoundaries = $null
 $baselineRoute = $null

@@ -9258,7 +9258,7 @@ function Resolve-FileTransferCoordinatorCheckpointResponderCarries {
         })
         if ($candidates.Count -eq 0) { continue }
         $lastGeneration = [long]$candidates[-1].Boundary.afterStateGeneration
-        $slot = $null; $retired = @{}; $previous = $null; $previousEntry = $null
+        $slot = $null; $current = $null; $retired = @{}; $previous = $null; $previousEntry = $null
         foreach ($entry in $entries) {
             $boundary = $entry.Boundary
             if ([long]$boundary.beforeStateGeneration -gt $lastGeneration) { break }
@@ -9273,6 +9273,7 @@ function Resolve-FileTransferCoordinatorCheckpointResponderCarries {
                 $entry.BeforeBoundary.dataSessionIdentity -cne $entry.AfterBoundary.dataSessionIdentity -or
                 [long]$entry.BeforeBoundary.dataSessionGeneration -ne [long]$entry.AfterBoundary.dataSessionGeneration) {
                 if ($null -ne $slot) { $retired[$slot.Key] = $true }; $slot = $null
+                if ($null -ne $current) { $retired[$current.Key] = $true }; $current = $null
                 $valid = $false
             }
             $terminals = @($boundary.operations | Where-Object {
@@ -9288,9 +9289,23 @@ function Resolve-FileTransferCoordinatorCheckpointResponderCarries {
                     $payload | Select-Object * -ExcludeProperty effectiveBoundary,targetBoundary,linkedTransitionAuthorityId,linkedTransitionGeneration)
                 $signature = $identity | ConvertTo-Json -Depth 32 -Compress
                 $key = [string]$operation.operationKey
-                if ($operation.beforeState -ceq 'None' -and $operation.afterState -ceq 'Invalidated' -and $valid -and
+                $observation = $payload | Select-Object * -ExcludeProperty role,decisionStatus,decisionReason,receipts,
+                    effectiveBoundary,targetBoundary,linkedTransitionAuthorityId,linkedTransitionGeneration
+                $observationSignature = ConvertTo-Json -InputObject $observation -Depth 32 -Compress
+                $hasCurrentPredecessor = $null -ne $current -and $current.Key -ceq $key -and
+                    $current.State -ceq $operation.beforeState -and $current.Observation -ceq $observationSignature -and
+                    $current.CommandIdentity -ceq $operation.commandIdentity -and
+                    $current.CommandGeneration -eq [long]$operation.commandGeneration -and
+                    $current.CommandFingerprint -ceq $operation.commandFingerprint -and
+                    $current.ReceiptIdentity -ceq $operation.receiptIdentity -and
+                    $current.ReceiptGeneration -eq [long]$operation.receiptGeneration
+                $origin = $operation.beforeState -ceq 'None' -or
+                    ($operation.beforeState -in @('Accepted','Held') -and $hasCurrentPredecessor -and
+                        $operation.stateApplied -and $operation.receiptValidated)
+                if ($origin -and $operation.afterState -ceq 'Invalidated' -and $valid -and
                     -not $retired.ContainsKey($key) -and $null -eq $slot) {
                     $slot = @{ Key=$key; Signature=$signature }
+                    $current = $null
                 }
                 else {
                     $valid = $valid -and $null -ne $slot -and $slot.Key -ceq $key -and $slot.Signature -ceq $signature -and
@@ -9299,6 +9314,39 @@ function Resolve-FileTransferCoordinatorCheckpointResponderCarries {
                 if ($operation.afterState -ceq 'None' -or -not $valid) {
                     if ($null -ne $slot) { $retired[$slot.Key] = $true }
                     $retired[$key] = $true; $slot = $null
+                }
+            }
+            foreach ($operation in @($boundary.operations | Where-Object {
+                $_.family -ceq 'responder_probe_handoff' -and $_.operationRole -in @('handoff_current','owner_work_hold') -and
+                $_.operationKind -ceq 'ResponderPeerProbeRouteTransitionHandoff'
+            })) {
+                $key = "responder_probe_handoff|handoff_terminal|$($operation.authorityId)|$($operation.operationGeneration)|ResponderPeerProbeRouteTransitionHandoff"
+                $observation = $operation.responderProbeHandoff | Select-Object * -ExcludeProperty role,decisionStatus,decisionReason,receipts,
+                    effectiveBoundary,targetBoundary,linkedTransitionAuthorityId,linkedTransitionGeneration
+                $observationSignature = ConvertTo-Json -InputObject $observation -Depth 32 -Compress
+                $continues = $null -ne $current -and $current.Key -ceq $key -and
+                    $current.State -ceq $operation.beforeState -and $current.Observation -ceq $observationSignature -and
+                    $current.CommandIdentity -ceq $operation.commandIdentity -and
+                    $current.CommandGeneration -eq [long]$operation.commandGeneration -and
+                    $current.CommandFingerprint -ceq $operation.commandFingerprint -and
+                    $current.ReceiptIdentity -ceq $operation.receiptIdentity -and
+                    $current.ReceiptGeneration -eq [long]$operation.receiptGeneration -and
+                    ($operation.afterState -cne $current.State -or $current.ReceiptFingerprint -ceq $operation.receiptFingerprint)
+                $starts = $null -eq $current -and $operation.beforeState -ceq 'None' -and $operation.afterState -ceq 'Accepted' -and
+                    $operation.stateApplied
+                $valid = $valid -and -not $retired.ContainsKey($key) -and $operation.receiptValidated -and
+                    $operation.receiptStatus -ceq $operation.afterState -and
+                    ($starts -or ($continues -and ($operation.afterState -ceq $current.State -or
+                        ($current.State -ceq 'Accepted' -and $operation.afterState -ceq 'Held' -and $operation.stateApplied))))
+                if (-not $valid -or $operation.afterState -ceq 'None') {
+                    if ($null -ne $current) { $retired[$current.Key] = $true }
+                    $retired[$key] = $true; $current = $null
+                }
+                else {
+                    $current = @{ Key=$key; State=[string]$operation.afterState; Observation=$observationSignature
+                        CommandIdentity=[string]$operation.commandIdentity; CommandGeneration=[long]$operation.commandGeneration
+                        CommandFingerprint=[string]$operation.commandFingerprint; ReceiptIdentity=[string]$operation.receiptIdentity
+                        ReceiptGeneration=[long]$operation.receiptGeneration; ReceiptFingerprint=[string]$operation.receiptFingerprint }
                 }
             }
             if ($null -ne $slot -and @($boundary.operations | Where-Object {

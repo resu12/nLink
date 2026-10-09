@@ -12,8 +12,10 @@ namespace NLink.SmokeTests;
 [Collection(FakeNknNetworkCollection.Name)]
 public sealed class FileTransferCheckpointResponderCoexistenceEvidenceTests : FileTransferOpsScriptsTestBase
 {
-    [Fact]
-    public async Task CheckpointResponderCarry_IndependentReceiverBarrierHasExactCrossHostConsumerParity()
+    [Theory]
+    [InlineData("handoff")]
+    [InlineData("barrier-and-history")]
+    public async Task CheckpointResponderCarry_IndependentReceiverBarrierHasExactCrossHostConsumerParity(string caseGroup)
     {
         if (!OperatingSystem.IsWindows()) { return; }
         var envelopes = FileTransferCoordinatorTests.CreateCheckpointResponderBarrierCoexistenceSnapshotFixture();
@@ -28,7 +30,7 @@ public sealed class FileTransferCheckpointResponderCoexistenceEvidenceTests : Fi
             string? firstHostOutput = null;
             foreach (var host in new[] { "powershell", "pwsh" })
             {
-                var result = await RunPowerShellScriptTextAsync(script, [FindRepoRoot(), path, directory], host);
+                var result = await RunPowerShellScriptTextAsync(script, [FindRepoRoot(), path, directory, caseGroup], host);
                 Assert.True(result.ExitCode == 0, $"{host} STDOUT:{result.Stdout}{Environment.NewLine}STDERR:{result.Stderr}");
                 Assert.Contains("checkpoint-coexistence-evidence-ok", result.Stdout);
                 var normalized = Assert.Single(result.Stdout.Split('\n').Select(line => line.Trim()).Where(line =>

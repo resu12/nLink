@@ -17,6 +17,7 @@ if (@($envelopes.aggregate.operations | Where-Object { Test-FileTransferCoordina
     if ($catalog.Hash -cne 'e6c3b5ff7cf8b44bcde0782ec325d2623cb96ba8ff362edca1902f9a1929059d') { throw 'Frozen continuity catalog changed.' }
 }
 $first = $envelopes[0]
+$hasHeldHistory = $first.decisionKind -ceq 'BindRuntimeUnlockResponderPeerProbeRouteTransitionHandoff'
 $prefix = "snapshot_contract_version=1; snapshot_selection_mode=SnapshotV1Authoritative; snapshot_catalog_version=$($catalog.Version); snapshot_catalog_hash=$($catalog.Hash); coordinator_instance_id=$($first.coordinatorInstanceId); session_id=$($first.sessionId); transfer_id=$($first.transferId); direction=$($first.direction)"
 $families = $catalog.RequiredFamilies -join ','
 $coverage = "emitted_family_coverage=$families; shadow_family_coverage=; authoritative_family_coverage=$families"
@@ -35,6 +36,18 @@ function Subject($envelope) {
     $matches = @($envelope.aggregate.operations | Where-Object { $_.operationRole -ceq 'handoff_terminal' -and $_.operationKind -ceq 'ResponderPeerProbeRouteTransitionHandoff' })
     if ($matches.Count -ne 1) { throw 'Terminal subject not unique.' }
     $matches[0]
+}
+function History-Entries($values) {
+    foreach($e in $values) {
+        [pscustomobject]@{
+            Boundary=[pscustomobject]@{ coordinatorInstanceId=$e.coordinatorInstanceId; writer='fixture-writer'; boundaryId=$e.transitionId
+                beforeStateGeneration=$e.aggregate.beforeStateGeneration; afterStateGeneration=$e.aggregate.afterStateGeneration
+                beforeStateHash=$e.aggregate.beforeStateFingerprint; afterStateHash=$e.aggregate.afterStateFingerprint
+                decisionKind=$e.decisionKind; operations=$e.aggregate.operations; evidenceLineIndex=$e.aggregate.afterStateGeneration }
+            BeforeBoundary=Copy-Value $e.aggregate.beforeBoundary; AfterBoundary=Copy-Value $e.aggregate.afterBoundary
+            SessionId=$e.sessionId; TransferId=$e.transferId; Direction=$e.direction
+        }
+    }
 }
 function Assert-Parity([string[]]$lines, [bool]$valid, [string]$reason = '') {
     $full = Get-FileTransferCoordinatorSnapshotEvaluation -Lines (@('event=unrelated') + $lines)
@@ -141,6 +154,50 @@ foreach ($mutation in @(
     $e=Copy-Value $request; $o=Subject $e; & $mutation $e $o
     if (Test-FileTransferCoordinatorSnapshotCheckpointResponderCarry $e $o) { throw "Malformed carry passed: $mutation" }
 }
+if ($hasHeldHistory) {
+    foreach ($e in $envelopes) {
+        foreach ($o in @($e.aggregate.operations | Where-Object family -CEQ 'responder_probe_handoff')) {
+            if (-not (Test-FileTransferCoordinatorSnapshotFamily6OperationCatalog $e $o)) { throw 'Production predecessor rejected by catalog.' }
+        }
+    }
+    foreach ($mutation in @('none','missing-bind','missing-hold','observation','source','authority','receipt','retained-receipt',
+            'unapplied-bind','unapplied-hold','unvalidated','state','gap','invalid-boundary','retired')) {
+        $entries=@(History-Entries (Copy-Value $envelopes))
+        $bind=$entries[0]; $hold=$entries[1]
+        $origin=@($entries | Where-Object {
+            @($_.Boundary.operations | Where-Object { $_.operationRole -ceq 'handoff_terminal' -and $_.beforeState -ceq 'Held' }).Count -gt 0
+        })[0]
+        $held=@($hold.Boundary.operations | Where-Object {
+            $_.operationRole -ceq 'owner_work_hold' -and $_.operationKind -ceq 'ResponderPeerProbeRouteTransitionHandoff'
+        })[0]
+        $invalid=@{}
+        switch ($mutation) {
+            'missing-bind' { $bind.Boundary.operations=@($bind.Boundary.operations | Where-Object operationRole -CNE 'handoff_current') }
+            'missing-hold' { $hold.Boundary.operations=@($hold.Boundary.operations | Where-Object operationRole -CNE 'owner_work_hold') }
+            'observation' { $held.responderProbeHandoff.ackMessageId+='-changed' }
+            'source' { $held.responderProbeHandoff.sourceBoundary.dataSessionGeneration++ }
+            'authority' { $held.operationGeneration++ }
+            'receipt' { $held.commandFingerprint+='-changed' }
+            'retained-receipt' { $held.receiptFingerprint+='-changed' }
+            'unapplied-bind' { (@($bind.Boundary.operations | Where-Object operationKind -CEQ 'ResponderPeerProbeRouteTransitionHandoff')[0]).stateApplied=$false }
+            'unapplied-hold' { $held.stateApplied=$false }
+            'unvalidated' { $held.receiptValidated=$false }
+            'state' { (Subject ([pscustomobject]@{ aggregate=[pscustomobject]@{ operations=$origin.Boundary.operations } })).beforeState='Accepted' }
+            'gap' { $hold.Boundary.beforeStateHash+='-changed' }
+            'invalid-boundary' { $invalid[$hold.Boundary.boundaryId]=$true }
+            'retired' { $held.afterState='None' }
+        }
+        $failures=@(Resolve-FileTransferCoordinatorCheckpointResponderCarries (New-FileTransferCoordinatorSnapshotAggregateIntervalIndex $entries) $invalid)
+        if (($failures.Count -eq 0) -ne ($mutation -ceq 'none')) {
+            $history = @($entries.Boundary.operations | Where-Object operationKind -CEQ 'ResponderPeerProbeRouteTransitionHandoff' | ForEach-Object {
+                "$($_.operationRole):$($_.beforeState)->$($_.afterState):$($_.responderProbeHandoff.ackMessageId)"
+            }) -join ';'
+            throw "Held predecessor history result differs: $mutation; $($failures -join ';'); history=$history"
+        }
+    }
+    Write-Output 'Production bound/held/invalidated checkpoint history and poisoned predecessor rejection passed.'
+    return
+}
 $lines = @(New-Lines $envelopes)
 Assert-Parity $lines $true
 $shuffled = Copy-Value $envelopes
@@ -163,18 +220,6 @@ foreach ($mutation in @(
 $values=Copy-Value $envelopes
 $values[0].aggregate.operations=@($values[0].aggregate.operations | Where-Object { $_.operationKind -cne 'ResponderPeerProbeRouteTransitionHandoff' })
 Assert-Parity (New-Lines $values) $false 'checkpoint_responder_terminal_carry_history_invalid'
-function History-Entries($values) {
-    foreach($e in $values) {
-        [pscustomobject]@{
-            Boundary=[pscustomobject]@{ coordinatorInstanceId=$e.coordinatorInstanceId; writer='fixture-writer'; boundaryId=$e.transitionId
-                beforeStateGeneration=$e.aggregate.beforeStateGeneration; afterStateGeneration=$e.aggregate.afterStateGeneration
-                beforeStateHash=$e.aggregate.beforeStateFingerprint; afterStateHash=$e.aggregate.afterStateFingerprint
-                decisionKind=$e.decisionKind; operations=$e.aggregate.operations; evidenceLineIndex=$e.aggregate.afterStateGeneration }
-            BeforeBoundary=Copy-Value $e.aggregate.beforeBoundary; AfterBoundary=Copy-Value $e.aggregate.afterBoundary
-            SessionId=$e.sessionId; TransferId=$e.transferId; Direction=$e.direction
-        }
-    }
-}
 foreach($mutation in @('gap','terminal','replacement','transfer','retirement','aba')) {
     $entries=@(History-Entries (Copy-Value $envelopes))
     $commit=@($entries | Where-Object { $_.Boundary.decisionKind -ceq 'CommitFileTransferRouteTransition' })[0]

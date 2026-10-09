@@ -6960,8 +6960,12 @@ public sealed class FileTransferOpsScriptSurfaceTests : FileTransferOpsScriptsTe
         finally { TryDeleteDirectory(tempRoot); }
     }
 
-    [Fact]
-    public async Task FileTransferOps_CheckpointResponderCarryUsesExactSharedHistory()
+    [Theory]
+    [InlineData(false, "powershell")]
+    [InlineData(true, "powershell")]
+    [InlineData(false, "pwsh")]
+    [InlineData(true, "pwsh")]
+    public async Task FileTransferOps_CheckpointResponderCarryUsesExactSharedHistory(bool includeHeldHistory, string host)
     {
         if (!OperatingSystem.IsWindows()) { return; }
         var repoRoot = FindRepoRoot();
@@ -6969,14 +6973,14 @@ public sealed class FileTransferOpsScriptSurfaceTests : FileTransferOpsScriptsTe
         Directory.CreateDirectory(tempRoot);
         try
         {
-            var envelopes = FileTransferCoordinatorTests.CreateCheckpointResponderCarrySnapshotFixture()
+            var envelopes = FileTransferCoordinatorTests.CreateCheckpointResponderCarrySnapshotFixture(includeHeldHistory)
                 .Select(NLink.Core.FileTransfer.SessionFileTransferService.CreateCoordinatorSnapshotEvidenceForTesting);
             var fixturePath = Path.Combine(tempRoot, "envelopes.json");
             await File.WriteAllTextAsync(fixturePath,
                 "[" + string.Join(",", envelopes.Select(envelope => envelope.ToCanonicalJson())) + "]");
             var script = File.ReadAllText(Path.Combine(repoRoot, "tests", "nLink.SmokeTests.Core",
                 "Support", "CheckpointResponderCarrySnapshotEvidence.ps1"));
-            var result = await RunPowerShellScriptTextAsync(script, [repoRoot, fixturePath, tempRoot]);
+            var result = await RunPowerShellScriptTextAsync(script, [repoRoot, fixturePath, tempRoot], host);
             Assert.True(result.ExitCode == 0, $"STDOUT:{result.Stdout}{Environment.NewLine}STDERR:{result.Stderr}");
         }
         finally { TryDeleteDirectory(tempRoot); }
