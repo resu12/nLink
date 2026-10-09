@@ -8861,6 +8861,7 @@ function Test-Phase5ScenarioRequiresIsolation {
         'pending-preparation-tuna-v4-64mb',
         'live-switch-off-helpee-64mb',
         'live-switch-off-helper-64mb',
+        'helper-to-helpee-payer-handoff-128mb',
         'regular-v4-live-activation-off-on-off-256mb',
         'second-transfer-after-reactivation'
     ) -contains [string]$Scenario.Name
@@ -9638,6 +9639,7 @@ function Get-Phase5RouteAcceptanceScenarios {
         (New-Phase4RouteAcceptanceScenario -Name 'active-tuna-v4-64mb' -Kind 'tuna' -ExpectedRouteChanges @('file_tuna_v4') -PayloadBytes 67108864L -BaselineScenario 'active-tuna-v4-64mb' -Baseline $baselines['active-tuna-v4-64mb'] -RouteMode 'preactivated' -Fault 'none' -PayerMode 'helpee')
         (New-Phase4RouteAcceptanceScenario -Name 'live-switch-off-helpee-64mb' -Kind 'tuna' -ExpectedRouteChanges @('file_tuna_v4', 'post_tuna_fallback_v6') -PayloadBytes 67108864L -BaselineScenario 'live-switch-off-helpee-64mb' -Baseline $baselines['live-switch-off-helpee-64mb'] -RouteMode 'live-v4-switch-off' -Fault 'switch-off' -PayerMode 'helpee' -LiveProofMode 'SwitchOff')
         (New-Phase4RouteAcceptanceScenario -Name 'live-switch-off-helper-64mb' -Kind 'tuna' -ExpectedRouteChanges @('file_tuna_v4', 'post_tuna_fallback_v6') -PayloadBytes 67108864L -BaselineScenario 'live-switch-off-helper-64mb' -Baseline $baselines['live-switch-off-helper-64mb'] -RouteMode 'live-v4-switch-off' -Fault 'switch-off' -PayerMode 'helper' -LiveProofMode 'SwitchOff')
+        (New-Phase4RouteAcceptanceScenario -Name 'helper-to-helpee-payer-handoff-128mb' -Kind 'tuna' -ExpectedRouteChanges @('file_tuna_v4', 'post_tuna_fallback_v6', 'file_tuna_v4', 'post_tuna_fallback_v6') -PayloadBytes 134217728L -RouteMode 'live-multi-toggle' -Fault 'switch-off' -PayerMode 'helper-to-helpee' -LiveToggleSequence 'off,on,off' -LiveProofMode 'MultiToggle')
         (New-Phase4RouteAcceptanceScenario -Name 'regular-v4-live-activation-off-on-off-256mb' -Kind 'tuna' -ExpectedRouteChanges @('regular_nkn_v4_fast', 'file_tuna_v4', 'post_tuna_fallback_v6', 'file_tuna_v4', 'post_tuna_fallback_v6') -PayloadBytes 268435456L -RouteMode 'live-regular-activation-cycle' -Fault 'switch-off' -PayerMode 'helpee' -LiveToggleSequence 'on,off,on,off' -LiveProofMode 'RegularActivationCycle')
         (New-Phase4RouteAcceptanceScenario -Name 'second-transfer-after-reactivation' -Kind 'tuna' -ExpectedRouteChanges @('file_tuna_v4', 'post_tuna_fallback_v6', 'file_tuna_v4') -PayloadBytes 134217728L -RouteMode 'live-reactivation-second-transfer' -Fault 'switch-off' -PayerMode 'helpee' -LiveToggleSequence 'off,on' -LiveProofMode 'None')
         if ($IncludePendingPreparation) {

@@ -23725,12 +23725,17 @@ public sealed partial class NknAccelerationTransportTests : CoreSmokeTestsBase, 
     [InlineData(false, false, "rejected")]
     [InlineData(false, false, "scope_replaced")]
     [InlineData(false, false, "expired")]
+    [InlineData(false, true, "accepted", true)]
+    [InlineData(false, true, "rejected", true)]
+    [InlineData(false, true, "scope_replaced", true)]
+    [InlineData(false, true, "expired", true)]
     [Trait("Category", "Smoke")]
     [Trait("FileTransferInfraSuite", "RuntimeUnlockRetryDispatch")]
     public async Task RuntimeUnlockRetryDispatch_ActiveInstalledRetryAnswerDefersGenericAndSuccessorUntilExactHandoffDisposition(
         bool postFallback,
         bool answerBeforeLocalObservedSend,
-        string? pendingSettlementDisposition = null)
+        string? pendingSettlementDisposition = null,
+        bool settlementStartsAfterAnswerValidation = false)
     {
         FakeNknClient.ResetNetwork();
         var previousHelpeePriorityDelay =
@@ -23898,7 +23903,7 @@ public sealed partial class NknAccelerationTransportTests : CoreSmokeTestsBase, 
                     host));
 
             Envelope? duplicateAnswerEnvelope = null;
-            if (pendingSettlementDisposition is not null)
+            if (pendingSettlementDisposition is not null && !settlementStartsAfterAnswerValidation)
             {
                 await settlementEntered.Task.WaitAsync(TimeSpan.FromSeconds(8), cts.Token);
             }
@@ -23985,6 +23990,15 @@ public sealed partial class NknAccelerationTransportTests : CoreSmokeTestsBase, 
             var answerLogStart = GetOperationalLogLength();
             var transactionBeforeAnswer = GetPrivateField(host, "runtimeUnlockTransactionState");
             var leaseBeforeAnswer = GetPrivateField(host, "runtimeUnlockTunaPathLeaseState");
+            if (settlementStartsAfterAnswerValidation)
+            {
+                host.RuntimeUnlockPeerAnswerDispatchAdmissionBarrierForTests = () =>
+                {
+                    host.RuntimeUnlockPeerAnswerDispatchAdmissionBarrierForTests = null;
+                    releaseSend.TrySetResult(null);
+                    settlementEntered.Task.Wait(cts.Token);
+                };
+            }
 
             InvokePrivateMethod(
                 host,
@@ -23998,8 +24012,11 @@ public sealed partial class NknAccelerationTransportTests : CoreSmokeTestsBase, 
                     ReadOperationalLogTail(answerLogStart), StringComparison.Ordinal);
                 Assert.False(answerAckEntered.Task.IsCompleted);
                 Assert.Null(GetPrivateField(host, "runtimeUnlockRetiredAnswerBarrier"));
-                Assert.Equal(transactionBeforeAnswer, GetPrivateField(host, "runtimeUnlockTransactionState"));
-                Assert.Equal(leaseBeforeAnswer, GetPrivateField(host, "runtimeUnlockTunaPathLeaseState"));
+                if (!settlementStartsAfterAnswerValidation)
+                {
+                    Assert.Equal(transactionBeforeAnswer, GetPrivateField(host, "runtimeUnlockTransactionState"));
+                    Assert.Equal(leaseBeforeAnswer, GetPrivateField(host, "runtimeUnlockTunaPathLeaseState"));
+                }
                 if (pendingSettlementDisposition == "scope_replaced")
                 {
                     lock (GetPrivateField(host, "accelerationGate")!)
@@ -24068,7 +24085,7 @@ public sealed partial class NknAccelerationTransportTests : CoreSmokeTestsBase, 
                 StringComparison.Ordinal);
             Assert.True(dispatchObservedIndex >= 0, logTail);
             Assert.True(completedIndex > dispatchObservedIndex, logTail);
-            if (answerBeforeLocalObservedSend)
+            if (answerBeforeLocalObservedSend && !settlementStartsAfterAnswerValidation)
             {
                 Assert.Contains(
                     "event=runtime_unlock_peer_answer_dispatch_admission_decided;",
@@ -24111,7 +24128,8 @@ public sealed partial class NknAccelerationTransportTests : CoreSmokeTestsBase, 
                     sessionId,
                     nonce,
                     payerDecisionId,
-                    offerGeneration)?.ToString());
+                    offerGeneration,
+                    null)?.ToString());
             foreach (var mutation in new[]
                      {
                          (
@@ -24168,7 +24186,8 @@ public sealed partial class NknAccelerationTransportTests : CoreSmokeTestsBase, 
                         mutation.SessionId,
                         mutation.Nonce,
                         mutation.PayerDecisionId,
-                        mutation.OfferGeneration)?.ToString());
+                        mutation.OfferGeneration,
+                        null)?.ToString());
             }
 
             releaseSend.TrySetResult(null);
@@ -38379,6 +38398,40 @@ public sealed partial class NknAccelerationTransportTests : CoreSmokeTestsBase, 
         private int listenerAdoptionCalls;
         private string? lastStopReason;
         private NknTunaListenerAdoptionSnapshot? listenerAdoptionSnapshot;
+        private NknTunaLaneLease? handoffLease;
+        public bool StrictPayerHandoffForTests { get; set; }
+
+        public NknTunaLaneLease? CaptureCurrentLaneLease() => StrictPayerHandoffForTests && IsAvailable ? handoffLease : null;
+
+        public bool TryStopCurrentLaneLease(NknTunaLaneLease lease, string reason)
+        {
+            if (CaptureCurrentLaneLease() != lease) return false;
+            handoffLease = null;
+            lease.Client.Dispose();
+            lease.DialerOwner?.Dispose();
+            Volatile.Write(ref available, 0);
+            IsLocalPaidListenerActive = false;
+            Volatile.Write(ref lastStopReason, reason);
+            Interlocked.Increment(ref stopCalls);
+            return true;
+        }
+
+        public async Task<NknTunaLaneLease?> StartPreparationLaneAsync(NknTunaLanePreparationRequest request, CancellationToken ct)
+        {
+            if (!StrictPayerHandoffForTests || IsAvailable || !request.LocalIsPayer) return null;
+            return await EnsureListenerSidecarConnectedCoreAsync(new(request.ExpectedRemotePeer, supportedLanes,
+                request.ListenerLifetimePolicy, request.ExecutionIdentity), ct).ConfigureAwait(false) ? handoffLease : null;
+        }
+
+        private void CaptureHandoffLease()
+        {
+            if (!StrictPayerHandoffForTests) return;
+            handoffLease = new(Guid.NewGuid(), 1, 1, new NknTunaSidecarClient(supportedLanes, 16),
+                IsLocalPaidListenerActive ? null : (NknTunaSidecarProcessOwner)typeof(NknTunaSidecarProcessOwner)
+                    .GetConstructors(BindingFlags.Instance | BindingFlags.NonPublic).Single()
+                    .Invoke(new object?[] { "dialer", new System.Diagnostics.Process(), null }),
+                IsLocalPaidListenerActive ? listenerAdoptionSnapshot : null);
+        }
 
         public RetryableTunaAccelerationSession(
             bool canListen,
@@ -38467,7 +38520,7 @@ public sealed partial class NknAccelerationTransportTests : CoreSmokeTestsBase, 
 
         public NknTunaListenerAdoptionSnapshot?
             CaptureCurrentListenerAdoptionSnapshot()
-            => IsAvailable ? listenerAdoptionSnapshot : null;
+            => IsAvailable && (!StrictPayerHandoffForTests || IsLocalPaidListenerActive) ? listenerAdoptionSnapshot : null;
 
         public bool TryAdoptCurrentListener(
             NknTunaListenerAdoptionSnapshot snapshot,
@@ -38490,6 +38543,8 @@ public sealed partial class NknAccelerationTransportTests : CoreSmokeTestsBase, 
             {
                 CurrentRequest = successorRequest,
             };
+            if (StrictPayerHandoffForTests && handoffLease is not null)
+                handoffLease = handoffLease with { Listener = listenerAdoptionSnapshot };
             receipt = new NknTunaListenerAdoptionReceipt(
                 snapshot,
                 successorRequest,
@@ -38531,6 +38586,7 @@ public sealed partial class NknAccelerationTransportTests : CoreSmokeTestsBase, 
             NknTunaListenerStartRequest request,
             CancellationToken ct)
         {
+            if (StrictPayerHandoffForTests && IsAvailable && !IsLocalPaidListenerActive) return false;
             LastListenerRequest = request;
             var calls = Interlocked.Increment(ref ensureListenerCalls);
             if ((!CanOfferListener && !allowListenerStartWhenCanListenFalse) || ct.IsCancellationRequested)
@@ -38569,7 +38625,8 @@ public sealed partial class NknAccelerationTransportTests : CoreSmokeTestsBase, 
                     ProcessStartedUtc: DateTimeOffset.UtcNow);
             }
             IsLocalPaidListenerActive = true;
-            MarkAvailable("listener_ready");
+            CaptureHandoffLease();
+            MarkAvailable("listener_ready", StrictPayerHandoffForTests ? request.ExecutionIdentity : null);
             return true;
         }
 
@@ -38606,6 +38663,7 @@ public sealed partial class NknAccelerationTransportTests : CoreSmokeTestsBase, 
 
             LocalTunaAddress = "nlink-tuna-sidecar.test-dialer-address";
             IsLocalPaidListenerActive = false;
+            CaptureHandoffLease();
             MarkAvailable("dialer_ready");
             return true;
         }
@@ -38627,16 +38685,19 @@ public sealed partial class NknAccelerationTransportTests : CoreSmokeTestsBase, 
 
         public void Dispose()
         {
+            handoffLease?.Client.Dispose();
+            handoffLease?.DialerOwner?.Dispose();
             listenerAttemptOutcome?.TrySetCanceled();
             Volatile.Write(ref available, 0);
             IsLocalPaidListenerActive = false;
         }
 
-        private void MarkAvailable(string reason)
+        private void MarkAvailable(string reason, string? preparationIdentity = null)
         {
             if (Interlocked.Exchange(ref available, 1) == 0)
             {
-                StateChanged?.Invoke(this, new AccelerationStateChangedEventArgs(true, reason));
+                StateChanged?.Invoke(this, new AccelerationStateChangedEventArgs(true, reason,
+                    sessionPreparationExecutionIdentity: preparationIdentity));
             }
         }
     }

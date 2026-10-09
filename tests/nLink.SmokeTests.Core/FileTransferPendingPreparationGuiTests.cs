@@ -30,7 +30,7 @@ public sealed class FileTransferPendingPreparationGuiTests : FileTransferOpsScri
             }
             $baseline = [pscustomobject]@{Scenarios=@{}}
             $defaults = @(Get-Phase5RouteAcceptanceScenarios -BaselineManifest $baseline)
-            if ($defaults.Count -ne 6 -or @($defaults | Where-Object RouteMode -eq 'pending-preparation').Count) { throw 'default matrix expanded' }
+            if ($defaults.Count -ne 7 -or @($defaults | Where-Object RouteMode -eq 'pending-preparation').Count) { throw 'unexpected default matrix' }
             $scenarios = @(Get-Phase5RouteAcceptanceScenarios -BaselineManifest $baseline -IncludePendingPreparation)
             $scenario = @($scenarios | Where-Object Name -eq 'pending-preparation-tuna-v4-64mb')
             if ($scenario.Count -ne 1) { throw 'target scenario missing or duplicated' }

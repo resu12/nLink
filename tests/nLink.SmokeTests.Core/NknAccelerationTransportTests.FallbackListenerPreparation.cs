@@ -88,6 +88,26 @@ public sealed partial class NknAccelerationTransportTests
             Assert.Null(GetPrivateField(pair.Host, "fallbackListenerPreparation"));
         });
 
+    [Fact]
+    [Trait("FileTransferInfraSuite", "PayerHandoff")]
+    public Task FallbackListenerPreparation_NoCurrentPublicationCannotRetirePriorDialer()
+        => WithPreparationExecutionPairAsync(true, async pair =>
+        {
+            await InstallFallbackPreparationSource(pair);
+            using var owner = (NknTunaSidecarProcessOwner)typeof(NknTunaSidecarProcessOwner)
+                .GetConstructors(BindingFlags.Instance | BindingFlags.NonPublic).Single()
+                .Invoke(new object?[] { "dialer", new System.Diagnostics.Process(), null });
+            var prior = pair.Lane.Original with { DialerOwner = owner };
+            pair.Lane.Current = prior;
+            var context = GetPrivateField(pair.Service, "outboundTransfer")!;
+            SetPrivateProperty(context, "CurrentRoutePublicationToken", null);
+            await pair.Host.RequestAccelerationNegotiationAsync("runtime_unlock", pair.Token);
+            Assert.Same(prior, pair.Lane.Current);
+            Assert.Equal(0, pair.Lane.Starts);
+            Assert.Equal(0, pair.Lane.ExactStops);
+            Assert.Equal(0, pair.Lane.GlobalStops);
+        });
+
     private static async Task<FileTransferCoordinatorState> InstallFallbackPreparationSource(PreparationExecutionPair pair)
     {
         await pair.Service.TryStartSendAsync(new("fallback.bin", 4, "fallback-preparation"),

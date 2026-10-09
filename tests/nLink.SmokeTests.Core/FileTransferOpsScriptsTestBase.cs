@@ -154,6 +154,7 @@ public abstract class FileTransferOpsScriptsTestBase
         "active-tuna-v4-64mb",
         "live-switch-off-helpee-64mb",
         "live-switch-off-helper-64mb",
+        "helper-to-helpee-payer-handoff-128mb",
         "live-multi-toggle-off-on-off-64mb",
         "regular-v4-live-activation-off-on-off-256mb",
         "second-transfer-after-reactivation"

@@ -12,6 +12,11 @@ namespace NLink.SmokeTests;
 public sealed partial class NknAccelerationTransportTests
 {
     [Fact]
+    [Trait("FileTransferInfraSuite", "PayerHandoff")]
+    public Task JoinedFallbackRetry_NewHelpeePayerReplacesPriorDialerBeforeListenerAdmission()
+        => RunJoinedFallbackRetryAsync(false, payerHandoff: true);
+
+    [Fact]
     [Trait("FileTransferInfraSuite", "RuntimeUnlockResponderPeerProbe")]
     [Trait("FileTransferRuntimeSuite", "CrossPeerFallbackOverlap")]
     public async Task JoinedFallbackRetry_InstalledServiceAuthorityDrivesRealOfferProbeAndAck()
@@ -93,7 +98,8 @@ public sealed partial class NknAccelerationTransportTests
     private async Task RunJoinedFallbackRetryAsync(bool withStalledRepair, string? sidecarFailureReason = null,
         string? failureControl = null, bool continueAfterEof = false, bool withRecentProgress = false,
         bool delayReceiverSnapshots = false, bool notifyResponderFromPeer = false,
-        string? responderFailureControl = null, bool dialFailureBeforeProbe = false, bool productionRedaction = false)
+        string? responderFailureControl = null, bool dialFailureBeforeProbe = false, bool productionRedaction = false,
+        bool payerHandoff = false)
     {
         // Initial fallback contexts are an explicit fixture baseline. There is
         // no file-I/O/live acceptance claim. After the baseline, all authority,
@@ -111,6 +117,7 @@ public sealed partial class NknAccelerationTransportTests
         var answerSent = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var answerAckSent = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var probeHeld = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var handoffPayload = new TaskCompletionSource<FileTransferReceivedDataFrame>(TaskCreationOptions.RunContinuationsAsynchronously);
         var releaseFailedProbe = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var firstDial = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
         var nextDial = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -128,6 +135,7 @@ public sealed partial class NknAccelerationTransportTests
             var hostClient = new FakeNknClient("host.joined-retry-continuation.address");
             var helperClient = new FakeNknClient("helper.joined-retry-continuation.address");
             var hostLane = new RetryableTunaAccelerationSession(true, 0, supportedLanes: NknAccelerationLaneKind.File);
+            hostLane.StrictPayerHandoffForTests = payerHandoff;
             var helperLane = new RetryableTunaAccelerationSession(false, 0, supportedLanes: NknAccelerationLaneKind.File,
                 dialAttemptOutcomes: dialFailureBeforeProbe ? [firstDial, nextDial] : null);
             var forwarded = new ConcurrentQueue<(string Sender, NknBridgeChannel Lane, byte[] Bytes)>();
@@ -166,8 +174,35 @@ public sealed partial class NknAccelerationTransportTests
                 new NknIdentity("host-joined-retry", hostClient.Address), NknTunaAccelerationOptions.Disabled, hostLane);
             var helper = helperTransport = new NknSignalingTransport(helperClient, options,
                 new NknIdentity("helper-joined-retry", helperClient.Address), NknTunaAccelerationOptions.Disabled, helperLane);
+            if (payerHandoff)
+            {
+                // Preparation requires an attachment that predates approval;
+                // a late test attachment deliberately cannot reuse that epoch.
+                senderService = new SessionFileTransferService();
+                receiverService = new SessionFileTransferService();
+                senderService.AttachTransport(host);
+                receiverService.AttachTransport(helper);
+            }
             var sessionId = await ApproveNknSessionAsync(host, helper, timeout.Token,
                 InviteCapabilities.Chat | InviteCapabilities.FileTransfer, suppressAutomaticAccelerationNegotiation: true);
+            EventHandler<FileTransferOfferReceivedEventArgs>? serviceOffer = null;
+            EventHandler<FileTransferAcceptReceivedEventArgs>? serviceAccept = null;
+            EventHandler<FileTransferSessionOpenReceivedEventArgs>? serviceOpen = null;
+            if (payerHandoff)
+            {
+                // The declared already-open fallback baseline is not a valid
+                // fresh offer. Register it on the transports without replaying
+                // its setup into the early-attached Services.
+                serviceOffer = typeof(SessionFileTransferService).GetMethod("OnFileTransferOfferReceived",
+                    BindingFlags.Instance | BindingFlags.NonPublic)!.CreateDelegate<EventHandler<FileTransferOfferReceivedEventArgs>>(receiverService);
+                serviceAccept = typeof(SessionFileTransferService).GetMethod("OnFileTransferAcceptReceived",
+                    BindingFlags.Instance | BindingFlags.NonPublic)!.CreateDelegate<EventHandler<FileTransferAcceptReceivedEventArgs>>(senderService);
+                serviceOpen = typeof(SessionFileTransferService).GetMethod("OnFileTransferSessionOpenReceived",
+                    BindingFlags.Instance | BindingFlags.NonPublic)!.CreateDelegate<EventHandler<FileTransferSessionOpenReceivedEventArgs>>(receiverService);
+                helper.FileTransferOfferReceived -= serviceOffer;
+                host.FileTransferAcceptReceived -= serviceAccept;
+                helper.FileTransferSessionOpenReceived -= serviceOpen;
+            }
             if (dialFailureBeforeProbe)
             {
                 await helper.SendChatMessageAsync(new byte[] { 1 }, timeout.Token);
@@ -199,8 +234,14 @@ public sealed partial class NknAccelerationTransportTests
                 SessionRole = FileTransferProtocol.SessionRoleSender, ChunkSizeBytes = 21 * 1024, InitialPipelineDepth = 8,
             }, timeout.Token);
             Assert.Equal(transferId, (await fileOpen.Task.WaitAsync(timeout.Token)).TransferId);
-            var sender = senderService = new SessionFileTransferService();
-            var receiver = receiverService = new SessionFileTransferService();
+            if (payerHandoff)
+            {
+                helper.FileTransferOfferReceived += serviceOffer;
+                host.FileTransferAcceptReceived += serviceAccept;
+                helper.FileTransferSessionOpenReceived += serviceOpen;
+            }
+            var sender = senderService ??= new SessionFileTransferService();
+            var receiver = receiverService ??= new SessionFileTransferService();
             if (withStalledRepair)
             {
                 // Delay real availability work, not the proof or its result.
@@ -208,8 +249,11 @@ public sealed partial class NknAccelerationTransportTests
                 receiver.InboundDispatchBeforeWorkAsyncForTests = (_, operation) =>
                     operation == "data_session_availability" ? releaseReceiverHandoff.Task : Task.CompletedTask;
             }
-            sender.AttachTransport(host);
-            receiver.AttachTransport(helper);
+            if (!payerHandoff)
+            {
+                sender.AttachTransport(host);
+                receiver.AttachTransport(helper);
+            }
             var dialFailures = new ConcurrentQueue<(RuntimeUnlockPostFallbackDialFailureObservedEventArgs Args, FileTransferCoordinatorState State)>();
             if (dialFailureBeforeProbe)
             {
@@ -230,6 +274,20 @@ public sealed partial class NknAccelerationTransportTests
                 withoutFrontierGap: continueAfterEof || dialFailureBeforeProbe);
             var senderInitial = SessionFileTransferV4SenderTests.CaptureJoinedNknStateForTest(sender, outbound);
             var receiverInitial = SessionFileTransferV4SenderTests.CaptureJoinedNknStateForTest(receiver, inbound);
+            if (payerHandoff)
+            {
+                // The previous helper-funded connection has fallen back. Its
+                // helpee-side physical dialer remains, as in the live failure.
+                Assert.True(await hostLane.StartDialerSidecarAsync("previous-helper-listener", helperClient.Address, timeout.Token));
+                Assert.False(hostLane.IsLocalPaidListenerActive);
+                await host.RequestAccelerationNegotiationAsync("runtime_unlock", timeout.Token);
+                var preparation = GetPrivateField(host, "fallbackListenerPreparation");
+                Assert.NotNull(preparation);
+                var completion = (TaskCompletionSource<NknTunaLaneLease?>)preparation!.GetType()
+                    .GetField("Completion")!.GetValue(preparation)!;
+                Assert.NotNull(await completion.Task.WaitAsync(timeout.Token));
+                Assert.True(hostLane.IsLocalPaidListenerActive);
+            }
             var initialPublications = new[]
             {
                 (Service: sender, Context: outbound, Direction: FileTransferDirection.Outbound,
@@ -324,6 +382,15 @@ public sealed partial class NknAccelerationTransportTests
                 firstDial.SetResult(false);
             }
             try { await Task.WhenAll(answerSent.Task, answerAckSent.Task).WaitAsync(timeout.Token); }
+            catch (OperationCanceledException) when (payerHandoff)
+            {
+                var events = ReadOperationalLogTail(logStart).Split('\n').Where(line =>
+                    line.Contains("event=tuna_acceleration_", StringComparison.Ordinal) &&
+                    (line.Contains("rejected", StringComparison.Ordinal) || line.Contains("accepted", StringComparison.Ordinal)))
+                    .TakeLast(12).Select(line => string.Join("; ", System.Text.RegularExpressions.Regex.Matches(line,
+                        @"(?:event|reason|trigger|decision_reason|observed_lane)=([^;]+)").Select(match => match.Value)));
+                throw new TimeoutException($"Payer handoff: answer={answerSent.Task.IsCompleted}; ack={answerAckSent.Task.IsCompleted}; {string.Join("\n", events)}");
+            }
             catch (OperationCanceledException) when (dialFailureBeforeProbe)
             {
                 var failures = dialFailures.Select(value =>
@@ -619,6 +686,36 @@ public sealed partial class NknAccelerationTransportTests
                         isSender ? outbound! : inbound!, isSender ? host : helper, failure.Args.Observation);
                 }
             }
+            if (payerHandoff)
+            {
+                Assert.Equal("fallback_payer_handoff_prior_dialer", hostLane.LastStopReason);
+                Assert.True(hostLane.IsLocalPaidListenerActive);
+                Assert.False(helperLane.IsLocalPaidListenerActive);
+                Assert.Equal(1, hostLane.StopCalls);
+                var bytes = Enumerable.Range(0, 21 * 1024).Select(index => (byte)(index * 17)).ToArray();
+                var publication = SessionFileTransferV4SenderTests.CaptureJoinedNknStateForTest(sender, outbound)
+                    .CurrentRoutePublicationToken!.Value;
+                Assert.Equal(("file_tuna_v4", 4), (publication.RouteToken, publication.ProtocolVersion));
+                var authority = Assert.IsType<FileTransferDataPathSendAuthority>(typeof(SessionFileTransferService)
+                    .GetMethod("CreateDataPathSendAuthority", BindingFlags.Static | BindingFlags.NonPublic)!
+                    .Invoke(null, [publication, "payer_handoff_regression"]));
+                await Assert.IsAssignableFrom<IFileTransferDataPathAuthoritySession>(senderData).SendAsync(
+                    new FileTransferChunkBatchFrameV4
+                    {
+                        SessionId = sessionId, TransferId = transferId, StartChunkIndex = 100, ChunkCount = 1,
+                        DataSegments = [bytes], BatchProfile = "v4_default_21k",
+                    }, authority, timeout.Token);
+                var delivery = await handoffPayload.Task.WaitAsync(timeout.Token);
+                Assert.Equal(FileTransferTransportKind.Tuna, delivery.TransportKind);
+                var delivered = Assert.Single(Assert.IsType<FileTransferChunkBatchFrameV4>(delivery.Frame).DataSegments);
+                Assert.Equal(bytes, delivered);
+                Assert.Equal(System.Security.Cryptography.SHA256.HashData(bytes),
+                    System.Security.Cryptography.SHA256.HashData(delivered));
+                var captured = Assert.Single(forwarded.Where(item => item.Sender == "host" &&
+                    DecodeData(item) is FileTransferChunkBatchFrameV4));
+                Assert.Equal(NknBridgeChannel.Bulk, captured.Lane);
+                Assert.Equal(bytes, Assert.Single(Assert.IsType<FileTransferChunkBatchFrameV4>(DecodeData(captured)).DataSegments));
+            }
             if (repairLineage is not null)
             {
                 releaseReceiverSnapshots?.Invoke();
@@ -649,7 +746,8 @@ public sealed partial class NknAccelerationTransportTests
                     Assert.IsType<byte[]>(GetPrivateField(recipient, "fileTransferSessionSharedKey")), envelope.Payload,
                     new SessionSecureEnvelopeExpectation(SessionSecureMessageFamily.FileTransfer, "file_transfer_data_frame",
                         new SessionId(sessionId), new PeerAddress(expectedSender), transferId));
-                Assert.True(FileTransferDataFrameCodec.TryDeserialize(secure.Plaintext, out var frame));
+                Assert.True(FileTransferDataFrameCodec.TryDeserialize(secure.Plaintext, out var frame) ||
+                    (payerHandoff && FileTransferDataFrameCodec.TryDeserializeLegacyV4(secure.Plaintext, out frame)));
                 Assert.Equal((sessionId, transferId), (frame!.SessionId, frame.TransferId));
                 return frame;
             }
@@ -671,6 +769,12 @@ public sealed partial class NknAccelerationTransportTests
                 while (!token.IsCancellationRequested)
                 {
                     var received = await data.ReceiveWithMetadataAsync(token);
+                    if (payerHandoff && direction == FileTransferDirection.Inbound &&
+                        received.Frame is FileTransferChunkBatchFrameV4)
+                    {
+                        handoffPayload.TrySetResult(received);
+                        continue;
+                    }
                     if (continueAfterEof && received.Frame is FileTransferFallbackTailYieldFrameV6 nextYield)
                     {
                         SessionFileTransferV4SenderTests.ApplyJoinedNknYieldForTest(service,

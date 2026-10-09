@@ -31,6 +31,8 @@ dotnet build-server shutdown
 
 Optional GUI smoke requires an interactive Windows desktop. Live NKN/GUI scenarios additionally need escalated execution outside a restricted sandbox and successful live preflights:
 
+The Phase 5 matrix also includes `helper-to-helpee-payer-handoff-128mb`: establish Helper-paid Tuna, switch Helper off, enable Helpee-paid Tuna during the same transfer, then switch Helpee off and finish on fallback. Its required published route sequence is `file_tuna_v4 -> post_tuna_fallback_v6 -> file_tuna_v4 -> post_tuna_fallback_v6`; payload must be observed in both Tuna phases, with SHA integrity and both terminal GUIs. This new row has no inherited live PASS or performance baseline. After focused checks and a fresh portable rebuild, select only it with `Run-FileTransferRouteAcceptance.ps1 -MatrixMode phase5-analyzer-gui-acceptance -ScenarioName helper-to-helpee-payer-handoff-128mb -StrictCampaignPreflight`, supplying the fresh executable/sidecar paths and existing test-wallet inputs. Do not bypass the clean-checkpoint, isolation, or live-network preflights.
+
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\tools\Test-Lanes.ps1 -Lane GuiSmoke -Configuration Release
 ```

@@ -62,6 +62,18 @@ public sealed partial class NknSignalingTransport
                     "runtime_unlock", work.Cancellation.Token).ConfigureAwait(false) ||
                 !IsFallbackListenerPreparationCurrent(work)) return;
             var lane = (INknTunaAccelerationSession)accelerationLane!;
+            if (lane.CaptureCurrentLaneLease() is { DialerOwner: not null, Listener: null } priorDialer)
+            {
+                // The coordinator's current fallback permit owns replacement of
+                // this physical resource, not a Tuna-active or route decision.
+                if (!IsFallbackListenerPreparationCurrent(work)) return;
+                if (!lane.TryStopCurrentLaneLease(priorDialer, "fallback_payer_handoff_prior_dialer"))
+                {
+                    LogFallbackListenerPreparation(work, "Unavailable", "prior_dialer_lease_replaced");
+                    return;
+                }
+            }
+            if (!IsFallbackListenerPreparationCurrent(work)) return;
             LogFallbackListenerPreparation(work, "Preparing", "coordinator_physical_preparation_permitted");
             lease = await lane.StartPreparationLaneAsync(new(work.Identity, remoteEndpoint!, LocalIsPayer: true,
                 ListenerLifetimePolicy: NknTunaListenerLifetimePolicy.CoordinatorScopedInitialActivation),

@@ -123,6 +123,7 @@ public sealed partial class NknSignalingTransport
     internal static Func<Task>? RuntimeUnlockRetryDispatchInstallFollowUpBarrierForTests;
     internal static Action?
         RuntimeUnlockRetryMissingDispatchSuccessorIntentBindingBarrierForTests;
+    internal Action? RuntimeUnlockPeerAnswerDispatchAdmissionBarrierForTests { get; set; }
     private readonly object accelerationGate = new();
     private readonly object accelerationBridgeRecoveryGate = new();
     private string? outboundAccelerationOfferNonce;
@@ -406,6 +407,7 @@ public sealed partial class NknSignalingTransport
         Accepted = 0,
         Idempotent = 1,
         Rejected = 2,
+        Deferred = 3,
     }
 
     private enum RuntimeUnlockOfferAuthorityMode
@@ -26299,7 +26301,8 @@ public sealed partial class NknSignalingTransport
             string sessionId,
             string nonce,
             long payerDecisionId,
-            long offerGeneration)
+            long offerGeneration,
+            (string Source, Envelope Envelope, TransportAccelerationAnswerPayload Payload)? receivedAnswer)
     {
         if (expectedBoundary is not { } boundary ||
             expectedInstallReceipt is not { } receipt)
@@ -26307,10 +26310,21 @@ public sealed partial class NknSignalingTransport
             return RuntimeUnlockPeerAnswerDispatchAdmissionResult.Rejected;
         }
 
+        bool TryDeferAnswerUnsafe()
+            => receivedAnswer is { } received && boundary.InstallReceipt == receipt &&
+               boundary.SessionId == sessionId && boundary.Nonce == nonce &&
+               boundary.PayerDecisionId == payerDecisionId && boundary.OfferGeneration == offerGeneration &&
+               TryDeferRuntimeUnlockAnswerForDispatchSettlementUnsafe(
+                   received.Source, received.Envelope, received.Payload, boundary);
+
+        RuntimeUnlockPeerAnswerDispatchAdmissionBarrierForTests?.Invoke();
         bool idempotent;
         string rejectionReason;
         lock (accelerationGate)
         {
+            // Settlement can start after the early answer-boundary check.
+            // Retain evidence only until Core applies that exact settlement.
+            if (TryDeferAnswerUnsafe()) return RuntimeUnlockPeerAnswerDispatchAdmissionResult.Deferred;
             if (!TryValidateRuntimeUnlockPeerAnswerDispatchAdmissionUnsafe(
                     boundary,
                     receipt,
@@ -26336,6 +26350,7 @@ public sealed partial class NknSignalingTransport
         {
             lock (accelerationGate)
             {
+                if (TryDeferAnswerUnsafe()) return RuntimeUnlockPeerAnswerDispatchAdmissionResult.Deferred;
                 if (!TryValidateRuntimeUnlockPeerAnswerDispatchAdmissionUnsafe(
                         boundary,
                         receipt,
@@ -26357,6 +26372,7 @@ public sealed partial class NknSignalingTransport
 
         lock (accelerationGate)
         {
+            if (TryDeferAnswerUnsafe()) return RuntimeUnlockPeerAnswerDispatchAdmissionResult.Deferred;
             if (!TryValidateRuntimeUnlockPeerAnswerDispatchAdmissionUnsafe(
                     boundary,
                     receipt,
@@ -37595,8 +37611,10 @@ public sealed partial class NknSignalingTransport
                     answer.SessionId,
                     answerNonce,
                     answer.PayerDecisionId,
-                    expectedOfferGeneration) ==
-                RuntimeUnlockPeerAnswerDispatchAdmissionResult.Rejected)
+                    expectedOfferGeneration,
+                    (source, env, answer)) is not (
+                RuntimeUnlockPeerAnswerDispatchAdmissionResult.Accepted or
+                RuntimeUnlockPeerAnswerDispatchAdmissionResult.Idempotent))
             {
                 return;
             }

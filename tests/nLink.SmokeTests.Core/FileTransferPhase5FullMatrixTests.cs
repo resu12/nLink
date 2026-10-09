@@ -65,7 +65,7 @@ public sealed class FileTransferPhase5FullMatrixTests : FileTransferAcceptancePh
             Assert.Equal("phase5", summary["acceptance_phase"]);
             Assert.Equal("PASS", summary["correctness_verdict"]);
             Assert.Equal("PASS", summary["performance_verdict"]);
-            Assert.Equal("6", summary["run_count"]);
+            Assert.Equal("7", summary["run_count"]);
             Assert.Equal("0", summary["failure_count"]);
             var snapshot = System.Text.Json.JsonDocument.Parse(File.ReadAllText(Path.Combine(runRoot,
                 "regular-v4-live-activation-off-on-off-256mb", "filetransfer-coordinator-snapshot-full-summary.json")));

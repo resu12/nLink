@@ -2,7 +2,7 @@ param(
     [string]$WalletPath = ".\artifacts\tuna-poc\wallet-test-nkn.json",
     [string]$WalletPassword = "",
     [string]$SidecarPath = ".\artifacts\portable\nLink\win-x64\tuna\win-x64\nlink-tuna-sidecar.exe",
-    [ValidateSet("helpee", "helper", "both")]
+    [ValidateSet("helpee", "helper", "both", "helper-to-helpee")]
     [string]$PayerMode = "helpee",
     [ValidateSet("none", "switch-off", "sidecar-kill")]
     [string]$Fault = "switch-off",
@@ -25,6 +25,12 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+
+if ($PayerMode -eq 'helper-to-helpee' -and
+    ($RouteMode -ne 'live-multi-toggle' -or $Fault -ne 'switch-off' -or
+     $LiveToggleSequence -notin @('', 'off,on,off'))) {
+    throw 'Helper-to-helpee payer handoff requires live-multi-toggle, switch-off, and off,on,off.'
+}
 
 . (Join-Path $PSScriptRoot 'FileTransferSoak\RetainedAnalysisEvidence.ps1')
 

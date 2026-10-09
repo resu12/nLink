@@ -1,7 +1,8 @@
 namespace NLink.Core.FileTransfer;
 
-// Permission for revocable physical listener startup only. It grants no retry,
-// runtime, route, fallback-release, or publication authority.
+// Permission for revocable physical listener startup, including exact cleanup
+// of the prior dialer while this fallback publication remains current. It grants
+// no retry, runtime unlock, route, fallback-release, or publication authority.
 internal sealed record FileTransferFallbackListenerPreparationPermit(
     RoutePublicationToken Publication, Guid SecurityIncarnation, DateTimeOffset ExpiresUtc);
 

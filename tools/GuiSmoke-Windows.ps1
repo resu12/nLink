@@ -33797,8 +33797,17 @@ function Get-TunaGuiPayerRole {
     if ([string]::IsNullOrWhiteSpace($mode)) { return 'helpee' }
 
     $normalized = $mode.Trim().ToLowerInvariant()
-    if ($normalized -in @('helpee', 'helper', 'both')) { return $normalized }
-    throw "Invalid NLINK_TUNA_GUI_PAYER_MODE '$mode'. Use helpee, helper, or both."
+    if ($normalized -in @('helpee', 'helper', 'both', 'helper-to-helpee')) { return $normalized }
+    throw "Invalid NLINK_TUNA_GUI_PAYER_MODE '$mode'. Use helpee, helper, both, or helper-to-helpee."
+}
+
+function Get-TunaGuiLiveTogglePayer {
+    param([Parameter(Mandatory = $true)][string]$PayerMode, [int]$StepIndex)
+    if ($PayerMode -eq 'helper-to-helpee') {
+        if ($StepIndex -eq 0) { return 'helper' }
+        return 'helpee'
+    }
+    return $PayerMode
 }
 
 function Unlock-TunaPayers {
@@ -33807,6 +33816,8 @@ function Unlock-TunaPayers {
         [Parameter(Mandatory = $true)][string]$PayerMode,
         [Parameter(Mandatory = $true)][string]$Password
     )
+
+    if ($PayerMode -eq 'helper-to-helpee') { $PayerMode = 'helper' }
 
     if ($PayerMode -eq 'helpee' -or $PayerMode -eq 'both') {
         Unlock-TunaFromSessionHeader -Process $Context.HelpeeProc -Window $Context.HelpeeWindow -Password $Password -RoleLabel 'helpee'
@@ -33878,7 +33889,7 @@ function Get-TunaGuiLiveMultiToggleSequence {
 function Get-TunaGuiFaultTarget {
     param([Parameter(Mandatory = $true)][string]$PayerMode)
 
-    if ($PayerMode -eq 'helper') { return 'helper' }
+    if ($PayerMode -in @('helper', 'helper-to-helpee')) { return 'helper' }
     return 'helpee'
 }
 
@@ -37153,6 +37164,7 @@ function Invoke-FileTransferTunaHandoffFallbackCycle {
         for ($stepIndex = 0; $stepIndex -lt $sequence.Count; $stepIndex++) {
             $action = [string]$sequence[$stepIndex]
             $stepNumber = $stepIndex + 1
+            $stepPayerMode = Get-TunaGuiLiveTogglePayer -PayerMode $PayerMode -StepIndex $stepIndex
             if ($action -eq 'off') {
                 Write-Host ("[GUI Smoke][filetransfer_tuna] Live toggle step {0}/{1}: switching Tuna off after transfer progress." -f $stepNumber, $sequence.Count) -ForegroundColor DarkGray
                 $earlyFallbackStartedLine = $null
@@ -37178,7 +37190,7 @@ function Invoke-FileTransferTunaHandoffFallbackCycle {
                     [string]::Equals([string]$sequence[$stepIndex - 1], 'on', [System.StringComparison]::OrdinalIgnoreCase)) {
                     $progressLine = "[{0}] [INFO] [GuiSmoke] event=filetransfer_tuna_gui_live_multi_toggle_progress_wait_skipped; route_mode={1}; step={2}; action=off; reason=regular_activation_cycle_off_after_live_tuna_epoch" -f ([datetime]::UtcNow.ToString('yyyy-MM-dd HH:mm:ssZ')), $RouteMode, $stepNumber
                 }
-                elseif ($RouteMode -eq 'live-multi-toggle' -and
+                elseif ($RouteMode -eq 'live-multi-toggle' -and $PayerMode -ne 'helper-to-helpee' -and
                     $stepIndex -eq ($sequence.Count - 1) -and
                     $stepIndex -gt 0 -and
                     [string]::Equals([string]$sequence[$stepIndex - 1], 'on', [System.StringComparison]::OrdinalIgnoreCase)) {
@@ -37205,12 +37217,12 @@ function Invoke-FileTransferTunaHandoffFallbackCycle {
                 }
                 $lastActivationPayloadBookmark = $null
                 $stepBookmark = if ($earlyFallbackAccepted) { $bookmark } else { [int]$faultAdmissionTracker.LastSynchronizedEndBookmark }
-                $observedEvidenceLines.Add(("[{0}] [INFO] [GuiSmoke] event=filetransfer_tuna_gui_live_multi_toggle_step; step={1}; action=off; early_fallback={2}" -f ([datetime]::UtcNow.ToString('yyyy-MM-dd HH:mm:ssZ')), $stepNumber, ($(if ($earlyFallbackAccepted) { 1 } else { 0 })))) | Out-Null
+                $observedEvidenceLines.Add(("[{0}] [INFO] [GuiSmoke] event=filetransfer_tuna_gui_live_multi_toggle_step; step={1}; action=off; early_fallback={2}; payer_role={3}" -f ([datetime]::UtcNow.ToString('yyyy-MM-dd HH:mm:ssZ')), $stepNumber, ($(if ($earlyFallbackAccepted) { 1 } else { 0 })), $stepPayerMode)) | Out-Null
                 if (-not $earlyFallbackAccepted) {
                     [void](Reset-TunaGuiFaultAdmissionActionWindow `
                         -Tracker $faultAdmissionTracker `
                         -ActionBookmark $stepBookmark)
-                    $faultResult = Invoke-TunaGuiFallbackFault -Context $Context -FaultMode $FaultMode -PayerMode $PayerMode -Bookmark $bookmark -PrearmedToggle $prearmedSwitchOffToggle -PrearmedToggleWaitMs $prearmedSwitchOffToggleWaitMs -AdmissionTracker $faultAdmissionTracker
+                    $faultResult = Invoke-TunaGuiFallbackFault -Context $Context -FaultMode $FaultMode -PayerMode $stepPayerMode -Bookmark $bookmark -PrearmedToggle $prearmedSwitchOffToggle -PrearmedToggleWaitMs $prearmedSwitchOffToggleWaitMs -AdmissionTracker $faultAdmissionTracker
                     $prearmedSwitchOffToggle = $null
                     $prearmedSwitchOffToggleWaitMs = 0L
                     Add-TunaGuiFaultWindowEvidence -ArtifactDir $ArtifactDir -ObservedEvidenceLines $observedEvidenceLines -ActivationLine $lastActivationEvidenceLine -ActivationObservedUtc $lastActivationObservedUtc -FaultResult $faultResult
@@ -37312,7 +37324,8 @@ function Invoke-FileTransferTunaHandoffFallbackCycle {
                         $prearmedActivationBookmark = Get-AppLogBookmark
                     }
                     $observedEvidenceLines.Add(("[{0}] [INFO] [GuiSmoke] event=filetransfer_tuna_gui_live_multi_toggle_step_prearmed; step={1}; next_step={2}; action=on; route_mode={3}; reason=prearm_after_fallback_epoch_started" -f ([datetime]::UtcNow.ToString('yyyy-MM-dd HH:mm:ssZ')), $stepNumber, ($stepNumber + 1), $RouteMode)) | Out-Null
-                    Unlock-TunaPayers -Context $Context -PayerMode $PayerMode -Password $WalletPassword
+                    $nextPayerMode = Get-TunaGuiLiveTogglePayer -PayerMode $PayerMode -StepIndex ($stepIndex + 1)
+                    Unlock-TunaPayers -Context $Context -PayerMode $nextPayerMode -Password $WalletPassword
                     $liveReactivationUnlockInvoked = $true
                     if ($null -ne $fallbackProjection) {
                         [void](Complete-TunaGuiLiveReactivationAction -Tracker $faultAdmissionTracker)
@@ -37466,18 +37479,18 @@ function Invoke-FileTransferTunaHandoffFallbackCycle {
                 }
                 $lastActivationPayloadBookmark = $stepBookmark
                 $prearmedFlag = if ($prearmedActivation) { 1 } else { 0 }
-                $observedEvidenceLines.Add(("[{0}] [INFO] [GuiSmoke] event=filetransfer_tuna_gui_live_multi_toggle_step; step={1}; action=on; prearmed={2}" -f ([datetime]::UtcNow.ToString('yyyy-MM-dd HH:mm:ssZ')), $stepNumber, $prearmedFlag)) | Out-Null
+                $observedEvidenceLines.Add(("[{0}] [INFO] [GuiSmoke] event=filetransfer_tuna_gui_live_multi_toggle_step; step={1}; action=on; prearmed={2}; payer_role={3}" -f ([datetime]::UtcNow.ToString('yyyy-MM-dd HH:mm:ssZ')), $stepNumber, $prearmedFlag, $stepPayerMode)) | Out-Null
                 if (-not $prearmedActivation) {
-                    Unlock-TunaPayers -Context $Context -PayerMode $PayerMode -Password $WalletPassword
+                    Unlock-TunaPayers -Context $Context -PayerMode $stepPayerMode -Password $WalletPassword
                 }
                 else {
-                    [void](Submit-TunaWalletPasswordDialogsForPayersIfPresent -Context $Context -PayerMode $PayerMode -Password $WalletPassword -Reason ("prearmed_on_step_{0}_existing_prompt" -f $stepNumber))
+                    [void](Submit-TunaWalletPasswordDialogsForPayersIfPresent -Context $Context -PayerMode $stepPayerMode -Password $WalletPassword -Reason ("prearmed_on_step_{0}_existing_prompt" -f $stepNumber))
                 }
                 if ($stepNumber -gt 1) {
                     [void](Reset-TunaGuiFaultAdmissionActionWindow -Tracker $faultAdmissionTracker -ActionBookmark $stepBookmark)
                 }
                 Write-Host ("[GUI Smoke][filetransfer_tuna] event=filetransfer_gui_evidence_activity; activity=switch_off_prearm; status=started; step={0}" -f $stepNumber) -ForegroundColor DarkGray
-                $switchOffPrearmResult = Try-PrearmTunaGuiSwitchOffToggle -Context $Context -PayerMode $PayerMode -Bookmark $bookmark -AdmissionTracker $faultAdmissionTracker
+                $switchOffPrearmResult = Try-PrearmTunaGuiSwitchOffToggle -Context $Context -PayerMode $stepPayerMode -Bookmark $bookmark -AdmissionTracker $faultAdmissionTracker
                 Write-Host ("[GUI Smoke][filetransfer_tuna] event=filetransfer_gui_evidence_activity; activity=switch_off_prearm; status=completed; step={0}" -f $stepNumber) -ForegroundColor DarkGray
                 $prearmedSwitchOffToggle = if ([string]::Equals([string]$switchOffPrearmResult.Kind, 'toggle', [System.StringComparison]::OrdinalIgnoreCase)) { $switchOffPrearmResult.Toggle } else { $null }
                 $prearmedSwitchOffToggleWaitMs = [long]$switchOffPrearmResult.WaitMs
