@@ -17567,6 +17567,8 @@ public sealed partial class NknAccelerationTransportTests : CoreSmokeTestsBase, 
             {
                 throw new TimeoutException(ReadOperationalLogTail(logStart), ex);
             }
+            var successorReceipt = Assert.IsType<RuntimeUnlockRetryDispatchInstallReceipt>(
+                GetLastCommittedRuntimeUnlockRetryDispatchInstallReceipt(host));
             var successorOfferGeneration = 0L;
             await WaitUntilAsync(
                 () =>
@@ -17580,12 +17582,24 @@ public sealed partial class NknAccelerationTransportTests : CoreSmokeTestsBase, 
                 },
                 TimeSpan.FromSeconds(5));
             await WaitUntilAsync(
-                () => Assert.IsType<bool>(InvokePrivateMethod(
-                    host,
-                    "MarkRuntimeUnlockRecoveryContractRetryObserved",
-                    sessionId,
-                    successorOfferGeneration,
-                    "test_exact_successor_observed_after_recovery_proof")),
+                () =>
+                {
+                    lock (GetPrivateField(host, "accelerationGate")!)
+                    {
+                        var retry = GetPrivateField(host, "runtimeUnlockRecoveryRetryState");
+                        var contract = retry?.GetType().GetProperty("DispatchContract")!.GetValue(retry)
+                            as RuntimeUnlockRetryDispatchContract;
+                        if (contract is not null && contract.Authority == successorReceipt.Authority &&
+                            contract.MatchesOfferAlias(successorOfferGeneration) && contract.Lifecycle.DispatchObserved)
+                            return true;
+                    }
+                    return Assert.IsType<bool>(InvokePrivateMethod(
+                        host,
+                        "MarkRuntimeUnlockRecoveryContractRetryObserved",
+                        sessionId,
+                        successorOfferGeneration,
+                        "test_exact_successor_observed_after_recovery_proof"));
+                },
                 TimeSpan.FromSeconds(5));
             try
             {
@@ -17625,10 +17639,12 @@ public sealed partial class NknAccelerationTransportTests : CoreSmokeTestsBase, 
         }
     }
 
-    [Fact]
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
     [Trait("Category", "Smoke")]
     [Trait("FileTransferInfraSuite", "RuntimeUnlockRetryDispatch")]
-    public async Task RuntimeUnlockRetryDispatch_PairedRequestReadyWhileUserStopped_UnlockRechecksExactIntent()
+    public async Task RuntimeUnlockRetryDispatch_PairedRequestReadyWhileUserStopped_UnlockRechecksExactIntent(bool peerStopped)
     {
         FakeNknClient.ResetNetwork();
         try
@@ -17671,9 +17687,14 @@ public sealed partial class NknAccelerationTransportTests : CoreSmokeTestsBase, 
                 cts.Token);
             InvokePrivateMethod(
                 host,
-                "MarkAccelerationUserStoppedForCurrentSession",
+                peerStopped
+                    ? "MarkAccelerationPeerUserStoppedForCurrentSession"
+                    : "MarkAccelerationUserStoppedForCurrentSession",
                 sessionId);
-            Assert.True(host.IsAccelerationUserStoppedForCurrentSessionForTests);
+            if (peerStopped)
+                Assert.Equal(sessionId, GetPrivateField(host, "accelerationPeerUserStoppedSessionId"));
+            else
+                Assert.True(host.IsAccelerationUserStoppedForCurrentSessionForTests);
 
             var logStart = GetOperationalLogLength();
             _ = QueueExactFallbackPairedTailYieldRuntimeUnlockRetryForTests(
@@ -17764,6 +17785,7 @@ public sealed partial class NknAccelerationTransportTests : CoreSmokeTestsBase, 
                 resumedTail,
                 StringComparison.Ordinal);
             Assert.False(host.IsAccelerationUserStoppedForCurrentSessionForTests);
+            Assert.Null(GetPrivateField(host, "accelerationPeerUserStoppedSessionId"));
         }
         finally
         {

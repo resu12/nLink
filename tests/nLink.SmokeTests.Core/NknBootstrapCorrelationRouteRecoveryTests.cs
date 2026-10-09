@@ -390,6 +390,8 @@ public sealed partial class NknAccelerationTransportTests
                             line.Contains($"transition_generation={transitionGeneration};", StringComparison.Ordinal)));
                 Assert.Equal(false, GetPrivateField(host, "fileTransferFallbackProofPending"));
                 Assert.Equal(false, GetPrivateField(helper, "fileTransferFallbackProofPending"));
+                Assert.Equal(FileTransferRoute.PostTunaFallbackV6, State(sender, outbound).CurrentLeg!.RouteSelection.Route);
+                Assert.Equal(FileTransferRoute.PostTunaFallbackV6, State(receiver, inbound).CurrentLeg!.RouteSelection.Route);
                 Assert.False(host.IsPostTunaFileFallbackActiveForRouteSelection, terminalProjectionDiagnostics);
                 Assert.False(helper.IsPostTunaFileFallbackActiveForRouteSelection, terminalProjectionDiagnostics);
                 foreach (var direction in new[] { FileTransferDirection.Outbound, FileTransferDirection.Inbound })
@@ -587,19 +589,28 @@ public sealed partial class NknAccelerationTransportTests
         {
             var state = State(service, context);
             var projection = GetPrivateField(transport, "tunaFallbackProofState");
+            var shadow = GetPrivateField(transport, "fileTransferRouteTransitionExecutionShadow")!;
             var input = FileTransferRouteResolverInput.FromTransport(transport);
             return new
             {
                 state.IsTerminal,
                 state.TerminalGeneration,
                 HasCurrentPublication = state.CurrentRoutePublicationToken is not null,
+                LegGeneration = state.CurrentLeg?.Generation,
+                LegRoute = state.CurrentLeg?.RouteSelection.TelemetryToken,
+                LegTransportEpoch = state.CurrentLeg?.TransportEpochId,
+                state.CurrentDataSessionGeneration,
                 input.IsPostTunaFileFallbackActive,
                 NextRouteCandidate = FileTransferRouteResolver.Resolve(input with { IsFileTunaActive = false }).TelemetryToken,
                 ProjectionPublication = projection is null ? null : ContextValue(projection, "FileProjectionPublication"),
                 ProjectionRetired = projection is not null && ContextValue(projection, "IsFileProjectionRetired") is true,
                 FallbackEpoch = projection is null ? null : ContextValue(projection, "Epoch"),
                 TransportEpoch = projection is null ? null : ContextValue(projection, "FileV6TransportEpoch"),
+                ProjectionDataSessionGeneration = projection is null ? null : ContextValue(projection, "FileProjectionDataSessionGeneration"),
                 FileState = projection is null ? null : ContextValue(projection, "FileState")?.ToString(),
+                HasCurrentTransition = ContextValue(shadow, "Current") is not null,
+                HasRetainedPredecessor = ContextValue(shadow, "RetainedPredecessor") is not null,
+                HasPendingAvailability = ContextValue(shadow, "PendingAvailabilityDisposition") is not null,
                 ProofPending = GetPrivateField(transport, "fileTransferFallbackProofPending"),
                 ProofGeneration = GetPrivateField(transport, "fileTransferFallbackProofGeneration"),
             };

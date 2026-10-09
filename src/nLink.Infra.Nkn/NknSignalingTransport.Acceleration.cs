@@ -31203,6 +31203,7 @@ public sealed partial class NknSignalingTransport
                     disposed ||
                     accelerationLane is not INknTunaAccelerationSession ||
                     IsAccelerationUserStoppedForCurrentSession() ||
+                    IsAccelerationPeerUserStoppedForFallbackSession(null) ||
                     !IsSessionAccelerationEligible(out _);
                 var replacesExactInstalledPredecessor =
                     !slotBlockedByRetainedAnswer &&
