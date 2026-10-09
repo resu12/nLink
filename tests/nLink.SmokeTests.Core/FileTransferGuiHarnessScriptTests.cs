@@ -3393,6 +3393,7 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
         var scopeKeyBody = ExtractPowerShellFunctionBody(guiText, "Get-TunaGuiFaultAdmissionScopeKey", "Get-TunaGuiFaultAdmissionTargetKey");
         var targetKeyBody = ExtractPowerShellFunctionBody(guiText, "Get-TunaGuiFaultAdmissionTargetKey", "Update-TunaGuiFaultAdmissionAuthority");
         var authorityBody = ExtractPowerShellFunctionBody(guiText, "Update-TunaGuiFaultAdmissionAuthority", "Update-TunaGuiFaultAdmissionTracker");
+        var routeCurrentBody = ExtractPowerShellFunctionBody(guiText, "Assert-TunaGuiSwitchOffRouteCurrent", "Update-TunaGuiFaultAdmissionTracker");
         var updateTrackerBody = ExtractPowerShellFunctionBody(guiText, "Update-TunaGuiFaultAdmissionTracker", "Test-TunaGuiSwitchOffToggleReady");
         var toggleBody = ExtractPowerShellFunctionBody(guiText, "Test-TunaGuiSwitchOffToggleReady", "Wait-TunaGuiSwitchOffToggleOrTerminal");
         var waitBody = ExtractPowerShellFunctionBody(guiText, "Wait-TunaGuiSwitchOffToggleOrTerminal", "Try-PrearmTunaGuiSwitchOffToggle");
@@ -3408,6 +3409,7 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
             function Get-TunaGuiFaultAdmissionScopeKey { {{scopeKeyBody}} }
             function Get-TunaGuiFaultAdmissionTargetKey { {{targetKeyBody}} }
             function Update-TunaGuiFaultAdmissionAuthority { {{authorityBody}} }
+            function Assert-TunaGuiSwitchOffRouteCurrent { {{routeCurrentBody}} }
             function Update-TunaGuiFaultAdmissionTracker { {{updateTrackerBody}} }
             function Test-TunaGuiSwitchOffToggleReady { {{toggleBody}} }
             function Get-TunaGuiSwitchOffClickPoint { param($Toggle) return [pscustomobject]@{ X = 100; Y = 100 } }

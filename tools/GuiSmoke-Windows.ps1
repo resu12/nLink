@@ -5819,6 +5819,9 @@ function Get-TunaGuiExplicitFailureClassification {
             'terminal_before_fallback_switch_off' {
                 return [pscustomobject]@{ Phase = 'live_route_proof'; Reason = $failureClass }
             }
+            'filetransfer_gui_fallback_before_switch_off' {
+                return [pscustomobject]@{ Phase = 'live_route_proof'; Reason = $failureClass }
+            }
             'filetransfer_gui_live_fallback_fault_window_missed' {
                 return [pscustomobject]@{
                     Phase = 'live_route_proof'
@@ -34323,6 +34326,26 @@ function Update-TunaGuiFaultAdmissionAuthority {
     }
 }
 
+function Assert-TunaGuiSwitchOffRouteCurrent {
+    param([Parameter(Mandatory = $true)]$Tracker)
+
+    if ($null -ne $Tracker.TerminalPair) { return }
+    $fallback = $Tracker.AuthoritativeFallbackProjection
+    if ($null -eq $fallback) { return }
+    $fallbackEpoch = [long](Get-GuiSmokeFieldValue -Fields $fallback.Outbound.Commit.Fields -Name 'target_live_route_epoch')
+    $tuna = $Tracker.AuthoritativeTunaProjection
+    if ($null -ne $tuna) {
+        if ([string]$tuna.ScopeKey -ne [string]$fallback.ScopeKey) { return }
+        $tunaEpoch = [long](Get-GuiSmokeFieldValue -Fields $tuna.Outbound.Commit.Fields -Name 'target_live_route_epoch')
+        if ($tunaEpoch -gt $fallbackEpoch) { return }
+    }
+
+    # Reject the stale fault window; this is not proof of payload delivery or
+    # permission to count an earlier fallback as the requested switch-off.
+    throw ("failure_class=filetransfer_gui_fallback_before_switch_off; route=post_tuna_fallback_v6; protocol_version=6; live_route_epoch={0}; inbound_commit_line={1}; outbound_commit_line={2}; click_invoked=0" -f `
+        $fallbackEpoch, $fallback.Inbound.Commit.LineIndex, $fallback.Outbound.Commit.LineIndex)
+}
+
 function Update-TunaGuiFaultAdmissionTracker {
     param(
         [Parameter(Mandatory = $true)]$Tracker,
@@ -34386,7 +34409,8 @@ function Update-TunaGuiFaultAdmissionTracker {
                 [int]$Tracker.AuthoritativeFallbackProjection.MinimumBookmark -eq [int]$Tracker.FallbackProjectionMinimumBookmark
             $parseDataPath = $dataPathEvent -and
                 (-not $tunaProjectionCurrent -or
-                    ($null -ne $Tracker.HeaderSwitchEvidence -and -not $fallbackProjectionCurrent))
+                    (($null -ne $Tracker.HeaderSwitchEvidence -or $Tracker.FallbackTransitionCommits.Count -gt 0) -and
+                        -not $fallbackProjectionCurrent))
             $parseFields = $eventName -in @(
                 'tuna_acceleration_reset',
                 'tuna_acceleration_timeline',
@@ -34763,6 +34787,7 @@ function Wait-TunaGuiSwitchOffToggleOrTerminal {
         }
 
         if ($null -ne $readyToggle) {
+            Assert-TunaGuiSwitchOffRouteCurrent -Tracker $tracker
             if ([string]$tracker.AdmissionState -eq 'Unclaimed') {
                 $tracker.AdmissionState = 'ClickClaimed'
                 $tracker.AdmissionWinner = 'click'
@@ -37219,6 +37244,8 @@ function Invoke-FileTransferTunaHandoffFallbackCycle {
                 $stepBookmark = if ($earlyFallbackAccepted) { $bookmark } else { [int]$faultAdmissionTracker.LastSynchronizedEndBookmark }
                 $observedEvidenceLines.Add(("[{0}] [INFO] [GuiSmoke] event=filetransfer_tuna_gui_live_multi_toggle_step; step={1}; action=off; early_fallback={2}; payer_role={3}" -f ([datetime]::UtcNow.ToString('yyyy-MM-dd HH:mm:ssZ')), $stepNumber, ($(if ($earlyFallbackAccepted) { 1 } else { 0 })), $stepPayerMode)) | Out-Null
                 if (-not $earlyFallbackAccepted) {
+                    [void](Update-TunaGuiFaultAdmissionTracker -Tracker $faultAdmissionTracker)
+                    Assert-TunaGuiSwitchOffRouteCurrent -Tracker $faultAdmissionTracker
                     [void](Reset-TunaGuiFaultAdmissionActionWindow `
                         -Tracker $faultAdmissionTracker `
                         -ActionBookmark $stepBookmark)
