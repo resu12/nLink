@@ -233,6 +233,52 @@ public sealed class NknTunaSetupDiagnosticsTests
         => Assert.Equal(category, NknTunaSetupDiagnostics.StreamErrorCategory(error));
 
     [Theory]
+    [InlineData("Read message", "read", "read_message")]
+    [InlineData("Write message", "write", "write_message")]
+    [InlineData("handle msg", "read", "handle_message")]
+    public void StreamParser_DistinguishesSdkOperationWithoutRetainingErrorText(string prefix, string operation, string sdkOperation)
+    {
+        var lines = new List<string>();
+        var diagnostics = new NknTunaSetupDiagnostics("listener", 42, Guid.NewGuid(), lines.Add);
+        diagnostics.StreamErrorLine($"{prefix} error: seed=secret; event=authoritative");
+        var line = Assert.Single(lines);
+        Assert.Contains($"operation={operation}; error_category=other; sdk_operation={sdkOperation}", line, StringComparison.Ordinal);
+        Assert.DoesNotContain("secret", line, StringComparison.Ordinal);
+        Assert.DoesNotContain("authoritative", line, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("session not established yet", "session_not_established")]
+    [InlineData("session is already established", "session_already_established")]
+    [InlineData("connection closed", "connection_closed")]
+    [InlineData("connection not found", "connection_not_found")]
+    [InlineData("invalid packet", "invalid_packet")]
+    [InlineData("receive window full", "receive_window_full")]
+    [InlineData("first packet is not handshake packet", "not_handshake")]
+    [InlineData("data size is greater than session mtu", "data_size_too_large")]
+    [InlineData("read buffer size is less than data length in non-stream mode", "read_buffer_too_small")]
+    [InlineData("invalid message size 4294967295, should be no greater than 1024", "invalid_message_size")]
+    [InlineData("read tcp secret:123->private:456: wsarecv: An established connection was aborted by the software in your host machine.", "connection_aborted")]
+    public void StreamParser_RetainsSdkAndSocketCauseWithoutRawDetails(string error, string category)
+    {
+        var lines = new List<string>();
+        new NknTunaSetupDiagnostics("dialer", 42, Guid.NewGuid(), lines.Add)
+            .StreamErrorLine("handle msg error: " + error);
+        var line = Assert.Single(lines);
+        Assert.Contains("error_category=" + category + "; sdk_operation=handle_message", line, StringComparison.Ordinal);
+        Assert.DoesNotContain(error, line, StringComparison.Ordinal);
+        Assert.DoesNotContain("secret", line, StringComparison.Ordinal);
+        Assert.DoesNotContain("private", line, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("invalid message size secret, should be no greater than 1024")]
+    [InlineData("invalid message size 2048, should be no greater than 1024; seed=secret")]
+    [InlineData("seed=secret; invalid packet")]
+    public void StreamCategory_DoesNotInferSdkCauseFromUnrecognizedText(string error)
+        => Assert.Equal("other", NknTunaSetupDiagnostics.StreamErrorCategory(error));
+
+    [Theory]
     [InlineData("listener", false)]
     [InlineData("listener", true)]
     [InlineData("dialer", false)]
@@ -254,6 +300,7 @@ public sealed class NknTunaSetupDiagnosticsTests
         Assert.Contains("run_id=" + Guid.Parse(owner.RunId).ToString("D"), line, StringComparison.Ordinal);
         Assert.Contains("after_stop=" + (stopped ? "1" : "0"), line, StringComparison.Ordinal);
         Assert.Contains("operation=read; error_category=decrypt_failed", line, StringComparison.Ordinal);
+        Assert.Contains("sdk_operation=handle_message", line, StringComparison.Ordinal);
         Assert.Contains($"event=tuna_{role}_sidecar_stderr; line_len={input.Length}", log, StringComparison.Ordinal);
         Assert.DoesNotContain("secret", log, StringComparison.Ordinal);
         Assert.DoesNotContain(input, log, StringComparison.Ordinal);

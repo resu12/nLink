@@ -20,6 +20,9 @@ internal sealed class NknTunaSetupDiagnostics(string role, int pid, Guid runId, 
     private static readonly Regex StreamError = new(
         @"\A(?:[0-9]{4}/[0-9]{2}/[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2} )?(?<operation>handle msg|Write message|Read message) error: (?<error>[^\r\n]+)\z",
         RegexOptions.CultureInvariant | RegexOptions.NonBacktracking);
+    private static readonly Regex InvalidMessageSize = new(
+        @"\Ainvalid message size [0-9]{1,10}, should be no greater than [0-9]{1,10}\z",
+        RegexOptions.CultureInvariant | RegexOptions.NonBacktracking);
     private readonly object gate = new();
     private int records;
     private int details;
@@ -96,11 +99,17 @@ internal sealed class NknTunaSetupDiagnostics(string role, int pid, Guid runId, 
         var match = StreamError.Match(line);
         if (!match.Success) return;
         var operation = match.Groups["operation"].Value == "Write message" ? "write" : "read";
+        var sdkOperation = match.Groups["operation"].Value switch
+        {
+            "Write message" => "write_message",
+            "Read message" => "read_message",
+            _ => "handle_message",
+        };
         lock (gate)
         {
             if (streamErrorObserved) return;
             streamErrorObserved = true;
-            Record($"kind=stream_error; operation={operation}; error_category={StreamErrorCategory(match.Groups["error"].Value)}", detail: true);
+            Record($"kind=stream_error; operation={operation}; error_category={StreamErrorCategory(match.Groups["error"].Value)}; sdk_operation={sdkOperation}", detail: true);
         }
     }
 
@@ -112,6 +121,15 @@ internal sealed class NknTunaSetupDiagnostics(string role, int pid, Guid runId, 
         return error.Trim() switch
         {
             "session closed" => "session_closed",
+            "session not established yet" => "session_not_established",
+            "session is already established" => "session_already_established",
+            "connection closed" => "connection_closed",
+            "connection not found" => "connection_not_found",
+            "invalid packet" => "invalid_packet",
+            "receive window full" => "receive_window_full",
+            "first packet is not handshake packet" => "not_handshake",
+            "data size is greater than session mtu" => "data_size_too_large",
+            "read buffer size is less than data length in non-stream mode" => "read_buffer_too_small",
             "EOF" => "eof",
             "unexpected EOF" => "unexpected_eof",
             "context canceled" => "context_canceled",
@@ -123,6 +141,8 @@ internal sealed class NknTunaSetupDiagnostics(string role, int pid, Guid runId, 
             var value when value.EndsWith("connection reset by peer", StringComparison.Ordinal) ||
                 value.EndsWith("An existing connection was forcibly closed by the remote host.", StringComparison.Ordinal) => "connection_reset",
             var value when value.EndsWith("broken pipe", StringComparison.Ordinal) => "broken_pipe",
+            var value when value.EndsWith("An established connection was aborted by the software in your host machine.", StringComparison.Ordinal) => "connection_aborted",
+            var value when InvalidMessageSize.IsMatch(value) => "invalid_message_size",
             _ => "other",
         };
     }
