@@ -504,7 +504,7 @@ public sealed class FileTransferPhase5PreflightTests : FileTransferAcceptancePha
 
             var summary = ReadArtifactReport(runRoot, "phase5-analyzer-gui-acceptance-summary.txt");
             Assert.Equal("PASS", summary["verdict"]);
-            Assert.Equal("6", summary["run_count"]);
+            Assert.Equal("7", summary["run_count"]);
             Assert.Equal("0", summary["failure_count"]);
         }
         finally

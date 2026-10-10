@@ -108,6 +108,7 @@ $secondBookmark = 7
 $StartupTimeoutMs = 1000
 $results = New-Object 'System.Collections.Generic.List[object]'
 foreach ($PayerMode in @('helpee','helper','both')) {
+    $stepPayerMode = $PayerMode
     foreach ($prearmedActivation in @($false,$true)) {
         foreach ($mode in @('fresh-ready','fresh-not-ready','not-fresh-ready','not-fresh-not-ready','missing-publication','unlock-failure')) {
             $script:on = @{1=$false;2=$false}

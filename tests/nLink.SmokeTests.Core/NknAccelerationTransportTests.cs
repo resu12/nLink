@@ -35249,10 +35249,16 @@ public sealed partial class NknAccelerationTransportTests : CoreSmokeTestsBase, 
 
             successorOutcome.TrySetResult(true);
             await WaitUntilAsync(
-                () => ReadOperationalLogTail(logStart).Contains(
-                    "event=runtime_unlock_tuna_dial_attempt_connected;" +
-                    " session_id=",
-                    StringComparison.Ordinal),
+                () => ReadOperationalLogTail(logStart)
+                    .Split(
+                        Environment.NewLine,
+                        StringSplitOptions.RemoveEmptyEntries)
+                    .Any(line => line.Contains(
+                        "event=tuna_acceleration_answer_sent; accepted=1;",
+                        StringComparison.Ordinal) &&
+                        line.Contains(
+                            $"payer_decision_id={successor.PayerDecisionId};",
+                            StringComparison.Ordinal)),
                 TimeSpan.FromSeconds(4));
 
             var logTail = ReadOperationalLogTail(logStart);
