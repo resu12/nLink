@@ -13334,9 +13334,11 @@ public sealed partial class NknAccelerationTransportTests : CoreSmokeTestsBase, 
 
 
 
-    [Fact]
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
     [Trait("Category", "Smoke")]
-    public async Task RuntimeUnlockRetryDispatchCurrentListenerAdoption_ReusesPhysicalListenerAndCreatesOffer()
+    public async Task RuntimeUnlockRetryDispatchCurrentListenerAdoption_PreparesCompatibleListenerBeforeAdoption(bool genericListener)
     {
         FakeNknClient.ResetNetwork();
         var previousHelpeePriorityDelay =
@@ -13382,7 +13384,7 @@ public sealed partial class NknAccelerationTransportTests : CoreSmokeTestsBase, 
                 transferId,
                 cts.Token);
             tuna.MarkCoordinatorScopedListenerAvailableForTests(
-                helperClient.Address);
+                helperClient.Address, genericListener);
 
             var logStart = GetOperationalLogLength();
             var request =
@@ -13408,7 +13410,12 @@ public sealed partial class NknAccelerationTransportTests : CoreSmokeTestsBase, 
 
             var tail = ReadOperationalLogTail(logStart);
             Assert.True(tuna.ListenerAdoptionCalls == 1, tail);
-            Assert.Equal(0, tuna.EnsureListenerCalls);
+            Assert.Equal(genericListener ? 1 : 0, tuna.EnsureListenerCalls);
+            Assert.Equal(NknTunaListenerLifetimePolicy.CoordinatorScopedInitialActivation,
+                tuna.LastListenerRequest?.LifetimePolicy);
+            var readyIndex = tail.IndexOf("event=runtime_unlock_retry_listener_preparation_decided; decision_status=Ready", StringComparison.Ordinal);
+            var installIndex = tail.IndexOf("event=runtime_unlock_retry_dispatch_install_committed;", StringComparison.Ordinal);
+            Assert.True(readyIndex >= 0 && installIndex > readyIndex, tail);
             Assert.Contains("status=Accepted", tail, StringComparison.Ordinal);
             Assert.Contains("physical_process_id=16704", tail, StringComparison.Ordinal);
             Assert.Contains(
@@ -13488,15 +13495,15 @@ public sealed partial class NknAccelerationTransportTests : CoreSmokeTestsBase, 
                     "decision_reason=retry_dispatch_authority_backoff_pending",
                     StringComparison.Ordinal),
                 TimeSpan.FromSeconds(3));
-             Assert.False(
-                 TryAcquireGenericAccelerationNegotiationSlotForTests(
-                     host,
-                    out _));
              await WaitUntilAsync(
                  () => ReadOperationalLogTail(logStart).Contains(
                      "event=runtime_unlock_retry_listener_preparation_decided; decision_status=Preparing",
                     StringComparison.Ordinal),
                 TimeSpan.FromSeconds(5));
+             Assert.False(
+                 TryAcquireGenericAccelerationNegotiationSlotForTests(
+                     host,
+                    out _));
 
             var preparingTail = ReadOperationalLogTail(logStart);
             Assert.DoesNotContain(
@@ -13513,6 +13520,11 @@ public sealed partial class NknAccelerationTransportTests : CoreSmokeTestsBase, 
             await WaitUntilAsync(
                 () => ReadOperationalLogTail(logStart).Contains(
                     "event=runtime_unlock_retry_listener_preparation_decided; decision_status=Ready",
+                    StringComparison.Ordinal),
+                TimeSpan.FromSeconds(8));
+            await WaitUntilAsync(
+                () => ReadOperationalLogTail(logStart).Contains(
+                    "event=runtime_unlock_retry_dispatch_install_committed;",
                     StringComparison.Ordinal),
                 TimeSpan.FromSeconds(8));
 
@@ -17107,6 +17119,8 @@ public sealed partial class NknAccelerationTransportTests : CoreSmokeTestsBase, 
                 TaskCreationOptions.RunContinuationsAsynchronously);
             var releaseSuccessorOffer = new TaskCompletionSource<object?>(
                 TaskCreationOptions.RunContinuationsAsynchronously);
+            var successorOfferEntered = new TaskCompletionSource<object?>(
+                TaskCreationOptions.RunContinuationsAsynchronously);
             var offerIdentityGate = new object();
             string? firstOfferMessageId = null;
             hostClient.BeforeSendCoreAsync = async (_, payload, _, ct) =>
@@ -17130,6 +17144,7 @@ public sealed partial class NknAccelerationTransportTests : CoreSmokeTestsBase, 
                 }
                 else if (exhaustedBudget)
                 {
+                    successorOfferEntered.TrySetResult(null);
                     await releaseSuccessorOffer.Task.WaitAsync(ct);
                     ct.ThrowIfCancellationRequested();
                 }
@@ -17278,6 +17293,7 @@ public sealed partial class NknAccelerationTransportTests : CoreSmokeTestsBase, 
                 }
                 predecessor = predecessorReceipt.Authority;
                 predecessorOfferGeneration = Assert.IsType<long>(GetPrivateField(host, "outboundAccelerationOfferGeneration"));
+                await successorOfferEntered.Task.WaitAsync(TimeSpan.FromSeconds(5), cts.Token);
                 recoveryCurrent = true;
                 Assert.True(Assert.IsType<bool>(InvokePrivateMethod(
                     host, "TrySettleRuntimeUnlockRetryDispatchMissingIfCurrent", sessionId,
@@ -38525,13 +38541,14 @@ public sealed partial class NknAccelerationTransportTests : CoreSmokeTestsBase, 
         }
 
         public void MarkCoordinatorScopedListenerAvailableForTests(
-            string expectedRemotePeer)
+            string expectedRemotePeer, bool genericListener = false)
         {
             var request = new NknTunaListenerStartRequest(
                 expectedRemotePeer,
                 supportedLanes,
-                NknTunaListenerLifetimePolicy.CoordinatorScopedInitialActivation,
-                "test-current-coordinator-listener");
+                genericListener ? NknTunaListenerLifetimePolicy.GenericBounded
+                    : NknTunaListenerLifetimePolicy.CoordinatorScopedInitialActivation,
+                genericListener ? "" : "test-current-coordinator-listener");
             LocalTunaAddress = "nlink-tuna-sidecar.test-listener-address";
             LastListenerRequest = request;
             listenerAdoptionSnapshot = new NknTunaListenerAdoptionSnapshot(

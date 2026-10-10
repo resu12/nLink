@@ -31448,6 +31448,14 @@ public sealed partial class NknSignalingTransport
 
         NknTunaListenerAdoptionSnapshot? snapshot =
             tunaSession.CaptureCurrentListenerAdoptionSnapshot();
+        // A generic listener cannot be adopted by an installed retry. Prepare
+        // the scoped replacement before Core consumes the paired release.
+        if (snapshot is { CurrentRequest.LifetimePolicy: NknTunaListenerLifetimePolicy.GenericBounded } &&
+            string.Equals(snapshot.CurrentRequest.ExpectedRemotePeer, remoteEndpoint, StringComparison.Ordinal) &&
+            snapshot.CurrentRequest.Lanes == lanes)
+        {
+            snapshot = null;
+        }
         try
         {
             if (snapshot is null &&
