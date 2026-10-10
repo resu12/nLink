@@ -95,6 +95,52 @@ public sealed partial class NknAccelerationTransportTests
     public Task JoinedFallbackRetry_ListenerEofRejectsStaleProbeBinding(string control)
         => RunJoinedFallbackRetryAsync(false, "listener_terminal_tuna_stream_eof", control);
 
+    [Theory]
+    [InlineData("remote_closed", 1)]
+    [InlineData("read_failed", 1)]
+    [InlineData("header_switch_off", 0)]
+    [Trait("FileTransferInfraSuite", "PostFallbackFailureHandoff")]
+    public async Task GenericEarlyDrop_WithoutPostFallbackProbeFailureKeepsExistingRetryPolicy(
+        string reason, int expectedRetries)
+    {
+        FakeNknClient.ResetNetwork();
+        try
+        {
+            using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(8));
+            var options = NknTransportOptions.Load();
+            var hostClient = new FakeNknClient("host.generic-early-drop.address");
+            var helperClient = new FakeNknClient("helper.generic-early-drop.address");
+            var lane = new RetryableTunaAccelerationSession(false, 0);
+            using var host = new NknSignalingTransport(hostClient, options,
+                new NknIdentity("host-generic-early-drop", hostClient.Address));
+            using var helper = new NknSignalingTransport(helperClient, options,
+                new NknIdentity("helper-generic-early-drop", helperClient.Address),
+                NknTunaAccelerationOptions.Disabled, lane);
+            var sessionId = await ApproveNknSessionAsync(host, helper, timeout.Token,
+                InviteCapabilities.Chat | InviteCapabilities.FileTransfer,
+                suppressAutomaticAccelerationNegotiation: true);
+            InvokePrivateMethod(helper, "ClearAccelerationUserStoppedForCurrentSession");
+            Assert.True(await lane.StartDialerSidecarAsync("test-tuna-address",
+                hostClient.Address, timeout.Token));
+            helper.SetAccelerationAcceptedForTests(NknAccelerationLaneKind.File, sessionId);
+            var logStart = GetOperationalLogLength();
+
+            await lane.StopAsync(reason, timeout.Token);
+
+            Assert.Equal(expectedRetries, Assert.IsType<int>(GetPrivateField(
+                helper, "accelerationEarlyDropRetryAttempts")));
+            var log = ReadOperationalLogTail(logStart);
+            Assert.DoesNotContain("event=runtime_unlock_post_fallback_precommit_probe_failure_decided;",
+                log, StringComparison.Ordinal);
+            if (expectedRetries > 0)
+            {
+                Assert.Contains($"event=tuna_acceleration_early_drop_retry_scheduled; reason={reason};",
+                    log, StringComparison.Ordinal);
+            }
+        }
+        finally { FakeNknClient.ResetNetwork(); }
+    }
+
     private async Task RunJoinedFallbackRetryAsync(bool withStalledRepair, string? sidecarFailureReason = null,
         string? failureControl = null, bool continueAfterEof = false, bool withRecentProgress = false,
         bool delayReceiverSnapshots = false, bool notifyResponderFromPeer = false,
@@ -510,7 +556,13 @@ public sealed partial class NknAccelerationTransportTests
                     }
                     else
                     {
+                        var earlyDropRetries = Assert.IsType<int>(GetPrivateField(
+                            helper, "accelerationEarlyDropRetryAttempts"));
                         await helperLane.StopAsync(sidecarFailureReason, timeout.Token);
+                        Assert.Equal(RuntimeUnlockPostFallbackPreCommitProbeFailureStatus.Accepted,
+                            Assert.Single(responderFailures).Decision.Status);
+                        Assert.Equal(earlyDropRetries, Assert.IsType<int>(GetPrivateField(
+                            helper, "accelerationEarlyDropRetryAttempts")));
                     }
                     releaseFailedProbe.TrySetResult();
                     await AssertJoinedIndependentInstallAfterEofAsync(sender, outbound, host,

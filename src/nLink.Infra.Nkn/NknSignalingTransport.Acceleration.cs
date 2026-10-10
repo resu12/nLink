@@ -13296,7 +13296,8 @@ public sealed partial class NknSignalingTransport
         var shouldNotifyRemoteDown = !e.IsAvailable &&
                                      ShouldNotifyRemoteAccelerationDown(e.Reason) &&
                                      TryCaptureAccelerationNegotiation(out downSessionId, out downLanes);
-        var shouldRetryEarlyDrop = !e.IsAvailable &&
+        var shouldRetryEarlyDrop = !hasPostFallbackProbeFailure &&
+                                   !e.IsAvailable &&
                                    ShouldRetryEarlyAccelerationDrop(e.Reason, diagnostics) &&
                                    TryCaptureAccelerationNegotiation(out _, out _);
         var fallbackSessionId = string.Empty;
