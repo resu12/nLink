@@ -2364,10 +2364,25 @@ public sealed partial class SessionFileTransferV4SenderTests
                 }
             }
 
+            var diagnosticScope = FileTransferDiagnosticScopeEvidence.Format(sessionId, transferId);
+            string[] stagedFrameLines = [];
+            // The next receive starts before the previous frame is dispatched,
+            // so its ordinal alone does not prove that all frontier requests are staged.
             await WaitUntilAsync(
-                () => transport.GetDataSessionReceiveStateForTests(transferId).Active &&
-                      transport.GetDataSessionReceiveStateForTests(transferId).Ordinal >=
-                      receiveOrdinal + frontierFrameCount,
+                () =>
+                {
+                    stagedFrameLines = LocalOperationalLog.GetRecentLogText()
+                        .Split(new[] { "\r\n", "\n" }, StringSplitOptions.RemoveEmptyEntries)
+                        .Where(line => line.Contains(diagnosticScope, StringComparison.Ordinal) &&
+                                       line.Contains("request_correlation_id=frq-blocked-reopen-frontier-", StringComparison.Ordinal))
+                        .ToArray();
+                    return transport.GetDataSessionReceiveStateForTests(transferId).Active &&
+                           transport.GetDataSessionReceiveStateForTests(transferId).Ordinal >=
+                           receiveOrdinal + frontierFrameCount &&
+                           stagedFrameLines.Count(line => line.Contains(
+                               "event=filetransfer_v6_frontier_request_receive_dispatch_staged;",
+                               StringComparison.Ordinal)) == frontierFrameCount;
+                },
                 timeoutMs: 5000);
             Assert.False(releaseSourceReopen.Task.IsCompleted);
             Assert.Equal(1, Assert.IsAssignableFrom<System.Collections.IDictionary>(
@@ -2375,11 +2390,6 @@ public sealed partial class SessionFileTransferV4SenderTests
             Assert.Empty(Assert.IsAssignableFrom<System.Collections.ICollection>(
                 GetPrivatePropertyValue(context, "PullV4SenderPumpRepairQueue")).Cast<object>());
             Assert.Equal(0, GetPrivateProperty<int>(context, "RemoteNextExpectedChunkIndex"));
-            var stagedLog = LocalOperationalLog.GetRecentLogText();
-            var stagedFrameLines = stagedLog
-                .Split(new[] { "\r\n", "\n" }, StringSplitOptions.RemoveEmptyEntries)
-                .Where(line => line.Contains("request_correlation_id=frq-blocked-reopen-frontier-", StringComparison.Ordinal))
-                .ToArray();
             Assert.Equal(
                 frontierFrameCount,
                 stagedFrameLines.Count(line => line.Contains(
@@ -4385,8 +4395,12 @@ public sealed partial class SessionFileTransferV4SenderTests
                     return receive.Active && receive.Ordinal > predecessorReceive.Ordinal;
                 },
                 timeoutMs: 5000);
+            // Emergency frontier credit advances the accepted projection before physical send.
             await WaitUntilAsync(
-                () => GetPrivateProperty<int>(context, "ChunksAcceptedForTransport") >= 1,
+                () => GetPrivateProperty<int>(context, "ChunksAcceptedForTransport") >= 1 &&
+                      transport.SentDataFrames.Any(frame =>
+                          string.Equals(frame.TransferId, transferId, StringComparison.Ordinal) &&
+                          frame is FileTransferChunkBatchFrameV6),
                 timeoutMs: 5000);
 
             Assert.Single(transport.SentDataFrames.Where(frame =>
