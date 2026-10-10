@@ -1141,6 +1141,75 @@ public sealed partial class SessionFileTransferV4SenderTests
         }
     }
 
+    [Theory]
+    [InlineData("clone")]
+    [InlineData("leg_generation")]
+    [InlineData("transport_epoch")]
+    [InlineData("bridge_recovery_generation")]
+    [InlineData("checkpoint_generation")]
+    [InlineData("checkpoint_request")]
+    [Trait("FileTransferRuntimeSuite", "SparseWorkerHandoff")]
+    public async Task OutboundSparseSend_CoordinatorLegClonePreservesOnlyExactSourceScope(string change)
+    {
+        var transferId = $"transfer_sparse_send_leg_{change}_{Guid.NewGuid():N}";
+        using var service = new SessionFileTransferService();
+        using var transport = new LoopbackFileTransferTransport($"session_{transferId}");
+        service.AttachTransport(transport);
+        var context = CreateRegularNknV4OutboundContext(transferId,
+            remoteNextExpectedChunkIndex: 0, chunksAcceptedForTransport: 0,
+            remoteGrantedUntilExclusive: 64, lastGrantReceivedUtc: DateTimeOffset.UtcNow);
+        var serviceType = typeof(SessionFileTransferService);
+        serviceType.GetField("outboundTransfer", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .SetValue(service, context);
+        var dataSession = new RecordingDataSession($"session_{transferId}", transferId);
+        ReplaceOutboundDataSession(service, context, dataSession);
+        var owner = GetPrivateProperty<RuntimeOwnerToken>(context, "CurrentRuntimeOwner");
+        var publication = GetPrivateProperty<RoutePublicationToken>(context, "CurrentRoutePublicationToken");
+        var sourceLeg = GetPrivateProperty<FileTransferLeg>(context, "CurrentTransferLeg");
+        var previousBarrier = SessionFileTransferService.OutboundRegularV4PhysicalSendPreReservationBarrierForTests;
+        SessionFileTransferService.OutboundRegularV4PhysicalSendPreReservationBarrierForTests = (observedTransferId, _) =>
+        {
+            if (observedTransferId != transferId) { return Task.CompletedTask; }
+            // Use the same clone operation as coordinator-state adoption, not a new leg authority.
+            var clone = Assert.IsType<FileTransferLeg>(serviceType.GetMethod(
+                "CloneCoordinatorLegForContext", BindingFlags.Static | BindingFlags.NonPublic)!
+                .Invoke(null, [sourceLeg]));
+            if (change == "leg_generation")
+                clone = new FileTransferLeg
+                {
+                    LegId = clone.LegId, Generation = clone.Generation + 1,
+                    RouteSelection = clone.RouteSelection, ProtocolVersion = clone.ProtocolVersion,
+                    LiveRouteEpochId = clone.LiveRouteEpochId, TransportEpochId = clone.TransportEpochId,
+                    StartedUtc = clone.StartedUtc,
+                };
+            if (change == "transport_epoch") { clone.TransportEpochId++; }
+            if (change == "bridge_recovery_generation") { clone.BridgeRecoveryGeneration++; }
+            if (change == "checkpoint_generation") { clone.CheckpointGeneration++; }
+            if (change == "checkpoint_request") { clone.CheckpointRequestId = "replacement-checkpoint"; }
+            SetPrivateProperty(context, "CurrentTransferLeg", clone);
+            return Task.CompletedTask;
+        };
+        try
+        {
+            await using var stream = new MemoryStream(new byte[GetPrivateProperty<int>(context, "ChunkSizeBytes")], writable: false);
+            var sent = await Assert.IsAssignableFrom<Task<bool>>(serviceType.GetMethod(
+                "SendChunkIndicesV4Async", BindingFlags.Instance | BindingFlags.NonPublic)!.Invoke(service,
+                [context, stream, dataSession, new List<int> { 0 }, false, "(none)", null, null, null,
+                 FileTransferV4RepairDeliveryMode.BulkOnly, "normal", null, null, null, null, null, null,
+                 CancellationToken.None])!).WaitAsync(TimeSpan.FromSeconds(5));
+            Assert.NotSame(sourceLeg, GetPrivateProperty<FileTransferLeg>(context, "CurrentTransferLeg"));
+            Assert.Equal(change == "clone", sent);
+            Assert.Equal(change == "clone" ? 1 : 0, dataSession.SentFrames.Count);
+            Assert.Equal(owner, GetPrivateProperty<RuntimeOwnerToken>(context, "CurrentRuntimeOwner"));
+            Assert.Equal(publication, GetPrivateProperty<RoutePublicationToken>(context, "CurrentRoutePublicationToken"));
+            Assert.False(GetPrivateProperty<bool>(context, "IsTerminal"));
+        }
+        finally
+        {
+            SessionFileTransferService.OutboundRegularV4PhysicalSendPreReservationBarrierForTests = previousBarrier;
+        }
+    }
+
     [Fact]
     [Trait("FileTransferRuntimeSuite", "SparseWorkerHandoff")]
     public async Task OutboundRegularV4WriteHandoff_ReservationAndPhysicalSubmissionCompleteBeforeDraining()

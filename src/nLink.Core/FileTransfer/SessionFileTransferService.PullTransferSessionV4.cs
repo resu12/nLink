@@ -17245,7 +17245,8 @@ public sealed partial class SessionFileTransferService
             : context.LifetimeCts.Token;
         RuntimeOwnerToken? sourceRuntimeOwner = null;
         RoutePublicationToken? sourceRoutePublication = null;
-        FileTransferLeg? sourceLeg = null;
+        (string LegId, int Generation, long TransportEpoch, int BridgeRecoveryGeneration,
+            string? CheckpointRequestId, int CheckpointGeneration)? sourceLegScope = null;
         long sourceDataSessionGeneration = 0;
 
         bool IsSourceSendScopeCurrentLocked()
@@ -17255,7 +17256,9 @@ public sealed partial class SessionFileTransferService
                context.DataSessionGeneration == sourceDataSessionGeneration &&
                context.CurrentRuntimeOwner == sourceRuntimeOwner &&
                context.CurrentRoutePublicationToken == sourceRoutePublication &&
-               context.CurrentTransferLeg == sourceLeg &&
+               context.CurrentTransferLeg is { } currentLeg &&
+               sourceLegScope == (currentLeg.LegId, currentLeg.Generation, currentLeg.TransportEpochId,
+                   currentLeg.BridgeRecoveryGeneration, currentLeg.CheckpointRequestId, currentLeg.CheckpointGeneration) &&
                !FileTransferCoordinator.IsFileTransferRouteTransitionDraining(
                    CreateCoordinatorStateLocked(context),
                    out _);
@@ -17296,7 +17299,11 @@ public sealed partial class SessionFileTransferService
 
             sourceRuntimeOwner = context.CurrentRuntimeOwner;
             sourceRoutePublication = context.CurrentRoutePublicationToken;
-            sourceLeg = context.CurrentTransferLeg;
+            // Coordinator adoption clones legs; object identity is not send authority.
+            sourceLegScope = context.CurrentTransferLeg is { } leg
+                ? (leg.LegId, leg.Generation, leg.TransportEpochId, leg.BridgeRecoveryGeneration,
+                    leg.CheckpointRequestId, leg.CheckpointGeneration)
+                : null;
             sourceDataSessionGeneration = context.DataSessionGeneration;
         }
 
@@ -18618,7 +18625,7 @@ public sealed partial class SessionFileTransferService
                         else if (!IsSourceSendScopeCurrentLocked() ||
                             !IsPumpInstallCurrentLocked())
                         {
-                            sendException = new OperationCanceledException(sendToken);
+                            physicalSendLeaseRejectionReason = "source_send_scope_replaced";
                         }
                         else if (!IsRegularV4FrontierRepairSubmissionCurrentLocked(
                                      out var regularContractRejectionReason))

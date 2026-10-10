@@ -635,9 +635,9 @@ public sealed partial class NknAccelerationTransportTests
         static string Field(string line, string name) => line.Split(';').Select(part => part.Trim())
             .Single(part => part.StartsWith(name + "=", StringComparison.Ordinal))[(name.Length + 1)..];
         static string? Text(JsonElement value, string name) => value.GetProperty(name).GetString();
-        static JsonElement Operation(JsonElement envelope, string role) => Assert.Single(
+        static JsonElement Operation(JsonElement envelope, string role, string? kind = null) => Assert.Single(
             envelope.GetProperty("aggregate").GetProperty("operations").EnumerateArray(),
-            item => Text(item, "operationRole") == role);
+            item => Text(item, "operationRole") == role && (kind is null || Text(item, "operationKind") == kind));
 
         var lines = log.Split('\n');
         var snapshots = lines.Where(line =>
@@ -662,7 +662,7 @@ public sealed partial class NknAccelerationTransportTests
         var retired = Operation(accepted.Envelope, "peer_proof_awaiting_checkpoint");
         var promoted = Operation(accepted.Envelope, "peer_proof_pending_initial");
         var consumed = Operation(yielded.Envelope, "peer_proof_pending_initial");
-        var current = Operation(yielded.Envelope, "yield_current");
+        var current = Operation(yielded.Envelope, "yield_current", "Quiescent");
         Assert.Equal("None", Text(held, "beforeState"));
         Assert.Equal("Pending", Text(held, "afterState"));
         Assert.Equal("None", Text(retired, "afterState"));
