@@ -28,7 +28,7 @@ function New-Lines([object[]]$values) {
         if ($e.decisionKind -ceq 'FallbackTailQuiescent') { $stages = @{ yield=@('recovery_owner_retired_after_yield') } }
         elseif ($e.decisionKind -ceq 'ApplyFallbackTailLocalProofReceipt') { $stages = @{ local_proof=@('local_proof_sent','local_proof_applied') } }
         elseif ($e.decisionKind -ceq 'ApplyFallbackTailPeerProofReceipt') { $stages = @{ peer_proof=@('peer_proof_observed'); paired_release=@('paired_release_published') } }
-        foreach ($o in @($e.aggregate.operations | Where-Object operationRole -CEQ 'yield_current')) {
+        foreach ($o in @($e.aggregate.operations | Where-Object { $_.operationRole -cin @('yield_current', 'peer_proof_pending_retry_successor') })) {
             foreach ($stage in $stages.Keys) {
                 $receipts = @($o.fallbackTailYield.receipts | Where-Object stage -CEQ $stage)
                 if ($receipts.Count -eq 1) {
@@ -41,9 +41,13 @@ function New-Lines([object[]]$values) {
     "event=filetransfer_coordinator_snapshot_stream_completed; $prefix; final_state_generation=$($last.aggregate.afterStateGeneration); final_state_hash=$($last.aggregate.afterStateFingerprint); transition_count=$($values.Count); $coverage; authority_effect=none"
 }
 function Copy-Value($value) { $value | ConvertTo-Json -Depth 64 -Compress | ConvertFrom-Json }
-function Assert-Parity($values, [bool]$valid, [string]$label) {
+function Get-Successor($values) { @($values[-1].aggregate.operations | Where-Object operationRole -CEQ 'yield_current')[0] }
+function Assert-Parity($values, [bool]$valid, [string]$label, [bool]$omitRetainedPeerEffect = $false) {
     $script:first = $values[0]
     $lines = @(New-Lines @($values))
+    if ($omitRetainedPeerEffect) {
+        $lines = @($lines | Where-Object { $_ -notlike '*event=filetransfer_coordinator_authority_effect;*operation_key=fallback_tail_yield|peer_proof_pending_retry_successor|*' })
+    }
     $full = Get-FileTransferCoordinatorSnapshotEvaluation -Lines (@('event=unrelated') + $lines)
     $compact = Get-FileTransferCoordinatorSnapshotEvaluation -Lines $lines
     if ((Compare-FileTransferCoordinatorSnapshotEvaluations $full $compact).Verdict -cne 'pass' -or
@@ -53,23 +57,23 @@ function Assert-Parity($values, [bool]$valid, [string]$label) {
 }
 Assert-Parity $envelopes $true 'exact rollback successor'
 foreach ($mutation in @(
-    @{ Name='foreign predecessor'; Edit={param($e) $e[-1].aggregate.operations[0].predecessorAuthorityId='foreign'} },
-    @{ Name='skipped generation'; Edit={param($e) $e[-1].aggregate.operations[0].operationGeneration++} },
+    @{ Name='foreign predecessor'; Edit={param($e) (Get-Successor $e).predecessorAuthorityId='foreign'} },
+    @{ Name='skipped generation'; Edit={param($e) (Get-Successor $e).operationGeneration++} },
     @{ Name='coherent skipped generation'; Edit={param($e)
-        $o=$e[-1].aggregate.operations[0]; $o.operationGeneration++; $o.commandGeneration++; $o.receiptGeneration++
+        $o=Get-Successor $e; $o.operationGeneration++; $o.commandGeneration++; $o.receiptGeneration++
         $o.operationKey=@($o.family,$o.operationRole,$o.authorityId,$o.operationGeneration,$o.operationKind) -join '|'
         $o.fallbackTailYield.receipts[0].commandGeneration++; $o.fallbackTailYield.receipts[0].receiptGeneration++
     } },
     @{ Name='unrelated reason'; Edit={param($e) $e[-1].decisionReason='unrelated'} },
-    @{ Name='foreign scope'; Edit={param($e) $e[-1].aggregate.operations[0].fallbackTailYield.sourceBoundary.dataSessionGeneration++} },
+    @{ Name='foreign scope'; Edit={param($e) (Get-Successor $e).fallbackTailYield.sourceBoundary.dataSessionGeneration++} },
     @{ Name='missing retained predecessor'; Edit={param($e) $e[-2].aggregate.operations=@($e[-2].aggregate.operations | Where-Object operationRole -CNE 'yield_retained_predecessor')} },
     @{ Name='wrong rollback kind'; Edit={param($e) $e[-2].decisionKind='InvalidateFallbackTailYield'} },
     @{ Name='wrong rollback receipt'; Edit={param($e) (@($e[-2].aggregate.operations | Where-Object operationRole -CEQ 'yield_terminal')[0]).receiptFingerprint='foreign'} },
     @{ Name='wrong retained receipt'; Edit={param($e) (@($e[-2].aggregate.operations | Where-Object operationRole -CEQ 'yield_retained_predecessor')[0]).receiptFingerprint='foreign'} },
-    @{ Name='foreign pair'; Edit={param($e) $e[-1].aggregate.operations[0].fallbackTailYield.pairKey='foreign'} },
-    @{ Name='invented local proof'; Edit={param($e) $e[-1].aggregate.operations[0].fallbackTailYield.localProofIdentity='foreign'} },
-    @{ Name='invented consuming install'; Edit={param($e) $e[-1].aggregate.operations[0].fallbackTailYield.consumingInstallGeneration=1} },
-    @{ Name='duplicate successor'; Edit={param($e) $e[-1].aggregate.operations+=Copy-Value $e[-1].aggregate.operations[0]} }
+    @{ Name='foreign pair'; Edit={param($e) (Get-Successor $e).fallbackTailYield.pairKey='foreign'} },
+    @{ Name='invented local proof'; Edit={param($e) (Get-Successor $e).fallbackTailYield.localProofIdentity='foreign'} },
+    @{ Name='invented consuming install'; Edit={param($e) (Get-Successor $e).fallbackTailYield.consumingInstallGeneration=1} },
+    @{ Name='duplicate successor'; Edit={param($e) $e[-1].aggregate.operations+=Copy-Value (Get-Successor $e)} }
 )) {
     $values = Copy-Value $envelopes
     & $mutation.Edit $values
@@ -78,4 +82,19 @@ foreach ($mutation in @(
 Assert-Parity @($envelopes[-1]) $false 'orphan successor'
 Assert-Parity @($envelopes[-2],$envelopes[-1]) $false 'unproven paired origin'
 Assert-Parity @($envelopes | Where-Object decisionKind -CNE 'SupersedeFallbackTailPairedYieldAfterRejectedProbe') $false 'missing rollback'
+if (@($envelopes[-1].aggregate.operations | Where-Object operationRole -CEQ 'peer_proof_pending_retry_successor').Count -gt 0) {
+    Assert-Parity $envelopes $false 'missing retained peer observation effect' $true
+    Assert-Parity @($envelopes | Where-Object decisionReason -CNE 'fallback_tail_retry_cycle_successor_peer_proof_retained') $false 'missing retained peer origin'
+    $values = Copy-Value $envelopes
+    $pending = @($values[-1].aggregate.operations | Where-Object operationRole -CEQ 'peer_proof_pending_retry_successor')[0]
+    $current = Get-Successor $values
+    foreach ($o in @($pending, $current)) {
+        $o.receiptFingerprint='foreign'
+        (@($o.fallbackTailYield.receipts | Where-Object stage -CEQ 'peer_proof')[0]).receiptFingerprint='foreign'
+    }
+    Assert-Parity $values $false 'coherently replaced consumed peer receipt'
+    $values = Copy-Value $envelopes
+    (@($values[-1].aggregate.operations | Where-Object operationRole -CEQ 'peer_proof_pending_retry_successor')[0]).predecessorAuthorityId='foreign'
+    Assert-Parity $values $false 'foreign peer predecessor'
+}
 Write-Output 'Exact rollback successor full/compact parity and negative controls passed.'

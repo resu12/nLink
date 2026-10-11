@@ -6666,9 +6666,11 @@ public sealed class FileTransferOpsScriptSurfaceTests : FileTransferOpsScriptsTe
     }
 
     [Theory]
-    [InlineData("sidecar_failed_precommit_probe_rollback")]
-    [InlineData("pressure_rejected_precommit_probe_rollback")]
-    public async Task FileTransferOps_RejectedProbeRetryCycleRequiresExactRollbackHistory(string reason)
+    [InlineData("sidecar_failed_precommit_probe_rollback", false)]
+    [InlineData("pressure_rejected_precommit_probe_rollback", false)]
+    [InlineData("sidecar_failed_precommit_probe_rollback", true)]
+    [InlineData("pressure_rejected_precommit_probe_rollback", true)]
+    public async Task FileTransferOps_RejectedProbeRetryCycleRequiresExactRollbackHistory(string reason, bool retainPeerProof)
     {
         if (!OperatingSystem.IsWindows()) { return; }
         var repoRoot = FindRepoRoot();
@@ -6676,7 +6678,7 @@ public sealed class FileTransferOpsScriptSurfaceTests : FileTransferOpsScriptsTe
         Directory.CreateDirectory(tempRoot);
         try
         {
-            var envelopes = FileTransferCoordinatorTests.CreateRejectedProbeRetryCycleSnapshotFixture(reason)
+            var envelopes = FileTransferCoordinatorTests.CreateRejectedProbeRetryCycleSnapshotFixture(reason, retainPeerProof)
                 .Select(NLink.Core.FileTransfer.SessionFileTransferService.CreateCoordinatorSnapshotEvidenceForTesting);
             var fixturePath = Path.Combine(tempRoot, "envelopes.json");
             await File.WriteAllTextAsync(fixturePath, "[" + string.Join(",", envelopes.Select(e => e.ToCanonicalJson())) + "]");

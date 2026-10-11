@@ -4707,7 +4707,7 @@ function Test-FileTransferCoordinatorSnapshotFallbackTailQuiescentEnvelope {
     }
 
     $pending = @($family4Operations | Where-Object {
-            [string]$_.operationRole -ceq 'peer_proof_pending_initial' -and
+            [string]$_.operationRole -ceq $(if ($yield.predecessorAuthorityId -ceq '(none)') { 'peer_proof_pending_initial' } else { 'peer_proof_pending_retry_successor' }) -and
             [string]$_.operationKind -ceq 'PeerProof' -and
             [string]$_.beforeState -ceq 'Pending' -and
             [string]$_.afterState -ceq 'None' -and
@@ -5200,13 +5200,17 @@ function Get-FileTransferCoordinatorSnapshotPendingPeerProofBindings {
                 [string]$_.Boundary.decisionKind -ceq
                     'ApplyFallbackTailPeerProofReceipt' -and
                 [string]$_.Boundary.decisionStatus -ceq 'Accepted' -and
-                [string]$_.Boundary.decisionReason -ceq
-                    'fallback_tail_initial_peer_proof_receipt_retained'
+                [string]$_.Boundary.decisionReason -cin @(
+                    'fallback_tail_initial_peer_proof_receipt_retained',
+                    'fallback_tail_retry_cycle_successor_peer_proof_retained')
             })) {
+        $pendingRole = if ($entry.Boundary.decisionReason -ceq 'fallback_tail_initial_peer_proof_receipt_retained') {
+            'peer_proof_pending_initial'
+        } else { 'peer_proof_pending_retry_successor' }
         $pending = @($entry.Boundary.operations | Where-Object {
                 [string]$_.family -ceq 'fallback_tail_yield' -and
                 [string]$_.operationRole -ceq
-                    'peer_proof_pending_initial' -and
+                    $pendingRole -and
                 [string]$_.operationKind -ceq 'PeerProof' -and
                 [string]$_.beforeState -ceq 'None' -and
                 [string]$_.afterState -ceq 'Pending' -and
@@ -5225,7 +5229,7 @@ function Get-FileTransferCoordinatorSnapshotPendingPeerProofBindings {
             })
         $expectedOperationKey = @(
             'fallback_tail_yield',
-            'peer_proof_pending_initial',
+            $pendingRole,
             [string]$operation.authorityId,
             ([long]$operation.operationGeneration).ToString(
                 [Globalization.CultureInfo]::InvariantCulture),
@@ -5243,13 +5247,14 @@ function Get-FileTransferCoordinatorSnapshotPendingPeerProofBindings {
         if ($null -eq $typed -or
             $receipts.Count -ne 1 -or
             [string]$operation.operationKey -cne $expectedOperationKey -or
-            [string]$operation.predecessorAuthorityId -cne '(none)' -or
+            ($pendingRole -ceq 'peer_proof_pending_initial' -and [string]$operation.predecessorAuthorityId -cne '(none)') -or
+            ($pendingRole -ceq 'peer_proof_pending_retry_successor' -and [string]$operation.predecessorAuthorityId -cin @('', '(none)', [string]$operation.authorityId)) -or
             [long]$operation.operationGeneration -le 0L -or
             $rawPeerAuthority -notmatch
                 '^fta2-fallback_tail_yield-[0-9a-f]{24}$' -or
             (ConvertTo-FileTransferCoordinatorEvidenceToken `
                 $rawPeerAuthority) -cne [string]$operation.authorityId -or
-            [string]$typed.role -cne 'peer_proof_pending_initial' -or
+            [string]$typed.role -cne $pendingRole -or
             [string]$typed.yieldKind -cne 'PeerProof' -or
             [string]$typed.pairingState -cne 'Pending' -or
             [long]$typed.peerProofYieldGeneration -ne
@@ -8313,27 +8318,33 @@ function Test-FileTransferCoordinatorCheckpointYieldTerminalBirth {
 function Test-FileTransferCoordinatorSnapshotRetryCycleSuccessorShape {
     param($Envelope, $Operation)
     $typed = $Operation.fallbackTailYield
-    foreach ($field in @('localProofIdentity','localProofFingerprint','peerProofAuthorityId','peerProofIdentity',
-            'peerProofFingerprint','pairedReleaseAuthorityId','reservedRetryAuthorityId','invalidationReason')) {
+    $pending = @($Envelope.aggregate.operations | Where-Object operationRole -CEQ 'peer_proof_pending_retry_successor')
+    $hasPeer = $pending.Count -eq 1
+    $emptyFields = @('localProofIdentity','localProofFingerprint','pairedReleaseAuthorityId','reservedRetryAuthorityId','invalidationReason')
+    if (-not $hasPeer) { $emptyFields += @('peerProofAuthorityId','peerProofIdentity','peerProofFingerprint') }
+    foreach ($field in $emptyFields) {
         if ([string](Get-FileTransferCoordinatorSnapshotObjectProperty $typed $field '') -cne '(none)') { return $false }
     }
-    foreach ($field in @('peerProofYieldGeneration','pairingGeneration','pairedReleaseGeneration','reauthorizationGeneration',
-            'reservationGeneration',
-            'consumingInstallGeneration','retryHoldGeneration','retryRecheckGeneration')) {
+    $zeroFields = @('pairingGeneration','pairedReleaseGeneration','reauthorizationGeneration','reservationGeneration',
+        'consumingInstallGeneration','retryHoldGeneration','retryRecheckGeneration')
+    if (-not $hasPeer) { $zeroFields += 'peerProofYieldGeneration' }
+    foreach ($field in $zeroFields) {
         if ([long](Get-FileTransferCoordinatorSnapshotObjectProperty $typed $field (-1)) -ne 0) { return $false }
     }
+    $yieldReceipts = @($typed.receipts | Where-Object stage -CEQ 'yield')
+    if ($yieldReceipts.Count -ne 1) { return $false }
     return $Envelope.decisionKind -ceq 'FallbackTailQuiescent' -and $Envelope.decisionStatus -ceq 'Accepted' -and
         $Envelope.decisionReason -cin @('sidecar_failed_precommit_probe_rollback','pressure_rejected_precommit_probe_rollback') -and
-        @($Envelope.aggregate.operations).Count -eq 1 -and
+        @($Envelope.aggregate.operations).Count -eq $(if ($hasPeer) { 2 } else { 1 }) -and
         $Operation.operationRole -ceq 'yield_current' -and $Operation.operationKind -ceq 'Quiescent' -and
-        $Operation.beforeState -ceq 'None' -and $Operation.afterState -ceq 'YieldIssued' -and $Operation.stateApplied -and
+        $Operation.beforeState -ceq 'None' -and $Operation.afterState -ceq $(if ($hasPeer) { 'PeerProofObserved' } else { 'YieldIssued' }) -and $Operation.stateApplied -and
         $Operation.predecessorAuthorityId -cnotin @('', '(none)', $Operation.authorityId) -and
         [long]$Operation.operationGeneration -gt 1 -and
         [long]$typed.reauthorizationSourceTransportEpoch -eq [long]$typed.sourceBoundary.transportEpoch -and
         [long]$typed.reauthorizationTargetTransportEpoch -eq [long]$typed.targetBoundary.transportEpoch -and
         $typed.failedPredecessorAuthorityId -ceq '(none)' -and -not $typed.failedSupersessionCarriedPeerProof -and
-        @($typed.receipts).Count -eq 1 -and $typed.receipts[0].stage -ceq 'yield' -and
-        $typed.receipts[0].receiptReason -ceq $Envelope.decisionReason
+        @($typed.receipts).Count -eq $(if ($hasPeer) { 2 } else { 1 }) -and
+        $yieldReceipts[0].receiptReason -ceq $Envelope.decisionReason
 }
 
 function Test-FileTransferCoordinatorSnapshotRetryCycleSuccessorHistory {
@@ -8400,7 +8411,7 @@ function Resolve-FileTransferCoordinatorFailedCheckpointYieldCandidates {
         }
         if ([long]$boundary.beforeStateGeneration -eq [long](Get-FileTransferCoordinatorSnapshotObjectProperty $boundary 'afterStateGeneration' (-1)) -and
             @($boundary.operations | Where-Object { $_.family -ceq 'fallback_tail_yield' -and
-                    $_.operationRole -in @('peer_proof_pending_initial','yield_current','yield_terminal') }).Count -gt 0) {
+                    $_.operationRole -in @('peer_proof_pending_initial','peer_proof_pending_retry_successor','yield_current','yield_terminal') }).Count -gt 0) {
             $key = "$($boundary.coordinatorInstanceId)|$($boundary.writer)|$($boundary.beforeStateGeneration)"
             if (-not $neutralProofObservations.ContainsKey($key)) { $neutralProofObservations[$key] = [Collections.Generic.List[object]]::new() }
             $neutralProofObservations[$key].Add($boundary)
@@ -8454,8 +8465,8 @@ function Resolve-FileTransferCoordinatorFailedCheckpointYieldCandidates {
                     $observation.afterStateHash -ceq $boundary.beforeStateHash
                 $originObservationValid = $observationAnchorValid
                 foreach ($operation in @($observation.operations | Where-Object {
-                        $_.family -ceq 'fallback_tail_yield' -and $_.operationRole -in @('peer_proof_pending_initial','yield_current','yield_terminal') })) {
-                    $subject = if ($operation.operationRole -ceq 'peer_proof_pending_initial') { $pendingProof }
+                        $_.family -ceq 'fallback_tail_yield' -and $_.operationRole -in @('peer_proof_pending_initial','peer_proof_pending_retry_successor','yield_current','yield_terminal') })) {
+                    $subject = if ($operation.operationRole -cin @('peer_proof_pending_initial','peer_proof_pending_retry_successor')) { $pendingProof }
                         elseif ($slots.ContainsKey([string]$operation.operationRole)) { $slots[[string]$operation.operationRole] } else { $null }
                     $identity = $operation | Select-Object * -ExcludeProperty beforeState,afterState,stateApplied | ConvertTo-Json -Depth 64 -Compress
                     $subjectObservationValid = $observationAnchorValid -and $null -ne $subject -and
@@ -8480,6 +8491,15 @@ function Resolve-FileTransferCoordinatorFailedCheckpointYieldCandidates {
                 $retryCycleValid = $valid -and -not $slots.ContainsKey('yield_current') -and
                     $slots.ContainsKey('yield_terminal') -and
                     (Test-FileTransferCoordinatorSnapshotRetryCycleSuccessorHistory $entry $previous $slots.yield_terminal)
+                $consumedPeer = @($boundary.operations | Where-Object operationRole -CEQ 'peer_proof_pending_retry_successor')
+                if ($consumedPeer.Count -gt 0) {
+                    $retryCycleValid = $retryCycleValid -and $consumedPeer.Count -eq 1 -and $null -ne $pendingProof
+                    if ($null -ne $pendingProof -and $consumedPeer.Count -eq 1) {
+                        $identity = $consumedPeer[0] | Select-Object * -ExcludeProperty beforeState,afterState,stateApplied | ConvertTo-Json -Depth 64 -Compress
+                        $retryCycleValid = $retryCycleValid -and $identity -ceq $pendingProof.Identity -and
+                            $pendingProof.Binding.OperationRole -ceq 'peer_proof_pending_retry_successor'
+                    }
+                }
                 if (-not $retryCycleValid) {
                     $InvalidBoundaries[$id] = $true; $RejectedSupersessions[$id] = $true
                     [void]$stream.Boundaries.Remove($id); [void]$stream.Mutations.Remove($generation)
@@ -8490,7 +8510,7 @@ function Resolve-FileTransferCoordinatorFailedCheckpointYieldCandidates {
             $supersessionProof = $null; $retiredPendingProof = $null; $displacedTerminal = $null
             $pendingNext = $pendingProof
             $pendingOperations = @($boundary.operations | Where-Object {
-                    $_.family -ceq 'fallback_tail_yield' -and $_.operationRole -ceq 'peer_proof_pending_initial' -and $_.stateApplied
+                    $_.family -ceq 'fallback_tail_yield' -and $_.operationRole -cin @('peer_proof_pending_initial','peer_proof_pending_retry_successor') -and $_.stateApplied
                 })
             if ($pendingOperations.Count -gt 0) {
                 $pendingExisting = @($pendingOperations | Where-Object beforeState -CNE 'None')
@@ -11064,8 +11084,8 @@ function Get-FileTransferCoordinatorSnapshotEvaluation {
                     $failedCheckpointYieldCandidates[$transitionId] = @{ Line = $record.LineIndex }
                 }
                 if ([string]$envelope.decisionKind -ceq 'FallbackTailQuiescent' -and
-                    @($envelope.aggregate.operations).Count -eq 1 -and
-                    (Test-FileTransferCoordinatorSnapshotRetryCycleSuccessorShape $envelope $envelope.aggregate.operations[0])) {
+                    @($envelope.aggregate.operations | Where-Object operationRole -CEQ 'yield_current').Count -eq 1 -and
+                    (Test-FileTransferCoordinatorSnapshotRetryCycleSuccessorShape $envelope (@($envelope.aggregate.operations | Where-Object operationRole -CEQ 'yield_current')[0]))) {
                     $rejectedProbeRetryCycleCandidates[$transitionId] = @{ Line = $record.LineIndex }
                 }
                 if ([string]$envelope.decisionKind -ceq 'FallbackTailQuiescent' -and

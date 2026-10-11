@@ -14,6 +14,39 @@ namespace NLink.SmokeTests;
 [Collection(FakeNknNetworkCollection.Name)]
 public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTestBase
 {
+    [Fact]
+    public async Task GuiSmokeWindows_ReactivationPayloadWaitUsesFastLedgerWithoutRecountingFrames()
+    {
+        if (!OperatingSystem.IsWindows()) { return; }
+        var guiText = File.ReadAllText(Path.Combine(FindRepoRoot(), "tools", "GuiSmoke-Windows.ps1"));
+        var body = ExtractPowerShellFunctionBody(guiText, "Wait-TunaGuiAcceleratedFilePayloadBeforeFault", "Wait-TunaGuiLiveSwitchOffTransferProgressBeforeFault");
+        var script = $$"""
+            $ErrorActionPreference = 'Stop'
+            $script:GuiSmokeAppLogLedger = [pscustomobject]@{}
+            $script:poll = 0
+            function Get-AppLogLinesAfterBookmark { throw 'slow full ledger replay used' }
+            function Sync-GuiSmokeAppLogLedger {}
+            function Get-GuiSmokeLogLedgerProgressSnapshotAfterBookmark {
+                param($State, [int]$Bookmark)
+                if ($Bookmark -ne 12) { throw 'activation bookmark changed' }
+                $script:poll++
+                'bytes=524288; frame=first'
+                if ($script:poll -ge 3) { 'bytes=524288; frame=second' }
+            }
+            function Get-TunaGuiPeerVisibleFileTunaV4PayloadBytes {
+                param([string]$Line)
+                [long]([regex]::Match($Line, 'bytes=(\d+)').Groups[1].Value)
+            }
+            function Wait-TunaGuiAcceleratedFilePayloadBeforeFault { {{body}} }
+            $line = Wait-TunaGuiAcceleratedFilePayloadBeforeFault -Bookmark 12 -TimeoutMs 1000 -MinimumTotalPayloadBytes 1048576 -MinimumFramePayloadBytes 16384 -PollIntervalMs 10
+            if ($script:poll -ne 3 -or $line -notlike '*frame=second*') {
+                throw 'unchanged payload threshold was satisfied by duplicate frames'
+            }
+            """;
+        var result = await RunPowerShellScriptTextAsync(script, Array.Empty<string>());
+        Assert.True(result.ExitCode == 0, result.Stdout + Environment.NewLine + result.Stderr);
+    }
+
     private static readonly Dictionary<string, Dictionary<string, string[]>> GuiFunctionBodies = new(StringComparer.Ordinal);
 
     private static new string ExtractPowerShellFunctionBody(string scriptText, string functionName, string nextFunctionName)

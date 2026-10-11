@@ -35906,7 +35906,8 @@ function Wait-TunaGuiAcceleratedFilePayloadBeforeFault {
     $totalPayloadBytes = 0L
     $lastFramePayloadBytes = -1L
     while ($sw.ElapsedMilliseconds -lt $TimeoutMs) {
-        $lines = @(Get-AppLogLinesAfterBookmark -Bookmark $Bookmark)
+        Sync-GuiSmokeAppLogLedger
+        $lines = @(Get-GuiSmokeLogLedgerProgressSnapshotAfterBookmark -State $script:GuiSmokeAppLogLedger -Bookmark $Bookmark)
         if ($lines.Count -lt $processedLineCount) {
             $processedLineCount = 0
         }
