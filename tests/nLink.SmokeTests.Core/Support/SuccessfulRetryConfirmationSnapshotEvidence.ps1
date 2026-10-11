@@ -455,7 +455,9 @@ foreach ($case in $cases) {
         if($settled -and $null -eq $boundary) {
             # Family-2-only Shadow has no selected Coordinator failure. Compare
             # the actual coarse fallback; this is not an authoritative GUI pass.
-            if($null -ne $gui.PSObject.Properties['CoordinatorBoundaryId'] -or -not $gui.ClassificationComplete -or
+            if([string]$gui.CoordinatorBoundaryId -cne '(none)' -or [string]$gui.CoordinatorBoundaryHash -cne '(none)' -or
+                $gui.CoordinatorRawCount -ne 0 -or $gui.CoordinatorDistinctCount -ne 0 -or
+                $gui.CoordinatorRecoveredCount -ne 0 -or $gui.CoordinatorUnresolvedCount -ne 0 -or -not $gui.ClassificationComplete -or
                 $gui.ClassificationSource -cne 'immutable_evidence'){throw "$case $form selected a spurious GUI Coordinator failure."}
             $fallback=[ordered]@{}
             foreach($property in @($gui.PSObject.Properties | Sort-Object Name)) {

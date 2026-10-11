@@ -5493,9 +5493,12 @@ function Test-FileTransferCoordinatorSnapshotFallbackTailPeerProofEffect {
         return $effectSubjects.Count -eq 1
     }
 
+    # Both pending slots keep their original observation effect when the
+    # coordinator consumes the exact receipt into a peer-first local yield.
     $pending = @($Entry.Boundary.operations | Where-Object {
             [string]$_.family -ceq 'fallback_tail_yield' -and
-            [string]$_.operationRole -ceq 'peer_proof_pending_initial' -and
+            [string]$_.operationRole -cin @(
+                'peer_proof_pending_initial', 'peer_proof_pending_retry_successor') -and
             [string]$_.operationKind -ceq 'PeerProof' -and
             [string]$_.beforeState -ceq 'Pending' -and
             [string]$_.afterState -ceq 'None' -and
@@ -5532,7 +5535,7 @@ function Test-FileTransferCoordinatorSnapshotFallbackTailPeerProofEffect {
             [string]$_.Operation.operationKey -ceq
                 [string]$pending[0].operationKey -and
             [string]$_.Operation.operationRole -ceq
-                'peer_proof_pending_initial' -and
+                [string]$pending[0].operationRole -and
             [string]$_.Operation.afterState -ceq 'Pending' -and
             (Test-FileTransferCoordinatorSnapshotExactEffectBinding `
                 -Boundary $_.Boundary `

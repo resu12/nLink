@@ -72851,13 +72851,22 @@ function Write-FileTransferDiagnosticsArtifacts {
         $effectiveNextArtifact = 'filetransfer-operator-verdict.txt'
     }
 
+    if ($recoveryClassification.Class -eq 'runtime_unlock_retry_dispatch_contract_unsettled') {
+        $effectiveHardFailures.Add('recovery: accepted retry settlement authority effect is unproven') | Out-Null
+        if ($effectiveGateStatus -ne 'fail') {
+            $effectiveVerdict = 'INCONCLUSIVE'
+            $effectiveGateStatus = 'fail'
+            $effectiveNextArtifact = 'filetransfer-operator-verdict.txt'
+        }
+    }
+
     $operatorAcceptanceFailureClass = if ($recoveryClassification.Class -eq
             'runtime_unlock_precommit_probe_start_handoff_missing' -and
         $recoveryClassification.FirstProofChainFailureReason -eq
             'post_fallback_initiator_probe_launch_accepted_without_route_transition_authority') {
         'route_runtime'
     }
-    elseif ($recoveryClassification.Class -eq 'filetransfer_tuna_activation_delivery_unproven') {
+    elseif ($recoveryClassification.Class -in @('filetransfer_tuna_activation_delivery_unproven', 'runtime_unlock_retry_dispatch_contract_unsettled')) {
         'incomplete_proof'
     }
     elseif ($recoveryClassification.Class -in @('filetransfer_gui_live_fallback_fault_window_missed', 'filetransfer_gui_live_reactivation_action_window_missed', 'filetransfer_live_route_epoch_projection_missing', 'runtime_unlock_retry_dispatch_install_grant_evidence_incomplete', 'runtime_unlock_retry_dispatch_fallback_paired_yield_successor_release_invalid', 'runtime_unlock_retry_regular_v4_recovery_settlement_missing', 'runtime_unlock_retry_regular_v4_recovery_lease_closure_hold_not_preserved', 'runtime_unlock_precommit_probe_start_handoff_missing', 'runtime_unlock_uncommitted_tuna_fallback_proof_authority_missing', 'runtime_unlock_precommit_fallback_recovery_handoff_suppressed', 'regular_v4_frontier_repair_settlement_disposition_unverifiable', 'regular_v4_frontier_repair_initial_pressure_install_missing', 'regular_v4_frontier_repair_successor_pressure_install_missing', 'regular_v4_frontier_repair_projection_reauthorization_missing_after_recovery', 'regular_v4_frontier_repair_pressure_recovery_handoff_missing')) {

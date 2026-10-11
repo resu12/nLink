@@ -10,8 +10,19 @@ public sealed partial class FileTransferCoordinatorTests
         => CreateRejectedIndependentRetryConfirmationSnapshotFixture();
 
     internal static IReadOnlyList<FileTransferCoordinatorTransitionEnvelope> CreateRejectedIndependentRetryConfirmationSnapshotFixture()
+        => CreateIndependentRetryConfirmationSnapshotFixture(FileTransferDirection.Outbound, false, out _);
+
+    internal static RuntimeUnlockRetryDispatchSettlementDecision CreateSuccessfulIndependentRetrySettlementFixture(FileTransferDirection direction)
     {
-        var fixture = CreateRetryConfirmationFixture(false, clearInitialCheckpoint: true);
+        CreateIndependentRetryConfirmationSnapshotFixture(direction, true, out var settlement);
+        return settlement!.Value;
+    }
+
+    private static IReadOnlyList<FileTransferCoordinatorTransitionEnvelope> CreateIndependentRetryConfirmationSnapshotFixture(
+        FileTransferDirection direction, bool successfulConfirmation, out RuntimeUnlockRetryDispatchSettlementDecision? settlement)
+    {
+        settlement = null;
+        var fixture = CreateRetryConfirmationFixture(false, direction, clearInitialCheckpoint: true);
         var envelopes = fixture.Envelopes;
         var receipt = fixture.Commit.CompensationContext!.Receipt;
         var alias = FileTransferCoordinator.ObserveRuntimeUnlockRetryDispatchExecutionState(fixture.Commit.State,
@@ -47,6 +58,23 @@ public sealed partial class FileTransferCoordinatorTests
         Assert.True(commit.Accepted, commit.Reason); Capture(commit.SnapshotEnvelope!);
         Assert.Null(commit.CompensationContext!.PredecessorBeforeInstall);
         Assert.Equal(oldTerminal, commit.State.PersistentState.RuntimeUnlockRetryLifecycle.LastTerminalAttempt);
+        if (successfulConfirmation)
+        {
+            var secondAlias = FileTransferCoordinator.ObserveRuntimeUnlockRetryDispatchExecutionState(commit.State,
+                issue.Receipt.Value, RuntimeUnlockRetryDispatchAttemptPhase.AliasBound, 32, "independent-successful-attempt", false);
+            Assert.True(secondAlias.Accepted, secondAlias.Reason); Capture(secondAlias.SnapshotEnvelope!);
+            var secondSending = FileTransferCoordinator.ObserveRuntimeUnlockRetryDispatchExecutionState(secondAlias.State,
+                issue.Receipt.Value, RuntimeUnlockRetryDispatchAttemptPhase.SendInFlight, 32, "independent-successful-attempt", false);
+            Assert.True(secondSending.Accepted, secondSending.Reason); Capture(secondSending.SnapshotEnvelope!);
+            var closure = FileTransferCoordinator.ObserveRuntimeUnlockRetryDispatchSettlement(secondSending.State,
+                new RuntimeUnlockRetryDispatchSettlementReport(issue.Receipt.Value.Authority,
+                    RuntimeUnlockRetryDispatchSettlementOutcome.DispatchObserved, "peer_visible_offer_send_observed")
+                { OfferGeneration = 32, OfferNonce = "independent-successful-attempt", DispatchObserved = true });
+            Assert.True(closure.Accepted, closure.Reason); Capture(closure.SnapshotEnvelope!);
+            Assert.Contains(oldTerminal, closure.State.PersistentState.RuntimeUnlockRetryLifecycle.AttemptHistory);
+            settlement = closure;
+            return envelopes;
+        }
         var compensation = FileTransferCoordinator.CompensateRejectedRuntimeUnlockRetryDispatchConfirmation(
             commit.State, commit.CompensationContext);
         Assert.True(compensation.Accepted, compensation.Reason); Capture(compensation.SnapshotEnvelope!);

@@ -42,17 +42,35 @@ function New-Lines([object[]]$values) {
 }
 function Copy-Value($value) { $value | ConvertTo-Json -Depth 64 -Compress | ConvertFrom-Json }
 function Get-Successor($values) { @($values[-1].aggregate.operations | Where-Object operationRole -CEQ 'yield_current')[0] }
-function Assert-Parity($values, [bool]$valid, [string]$label, [bool]$omitRetainedPeerEffect = $false) {
+function Assert-Parity($values, [bool]$valid, [string]$label, [bool]$omitRetainedPeerEffect = $false,
+    [string]$retainedPeerEffectMutation = '') {
     $script:first = $values[0]
     $lines = @(New-Lines @($values))
     if ($omitRetainedPeerEffect) {
         $lines = @($lines | Where-Object { $_ -notlike '*event=filetransfer_coordinator_authority_effect;*operation_key=fallback_tail_yield|peer_proof_pending_retry_successor|*' })
+    }
+    if ($retainedPeerEffectMutation -cne '') {
+        $effect = @($lines | Where-Object { $_ -like '*event=filetransfer_coordinator_authority_effect;*operation_key=fallback_tail_yield|peer_proof_pending_retry_successor|*' })
+        if ($effect.Count -ne 1) { throw 'Retained peer effect not unique in fixture.' }
+        $changed = switch -Exact ($retainedPeerEffectMutation) {
+            'foreign scope' { $effect[0] -replace '; transport_epoch=\d+;', '; transport_epoch=999;' }
+            'foreign writer' { $effect[0].Replace('log_writer_id=fixture-writer;', 'log_writer_id=foreign-writer;') }
+            'duplicate effect' { $effect[0].Replace('effect_identity=', 'effect_identity=duplicate-') }
+        }
+        if ($retainedPeerEffectMutation -ceq 'duplicate effect') { $lines += $changed }
+        else { $lines = @($lines | ForEach-Object { if ($_ -ceq $effect[0]) { $changed } else { $_ } }) }
     }
     $full = Get-FileTransferCoordinatorSnapshotEvaluation -Lines (@('event=unrelated') + $lines)
     $compact = Get-FileTransferCoordinatorSnapshotEvaluation -Lines $lines
     if ((Compare-FileTransferCoordinatorSnapshotEvaluations $full $compact).Verdict -cne 'pass' -or
         ($full.ArtifactEvidenceVerdict -ceq 'pass') -ne $valid) {
         throw "$label failed: $($full.ArtifactEvidenceFailureReason)"
+    }
+    if ($valid) {
+        $yieldFailures = @($full.Boundaries | Where-Object taxonomyClass -CEQ 'fallback_tail_yield_authority_invalid')
+        if ($yieldFailures.Count -gt 0) {
+            throw "$label semantic authority failed: $($yieldFailures[0].variant)"
+        }
     }
 }
 Assert-Parity $envelopes $true 'exact rollback successor'
@@ -84,6 +102,9 @@ Assert-Parity @($envelopes[-2],$envelopes[-1]) $false 'unproven paired origin'
 Assert-Parity @($envelopes | Where-Object decisionKind -CNE 'SupersedeFallbackTailPairedYieldAfterRejectedProbe') $false 'missing rollback'
 if (@($envelopes[-1].aggregate.operations | Where-Object operationRole -CEQ 'peer_proof_pending_retry_successor').Count -gt 0) {
     Assert-Parity $envelopes $false 'missing retained peer observation effect' $true
+    foreach ($mutation in @('foreign scope', 'foreign writer', 'duplicate effect')) {
+        Assert-Parity $envelopes $false "retained peer $mutation" $false $mutation
+    }
     Assert-Parity @($envelopes | Where-Object decisionReason -CNE 'fallback_tail_retry_cycle_successor_peer_proof_retained') $false 'missing retained peer origin'
     $values = Copy-Value $envelopes
     $pending = @($values[-1].aggregate.operations | Where-Object operationRole -CEQ 'peer_proof_pending_retry_successor')[0]

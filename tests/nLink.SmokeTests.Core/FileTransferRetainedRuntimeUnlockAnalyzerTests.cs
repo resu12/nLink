@@ -14,6 +14,44 @@ namespace NLink.SmokeTests;
 public sealed class FileTransferRetainedRuntimeUnlockAnalyzerTests : FileTransferOpsScriptsTestBase
 {
     [Theory]
+    [InlineData(false, true)]
+    [InlineData(true, true)]
+    [InlineData(false, false)]
+    [InlineData(true, false)]
+    public async Task AnalyzeRetained_AcceptedSettlementRequiresItsExactEffect(bool compact, bool missingEffect)
+    {
+        if (!OperatingSystem.IsWindows()) { return; }
+        var captured = await SessionFileTransferRuntimeUnlockRetryAuthorityTests.CaptureIndependentSuccessfulSettlementsAsync();
+        var lines = missingEffect
+            ? captured.Where(line => !line.Contains("effect_kind=settlement_observed;", StringComparison.Ordinal)).ToArray()
+            : captured;
+        var result = await RunAnalyzeFixtureAsync(lines, [], new Dictionary<string, string>
+        {
+            ["NLINK_FILETRANSFER_RETAINED_ANALYSIS_COMPACT"] = compact ? "1" : "0",
+        });
+        Assert.True(result.Script.ExitCode == 0, result.Script.Stdout + Environment.NewLine + result.Script.Stderr);
+        var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+        if (missingEffect)
+        {
+            Assert.Equal("runtime_unlock_retry_dispatch_contract_unsettled", verdict["first_proof_chain_failure_class"]);
+            Assert.Equal("incomplete_proof", verdict["runtime_correctness_verdict"]);
+            Assert.Equal("incomplete_proof", verdict["acceptance_failure_class"]);
+            Assert.Equal("fail", verdict["gate_status"]);
+        }
+        else
+        {
+            // This service fixture does not deliver bridge payload. Its real
+            // settlement effects must close this obligation, not prove all delivery.
+            Assert.NotEqual("runtime_unlock_retry_dispatch_contract_unsettled", verdict["first_proof_chain_failure_class"]);
+            using var snapshot = JsonDocument.Parse(await File.ReadAllTextAsync(
+                Path.Combine(result.ArtifactDir, "filetransfer-coordinator-snapshot-compact-summary.json")));
+            Assert.DoesNotContain(snapshot.RootElement.GetProperty("Boundaries").EnumerateArray(), boundary =>
+                boundary.GetProperty("taxonomyClass").GetString() == "runtime_unlock_retry_dispatch_contract_unsettled" &&
+                boundary.GetProperty("unresolvedCount").GetInt32() > 0);
+        }
+    }
+
+    [Theory]
     [InlineData(false, false, true)]
     [InlineData(true, false, true)]
     [InlineData(false, true, true)]

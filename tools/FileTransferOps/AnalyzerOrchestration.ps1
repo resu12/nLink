@@ -3223,6 +3223,15 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         Test-FileTransferCoordinatorSnapshotFamilyAuthoritative `
             -Evaluation $snapshotEvaluation `
             -Family 'responder_probe_handoff'
+    $snapshotRetrySettlementAuthoritative =
+        Test-FileTransferCoordinatorSnapshotFamilyAuthoritative `
+            -Evaluation $snapshotEvaluation `
+            -Family 'runtime_unlock_retry_lifecycle'
+    $snapshotRetrySettlementProof =
+        Get-FileTransferCoordinatorSnapshotCorrelationResult `
+            -Evaluation $snapshotEvaluation `
+            -Family 'runtime_unlock_retry_lifecycle' `
+            -TaxonomyClasses @('runtime_unlock_retry_dispatch_contract_unsettled')
     $snapshotRegularV4PressureProof =
         Get-FileTransferCoordinatorSnapshotCorrelationResult `
             -Evaluation $snapshotEvaluation `
@@ -6428,6 +6437,16 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
             }) | Out-Null
         }
     }
+    if ($snapshotRetrySettlementAuthoritative) {
+        foreach ($candidateRecord in @($snapshotRetrySettlementProof.UnresolvedCandidateRecords)) {
+            $compactProofChainCandidates.Add([pscustomobject]@{
+                Class = [string]$candidateRecord.Class
+                Event = $candidateRecord.Event
+                Reason = [string]$candidateRecord.Reason
+                Variant = '(none)'
+            }) | Out-Null
+        }
+    }
     $snapshotFallbackTailYieldPureClasses = @(
         'fallback_tail_yield_authority_invalid',
         'post_tuna_fallback_paired_yield_transport_epoch_reauthorization_missing')
@@ -6593,6 +6612,7 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
                 'filetransfer_gui_live_fallback_fault_window_missed',
                 'filetransfer_gui_live_reactivation_action_window_missed',
                 'runtime_unlock_retry_dispatch_install_grant_evidence_incomplete',
+                'runtime_unlock_retry_dispatch_contract_unsettled',
                 'runtime_unlock_retry_regular_v4_recovery_settlement_missing',
                 'runtime_unlock_retry_regular_v4_recovery_lease_closure_hold_not_preserved',
                 'runtime_unlock_retry_dispatch_fallback_paired_yield_successor_release_invalid',
