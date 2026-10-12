@@ -1,0 +1,22 @@
+Source: github.com/nknorg/nkn-tuna-session v0.2.6
+Upstream module checksum: h1:NsZIUHQdUU6fFIWBjl2i78mdZsaOjeeJ/G/EmxSEkSw=
+License: Apache-2.0; original LICENSE and upstream README are retained.
+
+Only client.go changes upstream production behavior. Its TCP listener takes its
+NCP connection IDs from the authenticated initial handshake, validating unique,
+canonical, in-range provider IDs and the arriving provider's membership. This
+keeps positional NCP pairs aligned when the dialer cannot reach every provider.
+The encrypted frame is verified before IDs are read or session state is changed.
+Dialing, encryption, provider count, retry policy, UDP, and NCP are unchanged.
+
+connection_ids_test.go is nLink's offline regression. From the sidecar directory:
+  go test github.com/nknorg/nkn-tuna-session
+  go test .
+Both commands use the sidecar's existing dependency versions. Tests in the local
+replacement module are not discovered by go test ./...; name that module as above.
+The portable build uses the same go.mod replacement without build-script changes.
+
+The module copy contains upstream package sources, protobuf source/generated Go,
+module metadata, and its existing unit test. Upstream examples, paid/live tests,
+and CI configuration are not included. Remove this local replacement only after
+an upstream replacement passes the sparse-provider and authentication regressions.

@@ -2,6 +2,8 @@ module github.com/resu12/nlink/tools/nkn-tuna-sidecar
 
 go 1.25
 
+replace github.com/nknorg/nkn-tuna-session => ./third_party/nkn-tuna-session
+
 require (
 	github.com/nknorg/nkn-sdk-go v1.4.8
 	github.com/nknorg/nkn-tuna-session v0.2.6
