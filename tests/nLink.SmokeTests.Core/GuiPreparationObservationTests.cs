@@ -130,6 +130,106 @@ public sealed class GuiPreparationObservationTests : FileTransferOpsScriptsTestB
         Assert.Equal("paired-wait-ok", result.Stdout.Trim());
     }
 
+    [Theory]
+    [InlineData("powershell", 0, "transient")]
+    [InlineData("powershell", 1, "transient")]
+    [InlineData("pwsh", 0, "transient")]
+    [InlineData("pwsh", 1, "transient")]
+    [InlineData("powershell", 0, "persistent")]
+    [InlineData("powershell", 1, "persistent")]
+    [InlineData("pwsh", 0, "persistent")]
+    [InlineData("pwsh", 1, "persistent")]
+    public async Task PairedPreparationWait_RecoversInterruptedPublicationWithoutAcceptingStaleResponses(
+        string host, int failurePeer, string failureMode)
+    {
+        if (!OperatingSystem.IsWindows()) return;
+        var result = await RunPowerShellScriptTextAsync(Harness + """
+            foreach ($name in @('Write-GuiSmokeAtomicJson', 'Wait-Until')) {
+                $definition = $ast.Find({ param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq $name }, $true)
+                Invoke-Expression $definition.Extent.Text
+            }
+            Set-Item Function:\Write-TestAtomicJson ${function:Write-GuiSmokeAtomicJson}
+            function Assert-GuiSmokeScenarioDeadline { }
+            $temp = Join-Path ([IO.Path]::GetTempPath()) ('nlink-preparation-publication-' + [guid]::NewGuid().ToString('N'))
+            [void][IO.Directory]::CreateDirectory($temp)
+            try {
+                $processes = @(0,1 | ForEach-Object {
+                    [pscustomobject]@{ Id=$identities[$_].processId; HasExited=$false
+                        StartTime=[DateTimeOffset]::FromUnixTimeMilliseconds($identities[$_].processStartedUtcMs).UtcDateTime
+                        PreparationObservationRoot=$temp; PreparationObservationBoot=$identities[$_].bootId }
+                })
+                $dirs = @(0,1 | ForEach-Object {
+                    $dir = Join-Path $temp ('{0}-{1}' -f $processes[$_].Id, $processes[$_].PreparationObservationBoot)
+                    Write-TestAtomicJson -Path (Join-Path $dir 'identity.json') -Value $identities[$_]
+                    Write-TestAtomicJson -Path (Join-Path $dir 'request.json') -Value $requests[$_]
+                    $dir
+                })
+                # Previously valid responses must not satisfy a new or partly published pair.
+                $old = New-Responses
+                for ($i=0; $i -lt 2; $i++) {
+                    Write-TestAtomicJson -Path (Join-Path $dirs[$i] 'response.json') -Value $old[$i]
+                }
+                $context = [pscustomobject]@{ HelpeeProc=$processes[0]; HelperProc=$processes[1] }
+                $script:failedIds = New-Object 'System.Collections.Generic.List[string]'
+                $script:publicationAttempts = 0
+                $script:sleeps = 0
+                function Write-GuiSmokeAtomicJson {
+                    param($Path, $Value)
+                    if ($Path -eq (Join-Path $dirs[$FailurePeer] 'request.json')) {
+                        $script:publicationAttempts++
+                        if ($FailureMode -eq 'persistent' -or $script:publicationAttempts -eq 1) {
+                            $script:failedIds.Add($Value.requestId)
+                            throw [IO.IOException]::new('injected request publication failure')
+                        }
+                    }
+                    Write-TestAtomicJson -Path $Path -Value $Value
+                }
+                function Start-Sleep {
+                    param($Milliseconds)
+                    if ($Milliseconds -ne 200) { throw 'poll cadence changed' }
+                    $script:sleeps++
+                    # Simulate the app: respond only to requests actually visible on disk.
+                    $script:requests = @((Read-GuiPreparationJson (Join-Path $dirs[0] 'request.json')), (Read-GuiPreparationJson (Join-Path $dirs[1] 'request.json')))
+                    $responses = New-Responses
+                    for ($i=0; $i -lt 2; $i++) {
+                        $responses[$i].capturedUtcMs = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
+                        Write-TestAtomicJson -Path (Join-Path $dirs[$i] 'response.json') -Value $responses[$i]
+                    }
+                    Microsoft.PowerShell.Utility\Start-Sleep -Milliseconds $Milliseconds
+                }
+                $budget = if ($FailureMode -eq 'persistent') { 1000 } else { 3000 }
+                $watch = [Diagnostics.Stopwatch]::StartNew()
+                $line = $null
+                $failure = $null
+                try { $line = Wait-GuiPairedPreparationReadiness -Context $context -Direction $Direction -ArtifactDir $temp -TimeoutMs $budget }
+                catch { $failure = $_.Exception.Message }
+                if ($script:publicationAttempts -lt 2) { throw 'failed publication stranded the pending request pair' }
+                if ($FailureMode -eq 'persistent') {
+                    if ($failure -notlike '*failureReason=paired_preparation_readiness_missing*' -or $null -ne $line -or
+                        $watch.ElapsedMilliseconds -lt $budget -or (Test-Path (Join-Path $temp 'paired-preparation-ready.json'))) {
+                        throw 'persistent publication failure bypassed the readiness deadline'
+                    }
+                }
+                else {
+                    if ($null -ne $failure) { throw $failure }
+                    if ($script:sleeps -lt 2 -or $line -notlike '*paired_peer_count=2*authority_effect=none*') { throw 'stale pair accepted' }
+                    $saved = Read-GuiPreparationJson (Join-Path $temp 'paired-preparation-ready.json')
+                    for ($i=0; $i -lt 2; $i++) {
+                        if ($saved.requests[$i].requestId -eq $old[$i].requestId -or
+                            $script:failedIds.Contains($saved.requests[$i].requestId) -or
+                            $saved.responses[$i].requestId -cne $saved.requests[$i].requestId) { throw 'unpublished or stale request accepted' }
+                    }
+                }
+                Write-Output 'publication-recovery-ok'
+            }
+            finally { Remove-Item -LiteralPath $temp -Recurse -Force }
+            """, [FindRepoRoot(), "helpee-to-helper", failurePeer.ToString(), failureMode], host);
+        Assert.True(result.ExitCode == 0, result.Stdout + result.Stderr);
+        Assert.Contains("publication-recovery-ok", result.Stdout);
+        Assert.Equal(1, result.Stdout.Split("event=gui_preparation_request_publication_failed").Length - 1);
+        Assert.Contains($"role={(failurePeer == 0 ? "Helpee" : "Helper")}; error=IOException; authority_effect=none", result.Stdout);
+    }
+
     [Fact]
     public void PairedPreparationGate_ReplacesOnlyFirstTransferWaitAndRetainsPublicationChecks()
     {
@@ -141,7 +241,7 @@ public sealed class GuiPreparationObservationTests : FileTransferOpsScriptsTestB
     }
 
     private const string Harness = """
-        param([string]$RepoRoot, [string]$Direction)
+        param([string]$RepoRoot, [string]$Direction, [int]$FailurePeer, [string]$FailureMode)
         Set-StrictMode -Version Latest
         $ErrorActionPreference = 'Stop'
         $tokens = $null; $errors = $null

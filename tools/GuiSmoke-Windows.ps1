@@ -33345,7 +33345,7 @@ function Wait-GuiPairedPreparationReadiness {
     $directories = @($processes | ForEach-Object {
         Join-Path $_.PreparationObservationRoot ('{0}-{1}' -f $_.Id, $_.PreparationObservationBoot)
     })
-    $poll = [pscustomobject]@{ Identities = $null; Requests = $null }
+    $poll = [pscustomobject]@{ Identities = $null; Requests = $null; PublicationFailureReported = $false }
     return Wait-Until -TimeoutMs $TimeoutMs -PollMs 200 -OnTimeoutMessage 'Phase 5 paired preparation readiness missing: failurePhase=diagnostic_tuna_readiness; failureReason=paired_preparation_readiness_missing' -Condition {
         if ($null -eq $poll.Identities) {
             $identities = @((Read-GuiPreparationJson (Join-Path $directories[0] 'identity.json')), (Read-GuiPreparationJson (Join-Path $directories[1] 'identity.json')))
@@ -33358,13 +33358,25 @@ function Wait-GuiPairedPreparationReadiness {
             $poll.Identities = $identities
         }
         if ($null -eq $poll.Requests) {
-            $poll.Requests = @(0, 1 | ForEach-Object {
+            $requests = @(0, 1 | ForEach-Object {
                 [pscustomobject]@{ requestId = [guid]::NewGuid().ToString('N'); expectedSessionId = $poll.Identities[$_].scope.sessionId
                     direction = @('Outbound', 'Inbound')[$_]; requestedUtcMs = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds() }
             })
-            for ($i = 0; $i -lt 2; $i++) {
-                Write-GuiSmokeAtomicJson -Path (Join-Path $directories[$i] 'request.json') -Value $poll.Requests[$i]
+            try {
+                for ($i = 0; $i -lt 2; $i++) {
+                    Write-GuiSmokeAtomicJson -Path (Join-Path $directories[$i] 'request.json') -Value $requests[$i]
+                }
             }
+            catch [System.OperationCanceledException] { throw }
+            catch {
+                if (-not $poll.PublicationFailureReported) {
+                    $poll.PublicationFailureReported = $true
+                    Write-Host ("[GUI Smoke] event=gui_preparation_request_publication_failed; role={0}; error={1}; authority_effect=none" -f $roles[$i], $_.Exception.GetBaseException().GetType().Name)
+                }
+                return $null
+            }
+            # Wait only for a fully published pair; partial writes retry within the existing deadline.
+            $poll.Requests = $requests
         }
         $responses = @((Read-GuiPreparationJson (Join-Path $directories[0] 'response.json')), (Read-GuiPreparationJson (Join-Path $directories[1] 'response.json')))
         for ($i = 0; $i -lt 2; $i++) {
