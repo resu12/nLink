@@ -36027,7 +36027,8 @@ public sealed partial class NknAccelerationTransportTests : CoreSmokeTestsBase, 
             string sessionId,
             string transferId,
             string retryReason,
-            string recoveryReason)
+            string recoveryReason,
+            Func<RuntimeUnlockRetryDispatchAuthorityRequest, RuntimeUnlockRetryDispatchDecisionStatus>? statusSelector = null)
     {
         InvokePrivateMethod(
             transport,
@@ -36240,6 +36241,7 @@ public sealed partial class NknAccelerationTransportTests : CoreSmokeTestsBase, 
             rejectionReason);
         InstallRuntimeUnlockRetryDispatchCoordinatorForTests(
             transport,
+            statusSelector: statusSelector,
             initialCoordinatorState: state);
         Assert.True(
             Assert.IsAssignableFrom<IRuntimeUnlockRetryDispatchAuthorityBridge>(transport)

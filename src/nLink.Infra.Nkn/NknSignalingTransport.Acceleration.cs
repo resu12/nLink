@@ -1112,7 +1112,7 @@ public sealed partial class NknSignalingTransport
         long IntentGeneration,
         long SlotGeneration,
         NknTunaListenerStartRequest Request,
-        NknTunaListenerAdoptionSnapshot Snapshot);
+        NknTunaListenerAdoptionSnapshot? Snapshot);
 
     private sealed record RuntimeUnlockRetryDispatchHistoricalSettlement(
         RuntimeUnlockRetryDispatchSettlementReport Report,
@@ -31447,8 +31447,16 @@ public sealed partial class NknSignalingTransport
             snapshot: null,
             "retry_dispatch_listener_preparation_started");
 
-        NknTunaListenerAdoptionSnapshot? snapshot =
-            tunaSession.CaptureCurrentListenerAdoptionSnapshot();
+        // A connected dialer already has its physical path to the peer's
+        // listener. Do not try to replace it with a local paid listener merely
+        // to submit the retry request. This evidence grants no route authority.
+        var dialerLease = tunaSession.CaptureCurrentLaneLease() is
+            { DialerOwner: not null, Listener: null } currentDialer
+                ? currentDialer
+                : null;
+        NknTunaListenerAdoptionSnapshot? snapshot = dialerLease is null
+            ? tunaSession.CaptureCurrentListenerAdoptionSnapshot()
+            : null;
         // A generic listener cannot be adopted by an installed retry. Prepare
         // the scoped replacement before Core consumes the paired release.
         if (snapshot is { CurrentRequest.LifetimePolicy: NknTunaListenerLifetimePolicy.GenericBounded } &&
@@ -31459,7 +31467,7 @@ public sealed partial class NknSignalingTransport
         }
         try
         {
-            if (snapshot is null &&
+            if (dialerLease is null && snapshot is null &&
                 await tunaSession
                     .EnsureListenerSidecarConnectedAsync(
                         request,
@@ -31478,7 +31486,10 @@ public sealed partial class NknSignalingTransport
 
         var currentSourceScope = default(RuntimeUnlockRetryNegotiationSourceScope);
         var preparedRequest = snapshot?.CurrentRequest ?? request;
-        var sourceCurrent = snapshot is not null &&
+        var physicalPreparationCurrent = dialerLease is not null
+            ? tunaSession.CaptureCurrentLaneLease() == dialerLease
+            : snapshot is not null;
+        var sourceCurrent = physicalPreparationCurrent &&
             TryCaptureRuntimeUnlockRetryNegotiationSourceScope(
                 intent.SourcePublicationAuthority,
                 out currentSourceScope) &&
@@ -31487,8 +31498,9 @@ public sealed partial class NknSignalingTransport
         lock (accelerationGate)
         {
             if (sourceCurrent &&
-                snapshot is not null &&
-                snapshot.CurrentRequest == preparedRequest &&
+                (dialerLease is not null
+                    ? tunaSession.CaptureCurrentLaneLease() == dialerLease
+                    : snapshot is not null && snapshot.CurrentRequest == preparedRequest) &&
                 pendingRuntimeUnlockRetryNegotiationIntent == intent &&
                 runtimeUnlockRetryNegotiationSlotReceipt == slotReceipt &&
                 accelerationNegotiationSlotGeneration ==
@@ -31533,9 +31545,11 @@ public sealed partial class NknSignalingTransport
             intent,
             preparedSlot,
             preparationGeneration,
-            preparedRequest,
+            dialerLease is null ? preparedRequest : null,
             snapshot,
-            "retry_dispatch_listener_preparation_exact");
+            dialerLease is null
+                ? "retry_dispatch_listener_preparation_exact"
+                : "retry_dispatch_current_dialer_prepared_no_route_authority");
         PublishRuntimeUnlockRetryNegotiationIntent(intent, preparedSlot);
     }
 
