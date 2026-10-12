@@ -25785,6 +25785,8 @@ public sealed partial class SessionFileTransferService :
         long DataSessionGeneration)
     {
         public CheckpointContinuitySourceStamp? CheckpointContinuitySource { get; init; }
+
+        public InboundBootstrapWriteSource? RequiredWriteSource { get; init; }
     }
 
     private sealed record InboundV6FrontierRecentProgressGraceWake(
@@ -25824,7 +25826,10 @@ public sealed partial class SessionFileTransferService :
         int CheckpointGeneration,
         IFileTransferDataSession DataSession,
         string DataSessionIdentity,
-        long DataSessionGeneration);
+        long DataSessionGeneration)
+    {
+        public InboundBootstrapWriteSource? RequiredWriteSource { get; init; }
+    }
 
     private sealed class InboundTransferContext
     {

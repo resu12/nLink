@@ -17679,7 +17679,7 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
 
     [Fact]
     [Trait("FileTransferRuntimeSuite", "FallbackTailChurn")]
-    public async Task InboundPostYieldFrontierStallState_IsSuppressedBeforeControlSend()
+    public async Task InboundPostYieldFrontierStallState_WithoutCurrentWriteSourceCannotSendOrRestartRecovery()
     {
         using var service = new SessionFileTransferService();
         var serviceType = typeof(SessionFileTransferService);
@@ -17688,10 +17688,8 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
         serviceType
             .GetField("inboundTransfer", BindingFlags.Instance | BindingFlags.NonPublic)!
             .SetValue(service, context);
-        SetPrivateProperty(
-            context,
-            "DataSession",
-            new CompletingDataSession($"session_{transferId}", transferId));
+        using var dataSession = new RecordingDataSession($"session_{transferId}", transferId);
+        SetPrivateProperty(context, "DataSession", dataSession);
         SetPrivateProperty(context, "DataSessionGeneration", 1L);
         serviceType
             .GetMethod("StartInboundPostTunaRecoveryLocked", BindingFlags.Instance | BindingFlags.NonPublic)!
@@ -17714,14 +17712,17 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
         SetPrivateProperty(context, "V4FrontierStallStartedUtc", DateTimeOffset.UtcNow.AddSeconds(-5));
         SetPrivateProperty(context, "V4FrontierStallChunkIndex", 100);
 
+        var before = CreateCoordinatorStateForTest(context).PersistentState;
         var logStart = GetOperationalLogLength();
         await (Task)serviceType
             .GetMethod("MaybeSendInboundSparseCreditFrontierStallStateAsync", BindingFlags.Instance | BindingFlags.NonPublic)!
             .Invoke(service, [context])!;
 
         var log = ReadOperationalLogTail(logStart);
-        Assert.Contains("event=filetransfer_fallback_tail_retired_owner_update_suppressed; direction=inbound;", log, StringComparison.Ordinal);
-        Assert.Contains("attempted_action=send_receiver_state", log, StringComparison.Ordinal);
+        Assert.Empty(dataSession.SentFrames);
+        Assert.Null(GetPrivatePropertyValue(context, "CurrentFallbackFrontierRepairContract"));
+        Assert.Equal(before, CreateCoordinatorStateForTest(context).PersistentState);
+        Assert.False(GetPrivateProperty<bool>(context, "PullPostTunaRecoveryActive"));
         Assert.DoesNotContain("event=filetransfer_v6_receiver_state_sent;", log, StringComparison.Ordinal);
         Assert.DoesNotContain("event=filetransfer_v6_frontier_request_sent;", log, StringComparison.Ordinal);
         Assert.DoesNotContain("event=filetransfer_control_plane_delivery_observed; direction=inbound; kind=receiver_state;", log, StringComparison.Ordinal);

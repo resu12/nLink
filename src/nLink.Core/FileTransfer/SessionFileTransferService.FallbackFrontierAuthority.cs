@@ -901,11 +901,12 @@ public sealed partial class SessionFileTransferService
                 context.V6TransportEpoch!.State is V6TransportEpochState.TargetProofPending
                     or V6TransportEpochState.FrontierRepairOnly
                     or V6TransportEpochState.WaitingForTargetTransport;
-            if (!ShouldSendInboundV6FrontierRequestLocked(
+            if (!ShouldSendInboundV6FrontierRequestCoreLocked(
                     context,
                     now,
                     unresolvedFrontierProofRequest,
-                    reason))
+                    reason,
+                    requiredWriteSource))
             {
                 return false;
             }

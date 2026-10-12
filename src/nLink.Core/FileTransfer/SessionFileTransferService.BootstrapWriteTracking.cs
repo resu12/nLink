@@ -17,6 +17,8 @@ public sealed partial class SessionFileTransferService
         public InboundBootstrapWriteOperation? Operation { get; set; }
 
         public FileTransferFallbackTailYieldScope? FallbackRepairSource { get; init; }
+
+        public (int FrontierChunkIndex, DateTimeOffset? Utc)? CommittedProgress { get; init; }
     }
 
     private sealed record InboundBootstrapWriteOperation(long Generation, InboundBootstrapWriteSource Source,
@@ -86,6 +88,8 @@ public sealed partial class SessionFileTransferService
             context.DataSession is not IFileTransferDataSessionGenerationProvider provider || provider.Generation != source.Ingress.ProviderGeneration ||
             !ReferenceEquals(context.WriteStream, source.Stream) || !ReferenceEquals(context.ReceiverSparseChunksWritten, source.Written) ||
             context.ChunkSizeBytes != source.ChunkSize || context.ChunkCount != source.ChunkCount || context.FileSizeBytes != source.FileSize ||
+            source.CommittedProgress is { } progress &&
+                (context.NextChunkIndex != progress.FrontierChunkIndex || context.PullLastCommittedProgressUtc != progress.Utc) ||
             ((context.PullTransportPaused != source.TransportPaused || context.PullTransportPausedSinceUtc != source.PausedSinceUtc) &&
                 !IsBootstrapHoldCapturedWritePauseCurrentLocked(context, source) && !IsFallbackRepairHoldCapturedSourcePauseCurrentLocked(context, source)) ||
             source.Operation is { } operation &&

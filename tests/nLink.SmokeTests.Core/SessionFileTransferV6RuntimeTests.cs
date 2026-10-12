@@ -1,6 +1,7 @@
 using System.Reflection;
 using System.Security.Cryptography;
 using NLink.Core.FileTransfer;
+using NLink.Core.Logging;
 
 namespace NLink.SmokeTests;
 
@@ -2004,6 +2005,165 @@ public sealed class SessionFileTransferV6RuntimeTests : SessionFileTransferServi
         Assert.Contains("settlement_outcome=SettledStalled", logTail, StringComparison.Ordinal);
     }
 
+    [Fact]
+    [Trait("FileTransferRuntimeSuite", "PostTunaFallbackV6FrontierStallGrace")]
+    public async Task V6SparseReceiver_PostTunaFallbackInitialStallWake_OutlivesCompletedWriteWithoutRetryPolling()
+    {
+        const string transferId = "transfer_v6_initial_stall_write_settlement";
+        const string sessionId = "session_v6_initial_stall_write_settlement";
+        const int chunkSize = 4;
+        var payload = Enumerable.Range(0, 64 * chunkSize).Select(static index => (byte)(index % 251)).ToArray();
+        var previousStallGrace = SessionFileTransferService.V6PostTunaFallbackFrontierRequestStallGraceOverrideForTests;
+        var previousFinalization = SessionFileTransferService.BootstrapWriteBeforeFinalizationForTests;
+        var writeReady = new TaskCompletionSource<object>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseWrite = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var retryStateBlocked = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseRetryState = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var requestObserved = new TaskCompletionSource<(FileTransferFrontierRequestFrameV6 Request, int ActiveWrites)>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        var blockRetryState = 0;
+        using var destination = new NonDisposingMemoryStream();
+        using var senderTransport = new LoopbackFileTransferTransport(sessionId);
+        using var receiverTransport = new GraceWakeReceiverTransport(sessionId);
+        using var receiver = new SessionFileTransferService();
+        senderTransport.Connect(receiverTransport);
+        receiver.AttachTransport(receiverTransport);
+
+        try
+        {
+            SessionFileTransferService.V6PostTunaFallbackFrontierRequestStallGraceOverrideForTests = TimeSpan.FromMilliseconds(1000);
+            receiverTransport.OutboundDataFrameDeliveryOverrideAsync = async (_, frame, _) =>
+            {
+                if (frame is FileTransferReceiverStateFrameV6 && Volatile.Read(ref blockRetryState) == 1)
+                {
+                    // The read-loop retry cannot reach its frontier send while
+                    // this state send waits; only the independent wake can dispatch.
+                    retryStateBlocked.TrySetResult();
+                    await releaseRetryState.Task;
+                }
+                if (frame is FileTransferFrontierRequestFrameV6 request)
+                {
+                    lock (GetPrivateField(receiver, "gate")!)
+                    {
+                        var context = GetPrivateField(receiver, "inboundTransfer")!;
+                        requestObserved.TrySetResult((request, ActiveWrites(context)));
+                    }
+                }
+                return false;
+            };
+            var senderSession = await StartManualInboundV6ReceiverAsync(senderTransport, receiver, transferId, sessionId,
+                "v6-initial-stall-write-settlement.bin", payload.Length,
+                Convert.ToBase64String(new byte[FileTransferProtocol.Sha256LengthBytes]),
+                (_, _) => Task.FromResult<Stream>(destination));
+            await senderSession.SendAsync(CreateManifest(sessionId, transferId, "v6-initial-stall-write-settlement.bin",
+                payload.Length, chunkSize, Convert.ToBase64String(new byte[FileTransferProtocol.Sha256LengthBytes])), CancellationToken.None);
+            await WaitUntilAsync(() => receiverTransport.SentDataFrames.OfType<FileTransferReceiverStateFrameV6>().Any());
+            var context = GetPrivateField(receiver, "inboundTransfer")!;
+            SessionFileTransferService.BootstrapWriteBeforeFinalizationForTests = async observedTransferId =>
+            {
+                if (observedTransferId != transferId || Volatile.Read(ref blockRetryState) == 1) { return; }
+                lock (GetPrivateField(receiver, "gate")!)
+                {
+                    var wake = Property(context, "CurrentV6FrontierStallGraceWake");
+                    Assert.NotNull(wake);
+                    Assert.Equal(1, ActiveWrites(context));
+                    Volatile.Write(ref blockRetryState, 1);
+                    writeReady.TrySetResult(wake!);
+                }
+                await releaseWrite.Task;
+            };
+            await senderSession.SendAsync(new FileTransferChunkBatchFrameV6
+            {
+                SessionId = sessionId, TransferId = transferId, StartChunkIndex = 12, ChunkCount = 1,
+                DataSegments = [payload.Skip(12 * chunkSize).Take(chunkSize).ToArray()],
+            }, CancellationToken.None);
+            var wake = await writeReady.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            releaseWrite.TrySetResult();
+            await WaitUntilAsync(() => { lock (GetPrivateField(receiver, "gate")!) { return ActiveWrites(context) == 0; } }, timeoutMs: 5000);
+            var source = Property(wake, "RequiredWriteSource");
+            Assert.NotNull(source);
+            lock (GetPrivateField(receiver, "gate")!)
+            {
+                Assert.True(SourceCurrent(), "Normal write settlement must not invalidate the admitted stall wake.");
+                Assert.Null(Property(source!, "Operation"));
+                Assert.Equal((0, (DateTimeOffset?)null), Assert.IsType<(int, DateTimeOffset?)>(Property(source!, "CommittedProgress")));
+                var owner = Assert.IsType<RuntimeOwnerToken>(Property(context, "CurrentRuntimeOwner"));
+                var publication = Assert.IsType<RoutePublicationToken>(Property(context, "CurrentRoutePublicationToken"));
+                var contract = Property(context, "CurrentFallbackFrontierRepairContract");
+                var persistentState = Property(context, "CoordinatorPersistentState");
+                foreach (var (name, value) in new (string, object?)[]
+                {
+                    ("NextChunkIndex", 1), ("PullLastCommittedProgressUtc", DateTimeOffset.UtcNow),
+                    ("DataSessionGeneration", Assert.IsType<long>(Property(context, "DataSessionGeneration")) + 1),
+                    ("DataSession", null), ("WriteStream", null), ("ReceiverSparseChunksWritten", null), ("UserPaused", true),
+                    ("CurrentRuntimeOwner", owner with { RuntimeGeneration = owner.RuntimeGeneration + 1 }),
+                    ("CurrentRoutePublicationToken", publication with { PublicationGeneration = publication.PublicationGeneration + 1 }),
+                    ("TerminalGeneration", Assert.IsType<int>(Property(context, "TerminalGeneration")) + 1),
+                })
+                {
+                    var previous = Property(context, name);
+                    try
+                    {
+                        SetPrivateProperty(context, name, value);
+                        Assert.False(SourceCurrent());
+                        var rejected = Assert.IsAssignableFrom<Task<bool>>(InvokePrivateMethod(receiver,
+                            "SendInboundV6FrontierRequestWithWriteBindingAsync", context, "stale_initial_stall_wake_test", true, source));
+                        Assert.True(rejected.IsCompletedSuccessfully);
+                        Assert.False(rejected.Result);
+                        Assert.Same(contract, Property(context, "CurrentFallbackFrontierRepairContract"));
+                        Assert.Equal(persistentState, Property(context, "CoordinatorPersistentState"));
+                    }
+                    finally { SetPrivateProperty(context, name, previous); }
+                }
+                Assert.True(SourceCurrent());
+            }
+            await retryStateBlocked.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            var observed = await requestObserved.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            Assert.Equal(0, observed.ActiveWrites);
+            Assert.Equal(0, observed.Request.MissingRanges[0].StartChunkIndex);
+            Assert.False(releaseRetryState.Task.IsCompleted);
+            await WaitUntilAsync(() =>
+            {
+                lock (GetPrivateField(receiver, "gate")!)
+                {
+                    var contract = Property(context, "CurrentFallbackFrontierRepairContract");
+                    return contract is not null && Property(Property(contract, "Lifecycle")!, "DispatchObserved") is true;
+                }
+            }, timeoutMs: 5000);
+            await WaitUntilAsync(() => LocalOperationalLog.GetRecentLogText()
+                .Split(Environment.NewLine, StringSplitOptions.RemoveEmptyEntries).Any(line =>
+                    line.Contains("event=filetransfer_v6_frontier_request_sent;", StringComparison.Ordinal) &&
+                    line.Contains(FileTransferDiagnosticScopeEvidence.Format(sessionId, transferId), StringComparison.Ordinal) &&
+                    line.Contains($"repair_request_id={observed.Request.RepairRequestId};", StringComparison.Ordinal) &&
+                    line.Contains("reason=frontier_stall_grace_elapsed", StringComparison.Ordinal)), timeoutMs: 5000);
+            releaseRetryState.TrySetResult();
+            await senderSession.SendAsync(new FileTransferChunkBatchFrameV6
+            {
+                SessionId = sessionId, TransferId = transferId, TransportEpoch = observed.Request.TransportEpoch,
+                RepairRequestId = observed.Request.RepairRequestId, StartChunkIndex = 0, ChunkCount = 1,
+                DataSegments = [payload.Take(chunkSize).ToArray()], Priority = observed.Request.Priority, RecoveryMode = observed.Request.RecoveryMode,
+            }, CancellationToken.None);
+            await WaitUntilAsync(() => receiver.Snapshot.Inbound?.ChunksTransferred >= 1, timeoutMs: 5000);
+            Assert.Equal(payload.Take(chunkSize), destination.ToArray().Take(chunkSize));
+            lock (GetPrivateField(receiver, "gate")!) { Assert.False(SourceCurrent()); }
+
+            bool SourceCurrent() => Assert.IsType<bool>(InvokePrivateMethod(receiver,
+                "IsInboundBootstrapWriteSourceCurrentLocked", context, source));
+        }
+        finally
+        {
+            releaseWrite.TrySetResult();
+            releaseRetryState.TrySetResult();
+            SessionFileTransferService.BootstrapWriteBeforeFinalizationForTests = previousFinalization;
+            SessionFileTransferService.V6PostTunaFallbackFrontierRequestStallGraceOverrideForTests = previousStallGrace;
+        }
+
+        static object? Property(object target, string name)
+            => target.GetType().GetProperty(name, BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)!.GetValue(target);
+        static int ActiveWrites(object context)
+            => Assert.IsAssignableFrom<System.Collections.IDictionary>(Property(context, "ActiveBootstrapWriteOperations")).Count;
+    }
+
     [Theory]
     [InlineData(false, false, false)]
     [InlineData(true, false, false)]
@@ -2034,7 +2194,7 @@ public sealed class SessionFileTransferV6RuntimeTests : SessionFileTransferServi
         {
             using var destination = new NonDisposingMemoryStream();
             using var senderTransport = new LoopbackFileTransferTransport(sessionId);
-            using var receiverTransport = new LoopbackFileTransferTransport(sessionId);
+            using var receiverTransport = new GraceWakeReceiverTransport(sessionId);
             senderTransport.Connect(receiverTransport);
             using var receiver = new SessionFileTransferService();
             receiver.AttachTransport(receiverTransport);
@@ -2302,6 +2462,23 @@ public sealed class SessionFileTransferV6RuntimeTests : SessionFileTransferServi
     public async Task V6SparseReceiver_PostTunaFallbackRecentProgressGraceWake_BlockedReceiverStateCannotStarveStallRecheck(
         bool adoptValueEquivalentCoordinatorState,
         long? deadlineOffsetTicks)
+        => await ProbeBlockedRecentProgressFeedbackAsync(adoptValueEquivalentCoordinatorState, deadlineOffsetTicks);
+
+    [Fact]
+    [Trait("FileTransferRuntimeSuite", "PostTunaFallbackV6FrontierStallGrace")]
+    public async Task V6SparseReceiver_PostTunaFallbackRecentProgressGraceExpiryBeforeWakeAdmission_CannotLoseLivenessWhileFeedbackBlocked()
+        => await ProbeBlockedRecentProgressFeedbackAsync(false, null, expireBeforeWakeAdmission: true);
+
+    [Fact]
+    [Trait("FileTransferRuntimeSuite", "PostTunaFallbackV6FrontierStallGrace")]
+    public async Task V6SparseReceiver_PostTunaFallbackCommittedProgressWake_OutlivesCompletedWriteOperation()
+        => await ProbeBlockedRecentProgressFeedbackAsync(false, null, releaseFeedbackBeforeRecheck: true);
+
+    private async Task ProbeBlockedRecentProgressFeedbackAsync(
+        bool adoptValueEquivalentCoordinatorState,
+        long? deadlineOffsetTicks,
+        bool expireBeforeWakeAdmission = false,
+        bool releaseFeedbackBeforeRecheck = false)
     {
         const string transferId = "transfer_v6_post_fallback_recent_progress_wake";
         const string sessionId = "session_v6_post_fallback_recent_progress_wake";
@@ -2317,6 +2494,11 @@ public sealed class SessionFileTransferV6RuntimeTests : SessionFileTransferServi
         var sha256 = Convert.ToBase64String(new byte[FileTransferProtocol.Sha256LengthBytes]);
         var receiverStateBlocked = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var releaseReceiverState = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var successorObserved = new TaskCompletionSource<(FileTransferFrontierRequestFrameV6 Frame, DateTimeOffset Utc)>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        var previousCommitBarrier = SessionFileTransferService.BootstrapWriteBeforeCommitForTests;
+        Task loggerDelay = Task.CompletedTask;
+        DateTimeOffset delayedCommittedUtc = default;
         var blockNextReceiverState = 0;
 
         try
@@ -2324,11 +2506,38 @@ public sealed class SessionFileTransferV6RuntimeTests : SessionFileTransferServi
             using var destination = new NonDisposingMemoryStream();
             using var senderTransport = new LoopbackFileTransferTransport(sessionId);
             using var receiverTransport = new GraceWakeReceiverTransport(sessionId);
+            using var receiver = new SessionFileTransferService();
             receiverTransport.OutboundDataFrameDeliveryOverrideAsync = async (_, frame, _) =>
             {
+                if (frame is FileTransferFrontierRequestFrameV6 request &&
+                    request.MissingRanges.Any(static range => range.StartChunkIndex == 1))
+                {
+                    successorObserved.TrySetResult((request, DateTimeOffset.UtcNow));
+                }
                 if (frame is FileTransferReceiverStateFrameV6 { ContiguousCommittedChunkIndex: 1, BytesCommitted: chunkSize } &&
                     Interlocked.CompareExchange(ref blockNextReceiverState, 0, 1) == 1)
                 {
+                    // Inspect the admitted wake on the sending thread, rather than
+                    // after an unrelated test continuation has consumed its grace.
+                    try
+                    {
+                        // An overdue commit wake may already have dispatched
+                        // before feedback reaches this interception point.
+                        if (!expireBeforeWakeAdmission) { AssertCommittedGraceWakeRejectsChangedSource(receiver); }
+                        if (adoptValueEquivalentCoordinatorState)
+                        {
+                            AssertInboundGraceWakeSurvivesCoordinatorAdoption(receiver, recentProgress: true);
+                        }
+                        if (deadlineOffsetTicks is { } offset)
+                        {
+                            AssertRecentProgressWakeSurvivesElapsedUnchangedRefresh(receiver, offset);
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        receiverStateBlocked.TrySetException(ex);
+                        return true;
+                    }
                     receiverStateBlocked.TrySetResult();
                     await releaseReceiverState.Task;
                 }
@@ -2336,7 +2545,6 @@ public sealed class SessionFileTransferV6RuntimeTests : SessionFileTransferServi
                 return false;
             };
             senderTransport.Connect(receiverTransport);
-            using var receiver = new SessionFileTransferService();
             receiver.AttachTransport(receiverTransport);
 
             var senderSession = await StartManualInboundV6ReceiverAsync(
@@ -2388,9 +2596,37 @@ public sealed class SessionFileTransferV6RuntimeTests : SessionFileTransferServi
             var predecessorRequest = receiverTransport.SentDataFrames
                 .OfType<FileTransferFrontierRequestFrameV6>()
                 .Last(static frame => frame.MissingRanges.Any(static range => range.StartChunkIndex == 0));
-            var requestCountBeforeProgress = receiverTransport.SentDataFrames
-                .OfType<FileTransferFrontierRequestFrameV6>()
-                .Count();
+            var runtimeOwnerBeforeProgress = Property(receiverContext, "CurrentRuntimeOwner");
+            var publicationBeforeProgress = Property(receiverContext, "CurrentRoutePublicationToken");
+
+            if (expireBeforeWakeAdmission)
+            {
+                var delayNextCommit = 1;
+                SessionFileTransferService.BootstrapWriteBeforeCommitForTests = async observedTransferId =>
+                {
+                    if (observedTransferId != transferId || Interlocked.Exchange(ref delayNextCommit, 0) != 1) { return; }
+                    var ready = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+                    var logGate = typeof(LocalOperationalLog).GetField("Gate", BindingFlags.Static | BindingFlags.NonPublic)!.GetValue(null)!;
+                    // Reuse the existing delayed-log fixture: the actual commit
+                    // clock is acquired unchanged, then settlement logging waits.
+                    loggerDelay = Task.Run(() =>
+                    {
+                        lock (logGate)
+                        {
+                            ready.TrySetResult();
+                            Assert.True(SpinWait.SpinUntil(() =>
+                                Equals(Property(receiverContext, "NextChunkIndex"), 1) &&
+                                Property(receiverContext, "PullLastCommittedProgressUtc") is DateTimeOffset,
+                                TimeSpan.FromSeconds(5)), "The valid payload must commit before the log-delay probe.");
+                            delayedCommittedUtc = Assert.IsType<DateTimeOffset>(Property(receiverContext, "PullLastCommittedProgressUtc"));
+                            var delay = delayedCommittedUtc + SessionFileTransferService.V6RegularNknFrontierRequestProgressGraceOverrideForTests!.Value +
+                                TimeSpan.FromMilliseconds(20) - DateTimeOffset.UtcNow;
+                            if (delay > TimeSpan.Zero) { Thread.Sleep(delay); }
+                        }
+                    });
+                    await ready.Task.WaitAsync(TimeSpan.FromSeconds(5));
+                };
+            }
 
             Volatile.Write(ref blockNextReceiverState, 1);
             var progressDelivery = senderSession.SendAsync(
@@ -2411,34 +2647,66 @@ public sealed class SessionFileTransferV6RuntimeTests : SessionFileTransferServi
             Assert.Equal(1, receiver.Snapshot.Inbound?.ChunksTransferred);
             Assert.Equal(payload.Take(chunkSize), destination.ToArray().Take(chunkSize));
 
-            if (adoptValueEquivalentCoordinatorState)
+            var committedUtc = Assert.IsType<DateTimeOffset>(Property(receiverContext, "PullLastCommittedProgressUtc"));
+            var deadline = committedUtc + SessionFileTransferService.V6RegularNknFrontierRequestProgressGraceOverrideForTests!.Value;
+            if (expireBeforeWakeAdmission)
             {
-                AssertInboundGraceWakeSurvivesCoordinatorAdoption(receiver, recentProgress: true);
+                await loggerDelay;
+                Assert.Equal(delayedCommittedUtc, committedUtc);
+                Assert.True(DateTimeOffset.UtcNow >= deadline);
+            }
+            if (releaseFeedbackBeforeRecheck)
+            {
+                releaseReceiverState.TrySetResult();
+                await progressDelivery;
+                await WaitUntilAsync(() =>
+                {
+                    lock (GetPrivateField(receiver, "gate")!)
+                    {
+                        return Assert.IsAssignableFrom<System.Collections.IDictionary>(
+                            Property(receiverContext, "ActiveBootstrapWriteOperations")).Count == 0;
+                    }
+                }, timeoutMs: 5000);
+                Assert.False(successorObserved.Task.IsCompleted, "The write must settle before the independent wake dispatches.");
             }
 
-            if (deadlineOffsetTicks is { } offset)
+            var lostLivenessWhileBlocked = false;
+            (FileTransferFrontierRequestFrameV6 Frame, DateTimeOffset Utc) observed;
+            try
             {
-                AssertRecentProgressWakeSurvivesElapsedUnchangedRefresh(receiver, offset);
+                observed = await successorObserved.Task.WaitAsync(TimeSpan.FromSeconds(5));
             }
-
-            await Task.Delay(300);
-            Assert.Equal(
-                requestCountBeforeProgress,
-                receiverTransport.SentDataFrames.OfType<FileTransferFrontierRequestFrameV6>().Count());
-
-            await WaitUntilAsync(
-                () => receiverTransport.SentDataFrames.OfType<FileTransferFrontierRequestFrameV6>().Count() >
-                      requestCountBeforeProgress,
-                timeoutMs: 5000);
-            var successorRequest = receiverTransport.SentDataFrames
-                .OfType<FileTransferFrontierRequestFrameV6>()
-                .Last();
-            Assert.Equal(
-                requestCountBeforeProgress + 1,
-                receiverTransport.SentDataFrames.OfType<FileTransferFrontierRequestFrameV6>().Count());
+            catch (TimeoutException) when (expireBeforeWakeAdmission)
+            {
+                // Confirm the source is still current and use release as the
+                // positive control before reporting the liveness failure.
+                Assert.Equal(1, receiver.Snapshot.Inbound?.ChunksTransferred);
+                Assert.False(releaseReceiverState.Task.IsCompleted);
+                Assert.Equal(runtimeOwnerBeforeProgress, Property(receiverContext, "CurrentRuntimeOwner"));
+                Assert.Equal(publicationBeforeProgress, Property(receiverContext, "CurrentRoutePublicationToken"));
+                Assert.Null(Property(receiverContext, "CurrentV6FrontierStallGraceWake"));
+                lostLivenessWhileBlocked = true;
+                releaseReceiverState.TrySetResult();
+                observed = await successorObserved.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            }
+            var successorRequest = observed.Frame;
+            // Count only the successor frontier, not legitimate frontier-0
+            // retries that raced with the first progress commit.
+            Assert.Single(receiverTransport.SentDataFrames.OfType<FileTransferFrontierRequestFrameV6>(),
+                static frame => frame.MissingRanges.Any(static range => range.StartChunkIndex == 1));
+            Assert.True(observed.Utc >= deadline + SessionFileTransferService.V6PostTunaFallbackFrontierRequestStallGraceOverrideForTests!.Value,
+                "The successor must respect both existing grace deadlines.");
             Assert.Equal(1, successorRequest.MissingRanges[0].StartChunkIndex);
             Assert.NotEqual(predecessorRequest.RepairRequestId, successorRequest.RepairRequestId);
 
+            // Observe send settlement before feeding the successor payload;
+            // otherwise the manual peer can invalidate the bound frontier while
+            // the local send-completion callback is still awaiting transport.
+            await WaitUntilAsync(() => ReadOperationalLogTail(logStart)
+                .Split(Environment.NewLine, StringSplitOptions.RemoveEmptyEntries).Any(static line =>
+                    line.Contains("event=filetransfer_v6_frontier_stall_grace_recheck_decided", StringComparison.Ordinal) &&
+                    line.Contains("decision_status=dispatched", StringComparison.Ordinal) &&
+                    line.Contains("frontier_chunk_index=1;", StringComparison.Ordinal)), timeoutMs: 5000);
             releaseReceiverState.TrySetResult();
             await progressDelivery;
             await senderSession.SendAsync(
@@ -2456,20 +2724,110 @@ public sealed class SessionFileTransferV6RuntimeTests : SessionFileTransferServi
                 },
                 CancellationToken.None);
             await WaitUntilAsync(() => receiver.Snapshot.Inbound?.ChunksTransferred >= 2, timeoutMs: 5000);
+            Assert.Equal(payload.Take(2 * chunkSize), destination.ToArray().Take(2 * chunkSize));
+
+            Assert.False(lostLivenessWhileBlocked,
+                "Lost liveness: grace expired before wake admission; no frontier-1 request appeared during 5 seconds of blocked feedback " +
+                "with unchanged coordinator authority. Releasing feedback restored the exact request and payload progress from 1 to 2.");
 
             var logTail = ReadOperationalLogTail(logStart);
             Assert.Contains("event=filetransfer_v6_frontier_recent_progress_grace_deferred", logTail, StringComparison.Ordinal);
             Assert.Contains("event=filetransfer_v6_frontier_recent_progress_grace_recheck_decided", logTail, StringComparison.Ordinal);
-            Assert.Contains("decision_reason=stall_grace_armed", logTail, StringComparison.Ordinal);
+            // The recent callback samples the current stall wake after an await;
+            // a dispatched stall callback may already have cleared that wake.
+            Assert.Contains(logTail.Split(Environment.NewLine, StringSplitOptions.RemoveEmptyEntries), static line =>
+                line.Contains("event=filetransfer_v6_frontier_recent_progress_grace_recheck_decided", StringComparison.Ordinal) &&
+                line.Contains("decision_status=rechecked", StringComparison.Ordinal) &&
+                (line.Contains("decision_reason=stall_grace_armed", StringComparison.Ordinal) ||
+                 line.Contains("decision_reason=exact_receiver_request_not_dispatched", StringComparison.Ordinal)));
             Assert.Contains("event=filetransfer_v6_frontier_stall_grace_recheck_decided", logTail, StringComparison.Ordinal);
             Assert.Contains("decision_status=dispatched", logTail, StringComparison.Ordinal);
+            Assert.Contains($"protocol_repair_request_id={successorRequest.RepairRequestId}", logTail, StringComparison.Ordinal);
+            Assert.Contains($"request_correlation_id={successorRequest.RequestCorrelationId}", logTail, StringComparison.Ordinal);
         }
         finally
         {
             releaseReceiverState.TrySetResult();
-            SessionFileTransferService.V6PostTunaFallbackFrontierRequestStallGraceOverrideForTests = previousStallGrace;
-            SessionFileTransferService.V6RegularNknFrontierRequestProgressGraceOverrideForTests = previousProgressGrace;
+            SessionFileTransferService.BootstrapWriteBeforeCommitForTests = previousCommitBarrier;
+            try { await loggerDelay; }
+            finally
+            {
+                SessionFileTransferService.V6PostTunaFallbackFrontierRequestStallGraceOverrideForTests = previousStallGrace;
+                SessionFileTransferService.V6RegularNknFrontierRequestProgressGraceOverrideForTests = previousProgressGrace;
+            }
         }
+
+        static object? Property(object target, string name)
+            => target.GetType().GetProperty(name, BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)!.GetValue(target);
+    }
+
+    private static void AssertCommittedGraceWakeRejectsChangedSource(SessionFileTransferService receiver)
+    {
+        lock (GetPrivateField(receiver, "gate")!)
+        {
+            var context = GetPrivateField(receiver, "inboundTransfer")!;
+            var wake = Property(context, "CurrentV6FrontierRecentProgressGraceWake") ??
+                Property(context, "CurrentV6FrontierStallGraceWake");
+            Assert.NotNull(wake);
+            var source = Property(wake!, "RequiredWriteSource");
+            Assert.NotNull(source);
+            Assert.Null(Property(source!, "Operation"));
+            Assert.Equal((1, (DateTimeOffset?)Assert.IsType<DateTimeOffset>(Property(context, "PullLastCommittedProgressUtc"))),
+                Assert.IsType<(int, DateTimeOffset?)>(Property(source!, "CommittedProgress")));
+            var type = typeof(SessionFileTransferService);
+            var isCurrent = type.GetMethod("IsInboundBootstrapWriteSourceCurrentLocked", BindingFlags.Instance | BindingFlags.NonPublic)!;
+            Assert.True(Assert.IsType<bool>(isCurrent.Invoke(receiver, [context, source])));
+            var owner = Assert.IsType<RuntimeOwnerToken>(Property(context, "CurrentRuntimeOwner"));
+            var publication = Assert.IsType<RoutePublicationToken>(Property(context, "CurrentRoutePublicationToken"));
+            var contract = Property(context, "CurrentFallbackFrontierRepairContract");
+            var persistentState = Property(context, "CoordinatorPersistentState");
+            var changes = new (string Name, object? Value)[]
+            {
+                ("NextChunkIndex", 2),
+                ("PullLastCommittedProgressUtc", Assert.IsType<DateTimeOffset>(Property(context, "PullLastCommittedProgressUtc")).AddTicks(1)),
+                ("DataSessionGeneration", Assert.IsType<long>(Property(context, "DataSessionGeneration")) + 1),
+                ("DataSession", null),
+                ("WriteStream", null),
+                ("ReceiverSparseChunksWritten", null),
+                ("UserPaused", true),
+                ("CurrentRuntimeOwner", owner with { RuntimeGeneration = owner.RuntimeGeneration + 1 }),
+                ("CurrentRoutePublicationToken", publication with { PublicationGeneration = publication.PublicationGeneration + 1 }),
+                ("TerminalGeneration", Assert.IsType<int>(Property(context, "TerminalGeneration")) + 1),
+            };
+            foreach (var (name, value) in changes)
+            {
+                var previous = Property(context, name);
+                try
+                {
+                    SetPrivateProperty(context, name, value);
+                    Assert.False(Assert.IsType<bool>(isCurrent.Invoke(receiver, [context, source])));
+                    var send = Assert.IsAssignableFrom<Task<bool>>(type.GetMethod("SendInboundV6FrontierRequestWithWriteBindingAsync",
+                        BindingFlags.Instance | BindingFlags.NonPublic)!.Invoke(receiver, [context, "stale_committed_wake_test", true, source]));
+                    Assert.True(send.IsCompletedSuccessfully);
+                    Assert.False(send.Result);
+                    Assert.Same(contract, Property(context, "CurrentFallbackFrontierRepairContract"));
+                    Assert.Equal(persistentState, Property(context, "CoordinatorPersistentState"));
+                    foreach (var kind in new[] { "RecentProgress", "Stall" })
+                    {
+                        var scheduledProperty = "V6Frontier" + kind + "GraceWakeScheduledGeneration";
+                        var generation = Property(context, scheduledProperty);
+                        try
+                        {
+                            SetPrivateProperty(context, scheduledProperty, 0L);
+                            type.GetMethod("SchedulePendingInboundV6Frontier" + kind + "GraceWakeWithWriteBinding",
+                                BindingFlags.Instance | BindingFlags.NonPublic)!.Invoke(receiver, [context, source]);
+                            Assert.Equal(0L, Property(context, scheduledProperty));
+                        }
+                        finally { SetPrivateProperty(context, scheduledProperty, generation); }
+                    }
+                }
+                finally { SetPrivateProperty(context, name, previous); }
+            }
+            Assert.True(Assert.IsType<bool>(isCurrent.Invoke(receiver, [context, source])));
+        }
+
+        static object? Property(object target, string name)
+            => target.GetType().GetProperty(name, BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)!.GetValue(target);
     }
 
     [Fact]

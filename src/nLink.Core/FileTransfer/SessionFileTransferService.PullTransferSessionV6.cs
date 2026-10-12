@@ -5616,7 +5616,23 @@ public sealed partial class SessionFileTransferService
                         out fallbackV6ProofBootstrapRecheckResult);
             }
 
-            ArmOrClearInboundV6FrontierRecentProgressGraceWakeLocked(context, DateTimeOffset.UtcNow);
+            if (committedChunkCount > 0 &&
+                writeSource is { FallbackRepairSource: not null } &&
+                fallbackFrontierProgressReceipt is not null &&
+                context.NextChunkIndex == fallbackFrontierProgressReceipt.CurrentFrontierChunkIndex &&
+                context.PullLastCommittedProgressUtc == progressUtc &&
+                IsInboundBootstrapWriteSourceCurrentLocked(context, writeSource) &&
+                TryValidateInboundFallbackFrontierProgressReceiptLocked(context, fallbackFrontierProgressReceipt, out _))
+            {
+                // A validated commit owns its original due recheck even if
+                // settlement logging consumed the grace before wake admission.
+                ArmInboundV6FrontierRecentProgressGraceWakeCoreLocked(context, DateTimeOffset.UtcNow,
+                    writeSource with { Operation = null, CommittedProgress = (context.NextChunkIndex, progressUtc) });
+            }
+            else
+            {
+                ArmOrClearInboundV6FrontierRecentProgressGraceWakeLocked(context, DateTimeOffset.UtcNow);
+            }
             frontierStallGraceWakeRefreshed = RefreshInboundV6FrontierStallGraceWakeForHighestProgressLocked(context);
 
             snapshot = CreateSnapshotLocked();
@@ -5925,12 +5941,14 @@ public sealed partial class SessionFileTransferService
         await SendInboundV6FrontierRequestAsync(context, "chunk_batch_committed", forceSend: false).ConfigureAwait(false);
     }
 
-    private async Task MaybeSendInboundV6RetryStateAsync(InboundTransferContext context)
+    private async Task MaybeSendInboundV6RetryStateAsync(InboundTransferContext context,
+        InboundBootstrapWriteSource? requiredWriteSource = null)
     {
         bool shouldSendState;
         bool shouldSendFrontierRequest;
         lock (gate)
         {
+            if (requiredWriteSource is not null && !IsInboundBootstrapWriteSourceCurrentLocked(context, requiredWriteSource)) { return; }
             if (!ReferenceEquals(inboundTransfer, context) ||
                 context.IsTerminal ||
                 !context.PullManifestReceived ||
@@ -5956,12 +5974,14 @@ public sealed partial class SessionFileTransferService
 
         if (shouldSendState)
         {
-            await SendInboundV6ReceiverStateAsync(context, "retry", forceSend: true).ConfigureAwait(false);
+            await SendInboundV6ReceiverStateWithWriteBindingAsync(context, "retry", forceSend: true,
+                requiredWriteSource: requiredWriteSource).ConfigureAwait(false);
         }
 
         if (shouldSendFrontierRequest)
         {
-            await SendInboundV6FrontierRequestAsync(context, "retry", forceSend: true).ConfigureAwait(false);
+            await SendInboundV6FrontierRequestWithWriteBindingAsync(context, "retry", forceSend: true,
+                requiredWriteSource: requiredWriteSource).ConfigureAwait(false);
         }
     }
 
@@ -6726,8 +6746,8 @@ public sealed partial class SessionFileTransferService
         {
             var sent = await SendInboundAuthorizedFallbackFrontierRequestAsync(context, reason, forceSend, requiredWriteSource)
                 .ConfigureAwait(false);
-            SchedulePendingInboundV6FrontierRecentProgressGraceWake(context);
-            SchedulePendingInboundV6FrontierStallGraceWake(context);
+            SchedulePendingInboundV6FrontierRecentProgressGraceWakeWithWriteBinding(context, requiredWriteSource);
+            SchedulePendingInboundV6FrontierStallGraceWakeWithWriteBinding(context, requiredWriteSource);
             return sent;
         }
 
@@ -7858,6 +7878,14 @@ public sealed partial class SessionFileTransferService
         DateTimeOffset now,
         bool unresolvedFrontierProofRequest,
         string reason)
+        => ShouldSendInboundV6FrontierRequestCoreLocked(context, now, unresolvedFrontierProofRequest, reason, null);
+
+    private static bool ShouldSendInboundV6FrontierRequestCoreLocked(
+        InboundTransferContext context,
+        DateTimeOffset now,
+        bool unresolvedFrontierProofRequest,
+        string reason,
+        InboundBootstrapWriteSource? requiredWriteSource)
     {
         if (unresolvedFrontierProofRequest)
         {
@@ -7890,7 +7918,7 @@ public sealed partial class SessionFileTransferService
             context.V6FrontierStallStartedUtc = now;
             context.V6FrontierStallChunkIndex = context.NextChunkIndex;
             context.V6FrontierStallLastDeferredLogUtc = now;
-            ArmInboundV6FrontierStallGraceWakeLocked(context, now, initialStallGrace);
+            ArmInboundV6FrontierStallGraceWakeLocked(context, now, initialStallGrace, requiredWriteSource);
             LogInboundV6FrontierRequestDeferred(
                 context,
                 now,
@@ -7929,7 +7957,8 @@ public sealed partial class SessionFileTransferService
     private static void ArmInboundV6FrontierStallGraceWakeLocked(
         InboundTransferContext context,
         DateTimeOffset now,
-        TimeSpan stallGrace)
+        TimeSpan stallGrace,
+        InboundBootstrapWriteSource? requiredWriteSource = null)
     {
         if (!IsStrictFallbackFrontierRuntime(context) ||
             context.CurrentRoutePublicationToken is not { IsDefault: false } publication ||
@@ -7990,6 +8019,12 @@ public sealed partial class SessionFileTransferService
         {
             CheckpointContinuitySource = FileTransferCoordinator.CreateCheckpointContinuitySourceStamp(
                 CreateCoordinatorStateLocked(context)),
+            // The admitted recheck outlives its write, not its frontier or route scope.
+            RequiredWriteSource = requiredWriteSource is null ? null : requiredWriteSource with
+            {
+                Operation = null,
+                CommittedProgress = (context.NextChunkIndex, context.PullLastCommittedProgressUtc),
+            },
         };
         context.FrontierPublicationObservation?.StallArm(CreateCoordinatorStateLocked(context), dataSession,
             wakeGeneration, context.NextChunkIndex, context.PullHighestReceivedChunkIndex, now, now + stallGrace);
@@ -8022,10 +8057,15 @@ public sealed partial class SessionFileTransferService
     }
 
     private void SchedulePendingInboundV6FrontierStallGraceWake(InboundTransferContext context)
+        => SchedulePendingInboundV6FrontierStallGraceWakeWithWriteBinding(context, null);
+
+    private void SchedulePendingInboundV6FrontierStallGraceWakeWithWriteBinding(InboundTransferContext context,
+        InboundBootstrapWriteSource? requiredWriteSource)
     {
         InboundV6FrontierStallGraceWake? wake;
         lock (gate)
         {
+            if (requiredWriteSource is not null && !IsInboundBootstrapWriteSourceCurrentLocked(context, requiredWriteSource)) { return; }
             wake = context.CurrentV6FrontierStallGraceWake;
             if (wake is null ||
                 context.V6FrontierStallGraceWakeScheduledGeneration == wake.WakeGeneration)
@@ -8080,7 +8120,7 @@ public sealed partial class SessionFileTransferService
         if (decisionStatus == "rearmed")
         {
             LogInboundV6FrontierStallGraceRecheckDecision(wake, decisionStatus, decisionReason);
-            SchedulePendingInboundV6FrontierStallGraceWake(context);
+            SchedulePendingInboundV6FrontierStallGraceWakeWithWriteBinding(context, wake.RequiredWriteSource);
             return;
         }
 
@@ -8090,15 +8130,17 @@ public sealed partial class SessionFileTransferService
             return;
         }
 
-        var sent = await SendInboundV6FrontierRequestAsync(
+        var sent = await SendInboundV6FrontierRequestWithWriteBindingAsync(
                 context,
                 "frontier_stall_grace_elapsed",
-                forceSend: true)
+                forceSend: true,
+                wake.RequiredWriteSource)
             .ConfigureAwait(false);
         InboundV6FrontierStallGraceWake? rearmedWake = null;
         lock (gate)
         {
-            if (ReferenceEquals(context.CurrentV6FrontierStallGraceWake, wake))
+            if (ReferenceEquals(context.CurrentV6FrontierStallGraceWake, wake) &&
+                (wake.RequiredWriteSource is null || IsInboundBootstrapWriteSourceCurrentLocked(context, wake.RequiredWriteSource)))
             {
                 if (!sent &&
                     context.V6LastFrontierRequestSentUtc is { } lastSentUtc &&
@@ -8137,7 +8179,7 @@ public sealed partial class SessionFileTransferService
                 rearmedWake,
                 "rearmed",
                 "same_frontier_retry_interval_pending");
-            SchedulePendingInboundV6FrontierStallGraceWake(context);
+            SchedulePendingInboundV6FrontierStallGraceWakeWithWriteBinding(context, rearmedWake.RequiredWriteSource);
             return;
         }
 
@@ -8159,6 +8201,12 @@ public sealed partial class SessionFileTransferService
         bool acceptedSparseWrite,
         out string reason)
     {
+        if (wake.RequiredWriteSource is { } source && !IsInboundBootstrapWriteSourceCurrentLocked(context, source))
+        {
+            reason = "committed_write_source_changed";
+            return false;
+        }
+
         if (!ReferenceEquals(context.CurrentV6FrontierStallGraceWake, wake) ||
             (context.V6FrontierStallGraceWakeScheduledGeneration != wake.WakeGeneration &&
                 (!acceptedSparseWrite || context.V6FrontierStallGraceWakeScheduledGeneration != 0)))
@@ -8262,6 +8310,12 @@ public sealed partial class SessionFileTransferService
     private static void ArmOrClearInboundV6FrontierRecentProgressGraceWakeLocked(
         InboundTransferContext context,
         DateTimeOffset now)
+        => ArmInboundV6FrontierRecentProgressGraceWakeCoreLocked(context, now, null);
+
+    private static void ArmInboundV6FrontierRecentProgressGraceWakeCoreLocked(
+        InboundTransferContext context,
+        DateTimeOffset now,
+        InboundBootstrapWriteSource? committedSource)
     {
         if (!IsStrictFallbackFrontierRuntime(context) ||
             !HasInboundV6SparseFrontierGapLocked(context) ||
@@ -8278,6 +8332,7 @@ public sealed partial class SessionFileTransferService
 
         var current = context.CurrentV6FrontierRecentProgressGraceWake;
         if (current is not null &&
+            (committedSource is null || current.RequiredWriteSource is not null) &&
             current.FrontierChunkIndex == context.NextChunkIndex &&
             current.HighestReceivedChunkIndex == context.PullHighestReceivedChunkIndex &&
             current.CommittedProgressUtc == committedProgressUtc &&
@@ -8313,7 +8368,7 @@ public sealed partial class SessionFileTransferService
 
         // An unchanged wake owns its due recheck. A concurrent sparse write or
         // state send must not retire it merely because the deadline elapsed.
-        if (now >= committedProgressUtc + CurrentV6RegularNknFrontierRequestProgressGrace)
+        if (committedSource is null && now >= committedProgressUtc + CurrentV6RegularNknFrontierRequestProgressGrace)
         {
             ResetInboundV6FrontierRecentProgressGraceWakeLocked(context);
             return;
@@ -8364,7 +8419,12 @@ public sealed partial class SessionFileTransferService
                 context.TransferId,
                 dataSession,
                 context.DataSessionGeneration),
-            context.DataSessionGeneration);
+            context.DataSessionGeneration)
+        {
+            RequiredWriteSource = committedSource ??
+                (current?.FrontierChunkIndex == context.NextChunkIndex && current.CommittedProgressUtc == committedProgressUtc
+                    ? current.RequiredWriteSource : null),
+        };
         context.CurrentV6FrontierRecentProgressGraceWake = wake;
         context.FrontierPublicationObservation?.RecentArm(CreateCoordinatorStateLocked(context), dataSession,
             wakeGeneration, wake.FrontierChunkIndex, wake.HighestReceivedChunkIndex, committedProgressUtc, wake.DueUtc);
@@ -8377,10 +8437,15 @@ public sealed partial class SessionFileTransferService
     }
 
     private void SchedulePendingInboundV6FrontierRecentProgressGraceWake(InboundTransferContext context)
+        => SchedulePendingInboundV6FrontierRecentProgressGraceWakeWithWriteBinding(context, null);
+
+    private void SchedulePendingInboundV6FrontierRecentProgressGraceWakeWithWriteBinding(InboundTransferContext context,
+        InboundBootstrapWriteSource? requiredWriteSource)
     {
         InboundV6FrontierRecentProgressGraceWake? wake;
         lock (gate)
         {
+            if (requiredWriteSource is not null && !IsInboundBootstrapWriteSourceCurrentLocked(context, requiredWriteSource)) { return; }
             wake = context.CurrentV6FrontierRecentProgressGraceWake;
             if (wake is null ||
                 context.V6FrontierRecentProgressGraceWakeScheduledGeneration == wake.WakeGeneration)
@@ -8437,7 +8502,7 @@ public sealed partial class SessionFileTransferService
         if (decisionStatus == "rearmed")
         {
             LogInboundV6FrontierRecentProgressGraceRecheckDecision(wake, decisionStatus, decisionReason);
-            SchedulePendingInboundV6FrontierRecentProgressGraceWake(context);
+            SchedulePendingInboundV6FrontierRecentProgressGraceWakeWithWriteBinding(context, wake.RequiredWriteSource);
             return;
         }
 
@@ -8447,10 +8512,11 @@ public sealed partial class SessionFileTransferService
             return;
         }
 
-        var sent = await SendInboundV6FrontierRequestAsync(
+        var sent = await SendInboundV6FrontierRequestWithWriteBindingAsync(
                 context,
                 "frontier_recent_progress_grace_elapsed",
-                forceSend: true)
+                forceSend: true,
+                wake.RequiredWriteSource)
             .ConfigureAwait(false);
         // Test-only inter-gate race: the original root diagnostic is already
         // emitted, but the recent recheck has not yet bound its current tip.
@@ -8486,6 +8552,12 @@ public sealed partial class SessionFileTransferService
         InboundV6FrontierRecentProgressGraceWake wake,
         out string reason)
     {
+        if (wake.RequiredWriteSource is { } source && !IsInboundBootstrapWriteSourceCurrentLocked(context, source))
+        {
+            reason = "committed_write_source_changed";
+            return false;
+        }
+
         if (!ReferenceEquals(context.CurrentV6FrontierRecentProgressGraceWake, wake) ||
             context.V6FrontierRecentProgressGraceWakeScheduledGeneration != wake.WakeGeneration)
         {

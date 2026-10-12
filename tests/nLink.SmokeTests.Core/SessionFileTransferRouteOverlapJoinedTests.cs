@@ -5,6 +5,200 @@ namespace NLink.SmokeTests;
 
 public sealed partial class SessionFileTransferV4SenderTests
 {
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    [Trait("FileTransferRuntimeSuite", "CrossPeerFallbackOverlap")]
+    [Trait("FileTransferRuntimeSuite", "PostTunaFallbackV6FrontierStallGrace")]
+    public async Task JoinedFallbackV6_RetainedV4ReceiverRepairsUnseenFrontierBeyondOldCredit(bool afterYield)
+    {
+        var transferId = "joined_retained_v4_unseen_frontier_" + afterYield;
+        var sessionId = "session_" + transferId;
+        const int chunkSize = 21 * 1024;
+        using var senderTransport = new PeerVisibleControlPlaneLoopbackTransport(sessionId);
+        using var receiverTransport = new PeerVisibleControlPlaneLoopbackTransport(sessionId);
+        senderTransport.Connect(receiverTransport);
+        using var receiver = new SessionFileTransferService();
+        receiver.AttachTransport(receiverTransport);
+        var senderData = await senderTransport.OpenFileTransferDataSessionAsync(sessionId, transferId, CancellationToken.None);
+        using var receiverData = new InitialOfferDataSession(
+            await receiverTransport.OpenFileTransferDataSessionAsync(sessionId, transferId, CancellationToken.None), 1);
+        var context = CreateRegularNknV4InboundContext(transferId, chunkCount: 8,
+            nextChunkIndex: 2, durableHighestChunkIndex: 1, creditUntilChunkIndexExclusive: 2);
+        SetPrivateProperty(context, "DataSession", receiverData);
+        SetPrivateProperty(context, "DataSessionGeneration", 1L);
+        SetPrivateProperty(context, "UserPaused", true);
+        SeedCurrentRuntimeOwnerForTest(context, FileTransferDirection.Inbound, "retained_v4_reader", false);
+        var written = new System.Collections.BitArray(8);
+        written[0] = written[1] = true;
+        SetPrivateProperty(context, "ReceiverSparseChunksWritten", written);
+        using var destination = new NonDisposingMemoryStream();
+        destination.SetLength(8L * chunkSize);
+        SetPrivateProperty(context, "WriteStream", destination);
+        SetPrivateProperty(context, "BytesTransferred", 2L * chunkSize);
+        SetPrivateProperty(context, "ReceiverSparseBytesWritten", 2L * chunkSize);
+        var type = typeof(SessionFileTransferService);
+        type.GetField("inboundTransfer", BindingFlags.Instance | BindingFlags.NonPublic)!.SetValue(receiver, context);
+        var loop = Assert.IsAssignableFrom<Task>(type.GetMethod("RunInboundRegularNknV4Async",
+            BindingFlags.Instance | BindingFlags.NonPublic)!.Invoke(receiver, [context, new FileTransferSessionOpenV2
+            {
+                SessionId = sessionId, TransferId = transferId, ProtocolVersion = 4,
+                ChunkSizeBytes = chunkSize, InitialPipelineDepth = 1,
+            }]));
+        Assert.False(loop.IsCompleted);
+
+        try
+        {
+            // Seed the adopted fallback scope, not a new reader. Route negotiation
+            // is outside this regression; repair authority and all peer frames are real.
+            lock (GetServiceGate(receiver))
+            {
+                var publication = ReplaceSparseRouteAuthority(context, FileTransferRoute.PostTunaFallbackV6);
+                var epoch = GetPrivateProperty<LiveRouteEpoch>(context, "CurrentLiveRouteEpoch");
+                SetPrivateProperty(context, "CurrentLiveRouteEpoch", new LiveRouteEpoch
+                {
+                    EpochId = epoch.EpochId,
+                    RouteSelection = FileTransferRouteResolver.Resolve(FileTransferRoute.PostTunaFallbackV6),
+                    RoutePublicationToken = publication,
+                    HandoffKind = FileTransferTransportHandoffKind.TunaToNormalFallback,
+                    TargetTransport = FileTransferTransportKind.RegularNkn,
+                    Reason = "retained_v4_test_fallback", State = "recovered",
+                });
+                var mode = context.GetType().GetProperty("V6DestinationMode")!.PropertyType;
+                SetPrivateProperty(context, "V6DestinationMode", Enum.Parse(mode, "SparseSeekable"));
+                SetPrivateProperty(context, "V6SparseAcceptWindowEndExclusive", 8);
+                if (afterYield)
+                {
+                    var leg = GetPrivateProperty<FileTransferLeg>(context, "CurrentTransferLeg");
+                    SeedPairedFallbackTailYieldForTest(context, leg);
+                    type.GetMethod("ClearInboundFallbackTailRecoveryOwnershipAfterYieldLocked",
+                        BindingFlags.Static | BindingFlags.NonPublic)!.Invoke(null, [context, leg, "retained_v4_test_yield"]);
+                }
+                SetPrivateProperty(context, "UserPaused", false);
+            }
+            var owner = GetPrivateProperty<RuntimeOwnerToken>(context, "CurrentRuntimeOwner");
+            var published = GetPrivateProperty<RoutePublicationToken>(context, "CurrentRoutePublicationToken");
+            var transportEpoch = GetPrivateProperty<FileTransferLeg>(context, "CurrentTransferLeg").TransportEpochId;
+            // Complete the pre-adoption pending read before admitting a write
+            // under the fallback generation-aware source scope.
+            await senderData.SendAsync(new FileTransferStateFrameV4
+            {
+                SessionId = sessionId, TransferId = transferId, Epoch = 1,
+            }, CancellationToken.None);
+            await senderData.SendAsync(new FileTransferChunkBatchFrameV6
+            {
+                SessionId = sessionId, TransferId = transferId, TransportEpoch = transportEpoch,
+                StartChunkIndex = 3, ChunkCount = 1, DataSegments = [Enumerable.Repeat((byte)4, chunkSize).ToArray()],
+            }, CancellationToken.None);
+            var firstRepair = await ReceiveRepairAsync(2);
+            await ReplyAsync(firstRepair);
+            await WaitUntilAsync(() => GetPrivateProperty<int>(context, "NextChunkIndex") == 4, timeoutMs: 5000);
+            Assert.Equal(3, GetPrivateProperty<int>(context, "PullHighestReceivedChunkIndex"));
+            Assert.Equal(2, GetPrivateProperty<int>(context, "V4CreditUntilChunkIndexExclusive"));
+
+            // No further payload arrives to wake the retained reader. Its poll
+            // must request the unseen frontier using the current V6 authority.
+            var successor = await ReceiveRepairAsync(4);
+            Assert.Equal(owner, GetPrivateProperty<RuntimeOwnerToken>(context, "CurrentRuntimeOwner"));
+            Assert.Equal(published, GetPrivateProperty<RoutePublicationToken>(context, "CurrentRoutePublicationToken"));
+            Assert.NotNull(GetPrivatePropertyValue(context, "CurrentFallbackFrontierRepairContract"));
+            await ReplyAsync(successor);
+            await WaitUntilAsync(() => GetPrivateProperty<int>(context, "NextChunkIndex") > 4, timeoutMs: 5000);
+            Assert.Equal(Enumerable.Repeat((byte)5, chunkSize), destination.ToArray().Skip(4 * chunkSize).Take(chunkSize));
+            Assert.False(GetPrivateProperty<bool>(context, "PullPostTunaRecoveryActive"));
+        }
+        finally
+        {
+            TryCancelContextLifetime(context);
+            await loop.WaitAsync(TimeSpan.FromSeconds(5));
+        }
+
+        async Task<FileTransferFrontierRequestFrameV6> ReceiveRepairAsync(int frontier)
+        {
+            using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(8));
+            while (true)
+            {
+                if (await senderData.ReceiveAsync(timeout.Token) is FileTransferFrontierRequestFrameV6 request &&
+                    request.MissingRanges[0].StartChunkIndex == frontier)
+                {
+                    Assert.False(string.IsNullOrWhiteSpace(request.RepairRequestId));
+                    Assert.False(string.IsNullOrWhiteSpace(request.RequestCorrelationId));
+                    Assert.True(receiverTransport.LastValidationAccepted);
+                    return request;
+                }
+            }
+        }
+
+        Task ReplyAsync(FileTransferFrontierRequestFrameV6 request)
+            => senderData.SendAsync(new FileTransferChunkBatchFrameV6
+            {
+                SessionId = sessionId, TransferId = transferId, TransportEpoch = request.TransportEpoch,
+                RepairRequestId = request.RepairRequestId, Priority = request.Priority, RecoveryMode = request.RecoveryMode,
+                StartChunkIndex = request.MissingRanges[0].StartChunkIndex, ChunkCount = 1,
+                DataSegments = [Enumerable.Repeat((byte)(request.MissingRanges[0].StartChunkIndex + 1), chunkSize).ToArray()],
+            }, CancellationToken.None);
+    }
+
+    [Theory]
+    [InlineData("user_paused")]
+    [InlineData("peer_paused")]
+    [InlineData("transport_paused")]
+    [InlineData("terminal")]
+    [InlineData("context_replaced")]
+    [InlineData("stale_write_source")]
+    [InlineData("route_replaced_during_feedback")]
+    [Trait("FileTransferRuntimeSuite", "PostTunaFallbackV6FrontierStallGrace")]
+    public async Task RetainedV4FallbackRetry_InvalidatedSourceCannotIssueFrontier(string boundary)
+    {
+        using var transport = new DeferredControlPlaneCompletionLoopbackTransport("session_fallback_repair_write");
+        using var fixture = new FallbackRepairWriteFixture(transport: transport);
+        var context = fixture.Context;
+        var type = typeof(SessionFileTransferService);
+        SetPrivateProperty(context, "V4CreditUntilChunkIndexExclusive", 0);
+        SetPrivateProperty(context, "PullHighestReceivedChunkIndex", 99);
+        SetPrivateProperty(context, "PullLastProgressUtc", DateTimeOffset.UtcNow.AddSeconds(-10));
+        SetPrivateProperty(context, "V6LastReceiverStateSentUtc", DateTimeOffset.UtcNow.AddSeconds(-10));
+        SetPrivateProperty(context, "V6LastReceiverStateCommittedChunkIndex", 100);
+        SetPrivateProperty(context, "V6FrontierStallStartedUtc", DateTimeOffset.UtcNow.AddSeconds(-10));
+        SetPrivateProperty(context, "V6FrontierStallChunkIndex", 100);
+        object? source = null;
+        switch (boundary)
+        {
+            case "user_paused": SetPrivateProperty(context, "UserPaused", true); break;
+            case "peer_paused": SetPrivateProperty(context, "PeerPaused", true); break;
+            case "transport_paused": SetPrivateProperty(context, "PullTransportPaused", true); break;
+            case "terminal": SetPrivateProperty(context, "State", FileTransferTransferState.Failed); break;
+            case "context_replaced":
+                type.GetField("inboundTransfer", BindingFlags.Instance | BindingFlags.NonPublic)!.SetValue(fixture.Service, null);
+                break;
+            case "stale_write_source":
+                object?[] capture = [context, fixture.Ingress(), null];
+                Assert.True((bool)type.GetMethod("TryCaptureInboundFallbackRepairWriteSourceLocked",
+                    BindingFlags.Instance | BindingFlags.NonPublic)!.Invoke(fixture.Service, capture)!);
+                source = capture[2];
+                fixture.Session.Generation++;
+                break;
+        }
+        if (boundary != "route_replaced_during_feedback") { transport.ReleaseCompletion.TrySetResult(); }
+        var before = CreateCoordinatorStateForTest(context).PersistentState;
+        var retry = Assert.IsAssignableFrom<Task>(type.GetMethod("MaybeSendInboundSparseCreditFrontierStallStateWithWriteBindingAsync",
+            BindingFlags.Instance | BindingFlags.NonPublic)!.Invoke(fixture.Service, [context, source]));
+        if (boundary == "route_replaced_during_feedback")
+        {
+            await transport.RequestCaptured.Task.WaitAsync(TimeSpan.FromSeconds(2));
+            lock (GetServiceGate(fixture.Service))
+            {
+                ReplaceSparseRouteAuthority(context, FileTransferRoute.FileTunaV4);
+                before = CreateCoordinatorStateForTest(context).PersistentState;
+            }
+            transport.ReleaseCompletion.TrySetResult();
+        }
+        await retry.WaitAsync(TimeSpan.FromSeconds(3));
+        Assert.Empty(fixture.Session.SentFrames);
+        Assert.Null(GetPrivatePropertyValue(context, "CurrentFallbackFrontierRepairContract"));
+        Assert.Equal(before, CreateCoordinatorStateForTest(context).PersistentState);
+    }
+
     [Fact]
     [Trait("FileTransferRuntimeSuite", "CrossPeerFallbackOverlap")]
     public async Task JoinedFallbackYield_LoopbackHarnessStopsAtMissingRetryAuthorityBridge()

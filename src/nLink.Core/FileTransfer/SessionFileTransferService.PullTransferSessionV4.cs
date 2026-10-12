@@ -25747,11 +25747,21 @@ public sealed partial class SessionFileTransferService
         InboundBootstrapWriteSource? requiredWriteSource)
     {
         var shouldSend = false;
+        var useFallbackV6Retry = false;
         lock (gate)
         {
             if (HasBootstrapSourceHoldLocked(context)) { return; }
             if (requiredWriteSource is not null && !IsInboundBootstrapWriteSourceCurrentLocked(context, requiredWriteSource)) { return; }
-            if (ReferenceEquals(inboundTransfer, context) &&
+            useFallbackV6Retry = ReferenceEquals(inboundTransfer, context) &&
+                !context.IsTerminal && context.PullManifestReceived && context.ReceiverSparseWriteActive &&
+                !context.PullTransportPaused && IsStrictFallbackFrontierRuntime(context);
+            if (useFallbackV6Retry && requiredWriteSource is null &&
+                !TryCaptureInboundFallbackRepairWriteSourceLocked(context,
+                    CaptureInboundBootstrapWriteIngress(context, context.DataSession), out requiredWriteSource))
+            {
+                return;
+            }
+            if (!useFallbackV6Retry && ReferenceEquals(inboundTransfer, context) &&
                 !context.IsTerminal &&
                 context.PullManifestReceived &&
                 context.ReceiverSparseWriteActive &&
@@ -25770,6 +25780,12 @@ public sealed partial class SessionFileTransferService
 
                 shouldSend = true;
             }
+        }
+
+        if (useFallbackV6Retry)
+        {
+            await MaybeSendInboundV6RetryStateAsync(context, requiredWriteSource).ConfigureAwait(false);
+            return;
         }
 
         if (shouldSend)
