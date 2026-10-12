@@ -15563,6 +15563,21 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
             foreach ($raw in $candidate.RawEvents) { [void]$admittedSequences.Add((Get-GuiStallSequence $raw)) }
         }
         $publishedSourceIndex = New-FileTransferStallGracePublishedSourceIndex -Events $handoffEvents -SnapshotEvidence $SnapshotEvidence
+        foreach ($candidate in $candidates.Values) {
+            # Match retained admission: exact current publication may own a
+            # caught-up hold even when same-scope predecessor progress remains.
+            if ($candidate.Highest -ne ($candidate.Frontier - 1) -or
+                -not (Test-GuiStallScope $candidate.Progress $candidate.Line) -or
+                ([string]$candidate.Line.Fields['data_session_identity']) -cne $candidate.DataSessionIdentity -or
+                ([string]$candidate.Line.Fields['data_session_generation']) -cne $candidate.DataSessionGeneration) { continue }
+            $admission = Get-FileTransferStallGracePublishedSourceAdmission -Index $publishedSourceIndex `
+                -Candidate ([pscustomobject]@{ Fields = $candidate.Line.Fields; Sequence = $candidate.Sequence })
+            if ($null -eq $admission -or -not $admission.Admitted) { continue }
+            $candidate.Progress = $candidate.Line
+            $candidate.Authority = ''
+            $candidate.DeadlineTicks = ([DateTimeOffset]::Parse([string]$candidate.Line.Fields['wake_deadline_utc'])).UtcTicks
+            $candidate | Add-Member -NotePropertyName PublishedSource -NotePropertyValue $admission.Source
+        }
         foreach ($deferred in $deferrals) {
             $sequence = Get-GuiStallSequence $deferred
             if ($admittedSequences.Contains($sequence)) { continue }

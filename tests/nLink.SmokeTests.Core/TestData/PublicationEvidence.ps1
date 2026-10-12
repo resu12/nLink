@@ -13,6 +13,8 @@ function Id([string]$Value){'fte1-'+(Get-FileTransferCoordinatorSnapshotSha256 -
 # Synthetic validated-boundary DTOs exercise the consumer contract only; they
 # are not producer, snapshot-validator or live-network proof.
 function Fixture {
+    param([switch]$Sanitized)
+    $dataIdentity=if($Sanitized){'0123456789abcdef0123456789abcdef:1'}else{'data'}
     $start=[DateTimeOffset]::Parse('2026-09-06T04:32:00Z')
     $scope=@{log_writer_id='writer';session_id='session';transfer_id='transfer';direction='inbound';
         route='post_tuna_fallback_v6';protocol_version='6';live_route_epoch='1';runtime_generation='1';
@@ -24,6 +26,7 @@ function Fixture {
         publication_evidence_state_generation='2';publication_evidence_observed_state_generation='2';
         publication_evidence_operation_key=('route_runtime|route_publication|'+(Id 'publication:1')+'|1|RoutePublication');
         publication_evidence_token_fingerprint=(Id 'receiver-token')}
+    if($Sanitized){$scope.data_session_identity='[redacted]:1';$scope.frontier_scope_data_session_identity=Id $dataIdentity}
     function Event([string]$Name,[long]$Ms,[hashtable]$Extra){
         $f=$scope.Clone();foreach($key in $Extra.Keys){$f[$key]=[string]$Extra[$key]}
         $f.event=$Name;$f.log_writer_sequence=[string]($Ms+1);$f.log_writer_attempt_utc_ticks=[string]$start.AddMilliseconds($Ms).UtcTicks
@@ -44,7 +47,7 @@ function Fixture {
         $f=$Event.Fields
         $mapping=@{route='route';protocol_version='protocolVersion';live_route_epoch='liveRouteEpoch';runtime_generation='runtimeGeneration';
             terminal_generation='terminalGeneration';leg_generation='legGeneration';route_publication_generation='routePublicationGeneration';route_commit_generation='routeCommitGeneration'}
-        $b=@{dataSessionIdentity=(Id 'data');dataSessionGeneration=1}
+        $b=@{dataSessionIdentity=(Id $dataIdentity);dataSessionGeneration=1}
         foreach($name in $mapping.Keys){$b[$mapping[$name]]=$f[$name]}
         $identity=Id ('publication:'+$f.route_publication_generation)
         $operation=[pscustomobject]@{operationKey=$f.publication_evidence_operation_key;family='route_runtime';operationRole='route_publication';
@@ -63,9 +66,29 @@ function Admit($Fixture){
     $index=New-FileTransferStallGracePublishedSourceIndex -Events $Fixture.Events -SnapshotEvidence $Fixture.Snapshot
     Get-FileTransferStallGracePublishedSourceAdmission -Index $index -Candidate $Fixture.Events[2]
 }
-function Reject($Fixture,[string]$Label){if((Admit $Fixture).Admitted){throw "Rejected ownership admitted: $Label"}}
+function Reject($Fixture,[string]$Label){$result=Admit $Fixture;if($null -ne $result -and $result.Admitted){throw "Rejected ownership admitted: $Label"}}
 $good=Fixture
 if(-not (Admit $good).Admitted){throw 'Exact independent peer publication invalidated current source'}
+$sanitized=Fixture -Sanitized
+if(-not (Admit $sanitized).Admitted){throw 'Sanitized data-session token did not bind to the exact current snapshot'}
+foreach($which in @(0,1,2)){
+    foreach($token in @('', '(none)', 'fte1-invalid', (Id 'foreign-data'))){
+        $bad=Fixture -Sanitized;$bad.Events[$which].Fields.frontier_scope_data_session_identity=$token;Reject $bad "sanitized $which token $token"
+    }
+    $bad=Fixture -Sanitized;$bad.Events[$which].Fields.Remove('frontier_scope_data_session_identity');Reject $bad "sanitized $which missing token"
+    foreach($raw in @('', '(none)', '[redacted]:0', 'prefix[redacted]:1', '[redacted]:1:extra', 'foreign-data')){
+        $bad=Fixture -Sanitized;$bad.Events[$which].Fields.data_session_identity=$raw;Reject $bad "sanitized $which conflicting raw $raw"
+    }
+    $bad=Fixture -Sanitized;$bad.Events[$which].Fields.data_session_generation='2';Reject $bad "sanitized $which generation"
+    $bad=Fixture -Sanitized;$bad.Snapshot.Boundaries[$which].writer='foreign-writer';Reject $bad "sanitized $which snapshot writer"
+    $bad=Fixture -Sanitized;$bad.Snapshot.Boundaries[$which].afterBoundary.dataSessionIdentity=Id 'foreign-data';Reject $bad "sanitized $which snapshot identity"
+    $bad=Fixture;$bad.Events[$which].Fields.frontier_scope_data_session_identity=Id 'foreign-data';Reject $bad "raw $which contradictory token"
+}
+$bad=Fixture -Sanitized;$bad.Events[2].Fields.publication_evidence_observed_state_generation='4';Reject $bad 'sanitized absent observed state'
+$bad=Fixture -Sanitized;$bad.Snapshot.ArtifactEvidenceVerdict='fail';Reject $bad 'sanitized failed snapshot'
+$raw=Fixture
+foreach($event in $raw.Events){$event.Fields.frontier_scope_data_session_identity=Id 'data'}
+if(-not (Admit $raw).Admitted){throw 'Matching raw and retained identity changed admission'}
 foreach($field in @('publication_evidence_version','publication_evidence_coordinator_id','publication_evidence_session_id',
     'publication_evidence_transfer_id','publication_evidence_boundary_id','publication_evidence_state_generation',
     'publication_evidence_observed_state_generation','publication_evidence_operation_key','publication_evidence_token_fingerprint')){
@@ -103,7 +126,7 @@ $bad=Fixture;$extra=(Fixture).Events[1];$extra.Fields.route_publication_generati
 $good.Events+=@($good.Events[1]);if(-not (Admit $good).Admitted){throw 'identical duplicate changed admission'}
 foreach($event in $good.Events){$event.Sequence+=20;$event.LineNumber+=20;$event.FilePath='compact.log'}
 if(-not (Admit $good).Admitted){throw 'location projection changed admission'}
-$good=Fixture
+foreach($good in @((Fixture),(Fixture -Sanitized))){
 $direct=& $script:FileTransferFallbackFrontierStallGraceLegacyCorrelation -Events $good.Events -SnapshotEvidence $good.Snapshot
 $index=New-FileTransferFallbackFrontierGraceCorrelationIndex -Events $good.Events -SnapshotEvidence $good.Snapshot
 $indexed=Get-FileTransferFallbackFrontierStallGraceRecheckCorrelation -Events $good.Events -Index $index -SnapshotEvidence $good.Snapshot
@@ -113,4 +136,5 @@ foreach($result in @($direct,$indexed)){
     if((@($result.RawCount,$result.DistinctCount,$result.RecoveredCount,$result.UnresolvedCount) -join '/') -cne '1/1/0/1'){throw 'unresolved quartet changed'}
 }
 if(-not $gui.Unresolved -or @($gui.EpisodeAudit).Count -ne 1 -or $gui.EpisodeAudit[0].Recovered){throw 'GUI admission parity failed'}
+}
 'publication-evidence-ok'

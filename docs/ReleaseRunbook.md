@@ -4,7 +4,19 @@ This runbook describes the version-neutral steps to ship `v<version>` from a cle
 
 It is the canonical release process; use [rc-validation-checklist.md](release/rc-validation-checklist.md) for sign-off. A successful build, source checkpoint, or operator-analyzer PASS does not by itself qualify a release. Do not tag or publish before mandatory security/route proofs, payload provenance, packaging checks, and CI sign-off are established.
 
+## Current Qualification Update (2026-10-12)
+
+The targeted 256 MiB route-cycle blocker is closed on runtime source `964fe2134c00236380392a97feea238991cb27d5`. This is targeted evidence, not full qualification of a new release payload:
+
+- Preserved live run: `artifacts/r964fe213-route-cycle-validation-20261012/gui/20261012T041635Z/regular-v4-live-activation-off-on-off-256mb/`. Its original campaign remains recorded as `FAIL` / `incomplete_proof`; do not overwrite that history.
+- Analyzer-only reanalysis: `artifacts/r964fe213-sanitized-identity-reanalysis-20261012/retained-analysis/`. Strict analysis exited `0`, with runtime correctness `pass` and overall `WARN_EXTERNAL_TRANSPORT`. All five admitted stall-grace episodes recovered; none remains unresolved. The authenticated Tuna route-cycle contract and full/compact snapshot parity pass. The two transport-churn warnings remain recorded.
+- The unchanged 97,436-event input has SHA-256 `6a1e262b7af8bf5358081cd2c3cae92094a683f89e4ab88e07ac809c8ab3136b`. Evidence includes completed GUI delivery, matching payload SHA-256, and coordinator-published `regular_nkn_v4_fast,file_tuna_v4,post_tuna_fallback_v6,file_tuna_v4,post_tuna_fallback_v6`, with authenticated delivery at both Tuna activations. No new live run was performed for the analyzer fix.
+- Focused regression evidence: 27 passing admission/handoff checks in `artifacts/r964fe213-analyzer-admission-reanalysis-20261012/focused-tests/focused-regressions-confirmation.trx`, followed by 14 passing publication-identity/admission/handoff checks in `artifacts/r964fe213-sanitized-identity-reanalysis-20261012/focused-tests/sanitized-identity-regressions.trx`. These are overlapping focused selections, not a full-suite result. Runtime code, acceptance rules, and limits were unchanged by these analyzer fixes.
+- Next release qualification: one planned broad regression gate on a stable checkpoint, then a fresh portable rebuild and strict GUI campaign, explicitly covering helper-to-helpee payer handoff. Live preflights require escalation and must pass before scenarios start. Preserve failures and stop for classification rather than automatically expanding patches. Final packaging must use the qualified payload; final CI, installer qualification, and release approval remain separate obligations.
+
 ## 0.7.0 Candidate Evidence (2026-10-08)
+
+Historical package evidence follows; see the current qualification update above for later runtime/analyzer work.
 
 `0.7.0` remains an unpublished candidate. Retained evidence applies to the covered source, contracts, and exact payload, not automatically to later builds:
 

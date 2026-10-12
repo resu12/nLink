@@ -58840,6 +58840,24 @@ function Get-FileTransferFallbackFrontierStallGraceRecheckCorrelation {
             continue
         }
 
+        # Retained same-scope progress must not hide a fully bound current
+        # publication for a caught-up receiver. Historical-only evidence keeps
+        # its stricter handoff bound, and changed-source evaluation stays owned.
+        if ($highest -eq ($frontier - 1) -and (& $sameScope $deferred) -and
+            (Get-FileTransferEventField -Event $deferred -Name 'data_session_identity' -Default '') -ceq $dataSessionIdentity -and
+            (Get-FileTransferEventField -Event $deferred -Name 'data_session_generation' -Default '0') -ceq $dataSessionGeneration) {
+            if ($null -eq (Get-Variable -Name publishedSourceIndex -Scope Local -ErrorAction SilentlyContinue)) {
+                $publishedSourceIndex = New-FileTransferStallGracePublishedSourceIndex -Events $ordered -SnapshotEvidence $SnapshotEvidence
+            }
+            $admission = Get-FileTransferStallGracePublishedSourceAdmission -Index $publishedSourceIndex -Candidate $deferred
+            if ($null -ne $admission -and $admission.Admitted) {
+                $episode = $admission.Episode
+                if (-not $incidents.Contains($episode.Key)) { $incidents[$episode.Key] = $episode }
+                $incidents[$episode.Key].RawEvents.Add($deferred)
+                continue
+            }
+        }
+
         $stallStart = Get-FileTransferEventField -Event $deferred -Name 'stall_started_utc' -Default ''
         if ([string]::IsNullOrWhiteSpace($stallStart) -or $stallStart -in @('(none)', 'none')) {
             $stallStart = Get-FileTransferEventField -Event $deferred -Name 'utc' -Default ''

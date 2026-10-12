@@ -20,6 +20,14 @@ public sealed class FileTransferRecentProgressGraceHandoffTests : FileTransferOp
         => RecentProgressGrace_ExactDispatchedRepairTunaRetirement_HasIndexedAndGuiParity("stall_published_caught_up", host);
 
     [Theory]
+    [InlineData("powershell")]
+    [InlineData("pwsh")]
+    [Trait("RetainedFallbackSuite", "FallbackFrontierRepair")]
+    [Trait("OpsSuite", "GuiHarness")]
+    public Task StallGrace_CaughtUpPublishedFrontierWithRetainedProgressRequiresExactTunaHandoff(string host)
+        => RecentProgressGrace_ExactDispatchedRepairTunaRetirement_HasIndexedAndGuiParity("stall_published_caught_up_with_progress", host);
+
+    [Theory]
     [InlineData("recent_progress", "powershell")]
     [InlineData("stall", "powershell")]
     [InlineData("stall_progress", "powershell")]
@@ -33,7 +41,8 @@ public sealed class FileTransferRecentProgressGraceHandoffTests : FileTransferOp
         var script = """
             param([string]$RepoRoot, [string]$Kind)
             $ErrorActionPreference='Stop'
-            $caughtUp=$Kind -eq 'stall_published_caught_up'
+            $retainProgress=$Kind -eq 'stall_published_caught_up_with_progress'
+            $caughtUp=$retainProgress -or $Kind -eq 'stall_published_caught_up'
             if($caughtUp){$Kind='stall_published'}
             $stallHighest=if($caughtUp){'40'}else{'70'}
             . (Join-Path $RepoRoot 'tools/FileTransferSoak/LogParsing.ps1')
@@ -78,7 +87,7 @@ public sealed class FileTransferRecentProgressGraceHandoffTests : FileTransferOp
                 Add 'filetransfer_fallback_frontier_repair_contract_settled' 4 $a @{settlement_outcome='ProgressObserved'}
                 Add 'filetransfer_fallback_frontier_repair_progress_observed' 100 $a @{previous_frontier_chunk_index='40';current_frontier_chunk_index='41'}
                 Add 'filetransfer_v6_fallback_frontier_repair_progress_state_forced' 101 $a @{current_frontier_chunk_index='41';receiver_state_epoch='7';data_session_identity='data';data_session_generation='1';decision_status='Accepted'}
-                Add 'filetransfer_v6_receiver_state_sent' 102 $scope @{epoch='7';contiguous_committed_chunk_index='41';durable_received_highest_chunk_index='60'}
+                Add 'filetransfer_v6_receiver_state_sent' 102 $scope @{epoch='7';contiguous_committed_chunk_index='41';durable_received_highest_chunk_index=$(if($caughtUp){'40'}else{'60'})}
                 Add 'filetransfer_v6_receiver_state_deferred' 150 $scope @{next_chunk_index='41';highest_received_chunk_index='60';reason='frontier_stalled'}
                 $wake=$scope.Clone(); $wake.frontier_chunk_index='41'; $wake.highest_received_chunk_index=$stallHighest
                 $wake.data_session_identity='data'; $wake.data_session_generation='1'
@@ -159,6 +168,7 @@ public sealed class FileTransferRecentProgressGraceHandoffTests : FileTransferOp
                     'published_wrong_wake_data','published_alias_only','published_wrong_primary','published_wrong_correlation',
                     'published_wrong_request_key','published_missing_predecessor','published_foreign_predecessor','published_prior_authority_case',
                     'published_prior_duplicate','published_empty_optional_diagnostic','published_prior_event_conflict','published_prior_session_conflict','published_unrelated_progress')
+                if($retainProgress){$cases+=@('published_missing_source','published_wrong_source','published_aba_source')}
             }
             foreach($case in $cases){
                 [object[]]$events=if($Kind -in @('stall_progress','stall_progress_chain')){NaturalFixture -Coalesced:($Kind -eq 'stall_progress_chain')}else{Fixture}
@@ -267,8 +277,9 @@ public sealed class FileTransferRecentProgressGraceHandoffTests : FileTransferOp
                     }
                 }
                 if($Kind -eq 'stall_published'){
-                    # No repair-progress predecessor reaches F: the exact publication admits this obligation.
-                    $events=@($events|Where-Object {$_.Sequence -notin @(6,7,8,9,11)})
+                    # Exercise current publication both with and without retained predecessor progress.
+                    $removed=if($retainProgress){@(9,11)}else{@(6,7,8,9,11)}
+                    $events=@($events|Where-Object {$_.Sequence -notin $removed})
                     $candidate=@($events|Where-Object EventName -eq 'filetransfer_v6_frontier_request_deferred')[0]
                     $candidate.Fields.authority_effect='none'
                     $script:fixtureEvents=[Collections.Generic.List[object]]::new()
@@ -286,6 +297,18 @@ public sealed class FileTransferRecentProgressGraceHandoffTests : FileTransferOp
                     foreach($extra in $script:fixtureEvents){$extra.Fields.log_writer_sequence=[string](100+$extra.Sequence)}
                     $events+=@($script:fixtureEvents)
                     switch($case){
+                        'published_missing_source' {$events=@($events|Where-Object EventName -ne 'filetransfer_route_hint_authorized_publication_accepted')}
+                        'published_wrong_source' {@($events|Where-Object EventName -eq 'filetransfer_route_hint_authorized_publication_accepted')[0].Fields.coordinator_decision_reason='rejected'}
+                        'published_aba_source' {
+                            $changed=$scope.Clone();$changed.route_publication_generation='4'
+                            $script:fixtureEvents=[Collections.Generic.List[object]]::new()
+                            Add 'filetransfer_route_selected' -50 $changed
+                            $script:fixtureEvents[0].Fields.log_writer_sequence='120';$events+=@($script:fixtureEvents)
+                            $publication=@($events|Where-Object EventName -eq 'filetransfer_route_hint_authorized_publication_accepted')[0]
+                            $restored=$publication.PSObject.Copy();$restored.Fields=$publication.Fields.Clone()
+                            $restored.TimestampUtc=$origin.AddMilliseconds(-25);$restored.Fields.log_writer_attempt_utc_ticks=[string]$restored.TimestampUtc.UtcTicks
+                            $restored.Fields.log_writer_sequence='121';$events+=@($restored)
+                        }
                         'published_missing_wake' {$events=@($events|Where-Object EventName -ne 'filetransfer_v6_frontier_stall_grace_recheck_decided')}
                         'published_wrong_wake' {$wake.Fields.wake_generation='42'}
                         'published_early_wake' {$wake.Fields.log_writer_attempt_utc_ticks=[string]$origin.AddMilliseconds(1849).UtcTicks}
@@ -325,10 +348,12 @@ public sealed class FileTransferRecentProgressGraceHandoffTests : FileTransferOp
                     $events=@($sortable|Sort-Object @{Expression={$_.Event.TimestampUtc}},
                         @{Expression={$_.Event.LineNumber}},InputOrder|ForEach-Object {$_.Event})
                     $sequence=0L;foreach($event in $events){$event.Sequence=++$sequence;$event.LineNumber=[int]$sequence}
-                    if(@($events|Where-Object {$_.EventName -eq 'filetransfer_fallback_frontier_repair_progress_observed' -and $_.Fields.current_frontier_chunk_index -eq '41'}).Count){throw 'fixture synthesized predecessor progress'}
+                    if(@($events|Where-Object {$_.EventName -eq 'filetransfer_fallback_frontier_repair_progress_observed' -and $_.Fields.current_frontier_chunk_index -eq '41'}).Count -ne [int]$retainProgress){throw 'fixture predecessor progress coverage differs'}
                     $publishedIndex=New-FileTransferStallGracePublishedSourceIndex $events
                     $admission=Get-FileTransferStallGracePublishedSourceAdmission -Index $publishedIndex -Candidate $candidate
-                    if(-not $admission.Admitted -or $admission.Episode.AdmissionKind -cne 'CurrentPublishedSource' -or $null -ne $admission.Episode.HistoricalProgress){throw "$case did not use exact current-publication admission"}
+                    if($case -in @('published_missing_source','published_wrong_source','published_aba_source')){
+                        if($admission.Admitted){throw "$case admitted invalid current publication"}
+                    }elseif(-not $admission.Admitted -or $admission.Episode.AdmissionKind -cne 'CurrentPublishedSource' -or $null -ne $admission.Episode.HistoricalProgress){throw "$case did not use exact current-publication admission"}
                     if($case -eq 'exact'){
                         if($caughtUp){
                             foreach($invalidHighest in @('39','','invalid')){
@@ -437,6 +462,6 @@ public sealed class FileTransferRecentProgressGraceHandoffTests : FileTransferOp
         var result = await RunPowerShellScriptTextAsync(script, [FindRepoRoot(), kind], host);
         Assert.True(result.ExitCode == 0, $"{result.Stdout}{Environment.NewLine}{result.Stderr}");
         Assert.Contains("pass exact", result.Stdout, StringComparison.Ordinal);
-        Assert.Contains(kind switch { "stall_progress" => "pass natural_missing_state", "stall_progress_chain" => "pass natural_chain_gap", "stall_published" or "stall_published_caught_up" => "pass published_unrelated_progress", _ => "pass stall_progress_only" }, result.Stdout, StringComparison.Ordinal);
+        Assert.Contains(kind switch { "stall_progress" => "pass natural_missing_state", "stall_progress_chain" => "pass natural_chain_gap", "stall_published" or "stall_published_caught_up" or "stall_published_caught_up_with_progress" => "pass published_unrelated_progress", _ => "pass stall_progress_only" }, result.Stdout, StringComparison.Ordinal);
     }
 }

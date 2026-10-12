@@ -81,10 +81,19 @@ function Resolve-FileTransferPublicationEvidence {
     foreach ($current in $Index.States[$stateKey]) {
         if ($Event.Fields.ContainsKey('data_session_generation') -and
             (F 'data_session_generation') -cne [string]$current.afterBoundary.dataSessionGeneration) { return $null }
-        if ($Event.Fields.ContainsKey('data_session_identity')) {
+        if ($Event.Fields.ContainsKey('data_session_identity') -or $Event.Fields.ContainsKey('frontier_scope_data_session_identity')) {
             $raw = F 'data_session_identity'
             if ([string]::IsNullOrWhiteSpace($raw)) { return $null }
+            $redacted = $raw -cmatch '\A\[redacted\](?::[1-9][0-9]*)?\z'
+            if ($raw.Contains('[redacted]') -and -not $redacted) { return $null }
             $projected = ConvertTo-FileTransferCoordinatorEvidenceToken $raw
+            if ($Event.Fields.ContainsKey('frontier_scope_data_session_identity')) {
+                $stable = F 'frontier_scope_data_session_identity'
+                if ($stable -cnotmatch '\Afte1-[0-9a-f]{24}\z' -or
+                    (-not $redacted -and $stable -cne $projected)) { return $null }
+                $projected = $stable
+            } elseif ($redacted) { return $null }
+            # Sanitization removes the raw identity, not its snapshot obligation.
             if ($projected -cne [string]$current.afterBoundary.dataSessionIdentity) { return $null }
         }
     }
