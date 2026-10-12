@@ -34,12 +34,12 @@ public sealed class ScreenShareViewerMetricsTests : ScreenShareViewerViewModelTe
                 });
 
             vm.OnEncodedFrame("jpeg", CreateTinyJpegBytes(), capturedTsUtcMs: DateTimeOffset.UtcNow.AddMilliseconds(-1500).ToUnixTimeMilliseconds());
-            await WaitUntilAsync(() => vm.GetMetricsSnapshot().FramesDecoded >= 1, TimeSpan.FromSeconds(2));
+            await WaitUntilAsync(() => vm.GetMetricsSnapshot().FramesApplied >= 1 && vm.IsIdleForDiagnostics, TimeSpan.FromSeconds(2));
 
             await Task.Delay(40);
 
             vm.OnEncodedFrame("jpeg", CreateTinyJpegBytes(), capturedTsUtcMs: DateTimeOffset.UtcNow.AddMilliseconds(-100).ToUnixTimeMilliseconds());
-            await WaitUntilAsync(() => vm.GetMetricsSnapshot().FramesDecoded >= 2, TimeSpan.FromSeconds(2));
+            await WaitUntilAsync(() => vm.GetMetricsSnapshot().FramesApplied >= 2 && vm.IsIdleForDiagnostics, TimeSpan.FromSeconds(2));
 
             var metrics = vm.GetMetricsSnapshot();
             Assert.Equal(2, metrics.FramesDecoded);
