@@ -1875,7 +1875,7 @@ function Get-FileTransferStallGraceUnresolvedDiagnostic {
             $ownerScope.scopeFingerprint -cne (F $Candidate 'continuity_source_fingerprint') -or
             $ownerScope.retainedLegCheckpointGeneration -ne (N $Candidate 'checkpoint_generation') -or
             $ownerScope.retainedLegCheckpointRequestId -cne (ConvertTo-FileTransferCoordinatorEvidenceToken (F $Candidate 'checkpoint_request_id')) -or
-            $ownerScope.boundary.dataSessionIdentity -cne (ConvertTo-FileTransferCoordinatorEvidenceToken (F $Candidate 'data_session_identity')) -or
+            $ownerScope.boundary.dataSessionIdentity -cne (Get-FileTransferDiagnosticScopeEvidenceToken $Candidate 'data_session_identity') -or
             $ownerScope.boundary.dataSessionGeneration -ne (N $Candidate 'data_session_generation') -or
             $binding.Boundary.writer -cne (F $Candidate 'log_writer_id') -or
             [long]$binding.Boundary.afterStateGeneration -le (N $Candidate 'publication_evidence_observed_state_generation')) { return $null }

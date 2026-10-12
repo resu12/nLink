@@ -84,6 +84,34 @@ function RepairOwnerSupersessionFixture {
 
 $current=RepairOwnerSupersessionFixture
 Check 'repair_owner_exact_role_separation' $current.Events $current.Snapshot 'SourceSuperseded' $true
+# Sanitization preserves the snapshot-bound identity token, not the raw label.
+foreach ($rawIdentity in @('[redacted]', '[redacted]:1', 'data')) {
+    $sanitized=RepairOwnerSupersessionFixture
+    foreach ($event in $sanitized.Events) {
+        $event.Fields.data_session_identity=$rawIdentity
+        $event.Fields.frontier_scope_data_session_identity=ConvertTo-FileTransferCoordinatorEvidenceToken 'data'
+    }
+    Check ('repair_owner_sanitized_identity_'+$rawIdentity) $sanitized.Events $sanitized.Snapshot 'SourceSuperseded' $true
+}
+foreach ($case in @('missing','malformed','mismatched','raw_conflict','invalid_redaction','snapshot_mismatch')) {
+    $bad=RepairOwnerSupersessionFixture
+    foreach ($event in $bad.Events) {
+        $event.Fields.data_session_identity='[redacted]:1'
+        $event.Fields.frontier_scope_data_session_identity=ConvertTo-FileTransferCoordinatorEvidenceToken 'data'
+        switch ($case) {
+            'missing' { $event.Fields.Remove('frontier_scope_data_session_identity') }
+            'malformed' { $event.Fields.frontier_scope_data_session_identity='fte1-invalid' }
+            'mismatched' { $event.Fields.frontier_scope_data_session_identity=ConvertTo-FileTransferCoordinatorEvidenceToken 'other-data' }
+            'raw_conflict' { $event.Fields.data_session_identity='other-data' }
+            'invalid_redaction' { $event.Fields.data_session_identity='prefix[redacted]:1' }
+        }
+    }
+    if ($case -ceq 'snapshot_mismatch') {
+        $bad.Snapshot.Boundaries[1].operations[0].repairOwner.scope.boundary.dataSessionIdentity=
+            ConvertTo-FileTransferCoordinatorEvidenceToken 'other-data'
+    }
+    Check ('repair_owner_sanitized_reject_'+$case) $bad.Events $bad.Snapshot 'DispatchedStalled'
+}
 # The emitter drains asynchronously. Its physical write may follow either the
 # grant or the settlement that already holds the exact authored reference.
 foreach ($stage in @('grant','settlement')) {
