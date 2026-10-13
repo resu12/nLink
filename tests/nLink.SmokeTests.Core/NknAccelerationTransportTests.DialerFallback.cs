@@ -13,8 +13,18 @@ public sealed partial class NknAccelerationTransportTests
     [InlineData(false, true)]
     [Trait("Category", "Smoke")]
     [Trait("FileTransferInfraSuite", "RuntimeUnlockRetryDispatch")]
-    public async Task RuntimeUnlockRetryDispatch_ConnectedDialerPreservesRoleAndRequiresCoordinatorGrant(
+    public Task RuntimeUnlockRetryDispatch_ConnectedDialerPreservesRoleAndRequiresCoordinatorGrant(
         bool canListen, bool coordinatorHolds)
+        => RunConnectedDialerRetryAsync(canListen, coordinatorHolds, continueAfterInstall: false);
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    [Trait("FileTransferInfraSuite", "RuntimeUnlockRetryDispatch")]
+    public Task RuntimeUnlockRetryDispatch_ConnectedDialerContinuationDoesNotRequireLocalPaidListener()
+        => RunConnectedDialerRetryAsync(false, false, continueAfterInstall: true);
+
+    private async Task RunConnectedDialerRetryAsync(
+        bool canListen, bool coordinatorHolds, bool continueAfterInstall)
     {
         var previousBarrier = NknSignalingTransport.RuntimeUnlockRetryDispatchInstallFollowUpBarrierForTests;
         var releaseFollowUp = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -93,6 +103,33 @@ public sealed partial class NknAccelerationTransportTests
             Assert.Equal(FileTransferProtocol.ProtocolVersionV6, publication.ProtocolVersion);
             Assert.Equal(request.SourcePublicationAuthority.RoutePublicationGeneration, publication.RoutePublicationGeneration);
             Assert.False(helper.IsAccelerationAvailableForTests);
+
+            if (continueAfterInstall)
+            {
+                // The existing test stops at the install barrier. Exercise the
+                // installed continuation without turning the dialer into a payer.
+                releaseFollowUp.TrySetResult(true);
+                await helper.DrainRuntimeUnlockRetryDispatchInstallFollowUpsForTestsAsync()
+                    .WaitAsync(cts.Token);
+                await WaitUntilAsync(() => ReadOperationalLogTail(logStart).Split('\n').Any(line =>
+                    line.Contains("event=runtime_unlock_post_tuna_fallback_activation_disposition;", StringComparison.Ordinal) &&
+                    (line.Contains("disposition=completed;", StringComparison.Ordinal) ||
+                     line.Contains("disposition=held;", StringComparison.Ordinal) ||
+                     line.Contains("disposition=rejected;", StringComparison.Ordinal))), TimeSpan.FromSeconds(4));
+                var continuation = ReadOperationalLogTail(logStart);
+                Assert.DoesNotContain(
+                    "event=tuna_acceleration_offer_preflight_rejected; reason=listener_unavailable;",
+                    continuation, StringComparison.Ordinal);
+                // A physical connection and retry grant alone do not supply
+                // the missing authenticated peer handshake.
+                Assert.Contains("event=runtime_unlock_sender_dialer_continuation; decision_status=Held;",
+                    continuation, StringComparison.Ordinal);
+                Assert.DoesNotContain("decision_reason=authenticated_handshake_requires_coordinator_probe_admission",
+                    continuation, StringComparison.Ordinal);
+                Assert.Equal(0, dialer.EnsureListenerCalls);
+                Assert.Equal(0, dialer.ListenerAdoptionCalls);
+                Assert.Same(lease, dialer.CaptureCurrentLaneLease());
+            }
         }
         finally
         {

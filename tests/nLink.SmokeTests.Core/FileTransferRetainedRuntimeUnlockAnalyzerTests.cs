@@ -941,14 +941,19 @@ public sealed class FileTransferRetainedRuntimeUnlockAnalyzerTests : FileTransfe
     }
 
     [Theory]
-    [InlineData(false, false)]
-    [InlineData(true, false)]
-    [InlineData(false, true)]
-    [InlineData(true, true)]
+    [InlineData(false, false, false)]
+    [InlineData(true, false, false)]
+    [InlineData(false, true, false)]
+    [InlineData(true, true, false)]
+    [InlineData(false, false, true)]
+    [InlineData(true, false, true)]
+    [InlineData(false, true, true)]
+    [InlineData(true, true, true)]
     [Trait("Category", "Smoke")]
     public async Task AnalyzeRetained_PostFallbackResponderDrainBoundaryRejectionUsesRouteTransitionOwnership(
         bool compact,
-        bool recovered)
+        bool recovered,
+        bool authenticatedAnswer)
     {
         if (!OperatingSystem.IsWindows())
         {
@@ -1042,6 +1047,15 @@ public sealed class FileTransferRetainedRuntimeUnlockAnalyzerTests : FileTransfe
         {
             messages.Add(LogLine($"event=filetransfer_route_transition_drain_receipt_decided; {scope}; " +
                 "decision_status=Rejected; decision_reason=paired_fallback_tail_yield_missing"));
+        }
+        if (authenticatedAnswer)
+        {
+            messages = messages.Select(line => line.Replace(
+                "answer_acceptance_source=SemanticAnswerAck;",
+                "answer_acceptance_source=AuthenticatedAnswer; tuna_path_lease_listener_run_id=listener-start-2; " +
+                $"ack_message_id=authenticated-answer; ack_source_fingerprint={new string('a', 64)}; " +
+                $"peer_probe_frame_fingerprint={new string('b', 64)}; probe_acked_utc_ms=100;",
+                StringComparison.Ordinal)).ToList();
         }
         if (recovered)
         {

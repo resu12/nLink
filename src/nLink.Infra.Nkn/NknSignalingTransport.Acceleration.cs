@@ -428,6 +428,7 @@ public sealed partial class NknSignalingTransport
     {
         SemanticAnswerAck = 0,
         PeerPreCommitProbe = 1,
+        AuthenticatedAnswer = 2,
     }
 
     private enum RuntimeUnlockResponderAnswerProbeConvergenceState
@@ -468,7 +469,13 @@ public sealed partial class NknSignalingTransport
         RuntimeUnlockPeerPreCommitAnswerAcceptanceScope CurrentReceiveScope =
             default,
         RuntimeUnlockPostFallbackPairedRetryOfferBindingReceipt?
-            PairedRetryBindingReceipt = null);
+            PairedRetryBindingReceipt = null)
+    {
+        public RuntimeUnlockResponderAnswerAcceptanceSource AcceptanceSource { get; init; } =
+            RuntimeUnlockResponderAnswerAcceptanceSource.SemanticAnswerAck;
+        public NknTunaLaneLease? PhysicalDialerLease { get; init; }
+        public NknTunaListenerAdoptionSnapshot? PhysicalListener { get; init; }
+    }
 
     private readonly record struct RuntimeUnlockResponderProbeAckScopeReceipt(
         string SessionId,
@@ -4143,9 +4150,8 @@ public sealed partial class NknSignalingTransport
                 StringComparison.Ordinal) ||
             !snapshot.TunaPathLeaseCurrent ||
             string.IsNullOrWhiteSpace(snapshot.TunaPathLeaseListenerRunId) ||
-            !snapshot.TunaPathLeaseListenerRunId.StartsWith(
-                "peer-offer-dialer-",
-                StringComparison.OrdinalIgnoreCase) ||
+            !ResponderAcceptanceMatchesPhysicalRole(
+                responderEvidence.AcceptanceSource, snapshot.TunaPathLeaseListenerRunId) ||
             string.IsNullOrWhiteSpace(snapshot.PathProbeId) ||
             !string.Equals(snapshot.PathProbeId, responderEvidence.ProbeId, StringComparison.Ordinal) ||
             snapshot.PathProbeState != responderEvidence.ProbeState ||
@@ -4516,14 +4522,20 @@ public sealed partial class NknSignalingTransport
             TunaPathLeaseFailureReason: snapshot.TunaPathLeaseFailureReason,
             LaunchGeneration: launchGeneration);
 
-    private static bool IsRuntimeUnlockResponderWaitingForPeerProbe(RuntimeUnlockTransactionSnapshot snapshot)
+    private bool IsRuntimeUnlockResponderWaitingForPeerProbe(RuntimeUnlockTransactionSnapshot snapshot)
         => !snapshot.IsTerminal &&
            snapshot.HasPeerVisibleProof &&
            snapshot.AnswerReceived &&
            !snapshot.RouteCommitted &&
            snapshot.PathProbeState == RuntimeUnlockPathProbeState.None &&
            !string.IsNullOrWhiteSpace(snapshot.TunaPathLeaseListenerRunId) &&
-           snapshot.TunaPathLeaseListenerRunId.StartsWith("peer-offer-dialer-", StringComparison.OrdinalIgnoreCase);
+           (snapshot.TunaPathLeaseListenerRunId.StartsWith("peer-offer-dialer-", StringComparison.OrdinalIgnoreCase) ||
+            runtimeUnlockResponderAnswerProbeConvergence is
+                { AcceptanceSource: RuntimeUnlockResponderAnswerAcceptanceSource.AuthenticatedAnswer } retained &&
+            retained.SessionId == snapshot.SessionId &&
+            retained.TransactionGeneration == snapshot.TransactionGeneration &&
+            retained.OfferGeneration == snapshot.OfferGeneration &&
+            retained.TunaPathLeaseGeneration == snapshot.TunaPathLeaseGeneration);
 
     private bool TryCaptureLiveExactRuntimeUnlockResponderWaitingConvergence(
         RuntimeUnlockTransactionSnapshot snapshot,
@@ -4612,6 +4624,7 @@ public sealed partial class NknSignalingTransport
             string.IsNullOrWhiteSpace(retained.Nonce) ||
             string.IsNullOrWhiteSpace(retained.AnswerMessageId) ||
             retained.AnswerDeadlineUtcMs <= nowUtcMs ||
+            !IsRetainedListenerAnswerPhysicalSourceCurrent(retained) ||
             (retained.Lanes & NknAccelerationLaneKind.File) !=
                 NknAccelerationLaneKind.File ||
             (!string.IsNullOrWhiteSpace(runtimeUnlockAnswerAckTimeoutSessionId) &&
@@ -7057,9 +7070,12 @@ public sealed partial class NknSignalingTransport
                 current.TunaPathLeaseGeneration > 0 &&
                 current.TunaPathLeaseCurrent &&
                 !string.IsNullOrWhiteSpace(current.TunaPathLeaseListenerRunId) &&
-                current.TunaPathLeaseListenerRunId.StartsWith(
-                    "peer-offer-dialer-",
-                    StringComparison.OrdinalIgnoreCase) &&
+                ResponderAcceptanceMatchesPhysicalRole(
+                    runtimeUnlockResponderAnswerProbeConvergence?.AcceptanceSource ??
+                        RuntimeUnlockResponderAnswerAcceptanceSource.SemanticAnswerAck,
+                    current.TunaPathLeaseListenerRunId) &&
+                (runtimeUnlockResponderAnswerProbeConvergence is not { } physicalHandshake ||
+                 IsRetainedListenerAnswerPhysicalSourceCurrent(physicalHandshake)) &&
                 lease.IsCurrent &&
                 lease.LeaseGeneration == current.TunaPathLeaseGeneration &&
                 string.Equals(
@@ -7966,7 +7982,7 @@ public sealed partial class NknSignalingTransport
             $"event=runtime_unlock_precommit_probe_launch_requested; session_id={SanitizeLogToken(launchSnapshot.SessionId)}; transfer_id={SanitizeLogToken(launchSnapshot.TransferId ?? "none")}; reason=runtime_unlock_responder_peer_probe_acked; lanes=file; transaction_generation={launchSnapshot.TransactionGeneration}; offer_generation={launchSnapshot.OfferGeneration}; peer_transaction_generation={handoffEvidence.PeerTransactionGeneration}; peer_offer_generation={handoffEvidence.PeerOfferGeneration}; peer_tuna_path_lease_generation={handoffEvidence.PeerTunaPathLeaseGeneration}; launch_generation={launchSnapshot.LaunchGeneration}; tuna_path_lease_generation={launchSnapshot.TunaPathLeaseGeneration}; tuna_path_lease_listener_run_id={SanitizeLogToken(launchSnapshot.TunaPathLeaseListenerRunId ?? "none")}; path_probe_id={SanitizeLogToken(launchSnapshot.PathProbeId ?? "none")}; path_probe_state={launchSnapshot.PathProbeState.ToLowerInvariant()}; duplicate={(duplicate ? 1 : 0)}; tuple_mutation=0; responder_waiting_for_peer_probe=0; launch_role={RuntimeUnlockPreCommitProbeLaunchRole.ResponderAdoptingAckedPeerProbe}; peer_probe_adoption=1");
         LocalOperationalLog.Info(
             "NKN.Tuna",
-            $"event=runtime_unlock_precommit_responder_peer_probe_handoff_bound; status={(duplicate ? "Idempotent" : "Accepted")}; decision_status={(duplicate ? "Idempotent" : "Accepted")}; direction=inbound; session_id={SanitizeLogToken(launchSnapshot.SessionId)}; transfer_id={SanitizeLogToken(launchSnapshot.TransferId ?? "none")}; transaction_generation={launchSnapshot.TransactionGeneration}; offer_generation={launchSnapshot.OfferGeneration}; peer_transaction_generation={handoffEvidence.PeerTransactionGeneration}; peer_offer_generation={handoffEvidence.PeerOfferGeneration}; peer_tuna_path_lease_generation={handoffEvidence.PeerTunaPathLeaseGeneration}; launch_generation={launchSnapshot.LaunchGeneration}; tuna_path_lease_generation={launchSnapshot.TunaPathLeaseGeneration}; tuna_path_lease_listener_run_id={SanitizeLogToken(launchSnapshot.TunaPathLeaseListenerRunId ?? "none")}; probe_id={SanitizeLogToken(launchSnapshot.PathProbeId ?? "none")}; probe_state={launchSnapshot.PathProbeState}; probe_transport={launchSnapshot.PathProbeTransport.ToString().ToLowerInvariant()}; probe_acked_utc_ms={launchSnapshot.PathProbeAckedUtcMs}; launch_role={RuntimeUnlockPreCommitProbeLaunchRole.ResponderAdoptingAckedPeerProbe}; answer_acceptance_source={RuntimeUnlockResponderAnswerAcceptanceSource.SemanticAnswerAck}; ack_message_id={SanitizeLogToken(handoffEvidence.AckMessageId ?? "none")}; ack_source_fingerprint={SanitizeLogToken(handoffEvidence.AckSourceFingerprint ?? "none")}; peer_probe_frame_fingerprint={SanitizeLogToken(handoffEvidence.PeerProbeFrameFingerprint ?? "none")}; received_transport={FormatFileTransferTransportKindForLog(handoffEvidence.ReceivedTransport)}; received_utc_ms={handoffEvidence.ReceivedUtcMs}; probe_ack_sent_utc_ms={handoffEvidence.ProbeAckSentUtcMs}; {FormatRuntimeUnlockPeerReceiveScopeForLog(peerScope)}; normalized_reason=exact_responder_peer_probe_adopted");
+            $"event=runtime_unlock_precommit_responder_peer_probe_handoff_bound; status={(duplicate ? "Idempotent" : "Accepted")}; decision_status={(duplicate ? "Idempotent" : "Accepted")}; direction=inbound; session_id={SanitizeLogToken(launchSnapshot.SessionId)}; transfer_id={SanitizeLogToken(launchSnapshot.TransferId ?? "none")}; transaction_generation={launchSnapshot.TransactionGeneration}; offer_generation={launchSnapshot.OfferGeneration}; peer_transaction_generation={handoffEvidence.PeerTransactionGeneration}; peer_offer_generation={handoffEvidence.PeerOfferGeneration}; peer_tuna_path_lease_generation={handoffEvidence.PeerTunaPathLeaseGeneration}; launch_generation={launchSnapshot.LaunchGeneration}; tuna_path_lease_generation={launchSnapshot.TunaPathLeaseGeneration}; tuna_path_lease_listener_run_id={SanitizeLogToken(launchSnapshot.TunaPathLeaseListenerRunId ?? "none")}; probe_id={SanitizeLogToken(launchSnapshot.PathProbeId ?? "none")}; probe_state={launchSnapshot.PathProbeState}; probe_transport={launchSnapshot.PathProbeTransport.ToString().ToLowerInvariant()}; probe_acked_utc_ms={launchSnapshot.PathProbeAckedUtcMs}; launch_role={RuntimeUnlockPreCommitProbeLaunchRole.ResponderAdoptingAckedPeerProbe}; answer_acceptance_source={handoffEvidence.AcceptanceSource}; ack_message_id={SanitizeLogToken(handoffEvidence.AckMessageId ?? "none")}; ack_source_fingerprint={SanitizeLogToken(handoffEvidence.AckSourceFingerprint ?? "none")}; peer_probe_frame_fingerprint={SanitizeLogToken(handoffEvidence.PeerProbeFrameFingerprint ?? "none")}; received_transport={FormatFileTransferTransportKindForLog(handoffEvidence.ReceivedTransport)}; received_utc_ms={handoffEvidence.ReceivedUtcMs}; probe_ack_sent_utc_ms={handoffEvidence.ProbeAckSentUtcMs}; {FormatRuntimeUnlockPeerReceiveScopeForLog(peerScope)}; normalized_reason=exact_responder_peer_probe_adopted");
         if (!duplicate)
         {
             RequestFileTransferDataSessionsHandoff(
@@ -15838,6 +15854,12 @@ public sealed partial class NknSignalingTransport
             runtimeUnlockDispatchAuthorityId = capturedDispatchContract!.Authority.AuthorityId;
         }
 
+        if (usesInstalledRetryAuthority && expectedInstallReceipt is { } dialerReceipt &&
+            TryContinueInstalledRetryOnAuthenticatedDialer(tunaSession, dialerReceipt))
+        {
+            return;
+        }
+
         var requiresContractLocalListenerRetry = false;
         if (usesInstalledRetryAuthority &&
             ShouldPauseRegularNknV4FileTransferBeforeRuntimeUnlockPayerIntent(sessionId, reason))
@@ -19126,7 +19148,8 @@ public sealed partial class NknSignalingTransport
            !evidence.PeerReceiveScope.IsDefault &&
            evidence.AcceptanceSource switch
            {
-               RuntimeUnlockResponderAnswerAcceptanceSource.SemanticAnswerAck =>
+               RuntimeUnlockResponderAnswerAcceptanceSource.SemanticAnswerAck or
+               RuntimeUnlockResponderAnswerAcceptanceSource.AuthenticatedAnswer =>
                    !string.IsNullOrWhiteSpace(evidence.AckMessageId) &&
                    !string.IsNullOrWhiteSpace(evidence.AckSourceFingerprint) &&
                    !string.IsNullOrWhiteSpace(evidence.PeerProbeFrameFingerprint),
@@ -37719,6 +37742,9 @@ public sealed partial class NknSignalingTransport
 
         if (isRuntimeUnlockOffer)
         {
+            RetainPostFallbackListenerAnswerForPeerProbe(
+                expectedOfferAuthorityBoundary!, retainedAnswerHandoffBarrierGeneration,
+                env.MessageId, source, env.Payload, validation.AcceptedLanes);
             _ = Task.Run(
                 async () =>
                 {
@@ -37951,7 +37977,10 @@ public sealed partial class NknSignalingTransport
             CurrentReceiveScope: currentReceiveScope,
             PairedRetryBindingReceipt:
                 retainedPairedRetryBinding ??
-                pendingAccelerationAnswerAckPairedRetryBindingReceipt);
+                pendingAccelerationAnswerAckPairedRetryBindingReceipt)
+        {
+            PhysicalDialerLease = (accelerationLane as INknTunaAccelerationSession)?.CaptureCurrentLaneLease(),
+        };
         runtimeUnlockResponderAnswerProbeConvergence = convergence;
         reason = peerReceipt is null
             ? "semantic_answer_ack_retained_waiting_for_peer_probe"
@@ -38133,6 +38162,7 @@ public sealed partial class NknSignalingTransport
             !string.Equals(peerReceipt.SessionId, convergence.SessionId, StringComparison.Ordinal) ||
             !string.Equals(peerReceipt.TransferId, transferId, StringComparison.Ordinal) ||
             convergence.AckObservedUtcMs > convergence.AnswerDeadlineUtcMs ||
+            !IsRetainedListenerAnswerPhysicalSourceCurrent(convergence) ||
             nowUtcMs > convergence.AnswerDeadlineUtcMs ||
             (!string.IsNullOrWhiteSpace(runtimeUnlockAnswerAckTimeoutSessionId) &&
              string.Equals(
@@ -38157,7 +38187,7 @@ public sealed partial class NknSignalingTransport
             convergence.PendingAnswerAckGeneration,
             convergence.AuthorityMode,
             convergence.PayerDecisionId,
-            RuntimeUnlockResponderAnswerAcceptanceSource.SemanticAnswerAck,
+            convergence.AcceptanceSource,
             ackMessageId,
             ackSourceFingerprint,
             peerReceipt.ProbeFrameFingerprint,
@@ -38262,7 +38292,7 @@ public sealed partial class NknSignalingTransport
 
         runtimeUnlockResponderAnswerAcceptanceReceipt =
             new RuntimeUnlockResponderAnswerAcceptanceReceipt(
-                RuntimeUnlockResponderAnswerAcceptanceSource.SemanticAnswerAck,
+                convergence.AcceptanceSource,
                 convergence.SessionId,
                 transferId,
                 convergence.TransactionGeneration,

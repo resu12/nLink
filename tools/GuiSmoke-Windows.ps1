@@ -17612,12 +17612,19 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
                     return $false
                 }
             }
+            $answerSource = Get-TunaGuiLogLineFieldValue -Line $handoff -Name 'answer_acceptance_source'
+            $authenticatedListenerAnswer = $answerSource -ceq 'AuthenticatedAnswer' -and
+                (Get-TunaGuiLogLineFieldValue -Line $handoff -Name 'responder_transition_mode') -eq 'post_fallback_v6_paired' -and
+                (Get-TunaGuiLogLineFieldValue -Line $handoff -Name 'tuna_path_lease_listener_run_id') -cmatch '^listener-start-' -and
+                (Get-TunaGuiLogLineFieldValue -Line $handoff -Name 'ack_message_id') -notin @('', '(none)', 'none') -and
+                (Get-TunaGuiLogLineFieldValue -Line $handoff -Name 'ack_source_fingerprint') -match '^[a-fA-F0-9]{64}$' -and
+                (Get-TunaGuiLogLineFieldValue -Line $handoff -Name 'peer_probe_frame_fingerprint') -match '^[a-fA-F0-9]{64}$' -and
+                (Get-TunaGuiLogLineFieldValue -Line $handoff -Name 'probe_acked_utc_ms') -match '^[1-9][0-9]*$'
             return (Get-TunaGuiLogLineFieldValue -Line $handoff -Name 'probe_state') -ieq
                     'acked' -and
                 (Get-TunaGuiLogLineFieldValue -Line $handoff -Name 'probe_transport') -ieq
                     'tuna' -and
-                (Get-TunaGuiLogLineFieldValue -Line $handoff -Name 'answer_acceptance_source') -eq
-                    'SemanticAnswerAck'
+                ($answerSource -eq 'SemanticAnswerAck' -or $authenticatedListenerAnswer)
         }
 
         function Test-TunaGuiInitialResponderDrainTuple {

@@ -4755,6 +4755,34 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
                     throw "post-fallback responder drain mismatch: $($postFallback | ConvertTo-Json -Compress)"
                 }
 
+                # The listener received an authenticated Answer, not an AnswerAck.
+                # Only an exact Core paired handoff may classify the drain failure.
+                $listenerEvidence = (Get-Content -LiteralPath $path -Raw).Replace(
+                    'answer_acceptance_source=SemanticAnswerAck;',
+                    ('answer_acceptance_source=AuthenticatedAnswer; tuna_path_lease_listener_run_id=listener-start-2; ack_message_id=authenticated-answer; ack_source_fingerprint=' + ('a' * 64) + '; peer_probe_frame_fingerprint=' + ('b' * 64) + '; probe_acked_utc_ms=100;'))
+                foreach ($control in @('exact', 'wrong-role', 'wrong-source', 'missing-answer', 'wrong-probe', 'missing-fingerprint', 'wrong-mode', 'rejected-handoff', 'wrong-offer')) {
+                    $evidence = switch ($control) {
+                        'wrong-role' { $listenerEvidence.Replace('listener-start-2', 'peer-offer-dialer-2') }
+                        'wrong-source' { $listenerEvidence.Replace('answer_acceptance_source=AuthenticatedAnswer', 'answer_acceptance_source=PeerPreCommitProbe') }
+                        'missing-answer' { $listenerEvidence.Replace('ack_message_id=authenticated-answer', 'ack_message_id=(none)') }
+                        'wrong-probe' { $listenerEvidence.Replace('probe_transport=tuna', 'probe_transport=regular_nkn') }
+                        'missing-fingerprint' { $listenerEvidence.Replace(('ack_source_fingerprint=' + ('a' * 64)), 'ack_source_fingerprint=(none)') }
+                        'wrong-mode' { $listenerEvidence.Replace('responder_transition_mode=post_fallback_v6_paired; activation_authority_mode=responder; admission_generation=3; pending_precommit_generation=2; transaction_generation=1; offer_generation=9; launch_generation=4; tuna_path_lease_generation=2; fallback_yield_authority_id', 'responder_transition_mode=initial_regular_v4; activation_authority_mode=responder; admission_generation=3; pending_precommit_generation=2; transaction_generation=1; offer_generation=9; launch_generation=4; tuna_path_lease_generation=2; fallback_yield_authority_id') }
+                        'rejected-handoff' { $listenerEvidence.Replace('event=filetransfer_runtime_unlock_responder_peer_probe_route_transition_handoff_decided; decision_status=Accepted', 'event=filetransfer_runtime_unlock_responder_peer_probe_route_transition_handoff_decided; decision_status=Rejected') }
+                        'wrong-offer' { $listenerEvidence.Replace('offer_generation=9; launch_generation=4; tuna_path_lease_generation=2; fallback_yield_authority_id', 'offer_generation=10; launch_generation=4; tuna_path_lease_generation=2; fallback_yield_authority_id') }
+                        default { $listenerEvidence }
+                    }
+                    $evidence | Set-Content -LiteralPath $path
+                    $listenerResult = Get-TunaGuiFileTransferSetupFailureClassification `
+                        -Bookmark 0 `
+                        -ErrorMessage 'gui_smoke_scenario_deadline_exceeded: scenario deadline elapsed' `
+                        -RouteMode 'live-regular-activation-cycle' `
+                        -ImmutableEvidencePaths @($path)
+                    if (($listenerResult.Reason -eq 'paired_fallback_tail_yield_missing') -ne ($control -eq 'exact')) {
+                        throw "listener Answer drain mismatch ($control): $($listenerResult | ConvertTo-Json -Compress)"
+                    }
+                }
+
                 @(
                     "event=filetransfer_route_transition_prepared; decision_status=Prepared; $tuple",
                     "event=filetransfer_route_transition_pause_bound; decision_status=Installed; $tuple",

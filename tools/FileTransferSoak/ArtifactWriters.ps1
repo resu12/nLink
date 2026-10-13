@@ -10287,8 +10287,14 @@ function Get-FileTransferRouteTransitionCorrelation {
                 (Get-RouteTransitionField -Event $_ -Name 'pair_state') -eq 'Paired' -and
                 (Get-RouteTransitionField -Event $_ -Name 'probe_state') -ieq 'acked' -and
                 (Get-RouteTransitionField -Event $_ -Name 'probe_transport') -ieq 'tuna' -and
-                (Get-RouteTransitionField -Event $_ -Name 'answer_acceptance_source') -eq
-                    'SemanticAnswerAck' -and
+                ((Get-RouteTransitionField -Event $_ -Name 'answer_acceptance_source') -eq 'SemanticAnswerAck' -or
+                    ((Get-RouteTransitionField -Event $_ -Name 'answer_acceptance_source') -ceq 'AuthenticatedAnswer' -and
+                        (Get-RouteTransitionField -Event $_ -Name 'responder_transition_mode') -eq 'post_fallback_v6_paired' -and
+                        (Get-RouteTransitionField -Event $_ -Name 'tuna_path_lease_listener_run_id') -cmatch '^listener-start-' -and
+                        (Get-RouteTransitionField -Event $_ -Name 'ack_message_id') -notin @('', '(none)', 'none') -and
+                        (Get-RouteTransitionField -Event $_ -Name 'ack_source_fingerprint') -match '^[a-fA-F0-9]{64}$' -and
+                        (Get-RouteTransitionField -Event $_ -Name 'peer_probe_frame_fingerprint') -match '^[a-fA-F0-9]{64}$' -and
+                        (Get-RouteTransitionField -Event $_ -Name 'probe_acked_utc_ms') -match '^[1-9][0-9]*$')) -and
                 -not [string]::IsNullOrWhiteSpace(
                     (Get-RouteTransitionField -Event $_ -Name 'local_proof_identity')) -and
                 -not [string]::IsNullOrWhiteSpace(

@@ -23131,6 +23131,21 @@ public sealed partial class FileTransferCoordinatorTests
     public void FileTransferRouteTransition_InboundResponderAckedProbeUsesPairedReceiptWithoutPhase2Release()
         => CreatePairedResponderHandoffForCheckpoint();
 
+    [Fact]
+    [Trait("FileTransferCoordinatorSuite", "ResponderProbeHandoff")]
+    public void FileTransferRouteTransition_InboundListenerAnswerRequiresExactPairedProbeCustody()
+    {
+        var fallback = FileTransferRouteResolver.Resolve(FileTransferRoute.PostTunaFallbackV6);
+        var (bound, release, observation, admission, pending, scope) = CreatePairedResponderHandoffBinding(
+            ActiveFallbackStateWithoutCheckpoint(FileTransferDirection.Inbound), fallback, listenerReceiver: true);
+        Assert.True((observation with { TunaPathLeaseListenerRunId = "peer-offer-dialer-1" }).IsDefault);
+        Assert.True((observation with { AnswerAcceptanceSource = "RawAnswer" }).IsDefault);
+        Assert.True((observation with { AckMessageId = null }).IsDefault);
+        Assert.True((observation with { PeerProbeFrameFingerprint = null }).IsDefault);
+        Assert.True((observation with { ProbeTransport = FileTransferTransportKind.RegularNkn }).IsDefault);
+        CompletePairedResponderHandoffForCheckpoint(bound, release, observation, admission, pending, scope);
+    }
+
     [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
     private static FileTransferCoordinatorState CreatePairedResponderHandoffForCheckpoint(bool ownerWorkHeld = false)
     {
@@ -23148,7 +23163,8 @@ public sealed partial class FileTransferCoordinatorTests
         RuntimeUnlockResponderPeerProbeRouteTransitionObservation Observation,
         RuntimeUnlockAdmissionToken Admission, RuntimeUnlockPendingPreCommitProbeRequest Pending,
         RuntimeUnlockPeerPreCommitAnswerAcceptanceScope PeerReceiveScope)
-        CreatePairedResponderHandoffBinding(FileTransferCoordinatorState state, FileTransferRouteSelection fallback)
+        CreatePairedResponderHandoffBinding(FileTransferCoordinatorState state, FileTransferRouteSelection fallback,
+            bool listenerReceiver = false)
     {
         state = state with
         {
@@ -23233,9 +23249,12 @@ public sealed partial class FileTransferCoordinatorTests
             paired.State.CurrentRuntimeOwner);
         var admission = Assert.IsType<RuntimeUnlockAdmissionToken>(
             admitted.RuntimeUnlockAdmissionDecision!.Value.AdmissionToken);
-        var pendingDecision = RecordPendingPreCommitProbe(
-            admitted.State,
-            admission);
+        var pendingDecision = listenerReceiver
+            ? FileTransferCoordinator.Apply(CoordinatorEvent(FileTransferCoordinatorEventKind.RuntimeUnlockPreCommitProbePending,
+                admitted.State.RouteSelection, reason: "precommit_probe_pending",
+                runtimeUnlockPendingPreCommitProbeRequest: PendingPreCommitProbeRequest(admitted.State, admission) with
+                { TunaPathLeaseListenerRunId = "listener-start-1" }), admitted.State)
+            : RecordPendingPreCommitProbe(admitted.State, admission);
         var pending = Assert.IsType<RuntimeUnlockPendingPreCommitProbeRequest>(
             pendingDecision.State.CurrentRuntimeUnlockPendingPreCommitProbe);
         var peerScopeState = pendingDecision.State;
@@ -23264,7 +23283,7 @@ public sealed partial class FileTransferCoordinatorTests
                 PayerDecisionId: 7,
                 LaunchGeneration: 31,
                 Lanes: "file",
-                AnswerAcceptanceSource: "SemanticAnswerAck",
+                AnswerAcceptanceSource: listenerReceiver ? "AuthenticatedAnswer" : "SemanticAnswerAck",
                 AckMessageId: "answer-ack-message",
                 AckSourceFingerprint: new string('b', 64),
                 PeerProbeFrameFingerprint: new string('c', 64),

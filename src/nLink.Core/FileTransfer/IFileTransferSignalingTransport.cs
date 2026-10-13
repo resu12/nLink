@@ -798,6 +798,12 @@ internal sealed record RuntimeUnlockResponderPeerProbeRouteTransitionObservation
     public RuntimeUnlockResponderPeerProbeTransitionMode ResponderTransitionMode =>
         PeerReceiveScope.ResponderTransitionMode;
 
+    public bool HasAuthenticatedAnswerAcceptance =>
+        string.Equals(AnswerAcceptanceSource, "SemanticAnswerAck", StringComparison.Ordinal) ||
+        (ResponderTransitionMode == RuntimeUnlockResponderPeerProbeTransitionMode.PostFallbackV6Paired &&
+         string.Equals(AnswerAcceptanceSource, "AuthenticatedAnswer", StringComparison.Ordinal) &&
+         TunaPathLeaseListenerRunId?.StartsWith("listener-start-", StringComparison.Ordinal) == true);
+
     public bool IsDefault =>
         string.IsNullOrWhiteSpace(SessionId) ||
         string.IsNullOrWhiteSpace(TransferId) ||
@@ -807,10 +813,7 @@ internal sealed record RuntimeUnlockResponderPeerProbeRouteTransitionObservation
         PayerDecisionId <= 0 ||
         LaunchGeneration <= 0 ||
         !string.Equals(Lanes, "file", StringComparison.Ordinal) ||
-        !string.Equals(
-            AnswerAcceptanceSource,
-            "SemanticAnswerAck",
-            StringComparison.Ordinal) ||
+        !HasAuthenticatedAnswerAcceptance ||
         string.IsNullOrWhiteSpace(AckMessageId) ||
         string.IsNullOrWhiteSpace(AckSourceFingerprint) ||
         string.IsNullOrWhiteSpace(PeerProbeFrameFingerprint) ||
