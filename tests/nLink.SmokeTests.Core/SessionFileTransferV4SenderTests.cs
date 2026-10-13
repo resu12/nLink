@@ -7654,8 +7654,12 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
         Assert.Equal(FileTransferRegularV4FrontierRepairSettlementOutcome.SettledStalled, settlement.Outcome);
     }
 
-    [Fact]
-    public void RegularNknV4FrontierRepairState_SettledStallClearsPressureAndSuppressesRefresh()
+    [Theory]
+    [InlineData("chunk_batch_committed", false)]
+    [InlineData("frontier_stall_repair_due", true)]
+    public void RegularNknV4FrontierRepairState_SettledStallClearsPressureAndSuppressesRefresh(
+        string refreshReason,
+        bool forceMissingRange)
     {
         var logStart = GetOperationalLogLength();
         using var service = new SessionFileTransferService();
@@ -7666,12 +7670,21 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
             "transfer_regular_v4_frontier_settled_stall",
             nextChunkIndex: 240,
             durableHighestChunkIndex: 255,
-            creditUntilChunkIndexExclusive: 252);
+            creditUntilChunkIndexExclusive: 252,
+            sessionId: "session_regular_v4_frontier_settled_stall");
+        using var dataSession = new RecordingDataSession(
+            "session_regular_v4_frontier_settled_stall",
+            "transfer_regular_v4_frontier_settled_stall");
+        SetPrivateProperty(context, "DataSession", dataSession);
+        // Settlement requires a real frontier gap, not the helper's all-written default.
+        GetPrivateProperty<System.Collections.BitArray>(context, "ReceiverSparseChunksWritten")[240] = false;
         SeedCurrentRuntimeOwnerForTest(context, FileTransferDirection.Inbound, "unit_test_regular_v4_settled_stall");
 
-        var state = Assert.IsType<FileTransferStateFrameV4>(serviceType
-            .GetMethod("CreateInboundV4StateLocked", BindingFlags.Instance | BindingFlags.NonPublic)!
-            .Invoke(service, [context, "frontier_stall_repair_due", false, true]));
+        var state = CreateInboundState(service, context, "frontier_stall_repair_due", forceMissingRange: true);
+        var missingRange = Assert.Single(state.MissingRanges);
+        Assert.Equal(240, missingRange.StartChunkIndex);
+        Assert.Equal(1, missingRange.ChunkCount);
+        var initialInstall = Assert.Single(transport.RegularV4PressureInstallReceipts);
         var repairs = Assert.IsAssignableFrom<System.Collections.IDictionary>(
             GetPrivatePropertyValue(context, "V4ReceiverRepairRequests"));
         var repairRequestKey = Assert.Single(repairs.Keys.Cast<string>());
@@ -7689,7 +7702,7 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
                     "unit_test_repeated_frontier_repair_without_progress",
                     state.ContiguousCommittedChunkIndex,
                     state.DurableReceivedHighestChunkIndex,
-                    state.MissingRanges[0].ChunkCount,
+                    missingRange.ChunkCount,
                     2,
                     11_000L,
                 ]));
@@ -7702,6 +7715,10 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
         Assert.Equal(FileTransferRouteResolver.RegularNknV4FastToken, settlement.RouteToken);
         Assert.Equal(FileTransferRegularV4FrontierRepairSettlementOutcome.SettledStalled, settlement.Outcome);
         Assert.Equal("regular_v4_frontier_repair_liveness_settled_stalled", settlement.DecisionReason);
+        Assert.Equal(initialInstall.Authority.AuthorityId, settlement.AuthorityId);
+        Assert.Null(GetPrivatePropertyValue(context, "CurrentRepairReplayDecision"));
+        Assert.Null(GetPrivatePropertyValue(context, "InstalledRegularV4FrontierRepairPressureBinding"));
+        var settledGeneration = GetPrivateProperty<int>(context, "LastRepairReplayGeneration");
         while (transport.RegularV4ControlFeedbackPressures.TryDequeue(out _))
         {
         }
@@ -7711,15 +7728,32 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
 
         serviceType
             .GetMethod("MaybeObserveRegularV4ReceiverFrontierRepairPressure", BindingFlags.Instance | BindingFlags.NonPublic)!
-            .Invoke(service, [context, 16, state.MissingRanges[0].ChunkCount]);
+            .Invoke(service, [context, 16, missingRange.ChunkCount]);
 
-        Assert.Empty(transport.RegularV4ControlFeedbackPressures);
+        // An observation is diagnostic; it must not restore settled repair authority.
+        Assert.Null(Assert.Single(transport.RegularV4ControlFeedbackPressures).RepairAuthority);
+        Assert.Null(GetPrivatePropertyValue(context, "CurrentRepairReplayDecision"));
+        Assert.Null(GetPrivatePropertyValue(context, "InstalledRegularV4FrontierRepairPressureBinding"));
+        Assert.Single(transport.RegularV4PressureInstallReceipts);
+
+        _ = CreateInboundState(service, context, refreshReason, forceMissingRange);
+
+        Assert.Null(GetPrivatePropertyValue(context, "CurrentRepairReplayDecision"));
+        Assert.Null(GetPrivatePropertyValue(context, "PendingRegularV4FrontierRepairPressureBinding"));
+        Assert.Null(GetPrivatePropertyValue(context, "InstalledRegularV4FrontierRepairPressureBinding"));
+        Assert.Equal(settledGeneration, GetPrivateProperty<int>(context, "LastRepairReplayGeneration"));
+        Assert.Single(transport.RegularV4PressureInstallReceipts);
+        Assert.Empty(transport.RegularV4FrontierRepairSettlements);
+        Assert.All(transport.RegularV4ControlFeedbackPressures, pressure => Assert.Null(pressure.RepairAuthority));
+        while (transport.RegularV4ControlFeedbackPressures.TryDequeue(out _))
+        {
+        }
         SetPrivateProperty(context, "LastRoutePublicationGeneration", 2);
         SeedCurrentRuntimeOwnerForTest(context, FileTransferDirection.Inbound, "unit_test_regular_v4_fresh_publication");
 
         serviceType
             .GetMethod("MaybeObserveRegularV4ReceiverFrontierRepairPressure", BindingFlags.Instance | BindingFlags.NonPublic)!
-            .Invoke(service, [context, 16, state.MissingRanges[0].ChunkCount]);
+            .Invoke(service, [context, 16, missingRange.ChunkCount]);
 
         var refreshedPressure = Assert.Single(transport.RegularV4ControlFeedbackPressures);
         Assert.Null(refreshedPressure.RepairAuthority);

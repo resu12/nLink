@@ -41,6 +41,7 @@ public sealed partial class FileTransferCoordinatorTests
     [Theory]
     [InlineData(FileTransferRegularV4FrontierRepairSettlementOutcome.ProgressObserved)]
     [InlineData(FileTransferRegularV4FrontierRepairSettlementOutcome.TransferTerminal)]
+    [InlineData(FileTransferRegularV4FrontierRepairSettlementOutcome.SettledStalled)]
     [Trait("FileTransferInfraSuite", "RegularV4PressureBackend")]
     public Task NknPressureBackend_RealReceiptsPreserveExactSuccessorOwnership(
         FileTransferRegularV4FrontierRepairSettlementOutcome outcome)
@@ -131,6 +132,19 @@ public sealed partial class FileTransferCoordinatorTests
             var finalState = FileTransferCoordinator.CommitRegularV4FrontierRepairPressureSettlement(final.State, finalReceipt);
             Assert.Equal(RegularV4FrontierRepairPressureBindingDecisionStatus.Accepted, finalState.Status);
             Assert.Null(PressureState(finalState.State).InstalledBinding);
+            Assert.Null(finalState.State.CurrentRepairReplayDecision);
+            Assert.False(adapter.TryGetFileTransferRegularV4ActivationSendPressure(out _, out _));
+            foreach (var observation in new[]
+            {
+                successor.InstallCommand!.Pressure with { RepairAuthority = null },
+                successor.InstallCommand.Pressure,
+                command.Pressure,
+            })
+            {
+                host.ObserveRegularV4ControlFeedbackPressure(observation);
+                Assert.False(adapter.TryGetFileTransferRegularV4ActivationSendPressure(out _, out _));
+                Assert.True(adapter.IsRegularV4FrontierRepairSettlementApplied(final.SettlementCommand!.Settlement));
+            }
             // A late genuine receipt is evidence, not permission to resurrect retired Core authority.
             var late = FileTransferCoordinator.CommitRegularV4FrontierRepairPressureBinding(finalState.State, receipt);
             Assert.Equal(RegularV4FrontierRepairPressureBindingDecisionStatus.Rejected, late.Status);
