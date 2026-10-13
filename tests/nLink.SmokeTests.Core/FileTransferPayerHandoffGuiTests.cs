@@ -8,6 +8,72 @@ public sealed class FileTransferPayerHandoffGuiTests : FileTransferOpsScriptsTes
     [Theory]
     [InlineData("powershell")]
     [InlineData("pwsh")]
+    public async Task PayerHandoffGui_ImmediateReactivationPrearmsTheFinalOffPayer(string host)
+    {
+        if (!OperatingSystem.IsWindows()) return;
+        var result = await RunPowerShellScriptTextAsync("""
+            param([string]$RepoRoot)
+            $ErrorActionPreference = 'Stop'
+            Set-StrictMode -Version Latest
+            $tokens = $null; $errors = $null
+            $ast = [Management.Automation.Language.Parser]::ParseFile((Join-Path $RepoRoot 'tools/GuiSmoke-Windows.ps1'), [ref]$tokens, [ref]$errors)
+            if ($errors.Count) { throw ($errors | Out-String) }
+            foreach ($name in @('Get-TunaGuiLiveTogglePayer', 'Get-TunaGuiFaultTarget',
+                    'Test-TunaGuiSwitchOffToggleReady', 'Get-TunaGuiSwitchOffClickPoint', 'Try-PrearmTunaGuiSwitchOffToggle')) {
+                Invoke-Expression $ast.Find({param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -ceq $name}, $true).Extent.Text
+            }
+            $cycle = $ast.Find({param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -ceq 'Invoke-FileTransferTunaHandoffFallbackCycle'}, $true)
+            $branches = @($cycle.FindAll({param($n) $n -is [Management.Automation.Language.IfStatementAst] -and
+                $n.Clauses[0].Item1.Extent.Text.Contains("`$RouteMode -eq 'live-regular-activation-cycle'") -and
+                $n.Clauses[0].Item1.Extent.Text.Contains('$nextAction') -and
+                $n.Clauses[0].Item1.Extent.Text.Contains('$prearmedActivationBookmark')}, $true))
+            if ($branches.Count -ne 1) { throw 'immediate reactivation branch missing or duplicated' }
+            # Execute the real branch through pre-arm, stopping before the live route wait.
+            $statements = [Collections.Generic.List[string]]::new()
+            foreach ($statement in $branches[0].Clauses[0].Item2.Statements) {
+                if ($statement -is [Management.Automation.Language.AssignmentStatementAst] -and
+                    $statement.Left.Extent.Text -ceq '$activationProofTimeoutMs') { break }
+                $statements.Add($statement.Extent.Text)
+            }
+            $prearmBranch = [scriptblock]::Create($statements -join "`n")
+            function Assert-GuiSmokeScenarioDeadline {}
+            function Find-VisibleByAutomationId { param($Root, $AutomationId) return $Root.Toggle }
+            function Submit-TunaWalletPasswordDialogsForPayersIfPresent {
+                param($Context, $PayerMode, $Password, $Reason)
+                $script:dialogPayer = $PayerMode
+            }
+            $helperToggle = [pscustomobject]@{Current=[pscustomobject]@{IsEnabled=$true; IsOffscreen=$false; ClickX=100; ClickY=100}}
+            $helpeeToggle = [pscustomobject]@{Current=[pscustomobject]@{IsEnabled=$true; IsOffscreen=$false; ClickX=300; ClickY=100}}
+            $Context = [pscustomobject]@{HelperWindow=[pscustomobject]@{Toggle=$helperToggle}; HelpeeWindow=[pscustomobject]@{Toggle=$helpeeToggle}}
+            $RouteMode = 'live-regular-activation-cycle'; $sequence = @('on','off','on','off')
+            $WalletPassword = 'fixture'; $bookmark = 0
+            foreach ($PayerMode in @('helper-to-helpee', 'helper', 'helpee', 'both')) {
+                $stepIndex = 1; $stepNumber = 2; $nextAction = 'on'; $prearmedActivationBookmark = 10
+                $stepPayerMode = Get-TunaGuiLiveTogglePayer -PayerMode $PayerMode -StepIndex $stepIndex -RouteMode $RouteMode
+                $observedEvidenceLines = [Collections.Generic.List[string]]::new()
+                $faultAdmissionTracker = [pscustomobject]@{CachedSwitchOffControl=$helperToggle; CachedSwitchOffClickPoint=[pscustomobject]@{X=100;Y=100}; LineVisitCount=0}
+                . $prearmBranch
+                $finalPayer = Get-TunaGuiLiveTogglePayer -PayerMode $PayerMode -StepIndex 3 -RouteMode $RouteMode
+                $target = Get-TunaGuiFaultTarget -PayerMode $finalPayer
+                $expectedToggle = if ($target -eq 'helper') { $helperToggle } else { $helpeeToggle }
+                if (-not [object]::ReferenceEquals($prearmedSwitchOffToggle, $expectedToggle) -or
+                    -not [object]::ReferenceEquals($faultAdmissionTracker.CachedSwitchOffControl, $expectedToggle) -or
+                    $faultAdmissionTracker.CachedSwitchOffClickPoint.X -ne $expectedToggle.Current.ClickX) {
+                    throw "wrong prearmed switch-off control: payer=$PayerMode; expected=$target"
+                }
+                if ($stepIndex -ne 2 -or $stepNumber -ne 3 -or $stepPayerMode -cne $finalPayer -or
+                    $script:dialogPayer -cne $finalPayer -or $null -ne $prearmedActivationBookmark -or
+                    $lastActivationPayloadBookmark -ne 10) { throw 'reactivation lost step payer or action bookmark' }
+            }
+            'PASS'
+            """, [FindRepoRoot()], host);
+        Assert.True(result.ExitCode == 0, result.Stdout + Environment.NewLine + result.Stderr);
+        Assert.Contains("PASS", result.Stdout, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("powershell")]
+    [InlineData("pwsh")]
     public async Task PayerHandoffGui_RegularStartKeepsHelperForFirstOnOffThenHandsToHelpee(string host)
     {
         if (!OperatingSystem.IsWindows()) return;

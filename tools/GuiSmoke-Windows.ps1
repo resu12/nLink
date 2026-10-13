@@ -37454,14 +37454,15 @@ function Invoke-FileTransferTunaHandoffFallbackCycle {
                     $null -ne $prearmedActivationBookmark) {
                     $stepIndex++
                     $stepNumber = $stepIndex + 1
+                    $stepPayerMode = Get-TunaGuiLiveTogglePayer -PayerMode $PayerMode -StepIndex $stepIndex -RouteMode $RouteMode
                     Write-Host ("[GUI Smoke][filetransfer_tuna] Live toggle step {0}/{1}: immediately re-enabling Tuna after fallback recovery proof." -f $stepNumber, $sequence.Count) -ForegroundColor DarkGray
                     $stepBookmark = $prearmedActivationBookmark
                     $prearmedActivationBookmark = $null
                     $lastActivationPayloadBookmark = $stepBookmark
                     $observedEvidenceLines.Add(("[{0}] [INFO] [GuiSmoke] event=filetransfer_tuna_gui_live_multi_toggle_step; step={1}; action=on; prearmed=1; immediate_after_fallback_recovered=1" -f ([datetime]::UtcNow.ToString('yyyy-MM-dd HH:mm:ssZ')), $stepNumber)) | Out-Null
-                    [void](Submit-TunaWalletPasswordDialogsForPayersIfPresent -Context $Context -PayerMode $PayerMode -Password $WalletPassword -Reason ("prearmed_on_step_{0}_immediate_after_fallback_recovered" -f $stepNumber))
+                    [void](Submit-TunaWalletPasswordDialogsForPayersIfPresent -Context $Context -PayerMode $stepPayerMode -Password $WalletPassword -Reason ("prearmed_on_step_{0}_immediate_after_fallback_recovered" -f $stepNumber))
                     Write-Host ("[GUI Smoke][filetransfer_tuna] event=filetransfer_gui_evidence_activity; activity=switch_off_prearm; status=started; step={0}" -f $stepNumber) -ForegroundColor DarkGray
-                    $switchOffPrearmResult = Try-PrearmTunaGuiSwitchOffToggle -Context $Context -PayerMode $PayerMode -Bookmark $bookmark -AdmissionTracker $faultAdmissionTracker
+                    $switchOffPrearmResult = Try-PrearmTunaGuiSwitchOffToggle -Context $Context -PayerMode $stepPayerMode -Bookmark $bookmark -AdmissionTracker $faultAdmissionTracker
                     Write-Host ("[GUI Smoke][filetransfer_tuna] event=filetransfer_gui_evidence_activity; activity=switch_off_prearm; status=completed; step={0}" -f $stepNumber) -ForegroundColor DarkGray
                     $prearmedSwitchOffToggle = if ([string]::Equals([string]$switchOffPrearmResult.Kind, 'toggle', [System.StringComparison]::OrdinalIgnoreCase)) { $switchOffPrearmResult.Toggle } else { $null }
                     $prearmedSwitchOffToggleWaitMs = [long]$switchOffPrearmResult.WaitMs
