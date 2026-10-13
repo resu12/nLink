@@ -44,14 +44,22 @@ function Write-FileTransferEvidenceAtomicJson {
         if (Test-Path -LiteralPath $Path -PathType Leaf) {
             $isWindowsPlatform = [System.Environment]::OSVersion.Platform -eq [System.PlatformID]::Win32NT
             if ($isWindowsPlatform) {
+                # Managed file creation accepts long paths; the native replacement
+                # also needs extended-length paths, including the GUID suffix.
+                $nativePaths = @($temporaryPath, $Path) | ForEach-Object {
+                    $fullPath = [System.IO.Path]::GetFullPath($_)
+                    if ($fullPath.StartsWith('\\?\')) { $fullPath }
+                    elseif ($fullPath.StartsWith('\\')) { '\\?\UNC\' + $fullPath.Substring(2) }
+                    else { '\\?\' + $fullPath }
+                }
                 $moveFileReplaceExisting = 0x1
                 $moveFileWriteThrough = 0x8
                 $replaced = $false
                 $nativeError = 0
                 foreach ($attempt in 1..40) {
                     if ([NLink.FileTransferEvidenceNative]::MoveFileEx(
-                            $temporaryPath,
-                            $Path,
+                            $nativePaths[0],
+                            $nativePaths[1],
                             ($moveFileReplaceExisting -bor $moveFileWriteThrough))) {
                         $replaced = $true
                         break
