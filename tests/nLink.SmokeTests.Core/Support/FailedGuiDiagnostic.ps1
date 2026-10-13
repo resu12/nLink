@@ -17,7 +17,7 @@ Invoke-Expression $launch
 $analysis=Definition $runner 'Invoke-RouteAcceptanceRetainedAnalysis'
 $analysis=$analysis.Replace("'.\tools\FileTransfer-Ops.ps1'","(Join-Path `$script:moduleRoot 'tests/nLink.SmokeTests.Core/Support/FailedGuiDiagnosticAnalyzer.ps1')")
 if(-not $LegacyAnalyzer){$analysis=$analysis.Replace("`$startInfo.FileName = 'powershell'","`$startInfo.FileName = (Get-Process -Id `$PID).Path")}
-$analysis=$analysis.Replace('$analysisTimeoutSeconds = 1800','$analysisTimeoutSeconds = if($env:NLINK_FAILED_DIAGNOSTIC_TEST_OUTCOME -ceq ''timeout''){5}else{30}').Replace('$process.WaitForExit(5000)','$process.WaitForExit(50)')
+$analysis=$analysis.Replace('$analysisTimeoutSeconds = 3600','$analysisTimeoutSeconds = if($env:NLINK_FAILED_DIAGNOSTIC_TEST_OUTCOME -ceq ''timeout''){5}else{30}').Replace('$process.WaitForExit(5000)','$process.WaitForExit(50)')
 Invoke-Expression $analysis
 function Write-RouteAcceptanceFakeAuthoritativeSnapshotEvidence {param($ArtifactDir)}
 function Test-RouteAcceptanceRetainedAnalysisCompletedProofArtifacts {param($ArtifactDir,$LiveRouteProofMode) return $true}

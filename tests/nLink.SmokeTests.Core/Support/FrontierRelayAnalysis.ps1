@@ -10,7 +10,7 @@ foreach($name in @('ConvertTo-RouteAcceptanceInt','Read-RouteAcceptanceKeyValueA
     if($definition.Count -ne 1) {throw ('Ambiguous analysis function: '+$name)}
     $text=$definition[0].Extent.Text
     if($name -ceq 'Invoke-RouteAcceptanceRetainedAnalysis') {
-        if($text -cnotmatch '\$analysisTimeoutSeconds = 1800' -or $text -cnotmatch 'while \(-not \$process.WaitForExit\(5000\)\)') {throw 'Original analysis deadline changed'}
+        if($text -cnotmatch '\$analysisTimeoutSeconds = 3600' -or $text -cnotmatch 'while \(-not \$process.WaitForExit\(5000\)\)') {throw 'Original analysis deadline changed'}
         $text=$text.Replace('$startInfo.FileName = ''powershell''','$startInfo.FileName = (Get-Process -Id $PID).Path')
         $text=$text.Replace('$startInfo.UseShellExecute = $false',"`$startInfo.UseShellExecute = `$false`n`$startInfo.CreateNoWindow = `$true")
         $text=$text.Replace("Join-Path (Split-Path -Parent `$PSScriptRoot) 'tools/FileTransferOps/LocalRetainedSourceRequest.ps1'","Join-Path `$script:relayRepoRoot 'tools/FileTransferOps/LocalRetainedSourceRequest.ps1'")

@@ -25,7 +25,8 @@ foreach($name in @('Read-TunaGuiReportValue','Write-TunaGuiRetainedAnalysisTimeo
 foreach($pair in @(@($route,'Invoke-RouteAcceptanceRetainedAnalysis'),@($wrapper,'Invoke-TunaGuiRetainedAnalysis'))) {
     $definition=Definition $pair[0] $pair[1]; $text=$definition.Extent.Text
     $deadline=@($definition.FindAll({param($n) $n -is [Management.Automation.Language.AssignmentStatementAst] -and $n.Left.Extent.Text -ceq '$analysisTimeoutSeconds'},$true))
-    if($deadline.Count -ne 1 -or $deadline[0].Right.Extent.Text -cne '1800' -or $text -cnotmatch 'while \(-not \$process.WaitForExit\(5000\)\)') { throw 'Original retained watchdog changed' }
+    $expectedWatchdog=if($pair[1] -ceq 'Invoke-RouteAcceptanceRetainedAnalysis') {'3600'} else {'1800'}
+    if($deadline.Count -ne 1 -or $deadline[0].Right.Extent.Text -cne $expectedWatchdog -or $text -cnotmatch 'while \(-not \$process.WaitForExit\(5000\)\)') { throw 'Original retained watchdog changed' }
     $text=$text.Replace($deadline[0].Extent.Text,'$analysisTimeoutSeconds = 5').Replace('while (-not $process.WaitForExit(5000))','while (-not $process.WaitForExit(25))')
     $text=$text.Replace('$startInfo.UseShellExecute = $false',"`$startInfo.UseShellExecute = `$false`n`$startInfo.CreateNoWindow = `$true")
     $loader="Join-Path (Split-Path -Parent `$PSScriptRoot) 'tools/FileTransferOps/LocalRetainedSourceRequest.ps1'"
@@ -80,4 +81,4 @@ try {
         }
     }
 } finally { Set-Location -LiteralPath $originalLocation.Path }
-'retained-writer-binding='+(@{Cases=$rows.ToArray();ProductionWatchdogSeconds=1800;TestWatchdogSeconds=5;AuthorityEvaluations=0;LiveExport=$false} | ConvertTo-Json -Depth 5 -Compress)
+'retained-writer-binding='+(@{Cases=$rows.ToArray();ProductionWatchdogSeconds=@{Wrapper=1800;RouteAcceptance=3600};TestWatchdogSeconds=5;AuthorityEvaluations=0;LiveExport=$false} | ConvertTo-Json -Depth 5 -Compress)

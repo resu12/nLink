@@ -19,7 +19,7 @@ foreach($name in @('ConvertTo-RouteAcceptanceInt','Read-RouteAcceptanceKeyValueA
     $text=$text.Replace('Join-Path $PSScriptRoot ''FileTransferOps/LocalGuiWriterRequest.ps1''',
         'Join-Path $script:moduleRoot ''tools/FileTransferOps/LocalGuiWriterRequest.ps1''')
     if($name -ceq 'Invoke-RouteAcceptanceRetainedAnalysis') {
-        if($text -notmatch '\$analysisTimeoutSeconds = 1800') { throw 'Production watchdog changed' }
+        if($text -notmatch '\$analysisTimeoutSeconds = 3600') { throw 'Production watchdog changed' }
         $text=$text.Replace('$startInfo.FileName = ''powershell''','$startInfo.FileName = (Get-Process -Id $PID).Path')
         $text=$text.Replace('$startInfo.UseShellExecute = $false','$startInfo.UseShellExecute = $false; $startInfo.CreateNoWindow = $true')
         if($LiveScaleFixture -or $ObservePrimary) {
@@ -207,6 +207,6 @@ if($PersistenceMode -cne 'off' -and $publication.TryPersistForAttempt($output,$R
 if([IO.Directory]::GetFiles($output,'filetransfer-local-publication-diagnostic.json.*.tmp').Length -ne 0) { throw 'Owned staging file leaked' }
 [IO.File]::WriteAllText((Join-Path $output 'adopted-offline-publication.json'),$payload)
 $result=[ordered]@{WholeWrapperMain=$true;PrimarySelectedSeededFailure=(-not $ReceiveFixture);RealReports=$true;Adopted=$true;Status=$receipt.status
-    Persistence=$PersistenceMode;OriginalRuntimeProofRejection=$true;ReceiptWrites=1;SourceHashes=2;SourceCounts=2;SyntheticEvents=0;ProductionWatchdogSeconds=1800;Live=$false}
+    Persistence=$PersistenceMode;OriginalRuntimeProofRejection=$true;ReceiptWrites=1;SourceHashes=2;SourceCounts=2;SyntheticEvents=0;ProductionWatchdogSeconds=3600;Live=$false}
 [IO.File]::WriteAllText((Join-Path $output 'positive-integration-result.json'),($result | ConvertTo-Json))
 'positive-integration='+($result | ConvertTo-Json -Compress)

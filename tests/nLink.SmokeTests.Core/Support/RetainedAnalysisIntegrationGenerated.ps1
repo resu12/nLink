@@ -17,7 +17,7 @@ foreach($name in @('ConvertTo-RouteAcceptanceInt','Read-RouteAcceptanceKeyValueA
     $text=$text.Replace("Join-Path `$PSScriptRoot 'FileTransferOps/LocalGuiWriterRequest.ps1'",
         "Join-Path `$script:moduleRoot 'tools/FileTransferOps/LocalGuiWriterRequest.ps1'")
     if($name -ceq 'Invoke-RouteAcceptanceRetainedAnalysis') {
-        if($text -notmatch '\$analysisTimeoutSeconds = 1800') { throw 'Production watchdog changed' }
+        if($text -notmatch '\$analysisTimeoutSeconds = 3600') { throw 'Production watchdog changed' }
         $text=$text.Replace("`$startInfo.FileName = 'powershell'","`$startInfo.FileName = (Get-Process -Id `$PID).Path")
         $text=$text.Replace('$startInfo.UseShellExecute = $false',"`$startInfo.UseShellExecute = `$false`n`$startInfo.CreateNoWindow = `$true")
         $needle='$private:localAdopted = $private:localAdoption.Take($private:localTerminalReceipt)'
@@ -87,7 +87,7 @@ $stages=[IO.File]::ReadAllText((Join-Path $output 'filetransfer-retained-analysi
 if($stages.synthetic_event_count -ne 0 -or $stages.compact_mode -ne 1) { throw 'Primary input was augmented or changed mode' }
 if($script:receiptWrites -ne 1 -or $script:sourceHashes -ne 2 -or $script:sourceCounts -ne 2) { throw 'Original receipt/source traversal counts changed' }
 $result=[ordered]@{RelayAccepted=$true;RealReports=$true;AdoptionAttempted=$true;Adopted=$false;Status=$receipt.status
-    FirstFailure='(none)';PrimaryGate='FAIL_PROTOCOL_OR_INTEGRITY';ReceiptWrites=1;SourceHashes=2;SourceCounts=2;ProductionWatchdogSeconds=1800
+    FirstFailure='(none)';PrimaryGate='FAIL_PROTOCOL_OR_INTEGRITY';ReceiptWrites=1;SourceHashes=2;SourceCounts=2;ProductionWatchdogSeconds=3600
     SyntheticEvents=0;LiveRun=$false;WholeWrapperMain=$false}
 [IO.File]::WriteAllText((Join-Path $output 'integration-result.json'),($result | ConvertTo-Json))
 'retained-analysis-integration='+($result | ConvertTo-Json -Compress)

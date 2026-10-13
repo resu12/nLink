@@ -26,7 +26,8 @@ foreach($name in @('Read-TunaGuiReportValue','Write-TunaGuiRetainedAnalysisTimeo
 foreach($pair in @(@($routeAst,'Invoke-RouteAcceptanceRetainedAnalysis'),@($wrapperAst,'Invoke-TunaGuiRetainedAnalysis'))) {
     $definition=Read-ParentDefinition $pair[0] $pair[1]; $text=$definition.Extent.Text
     $deadline=@($definition.FindAll({param($n) $n -is [Management.Automation.Language.AssignmentStatementAst] -and $n.Left.Extent.Text -ceq '$analysisTimeoutSeconds'},$true))
-    if($deadline.Count -ne 1 -or $deadline[0].Right.Extent.Text -cne '1800' -or $text -cnotmatch 'while \(-not \$process.WaitForExit\(5000\)\)' -or
+    $expectedWatchdog=if($pair[1] -ceq 'Invoke-RouteAcceptanceRetainedAnalysis') {'3600'} else {'1800'}
+    if($deadline.Count -ne 1 -or $deadline[0].Right.Extent.Text -cne $expectedWatchdog -or $text -cnotmatch 'while \(-not \$process.WaitForExit\(5000\)\)' -or
         $text -cmatch 'TryAdoptWhenOfferedAsync') {throw 'Original watchdog changed or short launch-time offer wait introduced'}
     if($retainedCase -ceq 'timeout') {$text=$text.Replace($deadline[0].Extent.Text,'$analysisTimeoutSeconds = 5')}
     $text=$text.Replace('$startInfo.FileName = ''powershell''','$startInfo.FileName = (Get-Process -Id $PID).Path')

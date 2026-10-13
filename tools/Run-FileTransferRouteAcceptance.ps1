@@ -7165,7 +7165,7 @@ function Invoke-RouteAcceptanceRetainedAnalysis {
         $analysisStderrPath = Join-Path $ArtifactDir 'filetransfer-retained-analysis.stderr.txt'
         $analysisDiagnosticsPath = Join-Path $ArtifactDir 'filetransfer-retained-analysis-diagnostics.json'
         # Offline evidence analysis budget; GUI and transfer deadlines are independent.
-        $analysisTimeoutSeconds = 1800
+        $analysisTimeoutSeconds = 3600
         $startedUtc = [DateTimeOffset]::UtcNow
 
         $startInfo = [System.Diagnostics.ProcessStartInfo]::new()

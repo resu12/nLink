@@ -39,12 +39,13 @@ foreach($pair in @(@($route,'Invoke-RouteAcceptanceRetainedAnalysis'),@($wrapper
     $definition=Definition $pair[0] $pair[1]
     $text=$definition.Extent.Text
     # Scale only the local test watchdog and polling interval. Pin the original
-    # 1800s value and retain the actual exit, cancellation, receipt and finally
+    # owner-specific value and retain the actual exit, cancellation, receipt and finally
     # branches. The controlled child and all its files stay in ArtifactRoot.
     $deadline=@($definition.FindAll({param($node)
         $node -is [Management.Automation.Language.AssignmentStatementAst] -and $node.Left.Extent.Text -ceq '$analysisTimeoutSeconds'
     },$true))
-    if($deadline.Count -ne 1 -or $deadline[0].Right.Extent.Text -cne '1800') { throw 'Production watchdog changed' }
+    $expectedWatchdog=if($pair[1] -ceq 'Invoke-RouteAcceptanceRetainedAnalysis') {'3600'} else {'1800'}
+    if($deadline.Count -ne 1 -or $deadline[0].Right.Extent.Text -cne $expectedWatchdog) { throw 'Production watchdog changed' }
     if(([regex]::Matches($text,'while \(-not \$process.WaitForExit\(5000\)\)')).Count -ne 1) { throw 'Production exit wait changed' }
     $testWatchdog=if($slotTransport -or $sourceRequestMode) { 5 } else { 2 }
     $text=$text.Replace($deadline[0].Extent.Text,('$analysisTimeoutSeconds = '+$testWatchdog))
@@ -262,5 +263,5 @@ finally {
     $env:NLINK_FILETRANSFER_ACCEPTANCE_RUN_ID=$originalRun
     $env:NLINK_FILETRANSFER_SCENARIO_RUN_ID=$originalScenario
 }
-'local-carrier-handoff='+ (ConvertTo-Json -InputObject ([ordered]@{Cases=$rows.Count;Rows=@($rows.ToArray());ProductionWatchdogSeconds=1800
+'local-carrier-handoff='+ (ConvertTo-Json -InputObject ([ordered]@{Cases=$rows.Count;Rows=@($rows.ToArray());ProductionWatchdogSeconds=@{Wrapper=1800;RouteAcceptance=3600}
     TestWatchdogSeconds=$testWatchdog;ProductionCarrierWired=$false;AuthorityEvaluations=0;PreExitHandoffGate='not_satisfied'}) -Depth 6 -Compress)

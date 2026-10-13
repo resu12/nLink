@@ -20,7 +20,8 @@ foreach($name in @('Read-TunaGuiReportValue','Write-TunaGuiRetainedAnalysisTimeo
 foreach($pair in @(@($route,'Invoke-RouteAcceptanceRetainedAnalysis'),@($wrapper,'Invoke-TunaGuiRetainedAnalysis'))) {
     $definition=Definition $pair[0] $pair[1]; $text=$definition.Extent.Text
     $deadline=@($definition.FindAll({param($n) $n -is [Management.Automation.Language.AssignmentStatementAst] -and $n.Left.Extent.Text -ceq '$analysisTimeoutSeconds'},$true))
-    if($deadline.Count -ne 1 -or $deadline[0].Right.Extent.Text -cne '1800') { throw 'Original watchdog changed' }
+    $expectedWatchdog=if($pair[1] -ceq 'Invoke-RouteAcceptanceRetainedAnalysis') {'3600'} else {'1800'}
+    if($deadline.Count -ne 1 -or $deadline[0].Right.Extent.Text -cne $expectedWatchdog) { throw 'Original watchdog changed' }
     $text=$text.Replace($deadline[0].Extent.Text,'$analysisTimeoutSeconds = 15').Replace('while (-not $process.WaitForExit(5000))','while (-not $process.WaitForExit(25))')
     $text=$text.Replace('$startInfo.UseShellExecute = $false',"`$startInfo.UseShellExecute = `$false`n`$startInfo.CreateNoWindow = `$true")
     $loader="Join-Path (Split-Path -Parent `$PSScriptRoot) 'tools/FileTransferOps/LocalRetainedSourceRequest.ps1'"
@@ -152,5 +153,5 @@ try {
     } }
 } finally { Set-Location -LiteralPath $originalLocation.Path }
 'publication-adoption='+([ordered]@{Cases=$rows.Count;Adopted=@($rows | Where-Object Adopted).Count;AuthorityEvaluationsPerWorker=2
-    OriginalReceiptWritesPerParent=1;OriginalSourceHashesPerParent=2;OriginalSourceCountsPerParent=2;ProductionWatchdogSeconds=1800
+    OriginalReceiptWritesPerParent=1;OriginalSourceHashesPerParent=2;OriginalSourceCountsPerParent=2;ProductionWatchdogSeconds=@{Wrapper=1800;RouteAcceptance=3600}
     TestWatchdogSeconds=15;LiveExport=$false;Reports='controlled_lifecycle_with_original_generated_catalog'} | ConvertTo-Json -Compress)

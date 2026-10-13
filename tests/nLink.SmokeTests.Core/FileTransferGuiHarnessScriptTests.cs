@@ -11356,20 +11356,21 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
     }
 
     [Theory]
-    [InlineData("Run-FileTransferTunaGuiSmoke.ps1", "TunaGui", "Invoke-TunaGuiRetainedAnalysisBestEffort", "powershell")]
-    [InlineData("Run-FileTransferRouteAcceptance.ps1", "RouteAcceptance", "Select-RouteAcceptanceMeasuredFallbackLogSlice", "powershell")]
-    [InlineData("Run-FileTransferTunaGuiSmoke.ps1", "TunaGui", "Invoke-TunaGuiRetainedAnalysisBestEffort", "pwsh")]
-    [InlineData("Run-FileTransferRouteAcceptance.ps1", "RouteAcceptance", "Select-RouteAcceptanceMeasuredFallbackLogSlice", "pwsh")]
-    public async Task RetainedAnalysis_DefaultWatchdogIs1800SecondsAndTimeoutRemainsFailClosed(
+    [InlineData("Run-FileTransferTunaGuiSmoke.ps1", "TunaGui", "Invoke-TunaGuiRetainedAnalysisBestEffort", "powershell", 1800)]
+    [InlineData("Run-FileTransferRouteAcceptance.ps1", "RouteAcceptance", "Select-RouteAcceptanceMeasuredFallbackLogSlice", "powershell", 3600)]
+    [InlineData("Run-FileTransferTunaGuiSmoke.ps1", "TunaGui", "Invoke-TunaGuiRetainedAnalysisBestEffort", "pwsh", 1800)]
+    [InlineData("Run-FileTransferRouteAcceptance.ps1", "RouteAcceptance", "Select-RouteAcceptanceMeasuredFallbackLogSlice", "pwsh", 3600)]
+    public async Task RetainedAnalysis_DefaultWatchdogMatchesOwnerAndTimeoutRemainsFailClosed(
         string scriptName,
         string scope,
         string nextFunctionName,
-        string host)
+        string host,
+        int timeoutSeconds)
     {
         var scriptText = File.ReadAllText(Path.Combine(FindRepoRoot(), "tools", scriptName));
         var body = ExtractPowerShellFunctionBody(scriptText, $"Invoke-{scope}RetainedAnalysis", nextFunctionName);
 
-        Assert.Contains("$analysisTimeoutSeconds = 1800", body, StringComparison.Ordinal);
+        Assert.Contains($"$analysisTimeoutSeconds = {timeoutSeconds}", body, StringComparison.Ordinal);
         Assert.Single(Regex.Matches(body, @"\$analysisTimeoutSeconds\s*="));
         Assert.Contains("$deadlineUtc = $startedUtc.AddSeconds($analysisTimeoutSeconds)", body, StringComparison.Ordinal);
         Assert.Contains("while (-not $process.WaitForExit(5000))", body, StringComparison.Ordinal);
