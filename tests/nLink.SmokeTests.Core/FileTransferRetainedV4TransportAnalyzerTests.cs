@@ -1,9 +1,12 @@
 using System.Diagnostics;
 using System.Globalization;
+using System.Reflection;
 using System.Text;
 using System.Text.RegularExpressions;
 using NLink.App.Views;
 using NLink.Core.Configuration;
+using NLink.Core.FileTransfer;
+using NLink.Core.Logging;
 
 namespace NLink.SmokeTests;
 
@@ -588,11 +591,23 @@ public sealed class FileTransferRetainedV4TransportAnalyzerTests : FileTransferO
     }
 
     [Theory]
-    [InlineData(false)]
-    [InlineData(true)]
+    [InlineData(false, null, false)]
+    [InlineData(true, null, false)]
+    [InlineData(true, "runtime_generation", true)]
+    [InlineData(true, "terminal_generation", true)]
+    [InlineData(true, "route_publication_generation", true)]
+    [InlineData(true, "route_commit_generation", true)]
+    [InlineData(true, "bridge_decision_generation", true)]
+    [InlineData(true, "runtime_generation", false)]
+    [InlineData(true, "terminal_generation", false)]
+    [InlineData(true, "route_publication_generation", false)]
+    [InlineData(true, "route_commit_generation", false)]
+    [InlineData(true, "bridge_decision_generation", false)]
     [Trait("RetainedV4Suite", "FrontierRepairLifecycle")]
     public async Task AnalyzeRetained_RegularV4StallRecoveredByExactTunaProgress_DoesNotRemainUnresolved(
-        bool compact)
+        bool compact,
+        string? alteredField,
+        bool removeField)
     {
         if (!OperatingSystem.IsWindows())
         {
@@ -602,8 +617,47 @@ public sealed class FileTransferRetainedV4TransportAnalyzerTests : FileTransferO
         const string transferId = "transfer_regular_v4_tuna_progress";
         const string repairKey = "96:12:96:12";
         const string authority = "fta2-repair_replay-0123456789abcdef01234567";
-        const string writer = "writer_a";
-        const string scope =
+        var leg = new FileTransferLeg
+        {
+            LegId = "frontier-stall-log-leg",
+            Generation = 1,
+            RouteSelection = FileTransferRouteResolver.Resolve(FileTransferRoute.RegularNknV4Fast),
+            ProtocolVersion = 4,
+            LiveRouteEpochId = 0,
+            TransportEpochId = 0,
+            StartedUtc = DateTimeOffset.UtcNow,
+        };
+        var owner = new RuntimeOwnerToken("sess_a", transferId, FileTransferDirection.Inbound,
+            FileTransferRoute.RegularNknV4Fast, "regular_nkn_v4_fast", 4, 0, 1, 0,
+            "regular_nkn_v4_fast", "initial_route");
+        var publication = new RoutePublicationToken("sess_a", transferId, FileTransferDirection.Inbound,
+            owner, owner.Route, owner.RouteToken, 4, 0, 1, 0, 1, null,
+            owner.Route, 4, FileTransferTransportKind.RegularNkn, 1,
+            FileTransferCoordinatorActionKind.RoutePublication, "accepted");
+        var bridgeDecision = new BridgeRecoveryDecision(true, BridgeRecoveryKind.ReceiveRecoveryRequest,
+            "accepted", 2, owner.Route, 4, 0, 1, 0, 1, 0, 0, owner);
+        var logStart = CoreSmokeTestsBase.GetOperationalLogLength();
+        typeof(SessionFileTransferService).GetMethod(
+            "LogFileTransferRegularV4FrontierRepairStalled", BindingFlags.Static | BindingFlags.NonPublic)!
+            .Invoke(null, [FileTransferDirection.Inbound, transferId, "sess_a", leg,
+                owner, publication, bridgeDecision, repairKey,
+                "repeated_frontier_repair_without_progress", 96, 95, 12, 2, 1716L]);
+        var stallLine = Assert.Single(CoreSmokeTestsBase.ReadOperationalLogTail(logStart)
+            .Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries)
+            .Where(line => line.Contains("event=filetransfer_regular_v4_frontier_repair_stalled;", StringComparison.Ordinal)));
+        foreach (var field in new[] { "runtime_generation=1", "terminal_generation=0",
+                     "route_publication_generation=1", "route_commit_generation=0", "bridge_decision_generation=2" })
+        {
+            Assert.Contains($"; {field};", stallLine, StringComparison.Ordinal);
+        }
+        var writer = Regex.Match(stallLine, @"(?:^|; )log_writer_id=([^;]+)").Groups[1].Value;
+        Assert.NotEmpty(writer);
+        if (alteredField is not null)
+        {
+            stallLine = Regex.Replace(stallLine, $@"; {Regex.Escape(alteredField)}=[^;]+",
+                removeField ? "" : $"; {alteredField}=99");
+        }
+        var scope =
             $"session_id=sess_a; transfer_id={transferId}; direction=inbound; " +
             "route=regular_nkn_v4_fast; protocol_version=4; live_route_epoch=0; " +
             "runtime_generation=1; terminal_generation=0; leg_generation=1; " +
@@ -611,14 +665,14 @@ public sealed class FileTransferRetainedV4TransportAnalyzerTests : FileTransferO
             $"route_publication_generation=1; route_commit_generation=0; log_writer_id={writer}";
         var lines = new[]
         {
-            LogLine($"event=filetransfer_regular_v4_frontier_repair_stalled; {scope}; repair_request_key={repairKey}; target_transport=regular_nkn; reason=repeated_frontier_repair_without_progress; frontier_chunk_index=96; durable_received_highest_chunk_index=95; requested_chunk_count=12", 1),
+            LogLine(stallLine[stallLine.IndexOf("event=", StringComparison.Ordinal)..], 1),
             LogLine($"event=filetransfer_regular_v4_frontier_repair_settlement_accepted; {scope}; authority_id={authority}; successor_authority_id=(none); successor_install_generation=4; repair_request_key={repairKey}; frontier_chunk_index=96; requested_chunk_count=12; outcome=StaleRejected; settlement_reason=tuna_activation_pause_tuna_activation_negotiating; settlement_disposition=accepted; cleared_pressure=1", 2),
             LogLine($"event=filetransfer_regular_v4_frontier_repair_pressure_settlement_apply_decided; session_id=sess_a; transfer_id={transferId}; direction=inbound; authority_id=[redacted]; install_generation=4; settlement_outcome=StaleRejected; apply_status=Applied; current_authority_cleared=1; retained_predecessor_cleared=0; log_writer_id={writer}", 3),
             LogLine($"event=filetransfer_regular_v4_frontier_repair_pressure_binding_retired; {scope}; authority_id={authority}; repair_request_key={repairKey}; install_generation=4; install_boundary=settlement", 4),
             LogLine($"event=filetransfer_route_transition_committed; session_id=sess_a; transfer_id={transferId}; direction=inbound; transition_kind=RegularV4ToTunaV4; source_route=regular_nkn_v4_fast; source_protocol_version=4; source_live_route_epoch=0; source_runtime_generation=1; source_terminal_generation=0; source_leg_generation=1; source_route_publication_generation=1; target_route=file_tuna_v4; target_protocol_version=4; target_transport=tuna; target_live_route_epoch=1; target_runtime_generation=2; target_leg_generation=2; decision_status=Committed; log_writer_id={writer}", 5),
             LogLine($"event=filetransfer_file_tuna_v4_frontier_repair_progress_observed; session_id=sess_a; transfer_id={transferId}; direction=inbound; repair_request_key={repairKey}; route=file_tuna_v4; protocol_version=4; live_route_epoch=1; leg_generation=2; transport_epoch=0; bridge_recovery_generation=0; committed_frontier_before=96; committed_frontier_after=99; reason=frontier_advanced; log_writer_id={writer}", 6),
             LogLine($"event=filetransfer_v4_repair_cleared; session_id=sess_a; transfer_id={transferId}; repair_request_key={repairKey}; reason=frontier_advanced; log_writer_id={writer}", 7)
-        };
+        }.Select(SensitiveDataRedactor.Redact).ToArray();
 
         var result = await RunAnalyzeFixtureAsync(
             lines,
@@ -634,8 +688,9 @@ public sealed class FileTransferRetainedV4TransportAnalyzerTests : FileTransferO
         var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
         Assert.Equal("1", verdict["regular_v4_frontier_repair_stalled_raw_count"]);
         Assert.Equal("1", verdict["regular_v4_frontier_repair_stalled_distinct_count"]);
-        Assert.Equal("1", verdict["regular_v4_frontier_repair_stalled_recovered_count"]);
-        Assert.Equal("0", verdict["regular_v4_frontier_repair_stalled_unresolved_count"]);
+        Assert.Equal(alteredField is null ? "1" : "0", verdict["regular_v4_frontier_repair_stalled_recovered_count"]);
+        Assert.Equal(alteredField is null ? "0" : "1", verdict["regular_v4_frontier_repair_stalled_unresolved_count"]);
+        Assert.Equal(alteredField is null ? "pass" : "fail", verdict["regular_v4_frontier_repair_stalled_verdict"]);
     }
 
     [Theory]

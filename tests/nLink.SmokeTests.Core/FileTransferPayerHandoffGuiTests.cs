@@ -8,6 +8,103 @@ public sealed class FileTransferPayerHandoffGuiTests : FileTransferOpsScriptsTes
     [Theory]
     [InlineData("powershell")]
     [InlineData("pwsh")]
+    public async Task PayerHandoffGui_FirstHelperOffRequiresCurrentReceiverPayload(string host)
+    {
+        if (!OperatingSystem.IsWindows()) return;
+        var result = await RunPowerShellScriptTextAsync("""
+            param([string]$RepoRoot)
+            $ErrorActionPreference = 'Stop'
+            Set-StrictMode -Version Latest
+            $tokens = $null; $errors = $null
+            $ast = [Management.Automation.Language.Parser]::ParseFile((Join-Path $RepoRoot 'tools/GuiSmoke-Windows.ps1'), [ref]$tokens, [ref]$errors)
+            if ($errors.Count) { throw ($errors | Out-String) }
+            foreach ($name in @('ConvertFrom-GuiSmokeSemicolonFields', 'Get-GuiSmokeFieldValue', 'ConvertTo-GuiSmokeInt',
+                    'Get-GuiSmokeInt64FieldValue', 'Test-GuiSmokeFieldEquals', 'Get-TunaGuiFaultAdmissionScopeKey',
+                    'Get-TunaGuiFaultAdmissionTargetKey', 'Test-TunaGuiPeerVisibleFileTunaV4DataPathLine',
+                    'Get-TunaGuiPeerVisibleFileTunaV4PayloadBytes', 'Wait-TunaGuiAcceleratedFilePayloadBeforeFault')) {
+                $definition = $ast.Find({param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -ceq $name}, $true)
+                Invoke-Expression $definition.Extent.Text.Replace('[System.Diagnostics.Stopwatch]::StartNew()', '$script:Clock')
+            }
+            function Sync-GuiSmokeAppLogLedger {}
+            function Start-Sleep { param($Milliseconds) $script:Clock.ElapsedMilliseconds += 10 }
+            function Get-GuiSmokeLogLedgerProgressSnapshotAfterBookmark {
+                param($State, $Bookmark)
+                if ($Bookmark -ne 12) { throw 'activation bookmark changed' }
+                $script:poll++
+                $script:frames
+                if ($script:addReceived -and $script:poll -ge 2) { $received.Replace('payload_bytes=1048576', 'payload_bytes=524288') }
+                if ($script:addReceived -and $script:poll -ge 3) { $received.Replace('payload_bytes=1048576', 'payload_bytes=524288') + '; second_frame=1' }
+            }
+            $script:GuiSmokeAppLogLedger = [pscustomobject]@{}
+            $scope = 'session_id=s; transfer_id=t; direction=inbound; log_writer_id=receiver; route=file_tuna_v4; protocol_version=4; live_route_epoch=1; runtime_generation=2; terminal_generation=0; leg_generation=2; route_publication_generation=2; route_commit_generation=1'
+            $publication = ConvertFrom-GuiSmokeSemicolonFields -Message $scope
+            $received = "event=filetransfer_tuna_data_path_peer_visible; $scope; target_route=file_tuna_v4; target_protocol_version=4; target_transport=tuna; actual_transport=tuna; frame_type=filetransfer.chunk_batch.v4; payload_bytes=1048576; raw_payload_bytes=1048576; proof_direction=receive; receive_disposition=dispatch_entered"
+            $decoys = @(
+                $received.Replace('proof_direction=receive', 'proof_direction=send'),
+                $received.Replace('direction=inbound', 'direction=outbound'),
+                $received.Replace('receive_disposition=dispatch_entered', 'receive_disposition=rejected_before_dispatch'),
+                $received.Replace('filetransfer.chunk_batch.v4', 'filetransfer.runtime_unlock.precommit_probe'),
+                $received.Replace('actual_transport=tuna', 'actual_transport=regular_nkn'),
+                $received.Replace('target_protocol_version=4', 'target_protocol_version=6'),
+                $received.Replace('payload_bytes=1048576', 'payload_bytes=0'))
+            foreach ($field in @('session_id', 'transfer_id', 'log_writer_id', 'route', 'protocol_version',
+                    'live_route_epoch', 'runtime_generation', 'terminal_generation', 'leg_generation',
+                    'route_publication_generation', 'route_commit_generation')) {
+                $decoys += [regex]::Replace($received, "; $field=[^;]+", "; $field=99")
+                $decoys += [regex]::Replace($received, "; $field=[^;]+", '')
+            }
+            foreach ($decoy in $decoys) {
+                $script:Clock = [pscustomobject]@{ElapsedMilliseconds=0}; $script:poll=0
+                $script:frames = @($decoy); $script:addReceived = $false
+                $rejected = $false
+                try { [void](Wait-TunaGuiAcceleratedFilePayloadBeforeFault -Bookmark 12 -ReceiverPublication $publication -MinimumTotalPayloadBytes 1048576 -TimeoutMs 30 -PollIntervalMs 10) }
+                catch {
+                    if ($_.Exception.Message -notlike 'Timed out waiting for Tuna accelerated bulk file payload*') { throw }
+                    $rejected = $true
+                }
+                if (-not $rejected) { throw "non-receiver or mismatched payload admitted switch-off: $decoy" }
+            }
+            $script:Clock = [pscustomobject]@{ElapsedMilliseconds=0}; $script:poll=0
+            $script:frames = $decoys; $script:addReceived = $true
+            $line = Wait-TunaGuiAcceleratedFilePayloadBeforeFault -Bookmark 12 -ReceiverPublication $publication -MinimumTotalPayloadBytes 1048576 -TimeoutMs 100 -PollIntervalMs 10
+            if ($script:poll -ne 3 -or $line -notlike '*second_frame=1') { throw 'received payload was recounted or did not satisfy the unchanged threshold' }
+            foreach ($missingPublication in @($null, @{}, @{direction='outbound'})) {
+                $rejected = $false
+                try { [void](Wait-TunaGuiAcceleratedFilePayloadBeforeFault -Bookmark 12 -ReceiverPublication $missingPublication -TimeoutMs 30) }
+                catch { $rejected = $true }
+                if (-not $rejected) { throw 'missing receiver publication fell back to sender evidence' }
+            }
+            # Execute the actual off-step gate, with only the payload wait stubbed.
+            $cycle = $ast.Find({param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -ceq 'Invoke-FileTransferTunaHandoffFallbackCycle'}, $true)
+            $gate = @($cycle.FindAll({param($n) $n -is [Management.Automation.Language.IfStatementAst] -and
+                $n.Clauses[0].Item1.Extent.Text -ceq '$stepIndex -eq 0'}, $true))
+            if ($gate.Count -ne 1) { throw 'off-step payload gate missing or duplicated' }
+            function Wait-TunaGuiAcceleratedFilePayloadBeforeFault {
+                param($Bookmark, $ReceiverPublication, $MinimumTotalPayloadBytes, $MinimumFramePayloadBytes, $TimeoutMs, $PollIntervalMs)
+                if ($Bookmark -ne 12 -or -not [object]::ReferenceEquals($ReceiverPublication, $publication) -or
+                    $MinimumTotalPayloadBytes -ne 1048576 -or $MinimumFramePayloadBytes -ne 16384 -or $TimeoutMs -ne 90000) { throw 'receiver gate scope or limits changed' }
+                $script:waits++
+                return $received
+            }
+            $faultAdmissionTracker = [pscustomobject]@{AuthoritativeTunaProjection=[pscustomobject]@{Inbound=[pscustomobject]@{Publication=[pscustomobject]@{Fields=$publication}}}}
+            $RouteMode='live-regular-activation-cycle'; $sequence=@('on','off','on','off'); $lastActivationPayloadBookmark=12
+            $script:waits=0; $PayerMode='helper-to-helpee'; $stepIndex=1; $stepNumber=2
+            Invoke-Expression $gate[0].Extent.Text
+            if ($script:waits -ne 1 -or $progressLine -cne $received) { throw 'first Helper off still skips received-payload wait' }
+            $stepIndex=3; $stepNumber=4
+            Invoke-Expression $gate[0].Extent.Text
+            $PayerMode='helper'; $stepIndex=1; $stepNumber=2
+            Invoke-Expression $gate[0].Extent.Text
+            if ($script:waits -ne 1) { throw 'unrelated switch-off behavior changed' }
+            'PASS'
+            """, [FindRepoRoot()], host);
+        Assert.True(result.ExitCode == 0, result.Stdout + Environment.NewLine + result.Stderr);
+        Assert.Contains("PASS", result.Stdout, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("powershell")]
+    [InlineData("pwsh")]
     public async Task PayerHandoffGui_ImmediateReactivationPrearmsTheFinalOffPayer(string host)
     {
         if (!OperatingSystem.IsWindows()) return;

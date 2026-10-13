@@ -35938,8 +35938,23 @@ function Wait-TunaGuiAcceleratedFilePayloadBeforeFault {
         [int]$TimeoutMs = 60000,
         [long]$MinimumTotalPayloadBytes = 67108864,
         [long]$MinimumFramePayloadBytes = 16384,
-        [int]$PollIntervalMs = 500
+        [int]$PollIntervalMs = 500,
+        [AllowNull()][hashtable]$ReceiverPublication
     )
+
+    $receiverTargetKey = ''
+    if ($PSBoundParameters.ContainsKey('ReceiverPublication')) {
+        if ($null -eq $ReceiverPublication -or
+            (Get-GuiSmokeFieldValue -Fields $ReceiverPublication -Name 'direction') -ne 'inbound' -or
+            (Get-GuiSmokeFieldValue -Fields $ReceiverPublication -Name 'route') -ne 'file_tuna_v4' -or
+            (Get-GuiSmokeFieldValue -Fields $ReceiverPublication -Name 'protocol_version') -ne '4') {
+            throw 'Current inbound file_tuna_v4 publication is required before the payer-handoff payload wait.'
+        }
+        $receiverTargetKey = Get-TunaGuiFaultAdmissionTargetKey -Fields $ReceiverPublication
+        if ([string]::IsNullOrWhiteSpace($receiverTargetKey)) {
+            throw 'Incomplete receiver publication cannot admit the payer-handoff payload wait.'
+        }
+    }
 
     $sw = [System.Diagnostics.Stopwatch]::StartNew()
     $processedLineCount = 0
@@ -35956,6 +35971,16 @@ function Wait-TunaGuiAcceleratedFilePayloadBeforeFault {
             $line = $lines[$lineIndex]
             $payloadBytes = Get-TunaGuiPeerVisibleFileTunaV4PayloadBytes -Line $line
             if ($payloadBytes -ge 0L) {
+                if ($receiverTargetKey -ne '') {
+                    $fields = ConvertFrom-GuiSmokeSemicolonFields -Message $line
+                    if ((Get-TunaGuiFaultAdmissionTargetKey -Fields $fields) -ne $receiverTargetKey -or
+                        (Get-GuiSmokeFieldValue -Fields $fields -Name 'proof_direction') -ne 'receive' -or
+                        (Get-GuiSmokeFieldValue -Fields $fields -Name 'receive_disposition') -ne 'dispatch_entered' -or
+                        (Get-GuiSmokeFieldValue -Fields $fields -Name 'frame_type') -notin @('filetransfer.chunk.v4', 'filetransfer.chunk_batch.v4') -or
+                        (Get-GuiSmokeInt64FieldValue -Fields $fields -Name 'raw_payload_bytes') -le 0L) {
+                        continue
+                    }
+                }
                 $lastFramePayloadBytes = [Math]::Max($lastFramePayloadBytes, $payloadBytes)
                 if ($payloadBytes -ge $MinimumFramePayloadBytes) {
                     $totalPayloadBytes += $payloadBytes
@@ -37254,7 +37279,13 @@ function Invoke-FileTransferTunaHandoffFallbackCycle {
                 elseif ($RouteMode -eq 'live-regular-activation-cycle' -and
                     $stepIndex -gt 0 -and
                     [string]::Equals([string]$sequence[$stepIndex - 1], 'on', [System.StringComparison]::OrdinalIgnoreCase)) {
-                    $progressLine = "[{0}] [INFO] [GuiSmoke] event=filetransfer_tuna_gui_live_multi_toggle_progress_wait_skipped; route_mode={1}; step={2}; action=off; reason=regular_activation_cycle_off_after_live_tuna_epoch" -f ([datetime]::UtcNow.ToString('yyyy-MM-dd HH:mm:ssZ')), $RouteMode, $stepNumber
+                    if ($PayerMode -eq 'helper-to-helpee' -and $stepIndex -eq 1) {
+                        if ($null -eq $lastActivationPayloadBookmark) { throw 'Helper switch-off is missing its activation bookmark.' }
+                        $progressLine = [string](Wait-TunaGuiAcceleratedFilePayloadBeforeFault -Bookmark $lastActivationPayloadBookmark -ReceiverPublication $faultAdmissionTracker.AuthoritativeTunaProjection.Inbound.Publication.Fields -MinimumTotalPayloadBytes 1048576L -MinimumFramePayloadBytes 16384L -TimeoutMs 90000 -PollIntervalMs 25)
+                    }
+                    else {
+                        $progressLine = "[{0}] [INFO] [GuiSmoke] event=filetransfer_tuna_gui_live_multi_toggle_progress_wait_skipped; route_mode={1}; step={2}; action=off; reason=regular_activation_cycle_off_after_live_tuna_epoch" -f ([datetime]::UtcNow.ToString('yyyy-MM-dd HH:mm:ssZ')), $RouteMode, $stepNumber
+                    }
                 }
                 elseif ($RouteMode -eq 'live-multi-toggle' -and $PayerMode -ne 'helper-to-helpee' -and
                     $stepIndex -eq ($sequence.Count - 1) -and
