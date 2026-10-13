@@ -27,9 +27,10 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
 if ($PayerMode -eq 'helper-to-helpee' -and
-    ($RouteMode -ne 'live-multi-toggle' -or $Fault -ne 'switch-off' -or
-     $LiveToggleSequence -notin @('', 'off,on,off'))) {
-    throw 'Helper-to-helpee payer handoff requires live-multi-toggle, switch-off, and off,on,off.'
+    ($Fault -ne 'switch-off' -or -not (
+        ($RouteMode -eq 'live-multi-toggle' -and $LiveToggleSequence -in @('', 'off,on,off')) -or
+        ($RouteMode -eq 'live-regular-activation-cycle' -and $LiveToggleSequence -in @('', 'on,off,on,off'))))) {
+    throw 'Helper-to-helpee payer handoff requires switch-off and either live-multi-toggle with off,on,off or live-regular-activation-cycle with on,off,on,off.'
 }
 
 . (Join-Path $PSScriptRoot 'FileTransferSoak\RetainedAnalysisEvidence.ps1')

@@ -8862,6 +8862,7 @@ function Test-Phase5ScenarioRequiresIsolation {
         'live-switch-off-helpee-64mb',
         'live-switch-off-helper-64mb',
         'helper-to-helpee-payer-handoff-128mb',
+        'regular-v4-helper-to-helpee-payer-handoff-256mb',
         'regular-v4-live-activation-off-on-off-256mb',
         'second-transfer-after-reactivation'
     ) -contains [string]$Scenario.Name
@@ -9356,6 +9357,8 @@ function Invoke-TunaRouteAcceptanceRun {
         [Parameter(Mandatory = $true)][string]$RouteMode,
         [Parameter(Mandatory = $true)][string]$Fault,
         [string]$PayerMode = 'helpee',
+        [ValidateSet('helpee-to-helper', 'helper-to-helpee')]
+        [string]$Direction = 'helpee-to-helper',
         [string]$PayloadSize = '128MiB',
         [string]$LiveToggleSequence = '',
         [string]$LiveProofMode = 'None',
@@ -9387,7 +9390,7 @@ function Invoke-TunaRouteAcceptanceRun {
                 '-PayerMode', $PayerMode,
                 '-RouteMode', $RouteMode,
                 '-Fault', $Fault,
-                '-Direction', 'helpee-to-helper',
+                '-Direction', $Direction,
                 '-PayloadSize', $PayloadSize,
                 '-ArtifactDir', $attemptDir,
                 '-TimeoutSeconds', ([string]$TimeoutSeconds),
@@ -9416,7 +9419,7 @@ function Invoke-TunaRouteAcceptanceRun {
                         -ExePath $ResolvedExePath `
                         -RouteMode $RouteMode `
                         -PayloadSize $PayloadSize `
-                        -Direction 'helpee-to-helper' `
+                        -Direction $Direction `
                         -PayerMode $PayerMode `
                         -Fault $Fault `
                         -LiveToggleSequence $LiveToggleSequence `
@@ -9477,7 +9480,7 @@ function Invoke-TunaRouteAcceptanceRun {
         '-PayerMode', $PayerMode,
         '-RouteMode', $RouteMode,
         '-Fault', $Fault,
-        '-Direction', 'helpee-to-helper',
+        '-Direction', $Direction,
         '-PayloadSize', $PayloadSize,
         '-ArtifactDir', $ArtifactDir,
         '-TimeoutSeconds', ([string]$TimeoutSeconds),
@@ -9558,7 +9561,7 @@ function Invoke-TunaRouteAcceptanceRun {
             -ExePath $ResolvedExePath `
             -RouteMode $RouteMode `
             -PayloadSize $PayloadSize `
-            -Direction 'helpee-to-helper' `
+            -Direction $Direction `
             -PayerMode $PayerMode `
             -Fault $Fault `
             -LiveToggleSequence $LiveToggleSequence `
@@ -9596,6 +9599,8 @@ function New-Phase4RouteAcceptanceScenario {
         [string]$RouteMode = '',
         [string]$Fault = 'none',
         [string]$PayerMode = 'helpee',
+        [ValidateSet('helpee-to-helper', 'helper-to-helpee')]
+        [string]$Direction = 'helpee-to-helper',
         [string]$LiveToggleSequence = '',
         [string]$LiveProofMode = 'None'
     )
@@ -9610,6 +9615,7 @@ function New-Phase4RouteAcceptanceScenario {
         RouteMode = $RouteMode
         Fault = $Fault
         PayerMode = $PayerMode
+        Direction = $Direction
         LiveToggleSequence = $LiveToggleSequence
         LiveProofMode = $LiveProofMode
     }
@@ -9631,7 +9637,7 @@ function Get-Phase4RouteAcceptanceScenarios {
 }
 
 function Get-Phase5RouteAcceptanceScenarios {
-    param([Parameter(Mandatory = $true)]$BaselineManifest, [switch]$IncludePendingPreparation)
+    param([Parameter(Mandatory = $true)]$BaselineManifest, [switch]$IncludePendingPreparation, [switch]$IncludeRegularPayerHandoff)
 
     $baselines = $BaselineManifest.Scenarios
     return @(
@@ -9644,6 +9650,9 @@ function Get-Phase5RouteAcceptanceScenarios {
         (New-Phase4RouteAcceptanceScenario -Name 'second-transfer-after-reactivation' -Kind 'tuna' -ExpectedRouteChanges @('file_tuna_v4', 'post_tuna_fallback_v6', 'file_tuna_v4') -PayloadBytes 134217728L -RouteMode 'live-reactivation-second-transfer' -Fault 'switch-off' -PayerMode 'helpee' -LiveToggleSequence 'off,on' -LiveProofMode 'None')
         if ($IncludePendingPreparation) {
             (New-Phase4RouteAcceptanceScenario -Name 'pending-preparation-tuna-v4-64mb' -Kind 'tuna' -ExpectedRouteChanges @('regular_nkn_v4_fast', 'file_tuna_v4') -PayloadBytes 67108864L -RouteMode 'pending-preparation' -Fault 'none' -PayerMode 'helpee')
+        }
+        if ($IncludeRegularPayerHandoff) {
+            (New-Phase4RouteAcceptanceScenario -Name 'regular-v4-helper-to-helpee-payer-handoff-256mb' -Kind 'tuna' -ExpectedRouteChanges @('regular_nkn_v4_fast', 'file_tuna_v4', 'post_tuna_fallback_v6', 'file_tuna_v4', 'post_tuna_fallback_v6') -PayloadBytes 268435456L -RouteMode 'live-regular-activation-cycle' -Fault 'switch-off' -PayerMode 'helper-to-helpee' -Direction 'helper-to-helpee' -LiveToggleSequence 'on,off,on,off' -LiveProofMode 'RegularActivationCycle')
         }
     )
 }
@@ -10925,6 +10934,7 @@ function Invoke-Phase4RouteAcceptanceScenario {
                         -RouteMode ([string]$Scenario.RouteMode) `
                         -Fault ([string]$Scenario.Fault) `
                         -PayerMode ([string]$Scenario.PayerMode) `
+                        -Direction ([string](Get-JsonPropertyValue -Object $Scenario -Name 'Direction' -DefaultValue 'helpee-to-helper')) `
                         -PayloadSize $payloadSize `
                         -LiveToggleSequence ([string]$Scenario.LiveToggleSequence) `
                         -LiveProofMode ([string]$Scenario.LiveProofMode) `
@@ -11106,6 +11116,7 @@ function Invoke-Phase4RouteAcceptanceScenario {
                                 -RouteMode ([string]$Scenario.RouteMode) `
                                 -Fault ([string]$Scenario.Fault) `
                                 -PayerMode ([string]$Scenario.PayerMode) `
+                                -Direction ([string](Get-JsonPropertyValue -Object $Scenario -Name 'Direction' -DefaultValue 'helpee-to-helper')) `
                                 -PayloadSize $payloadSize `
                                 -LiveToggleSequence ([string]$Scenario.LiveToggleSequence) `
                                 -LiveProofMode ([string]$Scenario.LiveProofMode) `
@@ -14657,7 +14668,7 @@ try {
         $baseline = Read-RouteAcceptanceBaselineManifest -RepoRoot $repoRoot -Path $BaselineManifestPath
         $acceptancePhase = if ($MatrixMode -eq 'phase5-analyzer-gui-acceptance') { 'phase5' } else { 'phase4' }
         $scenarios = if ($acceptancePhase -eq 'phase5') {
-            @(Get-Phase5RouteAcceptanceScenarios -BaselineManifest $baseline -IncludePendingPreparation:($ScenarioName -contains 'pending-preparation-tuna-v4-64mb'))
+            @(Get-Phase5RouteAcceptanceScenarios -BaselineManifest $baseline -IncludePendingPreparation:($ScenarioName -contains 'pending-preparation-tuna-v4-64mb') -IncludeRegularPayerHandoff:($ScenarioName -contains 'regular-v4-helper-to-helpee-payer-handoff-256mb'))
         }
         else {
             @(Get-Phase4RouteAcceptanceScenarios -BaselineManifest $baseline)

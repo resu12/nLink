@@ -8,6 +8,99 @@ public sealed class FileTransferPayerHandoffGuiTests : FileTransferOpsScriptsTes
     [Theory]
     [InlineData("powershell")]
     [InlineData("pwsh")]
+    public async Task PayerHandoffGui_RegularStartKeepsHelperForFirstOnOffThenHandsToHelpee(string host)
+    {
+        if (!OperatingSystem.IsWindows()) return;
+        var result = await RunPowerShellScriptTextAsync("""
+            param([string]$RepoRoot)
+            $ErrorActionPreference = 'Stop'
+            Set-StrictMode -Version Latest
+            function Read-ScriptAst([string]$Name) {
+                $tokens = $null; $errors = $null
+                $ast = [Management.Automation.Language.Parser]::ParseFile((Join-Path $RepoRoot ('tools/' + $Name)), [ref]$tokens, [ref]$errors)
+                if ($errors.Count) { throw ($errors | Out-String) }
+                return $ast
+            }
+            $gui = Read-ScriptAst 'GuiSmoke-Windows.ps1'
+            $wrapper = Read-ScriptAst 'Run-FileTransferTunaGuiSmoke.ps1'
+            $acceptance = Read-ScriptAst 'Run-FileTransferRouteAcceptance.ps1'
+            foreach ($name in @('New-Phase4RouteAcceptanceScenario', 'Get-Phase5RouteAcceptanceScenarios', 'Test-Phase5ScenarioRequiresIsolation')) {
+                Invoke-Expression $acceptance.Find({param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -ceq $name}, $true).Extent.Text
+            }
+            $baseline = [pscustomobject]@{Scenarios=@{}}
+            $name = 'regular-v4-helper-to-helpee-payer-handoff-256mb'
+            $defaults = @(Get-Phase5RouteAcceptanceScenarios -BaselineManifest $baseline)
+            if ($defaults.Count -ne 7 -or @($defaults | Where-Object Name -eq $name).Count -ne 0) { throw 'existing release matrix changed' }
+            $scenarios = @(Get-Phase5RouteAcceptanceScenarios -BaselineManifest $baseline -IncludeRegularPayerHandoff)
+            $matches = @($scenarios | Where-Object Name -eq $name)
+            if ($scenarios.Count -ne 8 -or $matches.Count -ne 1) { throw 'targeted reproduction missing or duplicated' }
+            $scenario = $matches[0]
+            if ($scenario.PayerMode -cne 'helper-to-helpee' -or $scenario.Direction -cne 'helper-to-helpee' -or
+                $scenario.RouteMode -cne 'live-regular-activation-cycle' -or $scenario.LiveToggleSequence -cne 'on,off,on,off' -or
+                $scenario.Fault -cne 'switch-off' -or $scenario.LiveProofMode -cne 'RegularActivationCycle' -or
+                $scenario.PayloadBytes -ne 268435456 -or $null -ne $scenario.Baseline -or
+                ($scenario.ExpectedRouteChanges -join ',') -cne 'regular_nkn_v4_fast,file_tuna_v4,post_tuna_fallback_v6,file_tuna_v4,post_tuna_fallback_v6') { throw 'reproduction contract mismatch' }
+            if (-not (Test-Phase5ScenarioRequiresIsolation -Scenario $scenario)) { throw 'strict isolation missing' }
+            Invoke-Expression $gui.Find({param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -ceq 'Get-TunaGuiLiveTogglePayer'}, $true).Extent.Text
+            $roles = @(0..3 | ForEach-Object { Get-TunaGuiLiveTogglePayer -PayerMode $scenario.PayerMode -RouteMode $scenario.RouteMode -StepIndex $_ })
+            if (($roles -join ',') -cne 'helper,helper,helpee,helpee') { throw 'regular-start payer ordering mismatch' }
+            foreach ($mode in @('helper', 'helpee', 'both')) {
+                foreach ($step in 0..3) {
+                    if ((Get-TunaGuiLiveTogglePayer -PayerMode $mode -RouteMode $scenario.RouteMode -StepIndex $step) -cne $mode) { throw 'fixed payer changed' }
+                }
+            }
+            $cycle = $gui.Find({param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -ceq 'Invoke-FileTransferTunaHandoffFallbackCycle'}, $true).Extent.Text
+            foreach ($call in @('Get-TunaGuiLiveTogglePayer -PayerMode $PayerMode -StepIndex $stepIndex -RouteMode $RouteMode',
+                'Get-TunaGuiLiveTogglePayer -PayerMode $PayerMode -StepIndex ($stepIndex + 1) -RouteMode $RouteMode')) {
+                if (-not $cycle.Contains($call)) { throw 'normal or prearmed action lost route mode' }
+            }
+            $guard = @($wrapper.FindAll({param($n) $n -is [Management.Automation.Language.IfStatementAst] -and
+                $n.Extent.Text.Contains('Helper-to-helpee payer handoff requires')}, $true))
+            if ($guard.Count -ne 1) { throw 'wrapper guard missing' }
+            $PayerMode = $scenario.PayerMode; $RouteMode = $scenario.RouteMode; $Fault = $scenario.Fault
+            foreach ($LiveToggleSequence in @('', 'on,off,on,off')) { Invoke-Expression $guard[0].Extent.Text }
+            foreach ($LiveToggleSequence in @('off,on,off', 'on,off')) {
+                $rejected = $false
+                try { Invoke-Expression $guard[0].Extent.Text } catch { $rejected = $true }
+                if (-not $rejected) { throw 'wrong regular-start sequence admitted' }
+            }
+            $LiveToggleSequence = 'on,off,on,off'; $Fault = 'none'; $rejected = $false
+            try { Invoke-Expression $guard[0].Extent.Text } catch { $rejected = $true }
+            if (-not $rejected) { throw 'handoff without switch-off admitted' }
+            $invoke = $acceptance.Find({param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -ceq 'Invoke-TunaRouteAcceptanceRun'}, $true).Extent.Text
+            if ($invoke.Contains("'-Direction', 'helpee-to-helper'") -or $invoke.Contains("-Direction 'helpee-to-helper'")) { throw 'direction hardcoded in execution or evidence' }
+            if ([regex]::Matches($invoke, "'-Direction', \`$Direction").Count -ne 2 -or
+                [regex]::Matches($invoke, '-Direction \$Direction').Count -ne 2) { throw 'execution and receipt direction not forwarded' }
+            Invoke-Expression $invoke
+            function Invoke-RouteAcceptanceChildScriptNoThrow {
+                param($ScriptPath, $Arguments)
+                $script:childArguments = $Arguments
+                return 0
+            }
+            function Invoke-RouteAcceptanceRetainedAnalysis {}
+            function Update-FileTransferTunaDirectEvidenceManifestFromReceipt {
+                param($Direction)
+                $script:receiptDirection = $Direction
+                return [pscustomobject]@{CurrentRuntimeProof=$true}
+            }
+            $TimeoutSeconds = 900; $ProgressTimeoutSeconds = 180; $script:RouteAcceptanceExecutionMode = 'fake'
+            foreach ($direction in @('helper-to-helpee', 'helpee-to-helper')) {
+                Invoke-TunaRouteAcceptanceRun -RepoRoot $RepoRoot -ArtifactDir 'fixture' -ResolvedExePath 'fixture.exe' `
+                    -ResolvedWalletPath 'fixture-wallet.json' -ResolvedSidecarPath 'fixture-sidecar.exe' -EffectiveWalletPassword 'fixture' `
+                    -RouteMode $scenario.RouteMode -Fault $scenario.Fault -PayerMode $scenario.PayerMode -Direction $direction `
+                    -PayloadSize '256MiB' -LiveToggleSequence $scenario.LiveToggleSequence -LiveProofMode $scenario.LiveProofMode
+                $index = [array]::IndexOf($script:childArguments, '-Direction')
+                if ($index -lt 0 -or $script:childArguments[$index + 1] -cne $direction -or $script:receiptDirection -cne $direction) { throw 'direction changed between GUI dispatch and evidence receipt' }
+            }
+            'PASS'
+            """, [FindRepoRoot()], host);
+        Assert.True(result.ExitCode == 0, result.Stdout + Environment.NewLine + result.Stderr);
+        Assert.Contains("PASS", result.Stdout, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("powershell")]
+    [InlineData("pwsh")]
     public async Task PayerHandoffGui_AlreadyPublishedFallbackCannotAdmitSwitchOff(string host)
     {
         if (!OperatingSystem.IsWindows()) return;
@@ -214,22 +307,35 @@ public sealed class FileTransferPayerHandoffGuiTests : FileTransferOpsScriptsTes
 [Collection(FakeNknNetworkCollection.Name)]
 public sealed class FileTransferPayerHandoffAcceptanceTests : FileTransferAcceptancePhase5TestBase
 {
-    [Fact]
-    public async Task PayerHandoffGui_FakeCampaignChecksTheNewRouteCycleWithoutLiveRuntimeClaims()
+    [Theory]
+    [InlineData("helper-to-helpee-payer-handoff-128mb", "file_tuna_v4,post_tuna_fallback_v6,file_tuna_v4,post_tuna_fallback_v6", false)]
+    [InlineData("regular-v4-helper-to-helpee-payer-handoff-256mb", "regular_nkn_v4_fast,file_tuna_v4,post_tuna_fallback_v6,file_tuna_v4,post_tuna_fallback_v6", true)]
+    public async Task PayerHandoffGui_FakeCampaignEnforcesRouteProofForSelectedScenario(string scenarioName, string routeSequence, bool missingActivationDelivery)
     {
         if (!OperatingSystem.IsWindows()) return;
         var root = FindRepoRoot();
         var artifacts = Path.Combine(root, "artifacts", "payer-handoff-20261009", "fake", Guid.NewGuid().ToString("N"));
         var result = await RunPowerShellFileAsync(root, Path.Combine(root, "tools", "Run-FileTransferRouteAcceptance.ps1"),
-            ["-MatrixMode", "phase5-analyzer-gui-acceptance", "-ScenarioName", "helper-to-helpee-payer-handoff-128mb",
+            ["-MatrixMode", "phase5-analyzer-gui-acceptance", "-ScenarioName", scenarioName,
              "-ArtifactRoot", artifacts, "-TimeoutSeconds", "30", "-ProgressTimeoutSeconds", "30",
              "-GoodputOnlyRerunLimit", "0", "-SetupOnlyRerunLimit", "0"], BuildFakeRouteAcceptanceEnvironment("phase5-pass"));
-        Assert.True(result.ExitCode == 0, result.Stdout + Environment.NewLine + result.Stderr);
         var summary = ReadArtifactReport(Path.Combine(artifacts, "phase5-pass"), "phase5-analyzer-gui-acceptance-summary.txt");
-        Assert.Equal("PASS", summary["correctness_verdict"]);
         Assert.Equal("1", summary["run_count"]);
-        Assert.Equal("file_tuna_v4,post_tuna_fallback_v6,file_tuna_v4,post_tuna_fallback_v6",
-            summary["helper-to-helpee-payer-handoff-128mb.route_sequence"]);
-        Assert.Equal("pass", summary["helper-to-helpee-payer-handoff-128mb.live_route_epoch_proof_verdict"]);
+        Assert.Equal(routeSequence, summary[scenarioName + ".route_sequence"]);
+        if (missingActivationDelivery)
+        {
+            // The generic fake fixture has route labels, not authenticated delivery
+            // for the second activation. It must not qualify this reproduction.
+            Assert.NotEqual(0, result.ExitCode);
+            Assert.Equal("FAIL", summary["correctness_verdict"]);
+            Assert.Equal("incomplete_proof", summary["runtime_correctness_verdict"]);
+            Assert.Equal("filetransfer_tuna_activation_delivery_unproven", summary["runtime_failure_candidate"]);
+            Assert.Equal("activation_2", summary["failure_variant"]);
+            Assert.Equal("0", summary["current_runtime_proof"]);
+            return;
+        }
+        Assert.True(result.ExitCode == 0, result.Stdout + Environment.NewLine + result.Stderr);
+        Assert.Equal("PASS", summary["correctness_verdict"]);
+        Assert.Equal("pass", summary[scenarioName + ".live_route_epoch_proof_verdict"]);
     }
 }

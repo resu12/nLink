@@ -33837,9 +33837,10 @@ function Get-TunaGuiPayerRole {
 }
 
 function Get-TunaGuiLiveTogglePayer {
-    param([Parameter(Mandatory = $true)][string]$PayerMode, [int]$StepIndex)
+    param([Parameter(Mandatory = $true)][string]$PayerMode, [int]$StepIndex, [string]$RouteMode = 'live-multi-toggle')
     if ($PayerMode -eq 'helper-to-helpee') {
-        if ($StepIndex -eq 0) { return 'helper' }
+        $helperStepCount = if ($RouteMode -eq 'live-regular-activation-cycle') { 2 } else { 1 }
+        if ($StepIndex -lt $helperStepCount) { return 'helper' }
         return 'helpee'
     }
     return $PayerMode
@@ -37222,7 +37223,7 @@ function Invoke-FileTransferTunaHandoffFallbackCycle {
         for ($stepIndex = 0; $stepIndex -lt $sequence.Count; $stepIndex++) {
             $action = [string]$sequence[$stepIndex]
             $stepNumber = $stepIndex + 1
-            $stepPayerMode = Get-TunaGuiLiveTogglePayer -PayerMode $PayerMode -StepIndex $stepIndex
+            $stepPayerMode = Get-TunaGuiLiveTogglePayer -PayerMode $PayerMode -StepIndex $stepIndex -RouteMode $RouteMode
             if ($action -eq 'off') {
                 Write-Host ("[GUI Smoke][filetransfer_tuna] Live toggle step {0}/{1}: switching Tuna off after transfer progress." -f $stepNumber, $sequence.Count) -ForegroundColor DarkGray
                 $earlyFallbackStartedLine = $null
@@ -37384,7 +37385,7 @@ function Invoke-FileTransferTunaHandoffFallbackCycle {
                         $prearmedActivationBookmark = Get-AppLogBookmark
                     }
                     $observedEvidenceLines.Add(("[{0}] [INFO] [GuiSmoke] event=filetransfer_tuna_gui_live_multi_toggle_step_prearmed; step={1}; next_step={2}; action=on; route_mode={3}; reason=prearm_after_fallback_epoch_started" -f ([datetime]::UtcNow.ToString('yyyy-MM-dd HH:mm:ssZ')), $stepNumber, ($stepNumber + 1), $RouteMode)) | Out-Null
-                    $nextPayerMode = Get-TunaGuiLiveTogglePayer -PayerMode $PayerMode -StepIndex ($stepIndex + 1)
+                    $nextPayerMode = Get-TunaGuiLiveTogglePayer -PayerMode $PayerMode -StepIndex ($stepIndex + 1) -RouteMode $RouteMode
                     Unlock-TunaPayers -Context $Context -PayerMode $nextPayerMode -Password $WalletPassword
                     $liveReactivationUnlockInvoked = $true
                     if ($null -ne $fallbackProjection) {
