@@ -16062,6 +16062,11 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
                 }
                 $recovered = $null -ne $recoveryEvent
             }
+            if (-not $recovered -and -not $matchingRecheckConflict -and $matchingRecheckDecisions.Count -eq 1 -and
+                $matchingRecheckDecisions[0] -eq 'stale|committed_write_source_changed|none') {
+                $recoveryEvent = Get-FileTransferStallGraceCommittedWriteProgressClosure -Events $handoffEvents -Episode $episode -SnapshotEvidence $SnapshotEvidence
+                $recovered = $null -ne $recoveryEvent
+            }
             $stallHandoffClosure = $null
             if (-not $recovered -and $hasTunaHandoffRetirement) {
                 $episode = [pscustomobject]@{

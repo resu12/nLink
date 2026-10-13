@@ -771,6 +771,88 @@ function Get-FileTransferStallGraceCurrentSourceRecovery {
     return $result
 }
 
+# A caught-up write may advance before a due callback acquires the gate. The
+# callback remains stale; only its locked, snapshot-bound progress witness closes
+# this obligation. Legacy stale reasons and eventual completion are insufficient.
+function Get-FileTransferStallGraceCommittedWriteProgressClosure {
+    param([object[]]$Events, $Episode, $SnapshotEvidence)
+    function F($Event, [string]$Name) { return [string]$Event.Fields[$Name] }
+    function N($Event, [string]$Name) {
+        $value = 0L
+        if (-not [long]::TryParse((F $Event $Name), [ref]$value)) { return -1L }
+        return $value
+    }
+    function T($Event, [string]$Name) {
+        $value = [DateTimeOffset]::MinValue
+        if (-not [DateTimeOffset]::TryParse((F $Event $Name), [ref]$value)) { return 0L }
+        return $value.UtcTicks
+    }
+    $candidate = $Episode.Event
+    $published = New-FileTransferStallGracePublishedSourceIndex -Events $Events -SnapshotEvidence $SnapshotEvidence
+    $admission = Get-FileTransferStallGracePublishedSourceAdmission -Index $published -Candidate $candidate
+    $binding = Resolve-FileTransferPublicationEvidence -Index $published.PublicationEvidence -Event $candidate
+    if ($null -eq $admission -or -not $admission.Admitted -or $null -eq $binding -or
+        (N $candidate 'highest_received_chunk_index') -ne ((N $candidate 'frontier_chunk_index') - 1)) { return $null }
+    $index = New-FileTransferStallGraceCurrentSourceIndex -Events $Events
+    $key = '{0}|{1}|{2}' -f (F $candidate 'log_writer_id'), (F $candidate 'session_id'), (F $candidate 'transfer_id')
+    $rows = @($index[$key] | Where-Object { [long]$_.Sequence -gt [long]$candidate.Sequence })
+    $rechecks = @($rows | Where-Object {
+        (F $_ 'event') -ceq 'filetransfer_v6_frontier_stall_grace_recheck_decided' -and
+        (F $_ 'wake_generation') -ceq (F $candidate 'wake_generation')
+    })
+    if ($rechecks.Count -ne 1) { return $null }
+    $recheck = $rechecks[0]
+    $scope = @($admission.Episode.ScopeFields)
+    foreach ($name in $scope + @('frontier_chunk_index', 'highest_received_chunk_index', 'wake_generation', 'stall_started_utc', 'wake_deadline_utc')) {
+        if ((F $recheck $name) -cne (F $candidate $name)) { return $null }
+    }
+    $current = Resolve-FileTransferPublicationEvidence -Index $published.PublicationEvidence -Event $recheck
+    if ($null -eq $current -or $current.CoordinatorId -cne $binding.CoordinatorId -or
+        $current.TokenFingerprint -cne $binding.TokenFingerprint -or
+        (F $recheck 'authority_effect') -cne 'none' -or (F $recheck 'decision_status') -cne 'stale' -or
+        (F $recheck 'decision_reason') -cne 'committed_write_source_changed' -or
+        (F $recheck 'write_progress_binding_version') -cne '1' -or
+        (F $recheck 'write_progress_binding') -cne 'exact_current_fallback_source') { return $null }
+    $frontier = N $candidate 'frontier_chunk_index'; $next = N $recheck 'write_progress_frontier'
+    $progressTicks = T $recheck 'write_progress_utc'; $recheckTicks = T $recheck 'write_progress_recheck_utc'
+    if ($next -le $frontier -or (N $recheck 'write_progress_highest') -ne ($next - 1) -or
+        $progressTicks -le (T $candidate 'stall_started_utc') -or $recheckTicks -lt $progressTicks -or
+        $recheckTicks -lt (T $candidate 'wake_deadline_utc') -or
+        (N $recheck 'log_writer_attempt_utc_ticks') -lt $recheckTicks) { return $null }
+    $commits = @($rows | Where-Object { (F $_ 'event') -ceq 'filetransfer_v6_sparse_write_committed' -and
+        (N $_ 'next_chunk_index') -gt $frontier })
+    if ($commits.Count -eq 0) { return $null }
+    $commit = $commits[0]
+    if ((N $commit 'next_chunk_index') -ne $next -or (N $commit 'highest_received_chunk_index') -ne ($next - 1) -or
+        (N $commit 'contiguous_chunks_committed') -ne ($next - $frontier) -or
+        (N $commit 'log_writer_attempt_utc_ticks') -lt $progressTicks) { return $null }
+    $states = @($rows | Where-Object { [long]$_.Sequence -gt [long]$commit.Sequence -and
+        (F $_ 'event') -ceq 'filetransfer_v6_receiver_state_sent' })
+    if ($states.Count -eq 0) { return $null }
+    $state = $states[0]
+    if ((N $state 'contiguous_committed_chunk_index') -ne $next -or
+        (N $state 'durable_received_highest_chunk_index') -ne ($next - 1) -or (N $state 'epoch') -le 0 -or
+        (F $state 'transfer_paused') -cne '0' -or
+        (F $state 'transport_epoch') -cne (F $candidate 'transport_epoch')) { return $null }
+    $end = [Math]::Max([long]$state.Sequence, [long]$recheck.Sequence)
+    $priorTicks = N $candidate 'log_writer_attempt_utc_ticks'
+    foreach ($event in $rows) {
+        if ([long]$event.Sequence -gt $end) { break }
+        if ($index['__conflicts'].ContainsKey("$(F $event 'log_writer_id')|$(F $event 'log_writer_sequence')") -or
+            (F $event 'log_writer_sequence') -notmatch '^[1-9][0-9]*$' -or
+            (N $event 'log_writer_attempt_utc_ticks') -lt $priorTicks -or
+            ($null -ne $event.PSObject.Properties['EventName'] -and $event.EventName -cne (F $event 'event')) -or
+            (F $event 'event') -in @('file_transfer_inbound_terminal', 'filetransfer_live_route_epoch_terminal',
+                'filetransfer_terminalized_by_session_end', 'filetransfer_data_session_recreated', 'filetransfer_data_session_removed') -or
+            (F $event 'transfer_paused') -ceq '1') { return $null }
+        $priorTicks = N $event 'log_writer_attempt_utc_ticks'
+        foreach ($name in $scope) {
+            if ($event.Fields.ContainsKey($name) -and (F $event $name) -cne (F $candidate $name)) { return $null }
+        }
+    }
+    return $(if ([long]$recheck.Sequence -gt [long]$state.Sequence) { $recheck } else { $state })
+}
+
 # A highest-only stale callback is diagnostic, not repair authority. Exact
 # ordinary progress may nevertheless close its stall obligation after grace.
 function Get-FileTransferStallGraceStaleNaturalProgressClosure {

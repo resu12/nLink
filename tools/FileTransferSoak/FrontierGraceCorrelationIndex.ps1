@@ -399,6 +399,26 @@ function Get-FileTransferFallbackFrontierGracePartitionSlice {
                 if ($recheck.EventName -ne 'filetransfer_v6_frontier_stall_grace_recheck_decided' -or
                     (Get-FileTransferEventInt64Field -Event $recheck -Name 'wake_generation' -Default 0) -ne $candidateWake) { continue }
                 if ((Get-FileTransferEventField -Event $recheck -Name 'decision_status' -Default '') -ceq 'stale' -and
+                    (Get-FileTransferEventField -Event $recheck -Name 'decision_reason' -Default '') -ceq 'committed_write_source_changed') {
+                    # Keep the first physical advance, its first state, and every
+                    # intervening contradiction. The locked witness may log either
+                    # before or after the commit; it does not select a later success.
+                    & $addEvents @($recheck) -IncludeWriterCopies
+                    $advance = Find-FileTransferFallbackFrontierGraceEventAfterSequence `
+                        -Index $Index -Events $sparseWritePool -AfterSequence $candidateSequence -Predicate {
+                            param($event)
+                            (Get-FileTransferEventInt64Field -Event $event -Name 'next_chunk_index' -Default -1) -gt $candidateFrontier
+                        }
+                    if ($null -eq $advance) { continue }
+                    $state = Find-FileTransferFallbackFrontierGraceEventAfterSequence `
+                        -Index $Index -Events $receiverStatePool -AfterSequence ([long]$advance.Sequence) -Predicate { param($event) $true }
+                    if ($null -eq $state) { continue }
+                    & $addEvents @(Get-FileTransferFallbackFrontierGraceSequenceRange `
+                        -Index $Index -Events $transferEvents -AfterSequence $candidateSequence `
+                        -ThroughSequence ([Math]::Max([long]$recheck.Sequence, [long]$state.Sequence))) -IncludeWriterCopies
+                    continue
+                }
+                if ((Get-FileTransferEventField -Event $recheck -Name 'decision_status' -Default '') -ceq 'stale' -and
                     (Get-FileTransferEventField -Event $recheck -Name 'decision_reason' -Default '') -ceq 'frontier_scope_changed') {
                     # Import subjects and their whole proof interval, not just
                     # favorable outcomes. The semantic helper owns validation.

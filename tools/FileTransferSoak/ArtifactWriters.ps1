@@ -59565,6 +59565,11 @@ function Get-FileTransferFallbackFrontierStallGraceRecheckCorrelation {
                 $recoveryEvent = Get-FileTransferStallGraceStaleNaturalProgressClosure -Events $ordered -Episode $incident
             }
         }
+        if ($naturalProgress.Count -eq 0 -and $null -eq $recoveryEvent -and
+            -not $matchingRecheckConflict -and $matchingRecheckDecisions.Count -eq 1 -and
+            $matchingRecheckDecisions[0] -eq 'stale|committed_write_source_changed|none') {
+            $recoveryEvent = Get-FileTransferStallGraceCommittedWriteProgressClosure -Events $ordered -Episode $incident -SnapshotEvidence $SnapshotEvidence
+        }
         $stallHandoffClosure = $null
         if ($naturalProgress.Count -eq 0 -and $null -eq $recoveryEvent) {
             $stallHandoffClosure = Get-FileTransferStallGraceTunaHandoffClosure -Events $ordered -Episode $incident
