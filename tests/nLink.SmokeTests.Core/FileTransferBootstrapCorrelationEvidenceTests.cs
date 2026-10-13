@@ -86,7 +86,8 @@ public sealed partial class FileTransferBootstrapCorrelationEvidenceTests : File
         }
     }
 
-    private static string[] Emit(IReadOnlyList<FileTransferCoordinatorTransitionEnvelope> envelopes, bool modeledOwnershipEffects = false)
+    private static string[] Emit(IReadOnlyList<FileTransferCoordinatorTransitionEnvelope> envelopes, bool modeledOwnershipEffects = false,
+        bool modeledFinalPublication = false)
     {
         const BindingFlags flags = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic;
         var type = typeof(SessionFileTransferService).GetNestedType("CoordinatorSnapshotStreamEmitter", BindingFlags.NonPublic)!;
@@ -102,6 +103,20 @@ public sealed partial class FileTransferBootstrapCorrelationEvidenceTests : File
         {
             type.GetMethod("Enqueue", flags)!.Invoke(emitter, [envelope]);
             if (modeledOwnershipEffects) { EmitModeledOwnershipEffects(type, emitter, envelope); }
+            if (modeledFinalPublication)
+            {
+                foreach (var publication in envelope.Aggregate.Operations.Where(operation =>
+                    operation.OperationRole == "route_publication" && operation.AfterState == "Published" &&
+                    operation.RouteRuntime?.Boundary.LiveRouteEpoch == 4))
+                {
+                    type.GetMethod("EnqueueAuthorityEffect", flags)!.Invoke(emitter,
+                        [envelope.CoordinatorInstanceId, envelope.SessionId, envelope.TransferId, direction,
+                            envelope.Aggregate.AfterStateGeneration, publication.Family, publication.AuthorityId,
+                            publication.OperationGeneration, publication.ReceiptIdentity, publication.ReceiptGeneration,
+                            publication.ReceiptStatus, publication.ReceiptFingerprint, "route_publication_forwarded",
+                            publication.ReceiptIdentity, publication.ReceiptGeneration, null]);
+                }
+            }
         }
         type.GetMethod("Complete", flags)!.Invoke(emitter, [first.CoordinatorInstanceId, first.SessionId, first.TransferId, direction]);
         var queue = (ConcurrentQueue<string>)type.GetField("pending", flags)!.GetValue(emitter)!;

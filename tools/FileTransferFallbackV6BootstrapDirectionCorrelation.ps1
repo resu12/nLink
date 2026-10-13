@@ -1,4 +1,5 @@
 Set-StrictMode -Version Latest
+. (Join-Path $PSScriptRoot 'FileTransferPublicationEvidence.ps1')
 
 # This is consumption of an exact peer-first bootstrap committed before the wait,
 # not recovery inferred from a later route. Its disposition may finish after the
@@ -195,7 +196,7 @@ function Test-FileTransferFallbackV6BootstrapPeerFirstEpisodeConsumed {
 }
 
 function Test-FileTransferFallbackV6BootstrapSourceHoldConsumed {
-    param($Completed, [object[]]$History)
+    param($Completed, [object[]]$History, [switch]$RequireCommittedRoute)
 
     $exchange = $Completed.Operation.routeTransition
     $initiation = $exchange.bootstrapInitiation
@@ -218,13 +219,14 @@ function Test-FileTransferFallbackV6BootstrapSourceHoldConsumed {
     $lost = @($holds | Where-Object {
         [long]$_.Boundary.writerSequence -ge [long]$Completed.Boundary.writerSequence -and $_.Operation.afterState -cne 'Drained'
     } | Select-Object -First 1)
-    if ($lost.Count -eq 0) { return $true }
+    if ($lost.Count -eq 0 -and -not $RequireCommittedRoute) { return $true }
+    $lostSequence = if ($lost.Count) { [long]$lost[0].Boundary.writerSequence } else { [long]::MaxValue }
 
     # Cleanup cannot reopen an obligation already consumed by this exact
     # Coordinator fallback. A later commit or an observation is not authority.
     $cycle = @($History | Where-Object {
         [long]$_.Boundary.writerSequence -gt [long]$Completed.Boundary.writerSequence -and
-        [long]$_.Boundary.writerSequence -lt [long]$lost[0].Boundary.writerSequence
+        [long]$_.Boundary.writerSequence -lt $lostSequence
     })
     $commits = @($cycle | Where-Object {
         $_.Boundary.decisionKind -ceq 'CommitFileTransferRouteTransition' -and $_.Boundary.decisionStatus -ceq 'Committed' -and
@@ -280,13 +282,14 @@ function Test-FileTransferFallbackV6BootstrapSourceHoldConsumed {
         $receipt = @($disposed[0].Operation.routeTransition.receipts | Where-Object stage -CEQ $stage)
         if ($receipt.Count -ne 1 -or -not $receipt[0].receiptValidated -or $receipt[0].receiptStatus -cnotin @('Applied','Idempotent')) { return $false }
     }
+    if ($RequireCommittedRoute) { return $commit.Boundary }
     return $true
 }
 
 # A validated correlated exchange owns its exact legacy diagnostic; this does
 # not recover a route, publish anything, or waive any independent snapshot gate.
 function Test-FileTransferFallbackV6BootstrapCorrelatedEpisodeConsumed {
-    param($Episode, [long]$BeforeSequence, $SnapshotEvaluation)
+    param($Episode, [long]$BeforeSequence, $SnapshotEvaluation, [switch]$AfterWaitRecovery)
 
     if ($null -eq $SnapshotEvaluation -or $Episode.ConflictingStart -or
         $SnapshotEvaluation.Mode -cne 'SnapshotV1Authoritative' -or
@@ -340,6 +343,48 @@ function Test-FileTransferFallbackV6BootstrapCorrelatedEpisodeConsumed {
             if ($record.Fields[$name] -cne $fields[$name]) { return $false }
         }
     }
+    $firstWaitSequence = $BeforeSequence
+    $publicationBoundary = $null
+    if ($AfterWaitRecovery) {
+        # Bound recovery to this exact route's closure, not the end of a later
+        # successful transfer. The first wait remains the trigger/start deadline.
+        $dispositions = @($SnapshotEvaluation.Boundaries | Where-Object {
+            $_.writer -ceq $Episode.Writer -and $_.direction -ceq $fields['direction'] -and
+            (IdentityMatches $fields['session_id'] $_.sessionId) -and (IdentityMatches $fields['transfer_id'] $_.transferId) -and
+            [long]$_.writerSequence -gt $firstWaitSequence -and
+            $_.decisionKind -ceq 'ApplyFileTransferRouteTransitionDispositionReceipt' -and $_.decisionStatus -ceq 'Committed' -and
+            $_.afterBoundary.route -ceq 'post_tuna_fallback_v6' -and $_.afterBoundary.protocolVersion -eq 6 -and
+            $_.afterBoundary.liveRouteEpoch -eq ([long]$fields['source_live_route_epoch'] + 1)
+        })
+        if ($dispositions.Count -ne 1) { return $false }
+        $disposition = $dispositions[0]
+        $index = New-FileTransferPublicationEvidenceIndex $SnapshotEvaluation
+        $publications = @($Episode.CompletionRecords | Where-Object {
+            $_.EventName -ceq 'filetransfer_route_hint_authorized_publication_accepted' -and
+            $_.WriterSequence -gt $firstWaitSequence -and $_.Fields['route'] -ceq 'post_tuna_fallback_v6' -and
+            $_.Fields['live_route_epoch'] -ceq [string]$disposition.afterBoundary.liveRouteEpoch
+        } | Sort-Object WriterSequence)
+        if ($publications.Count -eq 0) { return $false }
+        $publication = $publications[0]
+        $seen = @{}
+        foreach ($match in [regex]::Matches($publication.Line, '(?:^|;\s*)([^=;]+)=([^;]*)')) {
+            $name=$match.Groups[1].Value.Trim(); $value=$match.Groups[2].Value.Trim()
+            if ($seen.ContainsKey($name) -and $seen[$name] -cne $value) { return $false }
+            $seen[$name]=$value
+        }
+        $binding = Resolve-FileTransferPublicationEvidence $index $publication
+        if ($null -eq $binding -or $binding.CoordinatorId -cne $disposition.coordinatorInstanceId -or
+            $binding.SessionId -cne $disposition.sessionId -or $binding.TransferId -cne $disposition.transferId) { return $false }
+        $publicationBoundary = $index.Boundaries["$($binding.CoordinatorId)|$($publication.Fields['publication_evidence_boundary_id'])"][0]
+        if ([long]$publicationBoundary.writerSequence -ge $publication.WriterSequence) { return $false }
+        $BeforeSequence = [Math]::Max([long]$disposition.writerSequence, $publication.WriterSequence) + 1L
+        if (@($Episode.Candidates | Where-Object { $_.WriterSequence -ge $BeforeSequence }).Count -gt 0 -or
+            @($Episode.CompletionRecords | Where-Object {
+                $_.WriterSequence -gt $Episode.PendingSequence -and $_.WriterSequence -lt $BeforeSequence -and
+                $_.EventName -cin @('file_transfer_inbound_terminal','file_transfer_outbound_terminal','transfer_terminal',
+                    'filetransfer_runtime_terminalized','filetransfer_route_transition_invalidated','filetransfer_data_session_availability_changed')
+            }).Count -gt 0) { return $false }
+    }
     $history = [Collections.Generic.List[object]]::new()
     $owners = @{}
     foreach ($boundary in $SnapshotEvaluation.Boundaries) {
@@ -374,6 +419,13 @@ function Test-FileTransferFallbackV6BootstrapCorrelatedEpisodeConsumed {
         $_.Operation.stateApplied -and $_.Operation.beforeState -ceq 'Pending' -and $_.Operation.afterState -ceq 'Completed'
     })
     if ($completed.Count -ne 1) { return $false }
+    if ($AfterWaitRecovery -and
+        ([long]$completed[0].Boundary.writerSequence -le $firstWaitSequence -or
+            @($entries | Where-Object {
+                $_.Key -ceq $owner.Key -and $_.Boundary.decisionStatus -ceq 'Accepted' -and $_.Operation.stateApplied -and
+                $_.Operation.beforeState -ceq 'None' -and $_.Operation.afterState -ceq 'Pending' -and
+                [long]$_.Boundary.writerSequence -gt $Episode.PendingSequence -and [long]$_.Boundary.writerSequence -lt $firstWaitSequence
+            }).Count -ne 1)) { return $false }
     if (@($entries | Where-Object {
         [long]$_.Boundary.writerSequence -gt [long]$completed[0].Boundary.writerSequence -and
         $_.Boundary.decisionStatus -ceq 'Accepted' -and
@@ -382,13 +434,19 @@ function Test-FileTransferFallbackV6BootstrapCorrelatedEpisodeConsumed {
     }).Count -gt 0) { return $false }
     $latest = @($entries | Where-Object { $_.Boundary.decisionStatus -ceq 'Accepted' })[-1]
     $correlation = $latest.Operation.routeTransition.bootstrapCorrelation
-    if ($SnapshotEvaluation.CatalogVersion -cin @($script:FileTransferCoordinatorBootstrapInitiationCatalogVersion,
+    $requiresSourceHold = $SnapshotEvaluation.CatalogVersion -cin @($script:FileTransferCoordinatorBootstrapInitiationCatalogVersion,
             $script:FileTransferCoordinatorBootstrapCallbackCatalogVersion,
             $script:FileTransferCoordinatorRepairOwnerCatalogVersion,
             $script:FileTransferCoordinatorActivationRetryCatalogVersion,
             $script:FileTransferCoordinatorReceiverPreAdmissionCatalogVersion,
             $script:FileTransferCoordinatorInitialDataSessionCatalogVersion,
-            $script:FileTransferCoordinatorEarlyCheckpointProofCatalogVersion, $script:FileTransferCoordinatorFallbackRepairHandoffCatalogVersion) -and
+            $script:FileTransferCoordinatorEarlyCheckpointProofCatalogVersion, $script:FileTransferCoordinatorFallbackRepairHandoffCatalogVersion)
+    if ($AfterWaitRecovery) {
+        if (-not $requiresSourceHold) { return $false }
+        $commit = Test-FileTransferFallbackV6BootstrapSourceHoldConsumed $completed[0] $streamHistory -RequireCommittedRoute
+        if (-not $commit -or $publication.WriterSequence -le [long]$commit.writerSequence -or
+            -not (Test-FileTransferCoordinatorSnapshotBoundaryEqualExceptCheckpoint $commit.afterBoundary $publicationBoundary.afterBoundary)) { return $false }
+    } elseif ($requiresSourceHold -and
         -not (Test-FileTransferFallbackV6BootstrapSourceHoldConsumed $completed[0] $streamHistory)) { return $false }
     return $latest.Key -ceq $owner.Key -and $latest.Operation.afterState -ceq 'Completed' -and
         $correlation.agreementEnabled -and $correlation.version -eq 1 -and
@@ -786,6 +844,10 @@ function Get-FileTransferFallbackV6BootstrapDirectionCorrelation {
             }
         }
 
+        if (-not $recovered) {
+            $recovered = Test-FileTransferFallbackV6BootstrapCorrelatedEpisodeConsumed -Episode $episode `
+                -BeforeSequence $firstWait.WriterSequence -SnapshotEvaluation $SnapshotEvaluation -AfterWaitRecovery
+        }
         $first = $firstWait
         $distinctKey = "fallback-v6-bootstrap-direction|$($episode.Key)|$expectedDirection"
         $distinctRecord = [pscustomobject]@{

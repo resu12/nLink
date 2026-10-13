@@ -35,6 +35,40 @@ $diagnostic = @(
     "event=filetransfer_fallback_nkn_proof_unconfirmed; $scope; proof=nkn_control_ack_received; bulk_seen=1; control_seen=1; requires_control_proof=0; requires_v6_epoch_recovery=1",
     "event=filetransfer_fallback_nkn_proof_waiting_for_v6_epoch; $scope; proof=nkn_control_ack_received")
 $lines = @($captured[0..($startIndex-1)]) + $episode + @($captured[$startIndex..($captured.Count-1)]) + $diagnostic
+$recovery = $Scenario -cin @('recovered','recovered_cleanup')
+if ($recovery) {
+    # Move the diagnostic before the real second exchange completes. Model only
+    # the adapter's publication log from the actual Coordinator publication token.
+    $lines = [Collections.Generic.List[string]]::new()
+    for ($i=0; $i -lt $captured.Count; $i++) {
+        if ($i -eq $startIndex) { $lines.AddRange([string[]]$episode) }
+        if ((Get-FileTransferCoordinatorSnapshotEventName $captured[$i]) -ceq 'filetransfer_coordinator_transition_snapshot') {
+            $envelope = (ConvertFrom-FileTransferCoordinatorSnapshotPayload (Get-FileTransferCoordinatorSnapshotLineField $captured[$i] 'snapshot_payload')).Value
+            if (@($envelope.aggregate.operations | Where-Object {
+                $_.operationRole -ceq 'fallback_bootstrap_exchange' -and $_.operationGeneration -eq 2 -and
+                $_.beforeState -ceq 'Pending' -and $_.afterState -ceq 'Completed'
+            }).Count -eq 1) { $lines.AddRange([string[]]$diagnostic) }
+            $publication = @($envelope.aggregate.operations | Where-Object {
+                $_.operationRole -ceq 'route_publication' -and $_.afterState -ceq 'Published' -and
+                $_.routeRuntime.boundary.liveRouteEpoch -eq 4
+            })
+        } else { $publication = @() }
+        $lines.Add($captured[$i])
+        if ($publication.Count -eq 1) {
+            $op = $publication[0]; $target = $op.routeRuntime.boundary
+            $mapping = @{ route='route'; protocol_version='protocolVersion'; live_route_epoch='liveRouteEpoch';
+                runtime_generation='runtimeGeneration'; terminal_generation='terminalGeneration'; leg_generation='legGeneration';
+                route_publication_generation='routePublicationGeneration'; route_commit_generation='routeCommitGeneration' }
+            $tuple = @($mapping.Keys | ForEach-Object { "$_=$($target.($mapping[$_]))" }) -join '; '
+            $lines.Add("event=filetransfer_route_hint_authorized_publication_accepted; $scope; $tuple; publication_evidence_version=1; " +
+                "publication_evidence_coordinator_id=$($envelope.coordinatorInstanceId); publication_evidence_session_id=$($envelope.sessionId); " +
+                "publication_evidence_transfer_id=$($envelope.transferId); publication_evidence_boundary_id=$($envelope.transitionId); " +
+                "publication_evidence_state_generation=$($envelope.aggregate.afterStateGeneration); publication_evidence_observed_state_generation=$($envelope.aggregate.afterStateGeneration); " +
+                "publication_evidence_operation_key=$($op.operationKey); publication_evidence_token_fingerprint=$($op.receiptFingerprint)")
+        }
+    }
+    $lines = $lines.ToArray()
+}
 for ($i=0; $i -lt $lines.Count; $i++) {
     $lines[$i] = [regex]::Replace($lines[$i], '; log_writer_id=[^;]+; log_writer_sequence=[^;]+$', '') +
         "; log_writer_id=bootstrap-correlation-fixture; log_writer_sequence=$($i+1)"
@@ -52,7 +86,10 @@ $proof = Get-FileTransferCoordinatorSnapshotCorrelationResult -Evaluation $full 
     'filetransfer_route_transition_tuna_v4_to_post_tuna_fallback_v6_proof_bootstrap_missing')
 $combined = Add-FileTransferFallbackV6BootstrapDirectionToSnapshotProof -Events $events -SnapshotProof $proof -SnapshotEvaluation $full
 $expectedLegacy = if ($Scenario -ceq 'hold_invalidated') { 1 } else { 0 }
-if ($combined.UnresolvedCount -ne ($proof.UnresolvedCount + $expectedLegacy) -or $combined.RawCount -ne ($proof.RawCount + $expectedLegacy)) {
+$expectedRecovered = if ($recovery) { 1 } else { 0 }
+if ($combined.UnresolvedCount -ne ($proof.UnresolvedCount + $expectedLegacy) -or
+    $combined.RawCount -ne ($proof.RawCount + $expectedLegacy + $expectedRecovered) -or
+    $combined.RecoveredCount -ne ($proof.RecoveredCount + $expectedRecovered)) {
     throw "$Scenario expected $expectedLegacy legacy obligations, got $($combined.UnresolvedCount - $proof.UnresolvedCount)"
 }
 $records = @(for ($i=0; $i -lt $lines.Count; $i++) { [pscustomobject]@{Line=$lines[$i];LineIndex=$i} })
@@ -96,6 +133,55 @@ function Assert-LegacyRetained([string]$Name, [string[]]$InputLines, $Evaluation
     if ($result.RawCount -ne 1 -or $result.UnresolvedCount -ne 1) { throw "$Name waived the legacy obligation" }
 }
 function Clone($Value) { ConvertFrom-Json (ConvertTo-Json $Value -Depth 64 -Compress) }
+
+if ($recovery) {
+    foreach ($case in @('missing_publication','wrong_publication_token','wrong_publication_generation','wrong_publication_writer',
+            'conflicting_publication_field','publication_before_commit','missing_commit','missing_disposition',
+            'missing_prepare','missing_hold','wrong_peer','wrong_commit_source','unvalidated_disposition',
+            'exchange_started_after_wait','exchange_invalidated','ambiguous_owner','early_hold_loss','terminal_before_closure')) {
+        $copy = Clone $full; $inputLines = [string[]]$lines.Clone()
+        $completed = @($copy.Boundaries | Where-Object {
+            @($_.operations | Where-Object { $_.operationRole -ceq 'fallback_bootstrap_exchange' -and $_.operationGeneration -eq 2 -and $_.beforeState -ceq 'Pending' -and $_.afterState -ceq 'Completed' }).Count
+        })[-1]
+        $op = @($completed.operations | Where-Object operationRole -CEQ 'fallback_bootstrap_exchange')[0]
+        $commit = @($copy.Boundaries | Where-Object { $_.decisionKind -ceq 'CommitFileTransferRouteTransition' -and $_.afterBoundary.liveRouteEpoch -eq 4 })[-1]
+        $disposed = @($copy.Boundaries | Where-Object { $_.decisionKind -ceq 'ApplyFileTransferRouteTransitionDispositionReceipt' -and $_.afterBoundary.liveRouteEpoch -eq 4 })[-1]
+        for ($i=0; $i -lt $inputLines.Count; $i++) {
+            if ($inputLines[$i] -cnotmatch '^event=filetransfer_route_hint_authorized_publication_accepted;') { continue }
+            switch ($case) {
+                missing_publication { $inputLines[$i]='' }
+                wrong_publication_token { $inputLines[$i] = $inputLines[$i] -creplace 'publication_evidence_token_fingerprint=[^;]+','publication_evidence_token_fingerprint=fte1-000000000000000000000000' }
+                wrong_publication_generation { $inputLines[$i] = $inputLines[$i] -creplace 'route_publication_generation=[^;]+','route_publication_generation=999' }
+                wrong_publication_writer { $inputLines[$i] = $inputLines[$i] -creplace 'log_writer_id=[^;]+','log_writer_id=other' }
+                conflicting_publication_field { $inputLines[$i] += '; protocol_version=4' }
+                publication_before_commit { $inputLines[$i] = $inputLines[$i] -creplace 'log_writer_sequence=[^;]+',"log_writer_sequence=$([long]$commit.writerSequence-1)" }
+            }
+        }
+        switch ($case) {
+            missing_commit { $commit.decisionKind='unrelated' }
+            missing_disposition { $disposed.decisionKind='unrelated' }
+            missing_prepare { foreach ($b in $copy.Boundaries) { if ($b.decisionKind -ceq 'PrepareFileTransferRouteTransition' -and $b.beforeBoundary.liveRouteEpoch -eq 3) { $b.decisionKind='unrelated' } } }
+            missing_hold { foreach ($b in $copy.Boundaries) { $b.operations=@($b.operations | Where-Object operationRole -CNE 'fallback_bootstrap_source_hold') } }
+            wrong_peer { $op.routeTransition.bootstrapCorrelation.completedPeerIdFingerprint='(none)' }
+            wrong_commit_source { @($commit.operations | Where-Object operationRole -CEQ 'terminal')[0].routeTransition.sourceBoundary.runtimeGeneration=999 }
+            unvalidated_disposition { @(@($disposed.operations | Where-Object operationRole -CEQ 'terminal')[0].routeTransition.receipts | Where-Object stage -CEQ 'disposition')[0].receiptValidated=$false }
+            exchange_started_after_wait { foreach ($b in $copy.Boundaries) { if (@($b.operations | Where-Object { $_.operationKey -ceq $op.operationKey -and $_.beforeState -ceq 'None' }).Count) { $b.writerSequence=[long]$completed.writerSequence } } }
+            exchange_invalidated { $op.routeTransition.bootstrapCorrelation.invalidated=$true }
+            ambiguous_owner { $other=Clone $completed; $other.coordinatorInstanceId='fte1-000000000000000000000000'; $copy.Boundaries += $other }
+            early_hold_loss {
+                $other=Clone (@($copy.Boundaries | Where-Object { @($_.operations | Where-Object { $_.operationRole -ceq 'fallback_bootstrap_source_hold' -and $_.operationGeneration -eq 2 -and $_.afterState -ceq 'Drained' }).Count })[-1])
+                $other.writerSequence=[long]$completed.writerSequence+1
+                foreach ($h in @($other.operations | Where-Object operationRole -CEQ 'fallback_bootstrap_source_hold')) { $h.afterState='Invalidated' }
+                $copy.Boundaries += $other
+            }
+            terminal_before_closure {
+                $inputLines += "event=file_transfer_inbound_terminal; $scope; log_writer_id=bootstrap-correlation-fixture; log_writer_sequence=$([long]$completed.writerSequence+1)"
+            }
+        }
+        Assert-LegacyRetained $case $inputLines $copy
+    }
+    Write-Output 'bootstrap-ownership-ok'; return
+}
 
 # Project the same modeled decisions into each supported initiation catalog and
 # validate the complete stream before exercising ownership. The initiation-only

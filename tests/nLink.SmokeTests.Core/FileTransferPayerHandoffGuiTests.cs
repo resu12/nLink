@@ -6,13 +6,15 @@ namespace NLink.SmokeTests;
 public sealed class FileTransferPayerHandoffGuiTests : FileTransferOpsScriptsTestBase
 {
     [Theory]
-    [InlineData("powershell")]
-    [InlineData("pwsh")]
-    public async Task PayerHandoffGui_FirstHelperOffRequiresCurrentReceiverPayload(string host)
+    [InlineData("powershell", 1)]
+    [InlineData("powershell", 3)]
+    [InlineData("pwsh", 1)]
+    [InlineData("pwsh", 3)]
+    public async Task PayerHandoffGui_EachPayerOffRequiresCurrentReceiverPayload(string host, int activationEpoch)
     {
         if (!OperatingSystem.IsWindows()) return;
         var result = await RunPowerShellScriptTextAsync("""
-            param([string]$RepoRoot)
+            param([string]$RepoRoot, [int]$ActivationEpoch)
             $ErrorActionPreference = 'Stop'
             Set-StrictMode -Version Latest
             $tokens = $null; $errors = $null
@@ -29,14 +31,17 @@ public sealed class FileTransferPayerHandoffGuiTests : FileTransferOpsScriptsTes
             function Start-Sleep { param($Milliseconds) $script:Clock.ElapsedMilliseconds += 10 }
             function Get-GuiSmokeLogLedgerProgressSnapshotAfterBookmark {
                 param($State, $Bookmark)
-                if ($Bookmark -ne 12) { throw 'activation bookmark changed' }
+                if ($Bookmark -ne $expectedBookmark) { throw 'activation bookmark changed' }
                 $script:poll++
                 $script:frames
                 if ($script:addReceived -and $script:poll -ge 2) { $received.Replace('payload_bytes=1048576', 'payload_bytes=524288') }
                 if ($script:addReceived -and $script:poll -ge 3) { $received.Replace('payload_bytes=1048576', 'payload_bytes=524288') + '; second_frame=1' }
             }
             $script:GuiSmokeAppLogLedger = [pscustomobject]@{}
-            $scope = 'session_id=s; transfer_id=t; direction=inbound; log_writer_id=receiver; route=file_tuna_v4; protocol_version=4; live_route_epoch=1; runtime_generation=2; terminal_generation=0; leg_generation=2; route_publication_generation=2; route_commit_generation=1'
+            $expectedBookmark = if ($ActivationEpoch -eq 1) { 12 } else { 24 }
+            $generation = $ActivationEpoch + 1
+            $commitGeneration = if ($ActivationEpoch -eq 1) { 1 } else { 2 }
+            $scope = "session_id=s; transfer_id=t; direction=inbound; log_writer_id=receiver; route=file_tuna_v4; protocol_version=4; live_route_epoch=$ActivationEpoch; runtime_generation=$generation; terminal_generation=0; leg_generation=$generation; route_publication_generation=$generation; route_commit_generation=$commitGeneration"
             $publication = ConvertFrom-GuiSmokeSemicolonFields -Message $scope
             $received = "event=filetransfer_tuna_data_path_peer_visible; $scope; target_route=file_tuna_v4; target_protocol_version=4; target_transport=tuna; actual_transport=tuna; frame_type=filetransfer.chunk_batch.v4; payload_bytes=1048576; raw_payload_bytes=1048576; proof_direction=receive; receive_disposition=dispatch_entered"
             $decoys = @(
@@ -47,6 +52,9 @@ public sealed class FileTransferPayerHandoffGuiTests : FileTransferOpsScriptsTes
                 $received.Replace('actual_transport=tuna', 'actual_transport=regular_nkn'),
                 $received.Replace('target_protocol_version=4', 'target_protocol_version=6'),
                 $received.Replace('payload_bytes=1048576', 'payload_bytes=0'))
+            if ($ActivationEpoch -eq 3) {
+                $decoys += $received.Replace('live_route_epoch=3', 'live_route_epoch=1').Replace('runtime_generation=4', 'runtime_generation=2').Replace('leg_generation=4', 'leg_generation=2').Replace('route_publication_generation=4', 'route_publication_generation=2').Replace('route_commit_generation=2', 'route_commit_generation=1')
+            }
             foreach ($field in @('session_id', 'transfer_id', 'log_writer_id', 'route', 'protocol_version',
                     'live_route_epoch', 'runtime_generation', 'terminal_generation', 'leg_generation',
                     'route_publication_generation', 'route_commit_generation')) {
@@ -57,7 +65,7 @@ public sealed class FileTransferPayerHandoffGuiTests : FileTransferOpsScriptsTes
                 $script:Clock = [pscustomobject]@{ElapsedMilliseconds=0}; $script:poll=0
                 $script:frames = @($decoy); $script:addReceived = $false
                 $rejected = $false
-                try { [void](Wait-TunaGuiAcceleratedFilePayloadBeforeFault -Bookmark 12 -ReceiverPublication $publication -MinimumTotalPayloadBytes 1048576 -TimeoutMs 30 -PollIntervalMs 10) }
+                try { [void](Wait-TunaGuiAcceleratedFilePayloadBeforeFault -Bookmark $expectedBookmark -ReceiverPublication $publication -MinimumTotalPayloadBytes 1048576 -TimeoutMs 30 -PollIntervalMs 10) }
                 catch {
                     if ($_.Exception.Message -notlike 'Timed out waiting for Tuna accelerated bulk file payload*') { throw }
                     $rejected = $true
@@ -66,11 +74,11 @@ public sealed class FileTransferPayerHandoffGuiTests : FileTransferOpsScriptsTes
             }
             $script:Clock = [pscustomobject]@{ElapsedMilliseconds=0}; $script:poll=0
             $script:frames = $decoys; $script:addReceived = $true
-            $line = Wait-TunaGuiAcceleratedFilePayloadBeforeFault -Bookmark 12 -ReceiverPublication $publication -MinimumTotalPayloadBytes 1048576 -TimeoutMs 100 -PollIntervalMs 10
+            $line = Wait-TunaGuiAcceleratedFilePayloadBeforeFault -Bookmark $expectedBookmark -ReceiverPublication $publication -MinimumTotalPayloadBytes 1048576 -TimeoutMs 100 -PollIntervalMs 10
             if ($script:poll -ne 3 -or $line -notlike '*second_frame=1') { throw 'received payload was recounted or did not satisfy the unchanged threshold' }
             foreach ($missingPublication in @($null, @{}, @{direction='outbound'})) {
                 $rejected = $false
-                try { [void](Wait-TunaGuiAcceleratedFilePayloadBeforeFault -Bookmark 12 -ReceiverPublication $missingPublication -TimeoutMs 30) }
+                try { [void](Wait-TunaGuiAcceleratedFilePayloadBeforeFault -Bookmark $expectedBookmark -ReceiverPublication $missingPublication -TimeoutMs 30) }
                 catch { $rejected = $true }
                 if (-not $rejected) { throw 'missing receiver publication fell back to sender evidence' }
             }
@@ -81,23 +89,34 @@ public sealed class FileTransferPayerHandoffGuiTests : FileTransferOpsScriptsTes
             if ($gate.Count -ne 1) { throw 'off-step payload gate missing or duplicated' }
             function Wait-TunaGuiAcceleratedFilePayloadBeforeFault {
                 param($Bookmark, $ReceiverPublication, $MinimumTotalPayloadBytes, $MinimumFramePayloadBytes, $TimeoutMs, $PollIntervalMs)
-                if ($Bookmark -ne 12 -or -not [object]::ReferenceEquals($ReceiverPublication, $publication) -or
-                    $MinimumTotalPayloadBytes -ne 1048576 -or $MinimumFramePayloadBytes -ne 16384 -or $TimeoutMs -ne 90000) { throw 'receiver gate scope or limits changed' }
+                if ($Bookmark -ne $expectedBookmark -or -not [object]::ReferenceEquals($ReceiverPublication, $publication) -or
+                    $MinimumTotalPayloadBytes -ne 1048576 -or $MinimumFramePayloadBytes -ne 16384 -or $TimeoutMs -ne 90000 -or $PollIntervalMs -ne 25) { throw 'receiver gate scope or limits changed' }
                 $script:waits++
                 return $received
             }
             $faultAdmissionTracker = [pscustomobject]@{AuthoritativeTunaProjection=[pscustomobject]@{Inbound=[pscustomobject]@{Publication=[pscustomobject]@{Fields=$publication}}}}
-            $RouteMode='live-regular-activation-cycle'; $sequence=@('on','off','on','off'); $lastActivationPayloadBookmark=12
-            $script:waits=0; $PayerMode='helper-to-helpee'; $stepIndex=1; $stepNumber=2
+            $RouteMode='live-regular-activation-cycle'; $sequence=@('on','off','on','off'); $lastActivationPayloadBookmark=$expectedBookmark
+            $script:waits=0; $PayerMode='helper-to-helpee'; $stepIndex=$ActivationEpoch; $stepNumber=$stepIndex+1
             Invoke-Expression $gate[0].Extent.Text
-            if ($script:waits -ne 1 -or $progressLine -cne $received) { throw 'first Helper off still skips received-payload wait' }
-            $stepIndex=3; $stepNumber=4
-            Invoke-Expression $gate[0].Extent.Text
-            $PayerMode='helper'; $stepIndex=1; $stepNumber=2
-            Invoke-Expression $gate[0].Extent.Text
+            if ($script:waits -ne 1 -or $progressLine -cne $received) { throw "payer off still skips received-payload wait: epoch=$ActivationEpoch" }
+            $lastActivationPayloadBookmark=$null; $rejected=$false
+            try { Invoke-Expression $gate[0].Extent.Text }
+            catch {
+                if ($_.Exception.Message -notlike '*switch-off is missing its activation bookmark.') { throw }
+                $rejected=$true
+            }
+            if (-not $rejected -or $script:waits -ne 1) { throw 'missing activation bookmark admitted payload wait' }
+            $lastActivationPayloadBookmark=$expectedBookmark
+            foreach ($PayerMode in @('helper','helpee')) {
+                foreach ($stepIndex in @(1,3)) {
+                    $stepNumber=$stepIndex+1
+                    Invoke-Expression $gate[0].Extent.Text
+                    if ($progressLine -notlike '*reason=regular_activation_cycle_off_after_live_tuna_epoch') { throw 'single-payer switch-off changed' }
+                }
+            }
             if ($script:waits -ne 1) { throw 'unrelated switch-off behavior changed' }
             'PASS'
-            """, [FindRepoRoot()], host);
+            """, [FindRepoRoot(), activationEpoch.ToString(System.Globalization.CultureInfo.InvariantCulture)], host);
         Assert.True(result.ExitCode == 0, result.Stdout + Environment.NewLine + result.Stderr);
         Assert.Contains("PASS", result.Stdout, StringComparison.Ordinal);
     }

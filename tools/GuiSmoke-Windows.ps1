@@ -37279,8 +37279,8 @@ function Invoke-FileTransferTunaHandoffFallbackCycle {
                 elseif ($RouteMode -eq 'live-regular-activation-cycle' -and
                     $stepIndex -gt 0 -and
                     [string]::Equals([string]$sequence[$stepIndex - 1], 'on', [System.StringComparison]::OrdinalIgnoreCase)) {
-                    if ($PayerMode -eq 'helper-to-helpee' -and $stepIndex -eq 1) {
-                        if ($null -eq $lastActivationPayloadBookmark) { throw 'Helper switch-off is missing its activation bookmark.' }
+                    if ($PayerMode -eq 'helper-to-helpee') {
+                        if ($null -eq $lastActivationPayloadBookmark) { throw 'Payer handoff switch-off is missing its activation bookmark.' }
                         $progressLine = [string](Wait-TunaGuiAcceleratedFilePayloadBeforeFault -Bookmark $lastActivationPayloadBookmark -ReceiverPublication $faultAdmissionTracker.AuthoritativeTunaProjection.Inbound.Publication.Fields -MinimumTotalPayloadBytes 1048576L -MinimumFramePayloadBytes 16384L -TimeoutMs 90000 -PollIntervalMs 25)
                     }
                     else {

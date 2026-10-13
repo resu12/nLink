@@ -33,6 +33,10 @@ public sealed partial class FileTransferBootstrapCorrelationEvidenceTests
     [InlineData("pwsh", "committed_cleanup", true, true)]
     [InlineData("powershell", "committed", true, false)]
     [InlineData("pwsh", "committed", true, false)]
+    [InlineData("powershell", "recovered", true, false)]
+    [InlineData("pwsh", "recovered", true, false)]
+    [InlineData("powershell", "recovered_cleanup", true, true)]
+    [InlineData("pwsh", "recovered_cleanup", true, true)]
     public async Task BootstrapCorrelation_SourceHoldInvalidationRespectsCommittedConsumption(
         string host, string scenario, bool commitSuccessor, bool invalidateSourceHold)
     {
@@ -42,7 +46,7 @@ public sealed partial class FileTransferBootstrapCorrelationEvidenceTests
         var path = Path.Combine(directory, scenario + ".log");
         await File.WriteAllLinesAsync(path, Emit(FileTransferCoordinatorTests.CreateBootstrapSuccessorHistory(
             outbound: false, commitSuccessor: commitSuccessor, invalidateSourceHold: invalidateSourceHold),
-            modeledOwnershipEffects: true), new UTF8Encoding(false));
+            modeledOwnershipEffects: true, modeledFinalPublication: scenario.StartsWith("recovered", StringComparison.Ordinal)), new UTF8Encoding(false));
         const string script = """
             param([string]$RepoRoot, [string]$InputPath, [string]$Scenario)
             & (Join-Path $RepoRoot 'tests/nLink.SmokeTests.Core/TestData/BootstrapCorrelationOwnership.ps1') -RepoRoot $RepoRoot -InputPath $InputPath -Scenario $Scenario
