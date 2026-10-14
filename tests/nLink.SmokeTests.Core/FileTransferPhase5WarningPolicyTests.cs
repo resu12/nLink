@@ -16,6 +16,132 @@ public sealed class FileTransferPhase5WarningPolicyTests : FileTransferAcceptanc
     [Theory]
     [InlineData("powershell")]
     [InlineData("pwsh")]
+    public async Task CompletedFallbackWarningVariance_ProjectsEffectiveVerdictWithoutHidingFailures(string host)
+    {
+        if (!OperatingSystem.IsWindows()) { return; }
+        // Explicit projection inputs, not synthetic evidence admitted as a live run.
+        const string script = """
+            param([string]$RepoRoot, [string]$Directory)
+            Set-StrictMode -Version Latest
+            $ErrorActionPreference = 'Stop'
+            $errors = $null
+            $ast = [Management.Automation.Language.Parser]::ParseFile(
+                (Join-Path $RepoRoot 'tools/Run-FileTransferRouteAcceptance.ps1'), [ref]$null, [ref]$errors)
+            if ($errors.Count) { throw 'wrapper_parse_failed' }
+            foreach ($definition in $ast.EndBlock.Statements | Where-Object {
+                $_ -is [Management.Automation.Language.FunctionDefinitionAst]
+            }) { . ([scriptblock]::Create($definition.Extent.Text)) }
+            $script:RouteAcceptanceExecutionMode = 'live'
+            $GoodputRegressionTolerancePercent = 10D
+            $scenario = [pscustomobject]@{ Name='live-switch-off-helper-64mb'; Kind='tuna'; ExpectedRouteChanges=@('file_tuna_v4','post_tuna_fallback_v6') }
+            $proofs = @('routeConsistencyVerdict','liveRouteEpochProofVerdict','fallbackLegAuthorityProofVerdict',
+                'cleanFallbackLegProofVerdict','bridgeLivenessIntegrationVerdict','controlPlaneIsolationVerdict')
+            $variants = @('accepted','not_applied','hard_failure','other_failure','untrusted','cursor_gap','writer_gap','manifest_missing','provenance_missing',
+                'sha_mismatch','incomplete','other_candidate','incomplete_candidate','semantic_unavailable') +
+                @($proofs | ForEach-Object { "missing_$_"; "failed_$_" })
+            foreach ($variant in $variants) {
+                $result = New-RouteAcceptanceRunResult -Name $scenario.Name -ArtifactDir $Directory -ExpectedRoute file_tuna_v4 -ExpectedProtocol 4
+                $result.completed = $true
+                $result.integrityOk = $true
+                $result.shaOk = $true
+                $result.route = 'file_tuna_v4,post_tuna_fallback_v6'
+                foreach ($proof in $proofs) { $result.$proof = 'pass' }
+                $result.operatorVerdict = 'FAIL_EXTERNAL_TRANSPORT_CHURN'
+                $result.warningCount = 2
+                $result.warningKinds = 'fallback_frontier_repair_churn,fallback_receiver_state_churn'
+                $result.warningCapExceededKinds = 'fallback_frontier_repair_churn'
+                $result.goodputRegressionWarning = 'advisory switch-off goodput warning'
+                $result.runtimeFailureCandidate = 'warning_policy'
+                $result.firstProofChainFailureClass = 'warning_policy'
+                Add-RouteAcceptanceFailure -Result $result -Message 'warning cap exceeded: fallback_frontier_repair_churn'
+                Add-RouteAcceptanceFailure -Result $result -Message 'operator verdict is not accepted'
+                $script:RouteAcceptanceEvidence = [pscustomobject]@{
+                    ManifestPresent=$true; ManifestPath='projection-fixture'; ManifestSha256='fixture'
+                    ManifestValidationVerdict='pass'; ProvenanceVerdict='pass'; ProvenanceFailureReasons=@()
+                    CurrentRuntimeProof=$true; CurrentRuntimeProofReasons=@()
+                }
+                $ledger = [pscustomobject]@{ cursorIntegrityVerdict='pass'; cursorIntegrityReasons=@() }
+                foreach ($property in $result.PSObject.Properties | Where-Object { $_.Name -like 'writer*' }) {
+                    $ledger | Add-Member -NotePropertyName $property.Name -NotePropertyValue $property.Value
+                }
+                $ledger.writerEvidenceVersion = 3L
+                $ledger.writerIntegrityVerdict = $ledger.writerRecoveryVerdict = $ledger.writerChronologyVerdict = 'pass'
+                switch ($variant) {
+                    'hard_failure' { $result.hardFailureCount = 1; Add-RouteAcceptanceFailure -Result $result -Message 'operator hard failures observed: 1' }
+                    'other_failure' { Add-RouteAcceptanceFailure -Result $result -Message 'required authenticated Tuna delivery missing' }
+                    'untrusted' { $script:RouteAcceptanceEvidence.CurrentRuntimeProof = $false }
+                    'cursor_gap' { $ledger.cursorIntegrityVerdict = 'fail'; $ledger.cursorIntegrityReasons = @('gap') }
+                    'writer_gap' { $ledger.writerIntegrityVerdict = 'fail'; $ledger.writerGapCount = 1L }
+                    'manifest_missing' { $script:RouteAcceptanceEvidence.ManifestValidationVerdict = 'missing' }
+                    'provenance_missing' { $script:RouteAcceptanceEvidence.ProvenanceVerdict = 'missing' }
+                    'sha_mismatch' { $result.shaOk = $false }
+                    'incomplete' { $result.completed = $false }
+                    'other_candidate' { $result.runtimeFailureCandidate = $result.firstProofChainFailureClass = 'active_file_tuna_v6_evidence' }
+                    'incomplete_candidate' { $result.runtimeFailureCandidate = $result.firstProofChainFailureClass = 'runtime_unlock_retry_dispatch_install_grant_evidence_incomplete' }
+                    'semantic_unavailable' { $result.guiReportedFailurePhase = 'semantic_analysis'; $result.guiReportedFailureReason = 'evidence_enrichment_timeout'; $result.guiReportedFailureError = 'evidence_enrichment_timeout' }
+                }
+                foreach ($proof in $proofs) {
+                    if ($variant -ceq "missing_$proof") { $result.$proof = '(missing)' }
+                    if ($variant -ceq "failed_$proof") { $result.$proof = 'fail' }
+                }
+                if ($variant -cne 'not_applied') { Set-Phase5CompletedLiveFallbackWarningVariance -Scenario $scenario -Result $result | Out-Null }
+                $candidateBefore = $result.runtimeFailureCandidate
+                $failuresBefore = @($result.failures)
+                $evidence = @([pscustomobject]@{
+                    artifactDir=$Directory; selected=$true; finalizationValidation=[pscustomobject]@{isFinalized=$true}
+                    logLedger=$ledger
+                })
+                Set-RouteAcceptanceResultEvidence -Result $result -ScenarioEvidence $evidence
+                $dto = New-RouteAcceptanceSummaryRunDto -Result $result -AcceptancePhase phase5
+                if ($variant -ceq 'accepted') {
+                    if ($dto.runtimeCorrectnessVerdict -cne 'pass' -or $dto.runtimeFailureCandidate -cne '(none)' -or
+                        $dto.firstProofChainFailureClass -cne '(none)' -or $dto.acceptanceFailureClass -cne 'none' -or
+                        $dto.evidenceClassification -cne 'current_runtime_proof' -or $dto.correctnessFailureCount -ne 0) {
+                        throw 'accepted_warning_still_reported_as_runtime_failure'
+                    }
+                    $accepted = $result
+                }
+                elseif ($dto.runtimeCorrectnessVerdict -ceq 'pass' -or $dto.runtimeFailureCandidate -cne $candidateBefore) {
+                    throw "failure_or_missing_proof_hidden: $variant"
+                }
+                if ($variant -in @('untrusted','cursor_gap','incomplete','incomplete_candidate','semantic_unavailable') -and
+                    $dto.runtimeCorrectnessVerdict -cne 'incomplete_proof') { throw "incomplete_proof_lost: $variant" }
+                if ($dto.operatorVerdict -cne 'FAIL_EXTERNAL_TRANSPORT_CHURN' -or $dto.warningCount -ne 2 -or
+                    $dto.warningKinds -cne 'fallback_frontier_repair_churn,fallback_receiver_state_churn' -or
+                    $dto.warningCapExceededKinds -cne 'fallback_frontier_repair_churn') { throw "raw_warning_changed: $variant" }
+                if ($variant -cne 'semantic_unavailable' -and ($failuresBefore -join '|') -cne ($result.failures -join '|')) {
+                    throw "acceptance_failures_changed_by_projection: $variant"
+                }
+            }
+            # Exercise the real aggregate writer, including its text and JSON projections.
+            foreach ($prefix in @('fileTransferFallbackFrontierStallGraceRecheckMissing','fileTransferFallbackFrontierRecentProgressGraceRecheckMissing')) {
+                $accepted.($prefix + 'AccountingAvailability') = 'valid'
+                $accepted.($prefix + 'AccountingVersion') = 2
+            }
+            $script:RunResults = @($accepted)
+            Write-Phase4RouteAcceptanceSummaryFiles -RunRoot $Directory -BaselinePath fixture -AcceptancePhase phase5 -ExpectedRunCount 1 -RequestedScenarios @($scenario.Name) | Out-Null
+            $summary = Get-Content -LiteralPath (Join-Path $Directory 'phase4-ab-acceptance-summary.json') -Raw | ConvertFrom-Json
+            $text = Read-RouteAcceptanceKeyValueArtifact -Path (Join-Path $Directory 'phase4-ab-acceptance-summary.txt')
+            if ($summary.verdict -cne 'PASS' -or $summary.performanceVerdict -cne 'WARN' -or $summary.runtimeCorrectnessVerdict -cne 'pass' -or
+                $summary.runtimeFailureCandidate -cne '(none)' -or $summary.acceptanceFailureClass -cne '(none)' -or
+                $text['runtime_correctness_verdict'] -cne 'pass' -or $text['runtime_failure_candidate'] -cne '(none)' -or
+                $summary.runs[0].operatorVerdict -cne 'FAIL_EXTERNAL_TRANSPORT_CHURN') { throw 'aggregate_projection_disagrees' }
+            'fallback-warning-projection-ok'
+            """;
+        var directory = Path.Combine(Path.GetTempPath(), "nlink-warning-projection", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(directory);
+        try
+        {
+            var result = await RunPowerShellScriptTextAsync(script, [FindRepoRoot(), directory], host);
+            Assert.True(result.ExitCode == 0, $"{host}: {result.Stdout}{Environment.NewLine}{result.Stderr}");
+            Assert.Contains("fallback-warning-projection-ok", result.Stdout, StringComparison.Ordinal);
+        }
+        finally { TryDeleteDirectory(directory); }
+    }
+
+    [Theory]
+    [InlineData("powershell")]
+    [InlineData("pwsh")]
     public async Task RouteAcceptanceWarningPolicy_EmptyKindsRejectWithoutThrowing(string host)
     {
         if (!OperatingSystem.IsWindows()) { return; }

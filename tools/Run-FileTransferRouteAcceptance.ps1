@@ -901,6 +901,29 @@ function Set-RouteAcceptanceResultEvidence {
             Add-RouteAcceptanceFailure -Result $Result -Message $semanticUnavailableFailure
         }
     }
+    # The applied fallback variance changes effective qualification, not the raw
+    # operator verdict or warning counters. Do not promote missing/failed proofs.
+    if ($Result.runtimeFailureCandidate -eq 'warning_policy' -and
+        $Result.firstProofChainFailureClass -eq 'warning_policy' -and
+        $Result.environmentalClassification -eq 'live_transport_recovered_fallback_churn_completed_clean' -and
+        [bool]$Result.currentRuntimeProof -and
+        $Result.manifestValidationVerdict -eq 'pass' -and
+        $Result.provenanceVerdict -eq 'pass' -and
+        $Result.writerIntegrityVerdict -eq 'pass' -and
+        $Result.completed -and $Result.shaOk -and $Result.hardFailureCount -eq 0 -and
+        $Result.routeConsistencyVerdict -eq 'pass' -and
+        $Result.liveRouteEpochProofVerdict -eq 'pass' -and
+        $Result.fallbackLegAuthorityProofVerdict -eq 'pass' -and
+        $Result.cleanFallbackLegProofVerdict -eq 'pass' -and
+        $Result.bridgeLivenessIntegrationVerdict -eq 'pass' -and
+        $Result.controlPlaneIsolationVerdict -eq 'pass' -and
+        $Result.semanticFailureDomain -in @('(none)', 'none') -and
+        -not $semanticAnalysisUnavailable -and
+        @($Result.failures | Where-Object { -not (Test-Phase4PerformanceFailureLine -Line ([string]$_)) }).Count -eq 0) {
+        $Result.runtimeFailureCandidate = '(none)'
+        $Result.firstProofChainFailureClass = '(none)'
+    }
+
     if (-not [bool]$Result.currentRuntimeProof) {
         $Result.runtimeCorrectnessVerdict = 'incomplete_proof'
         $Result.evidenceClassification = 'incomplete_proof'
