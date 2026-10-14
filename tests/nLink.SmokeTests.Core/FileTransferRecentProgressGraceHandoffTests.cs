@@ -29,6 +29,10 @@ public sealed class FileTransferRecentProgressGraceHandoffTests : FileTransferOp
 
     [Theory]
     [InlineData("recent_progress", "powershell")]
+    [InlineData("recent_progress_retry_handoff", "powershell")]
+    [InlineData("recent_progress_retry_handoff", "pwsh")]
+    [InlineData("stall_retry_handoff", "powershell")]
+    [InlineData("stall_retry_handoff", "pwsh")]
     [InlineData("stall", "powershell")]
     [InlineData("stall_progress", "powershell")]
     [InlineData("stall_published", "powershell")]
@@ -135,6 +139,54 @@ public sealed class FileTransferRecentProgressGraceHandoffTests : FileTransferOp
                 Add 'filetransfer_v6_receiver_state_sent' 1450 $scope @{epoch='8';contiguous_committed_chunk_index=$(if($Coalesced){'48'}else{'43'});durable_received_highest_chunk_index=$(if($Coalesced){'82'}else{'80'});transfer_paused='0'}
                 return $script:fixtureEvents.ToArray()
             }
+            function RetryHandoffFixture {
+                # Preserved 8667444a GUI episode: frontier 1532, epoch 2;
+                # chunk callback arms first, repairs 53/54 stall, 55 retires to Tuna.
+                # Normalize IDs/frontiers while retaining that ownership/order shape.
+                $base=@(Fixture)
+                $script:fixtureEvents=[Collections.Generic.List[object]]::new()
+                foreach($event in $base[0..10]){$script:fixtureEvents.Add($event)}
+                $script:fixtureEvents[9].Fields.reason='chunk_batch_committed'
+                $script:fixtureEvents[9].Fields.authority_effect='none'
+                $script:fixtureEvents[10].Fields.authority_effect='none'
+                if($Kind -eq 'stall_retry_handoff'){
+                    # The same preserved episode replaces wake 32 through 37
+                    # as only the highest received chunk advances; deadline stays fixed.
+                    $wake=$base[9].Fields.Clone()
+                    foreach($step in 0..4){
+                        Add 'filetransfer_v6_frontier_stall_grace_recheck_decided' (1200+100*$step) $wake @{
+                            wake_generation=[string](42+$step);highest_received_chunk_index=[string](72+2*$step);
+                            decision_status='rearmed';decision_reason='highest_received_advanced'}
+                    }
+                    foreach($step in 0..4){
+                        Add 'filetransfer_v6_frontier_stall_grace_recheck_decided' (1851+$step) $wake @{
+                            wake_generation=[string](41+$step);highest_received_chunk_index=[string](70+2*$step);
+                            decision_status='stale';decision_reason='wake_generation_replaced'}
+                    }
+                }
+                foreach($step in 0..2){
+                    $id=@('B','C','D')[$step];$previous=@('A','B','C')[$step]
+                    $repair=Repair "fta2-repair_replay-$id" (61+$step) 41 "fta2-repair_replay-$previous"
+                    $repair.primary_protocol_repair_request_id="request:41:$id"
+                    $repair.primary_request_correlation_id="correlation:41:$id"
+                    $start=1860+100*$step
+                    Add 'filetransfer_fallback_frontier_repair_authority_granted' $start $repair
+                    Add 'filetransfer_control_plane_delivery_observed' ($start+1) $repair @{kind='frontier_request';repair_request_id="request:41:$id";request_correlation_id="correlation:41:$id";peer_visible_any='1';accepted_any='1'}
+                    Add 'filetransfer_fallback_frontier_repair_dispatched' ($start+2) $repair @{dispatch_observed='1'}
+                    Add 'filetransfer_v6_frontier_request_sent' ($start+3) $repair @{repair_request_id="request:41:$id";request_correlation_id="correlation:41:$id"}
+                    if($Kind -eq 'stall_retry_handoff' -and $step -eq 0){
+                        Add 'filetransfer_v6_frontier_stall_grace_recheck_decided' ($start+4) $wake @{
+                            wake_generation='46';highest_received_chunk_index='80';decision_status='dispatched';decision_reason='exact_receiver_request_dispatched'}
+                    }
+                    Add 'filetransfer_fallback_frontier_repair_contract_settled' ($start+40) $repair @{
+                        settlement_outcome=$(if($step -lt 2){'SettledStalled'}else{'StaleRejected'});dispatch_observed='1';
+                        decision_reason=$(if($step -lt 2){'frontier_stalled'}else{'tuna_reactivation_replaced_fallback_owner'})}
+                }
+                foreach($event in $base[16..19]){
+                    Add $event.EventName ([int]($event.TimestampUtc-$origin).TotalMilliseconds) $event.Fields
+                }
+                return $script:fixtureEvents.ToArray()
+            }
             $cases=@('exact','duplicate','missing_wake','missing_stall','early_grant','missing_delivery','missing_dispatch','missing_send',
                 'missing_retirement','wrong_retirement','wrong_scope','missing_commit','rejected_commit','missing_disposition','missing_publication',
                 'wrong_data','wrong_transition','wrong_target','malformed_grant_time','malformed_target_generation',
@@ -142,6 +194,21 @@ public sealed class FileTransferRecentProgressGraceHandoffTests : FileTransferOp
             if($Kind -eq 'stall'){
                 $cases=@($cases|Where-Object {$_ -ne 'missing_stall'}) + @('missing_grant','wrong_predecessor','ambiguous_grant',
                     'highest_regression','historical_caught_up','malformed_deadline','moved_deadline','wrong_stall_data','wrong_dispatch_order','unrelated_publication')
+            }
+            if($Kind -in @('recent_progress_retry_handoff','stall_retry_handoff')){
+                $cases=@('exact','duplicate','retry_callback_origin','retry_missing_grant','retry_missing_settlement',
+                    'retry_missing_delivery','retry_missing_dispatch','retry_missing_send','retry_wrong_predecessor',
+                    'retry_wrong_scope','retry_wrong_frontier','retry_wrong_generation','retry_overlapping_owner','retry_missing_owner_clocks',
+                    'retry_ambiguous_successor','retry_conflicting_record','retry_wrong_stall_origin','retry_early_stall',
+                    'retry_late_recheck','retry_stall_scope','retry_competing_stall','retry_missing_publication',
+                    'retry_wrong_publication','retry_wrong_retirement','retry_stale_recheck')
+                if($Kind -eq 'stall_retry_handoff'){
+                    $cases=@($cases|Where-Object {$_ -notin @('retry_callback_origin','retry_wrong_stall_origin','retry_early_stall','retry_late_recheck','retry_competing_stall','retry_stale_recheck')}) + @(
+                        'stall_no_stale_callbacks','stall_missing_link','stall_wrong_deadline','stall_highest_regression','stall_generation_gap',
+                        'stall_wrong_frontier','stall_wrong_scope','stall_wrong_data','stall_authority_effect','stall_missing_clock','stall_late_link',
+                        'stall_missing_wake','stall_stale_only','stall_wrong_wake','stall_early_dispatch','stall_conflicting_wake','stall_old_wake_effect','stall_old_wake_dispatch',
+                        'stall_missing_commit','stall_missing_disposition','stall_terminal')
+                }
             }
             if($Kind -eq 'stall_progress'){
                 $cases=@('exact','duplicate','natural_missing_arm','natural_missing_recheck','natural_missing_stall',
@@ -171,7 +238,62 @@ public sealed class FileTransferRecentProgressGraceHandoffTests : FileTransferOp
                 if($retainProgress){$cases+=@('published_missing_source','published_wrong_source','published_aba_source')}
             }
             foreach($case in $cases){
-                [object[]]$events=if($Kind -in @('stall_progress','stall_progress_chain')){NaturalFixture -Coalesced:($Kind -eq 'stall_progress_chain')}else{Fixture}
+                [object[]]$events=if($Kind -in @('recent_progress_retry_handoff','stall_retry_handoff')){RetryHandoffFixture}elseif($Kind -in @('stall_progress','stall_progress_chain')){NaturalFixture -Coalesced:($Kind -eq 'stall_progress_chain')}else{Fixture}
+                if($Kind -in @('recent_progress_retry_handoff','stall_retry_handoff')){
+                    $middle=@($events|Where-Object {$_.EventName -eq 'filetransfer_fallback_frontier_repair_authority_granted' -and $_.Fields.authority_id -eq 'fta2-repair_replay-C'})[0]
+                    switch($case){
+                        'retry_callback_origin' {$events[9].Fields.reason='frontier_recent_progress_grace_elapsed'}
+                        'retry_missing_grant' {$events=@($events|Where-Object {$_ -ne $middle})}
+                        'retry_missing_settlement' {$events=@($events|Where-Object {$_.EventName -ne 'filetransfer_fallback_frontier_repair_contract_settled' -or $_.Fields.authority_id -ne 'fta2-repair_replay-B'})}
+                        'retry_missing_delivery' {$events=@($events|Where-Object {$_.EventName -ne 'filetransfer_control_plane_delivery_observed' -or $_.Fields.authority_id -ne 'fta2-repair_replay-C'})}
+                        'retry_missing_dispatch' {$events=@($events|Where-Object {$_.EventName -ne 'filetransfer_fallback_frontier_repair_dispatched' -or $_.Fields.authority_id -ne 'fta2-repair_replay-C'})}
+                        'retry_missing_send' {$events=@($events|Where-Object {$_.EventName -ne 'filetransfer_v6_frontier_request_sent' -or $_.Fields.authority_id -ne 'fta2-repair_replay-C'})}
+                        'retry_wrong_predecessor' {$middle.Fields.predecessor_authority_id='fta2-repair_replay-other'}
+                        'retry_wrong_scope' {$middle.Fields.runtime_generation='4'}
+                        'retry_wrong_frontier' {$middle.Fields.frontier_chunk_index='42'}
+                        'retry_wrong_generation' {$middle.Fields.repair_generation='61'}
+                        'retry_overlapping_owner' {$middle.Fields.log_writer_attempt_utc_ticks=[string]$origin.AddMilliseconds(1899).UtcTicks}
+                        'retry_missing_owner_clocks' {$middle.Fields.Remove('log_writer_attempt_utc_ticks');@($events|Where-Object {$_.EventName -eq 'filetransfer_fallback_frontier_repair_contract_settled' -and $_.Fields.authority_id -eq 'fta2-repair_replay-B'})[0].Fields.Remove('log_writer_attempt_utc_ticks')}
+                        'retry_ambiguous_successor' {$copy=$middle.PSObject.Copy();$copy.Fields=$middle.Fields.Clone();$copy.Fields.authority_id='fta2-repair_replay-other';$copy.Fields.log_writer_sequence='90';$events+=$copy}
+                        'retry_conflicting_record' {$copy=$middle.PSObject.Copy();$copy.Fields=$middle.Fields.Clone();$copy.Fields.range_fingerprint='conflict';$events+=$copy}
+                        'retry_wrong_stall_origin' {$events[9].Fields.reason='unrelated'}
+                        'retry_early_stall' {$events[9].Fields.log_writer_attempt_utc_ticks=[string]$origin.AddMilliseconds(1099).UtcTicks}
+                        'retry_late_recheck' {$events[10].Fields.log_writer_attempt_utc_ticks=[string]$origin.AddMilliseconds(1851).UtcTicks}
+                        'retry_stall_scope' {$events[9].Fields.data_session_identity='foreign'}
+                        'retry_competing_stall' {$copy=$events[9].PSObject.Copy();$copy.Fields=$events[9].Fields.Clone();$copy.Fields.reason='unrelated';$copy.Fields.log_writer_sequence='90';$events+=$copy}
+                        'retry_missing_publication' {$events=@($events|Where-Object EventName -ne 'filetransfer_live_route_epoch_recovered')}
+                        'retry_wrong_publication' {$events[-1].Fields.route_publication_generation='5'}
+                        'retry_wrong_retirement' {@($events|Where-Object {$_.EventName -eq 'filetransfer_fallback_frontier_repair_contract_settled' -and $_.Fields.authority_id -eq 'fta2-repair_replay-D'})[0].Fields.decision_reason='unrelated'}
+                        'retry_stale_recheck' {$events[10].Fields.decision_status='stale'}
+                    }
+                    if($Kind -eq 'stall_retry_handoff'){
+                        $link=@($events|Where-Object {$_.EventName -eq 'filetransfer_v6_frontier_stall_grace_recheck_decided' -and $_.Fields.decision_status -eq 'rearmed' -and $_.Fields.wake_generation -eq '44'})[0]
+                        $dispatchWake=@($events|Where-Object {$_.EventName -eq 'filetransfer_v6_frontier_stall_grace_recheck_decided' -and $_.Fields.decision_status -eq 'dispatched'})[0]
+                        switch($case){
+                            'stall_no_stale_callbacks' {$events=@($events|Where-Object {$_.EventName -ne 'filetransfer_v6_frontier_stall_grace_recheck_decided' -or $_.Fields.decision_status -ne 'stale'})}
+                            'stall_missing_link' {$events=@($events|Where-Object {$_ -ne $link})}
+                            'stall_wrong_deadline' {$link.Fields.wake_deadline_utc=$origin.AddMilliseconds(1851).ToString('o')}
+                            'stall_highest_regression' {$link.Fields.highest_received_chunk_index='74'}
+                            'stall_generation_gap' {$link.Fields.wake_generation='45'}
+                            'stall_wrong_frontier' {$link.Fields.frontier_chunk_index='42'}
+                            'stall_wrong_scope' {$link.Fields.runtime_generation='4'}
+                            'stall_wrong_data' {$link.Fields.data_session_identity='foreign'}
+                            'stall_authority_effect' {$link.Fields.authority_effect='runtime'}
+                            'stall_missing_clock' {$link.Fields.Remove('log_writer_attempt_utc_ticks')}
+                            'stall_late_link' {$link.Fields.log_writer_attempt_utc_ticks=[string]$origin.AddMilliseconds(1851).UtcTicks}
+                            'stall_missing_wake' {$events=@($events|Where-Object {$_ -ne $dispatchWake})}
+                            'stall_stale_only' {$dispatchWake.Fields.decision_status='stale';$dispatchWake.Fields.decision_reason='wake_generation_replaced'}
+                            'stall_wrong_wake' {$dispatchWake.Fields.wake_generation='47'}
+                            'stall_early_dispatch' {$dispatchWake.Fields.log_writer_attempt_utc_ticks=[string]$origin.AddMilliseconds(1849).UtcTicks}
+                            'stall_conflicting_wake' {$copy=$dispatchWake.PSObject.Copy();$copy.Fields=$dispatchWake.Fields.Clone();$copy.Fields.log_writer_sequence='91';$copy.Fields.decision_status='stale';$events+=$copy}
+                            'stall_old_wake_effect' {@($events|Where-Object {$_.EventName -eq 'filetransfer_v6_frontier_stall_grace_recheck_decided' -and $_.Fields.wake_generation -eq '41'})[0].Fields.authority_effect='runtime'}
+                            'stall_old_wake_dispatch' {@($events|Where-Object {$_.EventName -eq 'filetransfer_v6_frontier_stall_grace_recheck_decided' -and $_.Fields.wake_generation -eq '41'})[0].Fields.decision_status='dispatched'}
+                            'stall_missing_commit' {$events=@($events|Where-Object EventName -ne 'filetransfer_route_transition_committed')}
+                            'stall_missing_disposition' {$events=@($events|Where-Object EventName -ne 'filetransfer_route_transition_disposition_applied')}
+                            'stall_terminal' {$copy=$middle.PSObject.Copy();$copy.Fields=$middle.Fields.Clone();$copy.EventName='file_transfer_inbound_terminal';$copy.Fields.event=$copy.EventName;$copy.Fields.log_writer_sequence='92';$events+=$copy}
+                        }
+                    }
+                }
                 if($Kind -eq 'stall'){
                     $stale=$events[9].Fields.Clone();$stale.event='filetransfer_v6_frontier_stall_grace_recheck_decided'
                     $stale.decision_status='stale';$stale.decision_reason='frontier_scope_changed';$stale.authority_effect='none'
@@ -385,8 +507,8 @@ public sealed class FileTransferRecentProgressGraceHandoffTests : FileTransferOp
                         }
                     }
                 }
-                $expected=$case -in @('exact','duplicate','published_prior_duplicate','published_empty_optional_diagnostic','natural_unrelated','natural_early_rearm','natural_chain_tail_only','natural_chain_frame_epoch') -or ($Kind -eq 'stall' -and $case -in @('missing_wake','stall_progress_only'))
-                $isStall=$Kind -in @('stall','stall_published')
+                $expected=$case -in @('exact','duplicate','retry_callback_origin','stall_no_stale_callbacks','published_prior_duplicate','published_empty_optional_diagnostic','natural_unrelated','natural_early_rearm','natural_chain_tail_only','natural_chain_frame_epoch') -or ($Kind -eq 'stall' -and $case -in @('missing_wake','stall_progress_only'))
+                $isStall=$Kind -in @('stall','stall_published','stall_retry_handoff')
                 $legacy=if($isStall){$script:FileTransferFallbackFrontierStallGraceLegacyCorrelation}else{$script:FileTransferFallbackFrontierRecentProgressGraceLegacyCorrelation}
                 $plain=& $legacy -Events $events
                 $index=New-FileTransferFallbackFrontierGraceCorrelationIndex -Events $events
@@ -425,24 +547,24 @@ public sealed class FileTransferRecentProgressGraceHandoffTests : FileTransferOp
                         }
                     }
                 }
-                if($Kind -eq 'stall_published'){
+                if($Kind -in @('stall_published','recent_progress_retry_handoff','stall_retry_handoff')){
                     # Regenerate compact input from this independent full fixture using the explicit catalog.
                     $catalog=@(Get-FileTransferFallbackFrontierGraceCorrelationEventNames)
                     $compactLines=@($lines|Where-Object {$_ -match '(?:^|; )event=([^;]+)' -and $Matches[1] -cin $catalog})
-                    $compactGui=Get-TunaGuiFallbackFrontierStallGraceRecheckFailure -Lines $compactLines
+                    $compactGui=if($isStall){Get-TunaGuiFallbackFrontierStallGraceRecheckFailure -Lines $compactLines}else{Get-TunaGuiFallbackFrontierRecentProgressGraceRecheckFailure -Lines $compactLines}
                     if($guiResult.Unresolved -ne $compactGui.Unresolved -or $guiResult.FirstSequence -ne $compactGui.FirstSequence){throw "$case full/compact GUI boundary differs"}
                     function ParseLines([string[]]$inputLines,[string]$path){
                         for($i=0;$i -lt $inputLines.Count;$i++){ConvertFrom-FileTransferLogLine -Line $inputLines[$i] -FilePath $path -LineNumber ($i+1) -Sequence ($i+1)}
                     }
                     $fullEvents=@(ParseLines $lines 'full.log');$compactEvents=@(ParseLines $compactLines 'compact.log')
-                    $serializedFull=Get-FileTransferFallbackFrontierStallGraceRecheckCorrelation -Events $fullEvents -Index (New-FileTransferFallbackFrontierGraceCorrelationIndex $fullEvents)
-                    $compact=Get-FileTransferFallbackFrontierStallGraceRecheckCorrelation -Events $compactEvents -Index (New-FileTransferFallbackFrontierGraceCorrelationIndex $compactEvents)
+                    $serializedFull=if($isStall){Get-FileTransferFallbackFrontierStallGraceRecheckCorrelation -Events $fullEvents -Index (New-FileTransferFallbackFrontierGraceCorrelationIndex $fullEvents)}else{Get-FileTransferFallbackFrontierRecentProgressGraceRecheckCorrelation -Events $fullEvents -Index (New-FileTransferFallbackFrontierGraceCorrelationIndex $fullEvents)}
+                    $compact=if($isStall){Get-FileTransferFallbackFrontierStallGraceRecheckCorrelation -Events $compactEvents -Index (New-FileTransferFallbackFrontierGraceCorrelationIndex $compactEvents)}else{Get-FileTransferFallbackFrontierRecentProgressGraceRecheckCorrelation -Events $compactEvents -Index (New-FileTransferFallbackFrontierGraceCorrelationIndex $compactEvents)}
                     if($compact.RawCount -ne $indexed.RawCount -or $compact.DistinctCount -ne $indexed.DistinctCount -or $compact.RecoveredCount -ne $indexed.RecoveredCount -or $compact.UnresolvedCount -ne $indexed.UnresolvedCount){throw "$case regenerated compact quartet differs"}
                     function BoundaryJson($result){
                         $records=@(foreach($record in $result.CandidateRecords){[ordered]@{
                             reason=$record.Reason;variant=$record.Variant;recovered=$record.Recovered;
                             writer=$record.Event.Fields.log_writer_id;sequence=$record.Event.Fields.log_writer_sequence;
-                            frontier=$record.Event.Fields.frontier_chunk_index;
+                            frontier=$(if($isStall){$record.Event.Fields.frontier_chunk_index}else{$record.Event.Fields.next_chunk_index});
                             recoveryWriter=$(if($null -ne $record.RecoveryEvent){$record.RecoveryEvent.Fields.log_writer_id}else{''});
                             recoverySequence=$(if($null -ne $record.RecoveryEvent){$record.RecoveryEvent.Fields.log_writer_sequence}else{''})}})
                         ConvertTo-Json -InputObject ([ordered]@{raw=$result.RawCount;distinct=$result.DistinctCount;recovered=$result.RecoveredCount;unresolved=$result.UnresolvedCount;verdict=$result.Verdict;boundaries=$records}) -Depth 10 -Compress
@@ -452,7 +574,7 @@ public sealed class FileTransferRecentProgressGraceHandoffTests : FileTransferOp
                 }
                 foreach($result in @($plain,$indexed)){
                     if($result.RawCount -ne 1 -or $result.DistinctCount -ne 1 -or $result.RecoveredCount -ne [int]$expected){throw "$case parity mismatch $($result|ConvertTo-Json -Depth 2 -Compress)"}
-                    if($Kind -eq 'stall_published' -and $expected -and $result.CandidateRecords[0].RecoveryEvent.EventName -cne 'filetransfer_live_route_epoch_recovered'){throw "$case closed without the exact handoff publication"}
+                    if($Kind -in @('stall_published','recent_progress_retry_handoff','stall_retry_handoff') -and $expected -and $result.CandidateRecords[0].RecoveryEvent.EventName -cne 'filetransfer_live_route_epoch_recovered'){throw "$case closed without the exact handoff publication"}
                 }
                 if($guiResult.Unresolved -eq $expected){throw "$case GUI mismatch"}
                 if(-not $expected -and $guiResult.FirstSequence -ne $plain.UnresolvedCandidateRecords[0].Event.Sequence){throw "$case GUI location mismatch"}
@@ -462,6 +584,6 @@ public sealed class FileTransferRecentProgressGraceHandoffTests : FileTransferOp
         var result = await RunPowerShellScriptTextAsync(script, [FindRepoRoot(), kind], host);
         Assert.True(result.ExitCode == 0, $"{result.Stdout}{Environment.NewLine}{result.Stderr}");
         Assert.Contains("pass exact", result.Stdout, StringComparison.Ordinal);
-        Assert.Contains(kind switch { "stall_progress" => "pass natural_missing_state", "stall_progress_chain" => "pass natural_chain_gap", "stall_published" or "stall_published_caught_up" or "stall_published_caught_up_with_progress" => "pass published_unrelated_progress", _ => "pass stall_progress_only" }, result.Stdout, StringComparison.Ordinal);
+        Assert.Contains(kind switch { "stall_retry_handoff" => "pass stall_terminal", "recent_progress_retry_handoff" => "pass retry_stale_recheck", "stall_progress" => "pass natural_missing_state", "stall_progress_chain" => "pass natural_chain_gap", "stall_published" or "stall_published_caught_up" or "stall_published_caught_up_with_progress" => "pass published_unrelated_progress", _ => "pass stall_progress_only" }, result.Stdout, StringComparison.Ordinal);
     }
 }

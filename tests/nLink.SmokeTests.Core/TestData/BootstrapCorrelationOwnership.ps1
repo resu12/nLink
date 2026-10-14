@@ -5,10 +5,16 @@ $ErrorActionPreference = 'Stop'
 . (Join-Path $RepoRoot 'tools/FileTransferAuthorityMatching.ps1')
 . (Join-Path $RepoRoot 'tools/FileTransferFallbackV6BootstrapDirectionCorrelation.ps1')
 $captured = [IO.File]::ReadAllLines($InputPath)
-$source = $null; $startIndex = -1
+$source = $null; $startIndex = -1; $holdIndex = -1; $drainIndex = -1
 for ($i=0; $i -lt $captured.Count; $i++) {
     if ((Get-FileTransferCoordinatorSnapshotEventName $captured[$i]) -cne 'filetransfer_coordinator_transition_snapshot') { continue }
     $envelope = (ConvertFrom-FileTransferCoordinatorSnapshotPayload (Get-FileTransferCoordinatorSnapshotLineField $captured[$i] 'snapshot_payload')).Value
+    foreach ($op in @($envelope.aggregate.operations | Where-Object {
+        $_.operationRole -ceq 'fallback_bootstrap_source_hold' -and $_.operationGeneration -eq 2
+    })) {
+        if ($op.beforeState -ceq 'None' -and $op.afterState -ceq 'Prepared') { $holdIndex = $i }
+        if ($op.beforeState -ceq 'Applied' -and $op.afterState -ceq 'Drained') { $drainIndex = $i }
+    }
     foreach ($op in @($envelope.aggregate.operations | Where-Object {
         $_.operationRole -ceq 'fallback_bootstrap_exchange' -and $_.operationGeneration -eq 2
     })) {
@@ -35,16 +41,22 @@ $diagnostic = @(
     "event=filetransfer_fallback_nkn_proof_unconfirmed; $scope; proof=nkn_control_ack_received; bulk_seen=1; control_seen=1; requires_control_proof=0; requires_v6_epoch_recovery=1",
     "event=filetransfer_fallback_nkn_proof_waiting_for_v6_epoch; $scope; proof=nkn_control_ack_received")
 $lines = @($captured[0..($startIndex-1)]) + $episode + @($captured[$startIndex..($captured.Count-1)]) + $diagnostic
-$recovery = $Scenario -cin @('recovered','recovered_cleanup')
+$preWaitHold = $Scenario -cin @('recovered_pre_wait_hold','recovered_pre_wait_hold_cleanup')
+$recovery = $Scenario -cin @('recovered','recovered_cleanup') -or $preWaitHold
 if ($recovery) {
     # Move the diagnostic before the real second exchange completes. Model only
     # the adapter's publication log from the actual Coordinator publication token.
+    if ($preWaitHold -and ($holdIndex -lt 0 -or $drainIndex -le $holdIndex -or $startIndex -le $drainIndex)) {
+        throw 'Missing real pre-wait source-hold fixture'
+    }
+    $episodeIndex = if ($preWaitHold) { $holdIndex } else { $startIndex }
     $lines = [Collections.Generic.List[string]]::new()
     for ($i=0; $i -lt $captured.Count; $i++) {
-        if ($i -eq $startIndex) { $lines.AddRange([string[]]$episode) }
+        if ($i -eq $episodeIndex) { $lines.AddRange([string[]]$episode) }
+        if ($preWaitHold -and $i -eq $drainIndex) { $lines.AddRange([string[]]$diagnostic) }
         if ((Get-FileTransferCoordinatorSnapshotEventName $captured[$i]) -ceq 'filetransfer_coordinator_transition_snapshot') {
             $envelope = (ConvertFrom-FileTransferCoordinatorSnapshotPayload (Get-FileTransferCoordinatorSnapshotLineField $captured[$i] 'snapshot_payload')).Value
-            if (@($envelope.aggregate.operations | Where-Object {
+            if (-not $preWaitHold -and @($envelope.aggregate.operations | Where-Object {
                 $_.operationRole -ceq 'fallback_bootstrap_exchange' -and $_.operationGeneration -eq 2 -and
                 $_.beforeState -ceq 'Pending' -and $_.afterState -ceq 'Completed'
             }).Count -eq 1) { $lines.AddRange([string[]]$diagnostic) }
@@ -135,10 +147,18 @@ function Assert-LegacyRetained([string]$Name, [string[]]$InputLines, $Evaluation
 function Clone($Value) { ConvertFrom-Json (ConvertTo-Json $Value -Depth 64 -Compress) }
 
 if ($recovery) {
-    foreach ($case in @('missing_publication','wrong_publication_token','wrong_publication_generation','wrong_publication_writer',
+    $cases = @('missing_publication','wrong_publication_token','wrong_publication_generation','wrong_publication_writer',
             'conflicting_publication_field','publication_before_commit','missing_commit','missing_disposition',
             'missing_prepare','missing_hold','wrong_peer','wrong_commit_source','unvalidated_disposition',
-            'exchange_started_after_wait','exchange_invalidated','ambiguous_owner','early_hold_loss','terminal_before_closure')) {
+            'exchange_started_after_wait','exchange_invalidated','ambiguous_owner','early_hold_loss','terminal_before_closure')
+    if ($preWaitHold) {
+        $cases += @('missing_hold_prepare','hold_prepared_after_wait','hold_prepared_before_pending','wrong_hold_writer',
+            'wrong_hold_owner','wrong_hold_authority','wrong_hold_generation','wrong_hold_command','wrong_hold_source',
+            'wrong_frozen_checkpoint','missing_hold_capture','missing_hold_drain','reordered_hold_capture',
+            'hold_invalidated_before_start','non_applied_hold_prepare','rejected_hold_prepare','exchange_before_drain',
+            'missing_exchange_start','missing_drain_receipt')
+    }
+    foreach ($case in $cases) {
         $copy = Clone $full; $inputLines = [string[]]$lines.Clone()
         $completed = @($copy.Boundaries | Where-Object {
             @($_.operations | Where-Object { $_.operationRole -ceq 'fallback_bootstrap_exchange' -and $_.operationGeneration -eq 2 -and $_.beforeState -ceq 'Pending' -and $_.afterState -ceq 'Completed' }).Count
@@ -146,6 +166,20 @@ if ($recovery) {
         $op = @($completed.operations | Where-Object operationRole -CEQ 'fallback_bootstrap_exchange')[0]
         $commit = @($copy.Boundaries | Where-Object { $_.decisionKind -ceq 'CommitFileTransferRouteTransition' -and $_.afterBoundary.liveRouteEpoch -eq 4 })[-1]
         $disposed = @($copy.Boundaries | Where-Object { $_.decisionKind -ceq 'ApplyFileTransferRouteTransitionDispositionReceipt' -and $_.afterBoundary.liveRouteEpoch -eq 4 })[-1]
+        if ($preWaitHold) {
+            $holdStages = @($copy.Boundaries | Where-Object {
+                @($_.operations | Where-Object { $_.operationRole -ceq 'fallback_bootstrap_source_hold' -and $_.operationGeneration -eq 2 }).Count
+            })
+            $holdPrepare = @($holdStages | Where-Object decisionKind -CEQ 'PrepareFallbackBootstrapSourceHold')[0]
+            $holdCapture = @($holdStages | Where-Object decisionKind -CEQ 'ApplyFallbackBootstrapSourceHoldCapture')[0]
+            $holdDrain = @($holdStages | Where-Object decisionKind -CEQ 'ApplyFallbackBootstrapSourceHoldReceipt')[0]
+            $holdOp = @($holdPrepare.operations | Where-Object { $_.operationRole -ceq 'fallback_bootstrap_source_hold' -and $_.operationGeneration -eq 2 })[0]
+            $drainOp = @($holdDrain.operations | Where-Object { $_.operationRole -ceq 'fallback_bootstrap_source_hold' -and $_.operationGeneration -eq 2 })[0]
+            $start = @($copy.Boundaries | Where-Object {
+                @($_.operations | Where-Object { $_.operationKey -ceq $op.operationKey -and $_.beforeState -ceq 'None' -and $_.afterState -ceq 'Pending' }).Count
+            })[0]
+            $waitSequence = [long]([regex]::Match(@($lines | Where-Object { $_ -cmatch '^event=filetransfer_fallback_nkn_proof_waiting_for_v6_epoch;' })[0], 'log_writer_sequence=(\d+)').Groups[1].Value)
+        }
         for ($i=0; $i -lt $inputLines.Count; $i++) {
             if ($inputLines[$i] -cnotmatch '^event=filetransfer_route_hint_authorized_publication_accepted;') { continue }
             switch ($case) {
@@ -167,6 +201,29 @@ if ($recovery) {
             unvalidated_disposition { @(@($disposed.operations | Where-Object operationRole -CEQ 'terminal')[0].routeTransition.receipts | Where-Object stage -CEQ 'disposition')[0].receiptValidated=$false }
             exchange_started_after_wait { foreach ($b in $copy.Boundaries) { if (@($b.operations | Where-Object { $_.operationKey -ceq $op.operationKey -and $_.beforeState -ceq 'None' }).Count) { $b.writerSequence=[long]$completed.writerSequence } } }
             exchange_invalidated { $op.routeTransition.bootstrapCorrelation.invalidated=$true }
+            missing_hold_prepare { $holdPrepare.decisionKind='unrelated' }
+            hold_prepared_after_wait { $holdPrepare.writerSequence=$waitSequence }
+            hold_prepared_before_pending { $holdPrepare.writerSequence=1 }
+            wrong_hold_writer { $holdPrepare.writer='unrelated' }
+            wrong_hold_owner { $holdPrepare.coordinatorInstanceId='fte1-000000000000000000000000' }
+            wrong_hold_authority { $holdOp.authorityId='fte1-000000000000000000000000' }
+            wrong_hold_generation { $holdOp.operationGeneration=999 }
+            wrong_hold_command { $holdOp.routeTransition.bootstrapInitiation.holdCommandFingerprint='fte1-000000000000000000000000' }
+            wrong_hold_source { $holdOp.routeTransition.bootstrapInitiation.sourceBoundary.runtimeGeneration=999 }
+            wrong_frozen_checkpoint { $drainOp.routeTransition.bootstrapInitiation.frozenCheckpointFingerprint='(none)' }
+            missing_hold_capture { $holdCapture.decisionKind='unrelated' }
+            missing_hold_drain { $holdDrain.decisionKind='unrelated' }
+            reordered_hold_capture { $holdCapture.writerSequence=$holdDrain.writerSequence }
+            hold_invalidated_before_start {
+                $other=Clone $holdDrain
+                foreach ($h in @($other.operations | Where-Object operationRole -CEQ 'fallback_bootstrap_source_hold')) { $h.afterState='Invalidated' }
+                $copy.Boundaries += $other
+            }
+            non_applied_hold_prepare { $holdOp.stateApplied=$false }
+            rejected_hold_prepare { $holdPrepare.decisionStatus='Rejected' }
+            exchange_before_drain { $start.writerSequence=$holdDrain.writerSequence }
+            missing_exchange_start { $start.decisionKind='unrelated' }
+            missing_drain_receipt { $drainOp.routeTransition.bootstrapInitiation.drainReceiptFingerprint='(none)' }
             ambiguous_owner { $other=Clone $completed; $other.coordinatorInstanceId='fte1-000000000000000000000000'; $copy.Boundaries += $other }
             early_hold_loss {
                 $other=Clone (@($copy.Boundaries | Where-Object { @($_.operations | Where-Object { $_.operationRole -ceq 'fallback_bootstrap_source_hold' -and $_.operationGeneration -eq 2 -and $_.afterState -ceq 'Drained' }).Count })[-1])

@@ -347,7 +347,8 @@ function Test-FileTransferFallbackV6BootstrapCorrelatedEpisodeConsumed {
     $publicationBoundary = $null
     if ($AfterWaitRecovery) {
         # Bound recovery to this exact route's closure, not the end of a later
-        # successful transfer. The first wait remains the trigger/start deadline.
+        # successful transfer. Ownership must precede the first wait, either
+        # through the exchange itself or its exact Coordinator source hold.
         $dispositions = @($SnapshotEvaluation.Boundaries | Where-Object {
             $_.writer -ceq $Episode.Writer -and $_.direction -ceq $fields['direction'] -and
             (IdentityMatches $fields['session_id'] $_.sessionId) -and (IdentityMatches $fields['transfer_id'] $_.transferId) -and
@@ -419,13 +420,50 @@ function Test-FileTransferFallbackV6BootstrapCorrelatedEpisodeConsumed {
         $_.Operation.stateApplied -and $_.Operation.beforeState -ceq 'Pending' -and $_.Operation.afterState -ceq 'Completed'
     })
     if ($completed.Count -ne 1) { return $false }
-    if ($AfterWaitRecovery -and
-        ([long]$completed[0].Boundary.writerSequence -le $firstWaitSequence -or
-            @($entries | Where-Object {
-                $_.Key -ceq $owner.Key -and $_.Boundary.decisionStatus -ceq 'Accepted' -and $_.Operation.stateApplied -and
-                $_.Operation.beforeState -ceq 'None' -and $_.Operation.afterState -ceq 'Pending' -and
-                [long]$_.Boundary.writerSequence -gt $Episode.PendingSequence -and [long]$_.Boundary.writerSequence -lt $firstWaitSequence
-            }).Count -ne 1)) { return $false }
+    if ($AfterWaitRecovery) {
+        if ([long]$completed[0].Boundary.writerSequence -le $firstWaitSequence) { return $false }
+        $started = @($entries | Where-Object {
+            $_.Key -ceq $owner.Key -and $_.Boundary.decisionStatus -ceq 'Accepted' -and $_.Operation.stateApplied -and
+            $_.Boundary.decisionKind -ceq 'StartFallbackBootstrapExchange' -and
+            $_.Operation.beforeState -ceq 'None' -and $_.Operation.afterState -ceq 'Pending' -and
+            [long]$_.Boundary.writerSequence -gt $Episode.PendingSequence -and
+            [long]$_.Boundary.writerSequence -lt [long]$completed[0].Boundary.writerSequence
+        })
+        if ($started.Count -ne 1) { return $false }
+        if ([long]$started[0].Boundary.writerSequence -ge $firstWaitSequence) {
+            # Drain may finish after the diagnostic. Bind that asynchronous work
+            # to the pre-wait hold, never to a later successful route alone.
+            $initiation = $started[0].Operation.routeTransition.bootstrapInitiation
+            if ($null -eq $initiation) { return $false }
+            $holds = @($streamHistory | Where-Object {
+                $_.Operation.operationRole -ceq 'fallback_bootstrap_source_hold' -and
+                $_.Operation.authorityId -ceq $initiation.holdIdentity -and
+                $_.Operation.operationGeneration -eq $initiation.holdGeneration -and
+                $_.Boundary.decisionStatus -ceq 'Accepted' -and $_.Operation.stateApplied -and
+                [long]$_.Boundary.writerSequence -gt $Episode.PendingSequence -and
+                [long]$_.Boundary.writerSequence -lt [long]$started[0].Boundary.writerSequence
+            })
+            $previousSequence = $Episode.PendingSequence
+            foreach ($stage in @(@('PrepareFallbackBootstrapSourceHold','None','Prepared'),
+                    @('ApplyFallbackBootstrapSourceHoldCapture','Prepared','Applied'),
+                    @('ApplyFallbackBootstrapSourceHoldReceipt','Applied','Drained'))) {
+                $matches = @($holds | Where-Object {
+                    $_.Boundary.decisionKind -ceq $stage[0] -and
+                    $_.Operation.beforeState -ceq $stage[1] -and $_.Operation.afterState -ceq $stage[2]
+                })
+                if ($matches.Count -ne 1 -or [long]$matches[0].Boundary.writerSequence -le $previousSequence -or
+                    ($stage[2] -ceq 'Prepared' -and [long]$matches[0].Boundary.writerSequence -ge $firstWaitSequence)) { return $false }
+                $previousSequence = [long]$matches[0].Boundary.writerSequence
+                $hold = $matches[0].Operation.routeTransition.bootstrapInitiation
+                foreach ($field in @('holdIdentity','holdGeneration','holdCommandFingerprint','sourceFingerprint')) {
+                    if ([string]$hold.$field -cne [string]$initiation.$field) { return $false }
+                }
+                if (-not (Test-FileTransferCoordinatorSnapshotBoundaryEqual $hold.sourceBoundary $initiation.sourceBoundary)) { return $false }
+            }
+            if ($hold.frozenCheckpointFingerprint -cne $initiation.frozenCheckpointFingerprint -or
+                @($holds | Where-Object { $_.Operation.afterState -cnotin @('Prepared','Applied','Drained') }).Count -gt 0) { return $false }
+        }
+    }
     if (@($entries | Where-Object {
         [long]$_.Boundary.writerSequence -gt [long]$completed[0].Boundary.writerSequence -and
         $_.Boundary.decisionStatus -ceq 'Accepted' -and

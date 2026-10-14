@@ -37,6 +37,10 @@ public sealed partial class FileTransferBootstrapCorrelationEvidenceTests
     [InlineData("pwsh", "recovered", true, false)]
     [InlineData("powershell", "recovered_cleanup", true, true)]
     [InlineData("pwsh", "recovered_cleanup", true, true)]
+    [InlineData("powershell", "recovered_pre_wait_hold", true, false)]
+    [InlineData("pwsh", "recovered_pre_wait_hold", true, false)]
+    [InlineData("powershell", "recovered_pre_wait_hold_cleanup", true, true)]
+    [InlineData("pwsh", "recovered_pre_wait_hold_cleanup", true, true)]
     public async Task BootstrapCorrelation_SourceHoldInvalidationRespectsCommittedConsumption(
         string host, string scenario, bool commitSuccessor, bool invalidateSourceHold)
     {
