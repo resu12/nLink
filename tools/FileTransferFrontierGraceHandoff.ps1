@@ -1648,14 +1648,51 @@ function Get-FileTransferRecentProgressGraceStallProgressClosure {
         (Ticks $_ 'wake_deadline_utc') -eq ((Ticks $_ 'committed_progress_utc') + [TimeSpan]::TicksPerSecond) -and
         (Number $_ 'log_writer_attempt_utc_ticks') -ge (Ticks $_ 'wake_deadline_utc')
     })
-    if ($rechecks.Count -ne 1) { return $null }
-    $recheck = $rechecks[0]
+    if ($rechecks.Count -gt 1) { return $null }
+    $chunkFirst = $rechecks.Count -eq 0
+    if ($chunkFirst) {
+        # The authorized chunk handler can observe recent-grace expiry before
+        # its timer. Bind the actual arm, never treat a stale callback as a wake.
+        $chunkRoots = @(Named 'filetransfer_v6_frontier_request_deferred' | Where-Object {
+            [long]$_.Sequence -gt [long]$Episode.Event.Sequence -and
+            (Number $_ 'frontier_chunk_index') -eq $Episode.Frontier -and
+            (Field $_ 'reason') -ceq 'chunk_batch_committed' -and (Number $_ 'elapsed_ms') -eq 0
+        })
+        if ($chunkRoots.Count -ne 1) { return $null }
+        $handoff = $chunkRoots[0]
+        $tips = @(Named 'filetransfer_v6_frontier_recent_progress_grace_deferred' | Where-Object {
+            [long]$_.Sequence -lt [long]$handoff.Sequence
+        } | Sort-Object Sequence, LineNumber | Select-Object -Last 1)
+        if ($tips.Count -ne 1) { return $null }
+        $recentWitness = $tips[0]
+        if (-not (Equal $recentWitness $Episode.Progress $scope) -or
+            (Field $recentWitness 'decision_status') -cnotin @('held', 'rearmed') -or
+            (Field $recentWitness 'decision_reason') -cnotin @('recent_progress_grace_current', 'highest_received_advanced') -or
+            (Field $recentWitness 'authority_effect') -cne 'none' -or
+            (Number $recentWitness 'frontier_chunk_index') -ne $Episode.Frontier -or
+            (Field $recentWitness 'data_session_identity') -cne $Episode.DataSessionIdentity -or
+            (Field $recentWitness 'data_session_generation') -cne $Episode.DataSessionGeneration -or
+            (Number $recentWitness 'wake_generation') -le 0 -or
+            (Ticks $recentWitness 'committed_progress_utc') -le 0 -or
+            (Ticks $recentWitness 'wake_deadline_utc') -ne ((Ticks $recentWitness 'committed_progress_utc') + [TimeSpan]::TicksPerSecond)) { return $null }
+        foreach ($name in @('frontier_scope_session_id', 'frontier_scope_transfer_id', 'frontier_scope_data_session_identity')) {
+            if ($recentWitness.Fields.ContainsKey($name)) { $wakeScope += $name }
+        }
+        foreach ($name in @('frontier_scope_session_id', 'frontier_scope_transfer_id')) {
+            if (($recentWitness.Fields.ContainsKey($name) -or $Episode.Progress.Fields.ContainsKey($name)) -and
+                -not (Equal $recentWitness $Episode.Progress @($name))) { return $null }
+        }
+    }
+    else {
+        $recentWitness = $rechecks[0]
+        $handoff = $recentWitness
+    }
     $arms = @(Named 'filetransfer_v6_frontier_recent_progress_grace_deferred' | Where-Object {
         [long]$_.Sequence -le [long]$Episode.Event.Sequence -and
-        (Equal $_ $recheck ($wakeScope + @('wake_generation', 'committed_progress_utc', 'wake_deadline_utc'))) -and
+        (Equal $_ $recentWitness ($wakeScope + @('wake_generation', 'committed_progress_utc', 'wake_deadline_utc'))) -and
         (Field $_ 'decision_status') -cin @('held', 'rearmed') -and (Field $_ 'authority_effect') -ceq 'none' -and
         (Number $_ 'highest_received_chunk_index') -ge (Number $Episode.Event 'highest_received_chunk_index') -and
-        (Number $_ 'highest_received_chunk_index') -le (Number $recheck 'highest_received_chunk_index') -and
+        (Number $_ 'highest_received_chunk_index') -le (Number $recentWitness 'highest_received_chunk_index') -and
         (Number $Episode.Event 'log_writer_attempt_utc_ticks') -lt (Ticks $_ 'wake_deadline_utc') -and
         (ArmTicks $_) -ge (Ticks $_ 'committed_progress_utc') -and
         (ArmTicks $_) -le (Number $_ 'log_writer_attempt_utc_ticks') -and
@@ -1663,7 +1700,7 @@ function Get-FileTransferRecentProgressGraceStallProgressClosure {
     })
     if ($arms.Count -gt 1) { return $null }
     $recentArms = @(Named 'filetransfer_v6_frontier_recent_progress_grace_deferred' | Where-Object {
-        [long]$_.Sequence -lt [long]$recheck.Sequence
+        [long]$_.Sequence -lt [long]$handoff.Sequence
     } | Sort-Object Sequence, LineNumber)
     $links = @($recentArms | Where-Object { [long]$_.Sequence -gt [long]$Episode.Event.Sequence })
     if ($arms.Count -eq 0 -or $links.Count -gt 0) {
@@ -1673,18 +1710,18 @@ function Get-FileTransferRecentProgressGraceStallProgressClosure {
         if ($roots.Count -ne 1) { return $null }
         $root = $roots[0]
         $chainScope = $wakeScope + @('committed_progress_utc', 'wake_deadline_utc')
-        $recentDeadline = Ticks $recheck 'wake_deadline_utc'
+        $recentDeadline = Ticks $recentWitness 'wake_deadline_utc'
         $candidateTicks = Number $Episode.Event 'log_writer_attempt_utc_ticks'
         $rootTicks = Number $root 'log_writer_attempt_utc_ticks'
         $rootDecisionTicks = ArmTicks $root
         $decisionClock = $root.Fields.ContainsKey('arm_decision_utc')
         $generation = Number $root 'wake_generation'
         $highest = Number $root 'highest_received_chunk_index'
-        if (-not (Equal $root $recheck $chainScope) -or
+        if (-not (Equal $root $recentWitness $chainScope) -or
             (Field $root 'decision_status') -cnotin @('held', 'rearmed') -or (Field $root 'authority_effect') -cne 'none' -or
-            $generation -le 0 -or $generation -ge (Number $recheck 'wake_generation') -or
+            $generation -le 0 -or $generation -ge (Number $recentWitness 'wake_generation') -or
             $highest -lt (Number $Episode.Event 'highest_received_chunk_index') -or
-            $highest -gt (Number $recheck 'highest_received_chunk_index') -or
+            $highest -gt (Number $recentWitness 'highest_received_chunk_index') -or
             $rootTicks -lt (Ticks $root 'committed_progress_utc') -or $rootTicks -gt $candidateTicks -or
             $rootDecisionTicks -lt (Ticks $root 'committed_progress_utc') -or
             $rootDecisionTicks -gt $rootTicks -or $rootDecisionTicks -ge $recentDeadline -or
@@ -1707,33 +1744,38 @@ function Get-FileTransferRecentProgressGraceStallProgressClosure {
             $highest = $nextHighest
             $previousTicks = $nextTicks
         }
-        if (-not (Equal $links[-1] $recheck ($chainScope + @('wake_generation', 'highest_received_chunk_index')))) { return $null }
+        if (-not (Equal $links[-1] $recentWitness ($chainScope + @('wake_generation', 'highest_received_chunk_index')))) { return $null }
     }
     $stalls = @(Named 'filetransfer_v6_frontier_request_deferred' | Where-Object {
-        [long]$_.Sequence -gt [long]$Episode.Event.Sequence -and (Equal $_ $recheck $wakeScope) -and
-        (Field $_ 'reason') -cin @('frontier_recent_progress_grace_elapsed', 'frontier_stall_repair_due') -and
+        [long]$_.Sequence -gt [long]$Episode.Event.Sequence -and (Equal $_ $recentWitness $wakeScope) -and
+        (Field $_ 'reason') -cin $(if ($chunkFirst) { @('chunk_batch_committed') } else { @('frontier_recent_progress_grace_elapsed', 'frontier_stall_repair_due') }) -and
         (Field $_ 'authority_effect') -ceq 'none' -and (Number $_ 'wake_generation') -gt 0 -and
         (Number $_ 'elapsed_ms') -eq 0 -and (Number $_ 'stall_grace_ms') -eq 750 -and
-        (Number $_ 'highest_received_chunk_index') -ge (Number $recheck 'highest_received_chunk_index') -and
-        (Ticks $_ 'stall_started_utc') -ge (Ticks $recheck 'wake_deadline_utc') -and
+        (Number $_ 'highest_received_chunk_index') -ge (Number $recentWitness 'highest_received_chunk_index') -and
+        (Ticks $_ 'stall_started_utc') -ge (Ticks $recentWitness 'wake_deadline_utc') -and
         (Ticks $_ 'wake_deadline_utc') -eq ((Ticks $_ 'stall_started_utc') + 7500000L)
     })
     if ($stalls.Count -ne 1) { return $null }
     $stall = $stalls[0]
     $deadline = Ticks $stall 'wake_deadline_utc'
+    if ($chunkFirst -and (
+        (Number $stall 'log_writer_attempt_utc_ticks') -lt (Ticks $stall 'stall_started_utc') -or
+        (Number $stall 'log_writer_attempt_utc_ticks') -ge $deadline -or
+        (Number $stall 'log_writer_attempt_utc_ticks') -lt (Number $recentWitness 'log_writer_attempt_utc_ticks') -or
+        (Number $stall 'highest_received_chunk_index') -le (Number $recentWitness 'highest_received_chunk_index'))) { return $null }
     $watchdogFirst = (Field $stall 'reason') -ceq 'frontier_stall_repair_due'
     if ($watchdogFirst) {
         # The watchdog can arm the current stall before the recent callback.
         # Its origin is not authority: require the exact, still-current interval.
         $stallTicks = Number $stall 'log_writer_attempt_utc_ticks'
-        $recheckTicks = Number $recheck 'log_writer_attempt_utc_ticks'
-        if ([long]$stall.Sequence -ge [long]$recheck.Sequence -or
+        $recheckTicks = Number $recentWitness 'log_writer_attempt_utc_ticks'
+        if ([long]$stall.Sequence -ge [long]$recentWitness.Sequence -or
             $stallTicks -lt (Ticks $stall 'stall_started_utc') -or $stallTicks -gt $recheckTicks -or
             $recheckTicks -ge $deadline -or
-            (Number $stall 'highest_received_chunk_index') -ne (Number $recheck 'highest_received_chunk_index')) { return $null }
+            (Number $stall 'highest_received_chunk_index') -ne (Number $recentWitness 'highest_received_chunk_index')) { return $null }
     }
     $writes = @(Named 'filetransfer_v6_sparse_write_committed' | Where-Object {
-        [long]$_.Sequence -gt [Math]::Max([long]$stall.Sequence, [long]$recheck.Sequence)
+        [long]$_.Sequence -gt [Math]::Max([long]$stall.Sequence, [long]$handoff.Sequence)
     })
     $initialStates = @(Named 'filetransfer_v6_receiver_state_sent' | Where-Object {
         [long]$_.Sequence -lt [long]$Episode.Event.Sequence -and
@@ -1743,7 +1785,8 @@ function Get-FileTransferRecentProgressGraceStallProgressClosure {
     if ($initialStates.Count -eq 0) { return $null }
     $frontier = [long]$Episode.Frontier
     $highest = Number $stall 'highest_received_chunk_index'
-    $writeTicks = Number $recheck 'log_writer_attempt_utc_ticks'
+    $writeTicks = Number $handoff 'log_writer_attempt_utc_ticks'
+    $firstProgressWrite = $null
     foreach ($write in $writes) {
         $next = Number $write 'next_chunk_index'
         $count = Number $write 'contiguous_chunks_committed'
@@ -1753,11 +1796,12 @@ function Get-FileTransferRecentProgressGraceStallProgressClosure {
         # account for the entire advance within the same bounded wake interval.
         if ($count -lt 0 -or $next -lt $frontier -or ($next - $frontier) -ne $count -or
             $nextHighest -lt $highest -or $nextTicks -lt $writeTicks -or
-            $nextTicks -le (Number $recheck 'log_writer_attempt_utc_ticks') -or $nextTicks -ge $deadline) { return $null }
+            $nextTicks -le (Number $handoff 'log_writer_attempt_utc_ticks') -or $nextTicks -ge $deadline) { return $null }
         $frontier = $next
         $highest = $nextHighest
         $writeTicks = $nextTicks
         if ($frontier -le $Episode.Frontier) { continue }
+        if ($null -eq $firstProgressWrite) { $firstProgressWrite = $write }
         $states = @(Named 'filetransfer_v6_receiver_state_sent' | Where-Object {
             [long]$_.Sequence -gt [long]$write.Sequence -and
             (Number $_ 'log_writer_attempt_utc_ticks') -ge (Number $write 'log_writer_attempt_utc_ticks') -and
@@ -1771,9 +1815,12 @@ function Get-FileTransferRecentProgressGraceStallProgressClosure {
         $state = $states[0]
         if (@($initialStates | Where-Object { (Number $_ 'epoch') -ge (Number $state 'epoch') }).Count -gt 0) { continue }
         $poisoned = $false
-        foreach ($event in $scoped) {
+        $stallGeneration = Number $stall 'wake_generation'
+        $stallHighest = Number $stall 'highest_received_chunk_index'
+        $stallTicks = Number $stall 'log_writer_attempt_utc_ticks'
+        foreach ($event in $scoped | Sort-Object Sequence, LineNumber) {
             if ([long]$event.Sequence -gt [long]$state.Sequence) { continue }
-            if ($watchdogFirst -and [long]$event.Sequence -gt [long]$Episode.Event.Sequence -and
+            if (($watchdogFirst -or $chunkFirst) -and [long]$event.Sequence -gt [long]$Episode.Event.Sequence -and
                 (Field $event 'event') -ceq 'filetransfer_v6_frontier_request_deferred' -and
                 (Number $event 'elapsed_ms') -eq 0 -and -not [object]::ReferenceEquals($event, $stall)) {
                 # Do not skip a competing/replacement root because its reason
@@ -1783,6 +1830,40 @@ function Get-FileTransferRecentProgressGraceStallProgressClosure {
             if ((Field $event 'event') -in @('file_transfer_inbound_terminal', 'filetransfer_live_route_epoch_terminal',
                     'filetransfer_terminalized_by_session_end', 'filetransfer_data_session_recreated', 'filetransfer_data_session_removed') -or
                 (Field $event 'transfer_paused') -ceq '1') { $poisoned = $true; break }
+            if ($chunkFirst) {
+                $name = Field $event 'event'
+                if ($name -ceq 'filetransfer_v6_frontier_recent_progress_grace_recheck_decided' -and
+                    (Number $event 'frontier_chunk_index') -eq $Episode.Frontier) {
+                    $capturedArms = @($recentArms | Where-Object {
+                        Equal $_ $event ($wakeScope + @('wake_generation', 'highest_received_chunk_index', 'committed_progress_utc', 'wake_deadline_utc'))
+                    })
+                    if ((Field $event 'decision_status') -cne 'stale' -or
+                        (Field $event 'decision_reason') -cne 'wake_generation_replaced' -or
+                        (Field $event 'authority_effect') -cne 'none' -or $capturedArms.Count -ne 1) { $poisoned = $true; break }
+                }
+                if ($name -ceq 'filetransfer_v6_frontier_stall_grace_recheck_decided' -and
+                    [long]$event.Sequence -gt [long]$stall.Sequence) {
+                    # Preserve the original stall interval across every rearm;
+                    # missing generations and rolling deadlines cannot close it.
+                    $generation = Number $event 'wake_generation'
+                    $eventHighest = Number $event 'highest_received_chunk_index'
+                    $eventTicks = Number $event 'log_writer_attempt_utc_ticks'
+                    if (-not (Equal $event $stall ($wakeScope + @('stall_started_utc', 'wake_deadline_utc'))) -or
+                        (Field $event 'decision_status') -cne 'rearmed' -or
+                        (Field $event 'decision_reason') -cne 'highest_received_advanced' -or
+                        (Field $event 'authority_effect') -cne 'none' -or
+                        ($generation - $stallGeneration) -ne 1 -or $eventHighest -le $stallHighest -or
+                        $eventTicks -lt $stallTicks -or $eventTicks -ge $deadline -or
+                        [long]$event.Sequence -ge [long]$firstProgressWrite.Sequence -or
+                        $eventTicks -gt (Number $firstProgressWrite 'log_writer_attempt_utc_ticks') -or
+                        $eventHighest -gt (Number $write 'highest_received_chunk_index')) { $poisoned = $true; break }
+                    $stallGeneration = $generation; $stallHighest = $eventHighest; $stallTicks = $eventTicks
+                }
+                foreach ($binding in @('frontier_scope_session_id', 'frontier_scope_transfer_id', 'frontier_scope_data_session_identity')) {
+                    if ($event.Fields.ContainsKey($binding) -and (Field $event $binding) -cne (Field $recentWitness $binding)) { $poisoned = $true; break }
+                }
+                if ($poisoned) { break }
+            }
             # Only contract evidence carries owner scope. Transport diagnostics
             # can expose frame transport_epoch, not the fallback owner's epoch.
             if (-not $scopeEvents.Contains((Field $event 'event'))) { continue }

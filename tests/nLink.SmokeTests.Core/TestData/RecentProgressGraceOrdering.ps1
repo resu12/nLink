@@ -1,4 +1,4 @@
-param([string]$RepoRoot, [string]$SourcePath, [switch]$WatchdogOnly, [switch]$DecisionClockOnly)
+param([string]$RepoRoot, [string]$SourcePath, [switch]$WatchdogOnly, [switch]$DecisionClockOnly, [switch]$ChunkFirstOnly)
 $ErrorActionPreference = 'Stop'
 . (Join-Path $RepoRoot 'tools/FileTransferSoak/LogParsing.ps1')
 . (Join-Path $RepoRoot 'tools/FileTransferSoak/ArtifactWriters.ps1')
@@ -136,6 +136,20 @@ if ($DecisionClockOnly) {
         'decision_source_changed', 'decision_conflicting_copy', 'decision_stale_only', 'decision_no_publication',
         'decision_publication_at_deadline')
 }
+if ($ChunkFirstOnly) {
+    $cases = @('chunk_exact', 'chunk_rearm', 'chunk_no_callbacks', 'chunk_duplicate', 'chunk_no_stall',
+        'chunk_no_publication', 'chunk_wrong_publication', 'chunk_late_publication', 'chunk_late_write',
+        'chunk_missing_write', 'chunk_stall_early', 'chunk_stall_duration', 'chunk_stall_clock',
+        'chunk_stall_missing_link', 'chunk_stall_generation', 'chunk_stall_deadline', 'chunk_stall_source',
+        'chunk_stall_highest', 'chunk_stall_late', 'chunk_callback_authority', 'chunk_current_callback',
+        'chunk_second_root', 'chunk_stale_only', 'chunk_new_frontier', 'chunk_sanitized_conflict',
+        'chunk_tip_status', 'chunk_tip_reason', 'chunk_stall_after_progress', 'chunk_unmatched_callback', 'chunk_progress_identity',
+        'chain_missing_root', 'chain_missing_middle', 'chain_missing_final', 'chain_generation_gap', 'chain_generation_reused',
+        'chain_highest_flat', 'chain_highest_regressed', 'chain_root_clock', 'chain_clock_regressed',
+        'chain_at_deadline', 'chain_after_deadline', 'chain_latest_bad_root', 'chain_conflict_session',
+        'chain_conflict_transfer', 'chain_conflict_event', 'chain_terminal', 'chain_pause', 'chain_source_replaced')
+    $cases += @($scopeChanges | ForEach-Object { "chain_scope_$_" })
+}
 function CopyEvent($event) { $copy = $event.PSObject.Copy(); $copy.Fields = $event.Fields.Clone(); return $copy }
 function Boundary($result) {
     $records = @(foreach ($record in $result.CandidateRecords) { [ordered]@{
@@ -145,11 +159,84 @@ function Boundary($result) {
         recovered=$result.RecoveredCount;unresolved=$result.UnresolvedCount;records=$records}) -Depth 8 -Compress
 }
 foreach ($case in $cases) {
-    $items = @(Fixture (($DecisionClockOnly -and $case -ne 'decision_root_only') -or $case.StartsWith('chain_') -or ($WatchdogOnly -and $case -ne 'watchdog_exact') -or
+    $items = @(Fixture (($ChunkFirstOnly -and $case -ne 'chunk_exact') -or ($DecisionClockOnly -and $case -ne 'decision_root_only') -or $case.StartsWith('chain_') -or ($WatchdogOnly -and $case -ne 'watchdog_exact') -or
         $case -in @('rearm_only', 'live_ordering')) ($case -in @('late_only', 'live_ordering', 'watchdog_late')))
     $recheck = @($items | Where-Object { $_.EventName -eq 'filetransfer_v6_frontier_recent_progress_grace_recheck_decided' -and $_.Fields.decision_status -eq 'rechecked' })[0]
     $arms = @($items | Where-Object EventName -eq 'filetransfer_v6_frontier_recent_progress_grace_deferred')
     $stall = @($items | Where-Object EventName -eq 'filetransfer_v6_frontier_request_deferred')[0]
+    if ($ChunkFirstOnly) {
+        $stall.Fields.reason = 'chunk_batch_committed'
+        $stall.Fields.highest_received_chunk_index = [string]([long]$arms[-1].Fields.highest_received_chunk_index + 3)
+        $recheck.Fields.decision_status = 'stale'; $recheck.Fields.decision_reason = 'wake_generation_replaced'
+        $recheck.Sequence = $stall.Sequence - 1; $recheck.LineNumber = [int]$recheck.Sequence
+        $recheck.Fields.log_writer_sequence = [string]$recheck.Sequence
+        $recheck.Fields.log_writer_attempt_utc_ticks = [string]$origin.AddMilliseconds(1104).UtcTicks
+        $writes = @($items | Where-Object EventName -eq 'filetransfer_v6_sparse_write_committed')
+        $state = @($items | Where-Object EventName -eq 'filetransfer_v6_receiver_state_sent')[-1]
+        $stallLinks = @(foreach ($i in 1..2) {
+            $copy = CopyEvent $stall
+            $copy.EventName = 'filetransfer_v6_frontier_stall_grace_recheck_decided'; $copy.Fields.event = $copy.EventName
+            $copy.Sequence = $writes[0].Sequence - 6 + $i; $copy.LineNumber = [int]$copy.Sequence
+            $copy.Fields.log_writer_sequence = [string]$copy.Sequence
+            $copy.Fields.log_writer_attempt_utc_ticks = [string]$origin.AddMilliseconds(1100 + 100 * $i).UtcTicks
+            $copy.Fields.wake_generation = [string](258 + $i)
+            $copy.Fields.highest_received_chunk_index = [string]([long]$stall.Fields.highest_received_chunk_index + $i)
+            $copy.Fields.decision_status = 'rearmed'; $copy.Fields.decision_reason = 'highest_received_advanced'
+            $copy.Fields.Remove('elapsed_ms'); $copy
+        })
+        $items += $stallLinks
+        foreach ($write in $writes) { $write.Fields.highest_received_chunk_index = [string]($highest + 12) }
+        $state.Fields.durable_received_highest_chunk_index = [string]($highest + 12)
+        # Sanitized identities must remain exact even when display IDs coincide.
+        foreach ($item in $items) {
+            $item.Fields.frontier_scope_session_id = 'fte1-session'
+            $item.Fields.frontier_scope_transfer_id = 'fte1-transfer'
+            $item.Fields.frontier_scope_data_session_identity = 'fte1-data'
+        }
+        switch ($case) {
+            'chunk_no_callbacks' { $items = @($items | Where-Object EventName -ne 'filetransfer_v6_frontier_recent_progress_grace_recheck_decided') }
+            'chunk_duplicate' { $items += (CopyEvent $stallLinks[0]) }
+            'chunk_no_stall' { $items = @($items | Where-Object { $_ -ne $stall }) }
+            'chunk_no_publication' { $items = @($items | Where-Object { $_ -ne $state }) }
+            'chunk_wrong_publication' { $state.Fields.durable_received_highest_chunk_index = '999' }
+            'chunk_late_publication' { $state.Fields.log_writer_attempt_utc_ticks = [string]$origin.AddMilliseconds(1855).UtcTicks }
+            'chunk_late_write' { $writes[1].Fields.log_writer_attempt_utc_ticks = [string]$origin.AddMilliseconds(1855).UtcTicks }
+            'chunk_missing_write' { $items = @($items | Where-Object { $_ -ne $writes[0] }) }
+            'chunk_stall_early' { $stall.Fields.stall_started_utc = $origin.AddMilliseconds(1099).ToString('o'); $stall.Fields.wake_deadline_utc = $origin.AddMilliseconds(1849).ToString('o') }
+            'chunk_stall_duration' { $stall.Fields.wake_deadline_utc = $origin.AddMilliseconds(1856).ToString('o') }
+            'chunk_stall_clock' { $stall.Fields.log_writer_attempt_utc_ticks = [string]$origin.AddMilliseconds(1104).UtcTicks }
+            'chunk_stall_missing_link' { $items = @($items | Where-Object { $_ -ne $stallLinks[0] }) }
+            'chunk_stall_generation' { $stallLinks[1].Fields.wake_generation = '261' }
+            'chunk_stall_deadline' { $stallLinks[1].Fields.wake_deadline_utc = $origin.AddMilliseconds(2000).ToString('o') }
+            'chunk_stall_source' { $stallLinks[1].Fields.data_session_identity = 'other' }
+            'chunk_stall_highest' { $stallLinks[1].Fields.highest_received_chunk_index = $stall.Fields.highest_received_chunk_index }
+            'chunk_stall_late' { $stallLinks[1].Fields.log_writer_attempt_utc_ticks = [string]$origin.AddMilliseconds(1855).UtcTicks }
+            'chunk_callback_authority' { $recheck.Fields.authority_effect = 'repair' }
+            'chunk_current_callback' { $recheck.Fields.decision_status = 'rechecked'; $recheck.Fields.decision_reason = 'other' }
+            'chunk_second_root' { $copy = CopyEvent $stall; $copy.Sequence++; $copy.LineNumber++; $copy.Fields.log_writer_sequence = [string]$copy.Sequence; $copy.Fields.reason = 'other'; $items += $copy }
+            'chunk_stale_only' { $items = @($items | Where-Object { $_ -ne $stall -and $_.EventName -notin @('filetransfer_v6_sparse_write_committed', 'filetransfer_v6_frontier_stall_grace_recheck_decided') }) }
+            'chunk_new_frontier' {
+                $copy = CopyEvent $arms[-1]; $copy.Sequence = $writes[0].Sequence - 1; $copy.LineNumber = [int]$copy.Sequence
+                $copy.Fields.log_writer_sequence = [string]$copy.Sequence
+                $copy.Fields.log_writer_attempt_utc_ticks = [string]$origin.AddMilliseconds(1399).UtcTicks
+                $copy.TimestampUtc = $origin.AddMilliseconds(1399)
+                $copy.Fields.frontier_chunk_index = [string]($frontier + 3)
+                $copy.Fields.highest_received_chunk_index = [string]($highest + 12)
+                $copy.Fields.wake_generation = '170'; $copy.Fields.decision_status = 'held'
+                $copy.Fields.decision_reason = 'recent_progress_grace_current'
+                $copy.Fields.committed_progress_utc = $origin.AddMilliseconds(1399).ToString('o')
+                $copy.Fields.wake_deadline_utc = $origin.AddMilliseconds(2399).ToString('o'); $items += $copy
+            }
+            'chunk_sanitized_conflict' { $writes[1].Fields.frontier_scope_transfer_id = 'fte1-other' }
+            'chunk_tip_status' { $arms[-1].Fields.decision_status = 'stale' }
+            'chunk_tip_reason' { $arms[-1].Fields.decision_reason = 'other' }
+            'chunk_stall_after_progress' { $stallLinks[-1].Sequence = $writes[0].Sequence + 1; $stallLinks[-1].Fields.log_writer_sequence = [string]$stallLinks[-1].Sequence }
+            'chunk_unmatched_callback' { $recheck.Fields.wake_generation = '170' }
+            'chunk_progress_identity' {
+                foreach ($item in $items | Where-Object { $_.Sequence -gt 60 }) { $item.Fields.frontier_scope_session_id = 'fte1-other' }
+            }
+        }
+    }
     if ($DecisionClockOnly) {
         foreach ($arm in $arms) {
             $arm.Fields.arm_decision_utc = [DateTimeOffset]::new([long]$arm.Fields.log_writer_attempt_utc_ticks, [TimeSpan]::Zero).ToString('o')
@@ -325,7 +412,8 @@ foreach ($case in $cases) {
     $expected = $case -in @('exact', 'rearm_only', 'chain_duplicate', 'chain_no_stale', 'chain_family_same', 'chain_earlier_root',
         'chain_unrelated_transfer_conflict', 'watchdog_exact', 'watchdog_rearm', 'watchdog_duplicate',
         'watchdog_close_publication', 'watchdog_zero_write', 'decision_timely_receipt_late',
-        'decision_timely_receipt_at_deadline', 'decision_root_only')
+        'decision_timely_receipt_at_deadline', 'decision_root_only', 'chunk_exact', 'chunk_rearm',
+        'chunk_no_callbacks', 'chunk_duplicate', 'chunk_new_frontier')
     $plain = & $script:FileTransferFallbackFrontierRecentProgressGraceLegacyCorrelation -Events $items
     $index = New-FileTransferFallbackFrontierGraceCorrelationIndex $items
     $indexed = Get-FileTransferFallbackFrontierRecentProgressGraceRecheckCorrelation -Events $items -Index $index
