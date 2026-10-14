@@ -459,12 +459,12 @@ public sealed partial class SessionFileTransferService
                         RetainedPeerFrame: { } retainedFrame,
                         RetainedFrameIdentity: { } identity,
                     } execution ||
-                !identity.Matches(frame) ||
                 !identity.Matches(retainedFrame))
             {
                 return InboundRetainedFrameReceiveDispatchDecision.None;
             }
 
+            var state = CreateCoordinatorStateLocked(context);
             var current = !context.IsTerminal &&
                 ReferenceEquals(execution.SourceDataSession, context.DataSession) &&
                 execution.SourceDataSessionGeneration ==
@@ -475,7 +475,7 @@ public sealed partial class SessionFileTransferService
                     FileTransferProtocol.ProtocolVersionV6 &&
                 context.RouteRuntime.UsesPostTunaFallbackV6Runtime &&
                 FileTransferCoordinator.GetFileTransferRouteTransitionSubstate(
-                        CreateCoordinatorStateLocked(context))
+                        state)
                     .LastTerminalOperation is
                     {
                         State: FileTransferRouteTransitionState.Committed,
@@ -489,6 +489,25 @@ public sealed partial class SessionFileTransferService
                 context.CurrentRuntimeOwner == command.TargetRuntimeOwner &&
                 context.CurrentRoutePublicationToken ==
                     command.TargetRoutePublication;
+
+            if (!identity.Matches(frame))
+            {
+                // The retained bootstrap response owns this coordinator-issued checkpoint.
+                // A parallel refresh response could clear its lease before completion returns.
+                if (!current || execution.LastFrameReceipt is not null ||
+                    retainedFrame is not FileTransferFallbackBootstrapRequestFrameV6 ||
+                    frame is not FileTransferFrontierRequestFrameV6 refresh ||
+                    !IsV6RegularNknStateRefreshRequest(refresh) ||
+                    state.CurrentFallbackCheckpointLease is not { State: FallbackCheckpointLeaseState.Pending } checkpoint ||
+                    checkpoint.RuntimeOwner != state.CurrentRuntimeOwner ||
+                    refresh.SessionId != state.SessionId || refresh.TransferId != state.TransferId ||
+                    refresh.TransportEpoch != checkpoint.TransportEpoch ||
+                    !string.Equals(refresh.RepairRequestId, checkpoint.CheckpointRequestId, StringComparison.Ordinal))
+                {
+                    return InboundRetainedFrameReceiveDispatchDecision.None;
+                }
+            }
+
             return current
                 ? InboundRetainedFrameReceiveDispatchDecision.Coalesced
                 : InboundRetainedFrameReceiveDispatchDecision.Stale;
