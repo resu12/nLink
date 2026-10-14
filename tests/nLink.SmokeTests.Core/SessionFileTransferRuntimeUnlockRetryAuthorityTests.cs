@@ -45,6 +45,43 @@ public sealed class SessionFileTransferRuntimeUnlockRetryAuthorityTests :
         using var fixture = await CreateFixtureAsync(
             "session_retry_two_phase_install",
             "transfer_retry_two_phase_install");
+        AssertGrantedDecisionIsStagedThenInstalledOnceUnderCoreGate(fixture);
+    }
+
+    [Fact]
+    public async Task AdoptedClosureRetryInstall_ConstrainedStackChild()
+    {
+        if (Environment.GetEnvironmentVariable("NLINK_SNAPSHOT_STACK_CHILD") != "1")
+        {
+            return;
+        }
+
+        using var fixture = await CreateFixtureAsync(
+            "session_retry_adopted_closure_stack",
+            "transfer_retry_adopted_closure_stack");
+        Exception? failure = null;
+        var completed = false;
+        var thread = new Thread(() =>
+        {
+            try
+            {
+                AssertGrantedDecisionIsStagedThenInstalledOnceUnderCoreGate(fixture);
+                completed = true;
+            }
+            catch (Exception ex)
+            {
+                failure = ex;
+            }
+        }, maxStackSize: 1024 * 1024);
+        thread.Start();
+        Assert.True(thread.Join(TimeSpan.FromSeconds(30)));
+        Assert.Null(failure);
+        Assert.True(completed);
+    }
+
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private static void AssertGrantedDecisionIsStagedThenInstalledOnceUnderCoreGate(RetryFixture fixture)
+    {
         fixture.Bridge.CoreGateForInstallProbe = GetCoreGate(fixture.Service);
         var logStart = GetOperationalLogLength();
         Assert.Equal(

@@ -6360,9 +6360,11 @@ public sealed partial class FileTransferCoordinatorTests
             StringComparison.Ordinal);
     }
 
-    [Fact]
+    [Theory]
+    [InlineData("NLink.SmokeTests.FileTransferCoordinatorTests.SnapshotAttemptProjection_ConstrainedStackChild")]
+    [InlineData("NLink.SmokeTests.SessionFileTransferRuntimeUnlockRetryAuthorityTests.AdoptedClosureRetryInstall_ConstrainedStackChild")]
     [Trait("FileTransferCoordinatorSuite", "CoordinatorSnapshots")]
-    public async Task SnapshotAttemptProjection_ConstrainedStackChildProcessSurvives()
+    public async Task SnapshotAttemptProjection_ConstrainedStackChildProcessSurvives(string childTest)
     {
         if (string.Equals(
                 Environment.GetEnvironmentVariable(
@@ -6390,12 +6392,15 @@ public sealed partial class FileTransferCoordinatorTests
             "nLink.SmokeTests.Core",
             "nLink.SmokeTests.Core.csproj"));
         startInfo.ArgumentList.Add("-c");
+#if DEBUG
+        startInfo.ArgumentList.Add("Debug");
+#else
         startInfo.ArgumentList.Add("Release");
+#endif
         startInfo.ArgumentList.Add("--no-build");
         startInfo.ArgumentList.Add("--no-restore");
         startInfo.ArgumentList.Add("--filter");
-        startInfo.ArgumentList.Add(
-            "FullyQualifiedName=NLink.SmokeTests.FileTransferCoordinatorTests.SnapshotAttemptProjection_ConstrainedStackChild");
+        startInfo.ArgumentList.Add($"FullyQualifiedName={childTest}");
         startInfo.Environment["NLINK_SNAPSHOT_STACK_CHILD"] = "1";
 
         using var process = Process.Start(startInfo) ??
@@ -14152,6 +14157,14 @@ public sealed partial class FileTransferCoordinatorTests
     public void FileTransferReceiveRecoveryOperation_ClosureReleaseReservesAndConsumesOnce()
     {
         var fixture = CreateReceiveRecoveryOperationFixture();
+        var state = fixture.Decision.State with
+        {
+            PersistentState = fixture.Decision.State.PersistentState with
+            {
+                CoordinatorInstanceId = "closure-consumption-snapshot-coordinator",
+                SnapshotStateGeneration = 0,
+            },
+        };
         var authority =
             Assert.IsType<FileTransferReceiveRecoveryOperationAuthority>(
                 fixture.Decision.Authority);
@@ -14162,7 +14175,7 @@ public sealed partial class FileTransferCoordinatorTests
             "bridge_recovery_completed");
         var started =
             FileTransferCoordinator.ObserveReceiveRecoveryExecutionStart(
-                fixture.Decision.State,
+                state,
                 new FileTransferBridgeRecoveryExecutionStartResult(
                     authority.ExecutionCommand,
                     FileTransferBridgeRecoveryExecutionStartStatus.Started,
@@ -14234,6 +14247,16 @@ public sealed partial class FileTransferCoordinatorTests
             FileTransferReceiveRecoveryTransitionStatus.Rejected,
             stageOnlyConsumption.Status);
         Assert.Same(granted.State, stageOnlyConsumption.State);
+        AssertClosureConsumptionSnapshot(
+            granted.State,
+            fabricatedInstallReceipt,
+            stageOnlyConsumption,
+            new(
+                FileTransferReceiveRecoveryTransitionStatus.Rejected,
+                "filetransfer_receive_recovery_closure_consumption_mismatch")
+            {
+                State = granted.State,
+            });
 
         var installed = StageAndInstallPersistentRetryLifecycle(
             granted.State,
@@ -14248,6 +14271,29 @@ public sealed partial class FileTransferCoordinatorTests
             FileTransferReceiveRecoveryClosureState.Consumed,
             FileTransferCoordinator.GetReceiveRecoverySubstate(
                 consumed).LastTerminalOperation?.ClosureState);
+        var beforeConsumption = consumed with
+        {
+            PersistentState = consumed.PersistentState with
+            {
+                FileTransferReceiveRecovery =
+                    FileTransferCoordinator.GetReceiveRecoverySubstate(granted.State),
+            },
+        };
+        var directConsumption = FileTransferCoordinator.ConsumeReceiveRecoveryClosure(
+            beforeConsumption,
+            installed.Receipt);
+        Assert.Equal(FileTransferReceiveRecoveryTransitionStatus.Accepted, directConsumption.Status);
+        AssertClosureConsumptionSnapshot(
+            beforeConsumption,
+            installed.Receipt,
+            directConsumption,
+            new(
+                FileTransferReceiveRecoveryTransitionStatus.Accepted,
+                "filetransfer_receive_recovery_closure_consumed",
+                authority)
+            {
+                State = consumed,
+            });
         var duplicate =
             FileTransferCoordinator.ConsumeReceiveRecoveryClosure(
                 consumed,
@@ -14256,6 +14302,50 @@ public sealed partial class FileTransferCoordinatorTests
             FileTransferReceiveRecoveryTransitionStatus.Idempotent,
             duplicate.Status);
         Assert.Equal(consumed, duplicate.State);
+        AssertClosureConsumptionSnapshot(
+            consumed,
+            installed.Receipt,
+            duplicate,
+            new(
+                FileTransferReceiveRecoveryTransitionStatus.Idempotent,
+                "filetransfer_receive_recovery_closure_consumption_duplicate",
+                authority)
+            {
+                State = consumed,
+            });
+    }
+
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private static void AssertClosureConsumptionSnapshot(
+        FileTransferCoordinatorState before,
+        RuntimeUnlockRetryDispatchInstallReceipt receipt,
+        in FileTransferReceiveRecoveryDecision actual,
+        in FileTransferReceiveRecoveryDecision expectedTransition)
+    {
+        var expected = FileTransferCoordinator.FinalizeReceiveRecoverySnapshot(
+            before,
+            in expectedTransition,
+            nameof(FileTransferCoordinator.ConsumeReceiveRecoveryClosure),
+            receipt,
+            expectedTransition.Authority);
+        var expectedEnvelope = Assert.IsType<FileTransferCoordinatorTransitionEnvelope>(expected.SnapshotEnvelope);
+        var actualEnvelope = Assert.IsType<FileTransferCoordinatorTransitionEnvelope>(actual.SnapshotEnvelope);
+        Assert.True(expectedEnvelope.DecisionUtcMilliseconds > actualEnvelope.DecisionUtcMilliseconds);
+        Assert.NotEqual(expectedEnvelope.TransitionId, actualEnvelope.TransitionId);
+        // Each finalization gets a fresh timestamp and derived transition identity.
+        // Compare all canonical decision content using the same event identity.
+        expectedEnvelope = expectedEnvelope with
+        {
+            DecisionUtcMilliseconds = actualEnvelope.DecisionUtcMilliseconds,
+            TransitionId = actualEnvelope.TransitionId,
+        };
+        Assert.Equal(expectedEnvelope.ToCanonicalJson(), actualEnvelope.ToCanonicalJson());
+        Assert.Equal(expectedEnvelope.CalculatePayloadSha256(), actualEnvelope.CalculatePayloadSha256());
+        Assert.Equal(expected.SnapshotAuthorityEffectBinding, actual.SnapshotAuthorityEffectBinding);
+        Assert.Equal(expected.State.PersistentState, actual.State.PersistentState);
+        Assert.Equal(expectedTransition.Status, actual.Status);
+        Assert.Equal(expectedTransition.Reason, actual.Reason);
+        Assert.Equal(expectedTransition.Authority, actual.Authority);
     }
 
     [Fact]

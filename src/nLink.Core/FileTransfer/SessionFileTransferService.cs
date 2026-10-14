@@ -6482,6 +6482,14 @@ public sealed partial class SessionFileTransferService :
             var bridgeIsCurrentTransport =
                 transport is IRuntimeUnlockRetryDispatchAuthorityBridge currentBridge &&
                 ReferenceEquals(currentBridge, bridge);
+            if (args.RecheckCommand is not null &&
+                (!bridgeIsCurrentTransport || outboundTransfer is not { IsTerminal: false } currentOutbound ||
+                 request.Direction != FileTransferDirection.Outbound ||
+                 request.SessionId != currentOutbound.SessionId || request.TransferId != currentOutbound.TransferId))
+            {
+                // Terminal/replaced transport callbacks cannot cancel or resume work.
+                return;
+            }
             if (bridgeIsCurrentTransport &&
                 outboundTransfer is { } outbound &&
                 !outbound.IsTerminal &&
@@ -6489,12 +6497,23 @@ public sealed partial class SessionFileTransferService :
                 string.Equals(request.SessionId, outbound.SessionId, StringComparison.Ordinal) &&
                 string.Equals(request.TransferId, outbound.TransferId, StringComparison.Ordinal))
             {
+                if (!FileTransferCoordinator.IsFallbackHandoffCallbackCurrent(
+                        CreateCoordinatorStateLocked(outbound), request, args.RecheckCommand,
+                        DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()))
+                {
+                    // A stale callback is diagnostic-only, including at the bridge:
+                    // reporting a non-grant there could cancel a newer pending request.
+                    LocalOperationalLog.Info("FileTransferService",
+                        $"event=runtime_unlock_retry_dispatch_fallback_handoff_callback_rejected; {FileTransferDiagnosticScopeEvidence.Format(outbound.SessionId, outbound.TransferId)}decision_reason=handoff_callback_not_current");
+                    return;
+                }
                 decision =
                     TryResumePendingRuntimeUnlockRetryDispatchStageExpiryLocked(
                         outbound)
                         ? AuthorizeRuntimeUnlockRetryDispatchLocked(
                             outbound,
-                            request)
+                            request,
+                            args.RecheckCommand)
                         : new RuntimeUnlockRetryDispatchDecision(
                             RuntimeUnlockRetryDispatchDecisionStatus.Rejected,
                             "retry_dispatch_stage_expiry_pending",
@@ -6540,10 +6559,25 @@ public sealed partial class SessionFileTransferService :
             }
         }
 
-        ProcessRuntimeUnlockRetryDispatchDecision(
-            bridge,
-            decision,
-            decisionDataSessionGeneration);
+        try
+        {
+            ProcessRuntimeUnlockRetryDispatchDecision(bridge, decision, decisionDataSessionGeneration);
+        }
+        finally
+        {
+            if (args.RecheckCommand is { } reservation)
+            {
+                lock (gate)
+                {
+                    if (outboundTransfer is { } outbound)
+                    {
+                        ReleaseFallbackHandoffLocked(outbound, reservation,
+                            FallbackHandoffReleaseReason.DispatchFinished,
+                            DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
+                    }
+                }
+            }
+        }
     }
 
     private void ProcessRuntimeUnlockRetryDispatchDecision(
@@ -7368,6 +7402,13 @@ public sealed partial class SessionFileTransferService :
     private static RuntimeUnlockRetryDispatchDecision AuthorizeRuntimeUnlockRetryDispatchLocked(
         OutboundTransferContext context,
         RuntimeUnlockRetryDispatchAuthorityRequest request)
+        => AuthorizeRuntimeUnlockRetryDispatchLocked(context, request, null);
+
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private static RuntimeUnlockRetryDispatchDecision AuthorizeRuntimeUnlockRetryDispatchLocked(
+        OutboundTransferContext context,
+        RuntimeUnlockRetryDispatchAuthorityRequest request,
+        in FileTransferFallbackTailYieldRetryDispatchRecheckCommand? handoffCommand)
     {
         ResolveRuntimeUnlockRetryReleaseLocked(
             context,
@@ -7381,7 +7422,8 @@ public sealed partial class SessionFileTransferService :
             releaseKind,
             releaseAuthorityId,
             releaseGeneration,
-            releaseOutcome);
+            releaseOutcome,
+            in handoffCommand);
         ApplyRuntimeUnlockRetryDispatchAuthorityDecisionLocked(
             context,
             decision.Request.IsDefault ? request : decision.Request,
@@ -24957,6 +24999,8 @@ public sealed partial class SessionFileTransferService :
             PendingRegularV4FrontierRepairPressureInstallRetry { get; set; }
 
         public FallbackFrontierRepairContract? CurrentFallbackFrontierRepairContract { get; set; }
+
+        public List<DeferredFallbackHandoffRepair> DeferredFallbackHandoffRepairs { get; } = [];
 
         public FallbackFrontierRepairAuthority?
             LastSettledFallbackFrontierRepairAuthority { get; set; }

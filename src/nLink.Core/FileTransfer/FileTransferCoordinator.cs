@@ -828,6 +828,9 @@ internal readonly record struct
 {
     public RuntimeUnlockRetryDispatchAuthorityRequest Request => Hold.Request;
 
+    public long DeadlineUtcMs => Observation.ObservedUtcMs +
+        FileTransferCoordinator.RuntimeUnlockRetryDispatchDeadlineMilliseconds;
+
     public bool IsDefault =>
         Hold.IsDefault ||
         Observation.IsDefault ||
@@ -888,6 +891,9 @@ internal sealed record FileTransferFallbackTailYieldSubstate(
     int LastRetryDispatchRecheckGeneration = 0)
 {
     public FileTransferFallbackRepairHandoffOperation? RepairHandoff { get; init; }
+
+    public FileTransferFallbackTailYieldRetryDispatchRecheckCommand? HandoffReservation { get; init; }
+    public FileTransferFallbackTailYieldRetryDispatchRecheckCommand? LastReleasedHandoffReservation { get; init; }
 
     internal static FileTransferFallbackTailYieldSubstate Empty { get; } =
         new();
@@ -1307,7 +1313,7 @@ internal readonly record struct FileTransferRouteTransitionSupersession(
     FileTransferRouteTransitionPauseBindCommand PauseRebindCommand,
     FileTransferRouteTransitionPauseBindReceipt? PauseRebindReceipt = null);
 
-internal readonly record struct FileTransferRouteTransitionSubstate(
+internal sealed record FileTransferRouteTransitionSubstate(
     FileTransferRouteTransitionOperation? CurrentOperation = null,
     FileTransferRouteTransitionSupersession? PendingSupersession = null,
     FileTransferRouteTransitionOperation? LastTerminalOperation = null,
@@ -1319,7 +1325,7 @@ internal readonly record struct FileTransferRouteTransitionSubstate(
     FileTransferBootstrapExchange? BootstrapExchange = null,
     FileTransferBootstrapSourceHoldOperation? BootstrapSourceHold = null)
 {
-    internal static FileTransferRouteTransitionSubstate Empty => default;
+    internal static FileTransferRouteTransitionSubstate Empty { get; } = new();
 }
 
 internal enum FileTransferFallbackV6ProofBootstrapFrameKind
@@ -2704,10 +2710,26 @@ internal sealed record
 
 internal readonly record struct FileTransferCoordinatorPersistentState(
     RegularV4FrontierRepairPressureSubstate RegularV4FrontierRepairPressure = default,
-    FileTransferRouteTransitionSubstate FileTransferRouteTransition = default,
+    [System.Diagnostics.CodeAnalysis.AllowNull]
+    FileTransferRouteTransitionSubstate FileTransferRouteTransition = null!,
     RuntimeUnlockResponderPeerProbeRouteTransitionHandoffSubstate
         RuntimeUnlockResponderPeerProbeRouteTransitionHandoff = default)
 {
+    // Canonical empty storage preserves aggregate value equality after a reset.
+    private readonly FileTransferRouteTransitionSubstate? fileTransferRouteTransition =
+        FileTransferRouteTransition == FileTransferRouteTransitionSubstate.Empty
+            ? null
+            : FileTransferRouteTransition;
+
+    [System.Diagnostics.CodeAnalysis.AllowNull]
+    public FileTransferRouteTransitionSubstate FileTransferRouteTransition
+    {
+        get => fileTransferRouteTransition ?? FileTransferRouteTransitionSubstate.Empty;
+        init => fileTransferRouteTransition = value == FileTransferRouteTransitionSubstate.Empty
+            ? null
+            : value;
+    }
+
     internal string? CoordinatorInstanceId { get; init; }
 
     internal long SnapshotStateGeneration { get; init; }
@@ -3811,6 +3833,8 @@ internal static partial class FileTransferCoordinator
             stageResult.StagedUtcMs <= 0 ||
             stageResult.StagedUtcMs > long.MaxValue - deadlineMilliseconds ||
             observedUtcMs < stageResult.StagedUtcMs ||
+            (pending.Authority.FallbackHandoffDeadlineUtcMs > 0 &&
+             observedUtcMs >= pending.Authority.FallbackHandoffDeadlineUtcMs) ||
             observedUtcMs >
                 stageResult.StagedUtcMs + deadlineMilliseconds)
         {
@@ -3826,7 +3850,7 @@ internal static partial class FileTransferCoordinator
             StageDisposition = stageResult.StageDisposition,
             StagedUtcMs = stageResult.StagedUtcMs,
             StageExpiresUtcMs =
-                stageResult.StagedUtcMs + deadlineMilliseconds,
+                CapFallbackHandoffDeadline(pending.Authority, stageResult.StagedUtcMs + deadlineMilliseconds),
         };
         var nextLifecycle = lifecycle with
         {
@@ -3985,7 +4009,7 @@ internal static partial class FileTransferCoordinator
         receipt = receipt with
         {
             DispatchDeadlineUtcMs =
-                observedUtcMs + dispatchDeadlineMilliseconds,
+                CapFallbackHandoffDeadline(pending.Authority, observedUtcMs + dispatchDeadlineMilliseconds),
         };
         var issued = pending with
         {
@@ -17168,7 +17192,8 @@ internal static partial class FileTransferCoordinator
         RuntimeUnlockRetryReleaseKind releaseKind,
         FileTransferAuthorityId? releaseAuthorityId,
         int releaseGeneration,
-        string releaseOutcome)
+        string releaseOutcome,
+        in FileTransferFallbackTailYieldRetryDispatchRecheckCommand? handoffCommand = null)
     {
         var decision = AuthorizeRuntimeUnlockRetryDispatchCore(
             state,
@@ -17177,7 +17202,8 @@ internal static partial class FileTransferCoordinator
             releaseAuthorityId,
             releaseGeneration,
             releaseOutcome,
-            allowCoordinatorPreparedSuccessor: false);
+            allowCoordinatorPreparedSuccessor: false,
+            in handoffCommand);
         return FinalizeRuntimeUnlockRetrySnapshot(
             state,
             decision,
@@ -17200,7 +17226,8 @@ internal static partial class FileTransferCoordinator
             FileTransferAuthorityId? releaseAuthorityId,
             int releaseGeneration,
             string releaseOutcome,
-            bool allowCoordinatorPreparedSuccessor)
+            bool allowCoordinatorPreparedSuccessor,
+            in FileTransferFallbackTailYieldRetryDispatchRecheckCommand? handoffCommand = null)
     {
         RuntimeUnlockRetryDispatchDecision Decision(
             RuntimeUnlockRetryDispatchDecisionStatus status,
@@ -17224,6 +17251,14 @@ internal static partial class FileTransferCoordinator
         RuntimeUnlockRetryLifecycleAttemptSnapshot? currentAttempt =
             retryLifecycle.PendingAttempt ??
             retryLifecycle.InstalledAttempt;
+
+        if (currentAttempt is null &&
+            !IsFallbackHandoffCallbackCurrent(state, request, handoffCommand,
+                DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()))
+        {
+            return Decision(RuntimeUnlockRetryDispatchDecisionStatus.Rejected,
+                "fallback_handoff_callback_not_current");
+        }
 
         if (state.IsTerminal)
         {
@@ -17759,6 +17794,11 @@ internal static partial class FileTransferCoordinator
                 state.CurrentDataSessionIdentity ?? "(none)",
             DataSessionGeneration = state.CurrentDataSessionGeneration,
         };
+        if (state.PersistentState.FallbackTailYield.HandoffReservation is { } handoff &&
+            handoff.Request == request && IsFallbackHandoffReservationCurrent(state, handoff))
+        {
+            authority = authority with { FallbackHandoffDeadlineUtcMs = handoff.DeadlineUtcMs };
+        }
         var contract = new RuntimeUnlockRetryDispatchContract(
             authority,
             request.RequestActivePredecessorSupersession,
@@ -18505,6 +18545,7 @@ internal static partial class FileTransferCoordinator
         };
     }
 
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
     internal static FileTransferReceiveRecoverySubstate
         GetReceiveRecoverySubstate(FileTransferCoordinatorState state)
         => state.PersistentState.FileTransferReceiveRecovery;
@@ -21955,31 +21996,39 @@ internal static partial class FileTransferCoordinator
             nextState);
     }
 
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
     internal static FileTransferReceiveRecoveryDecision
         ConsumeReceiveRecoveryClosure(
             FileTransferCoordinatorState state,
             RuntimeUnlockRetryDispatchInstallReceipt receipt)
+    {
+        var decision = ConsumeReceiveRecoveryClosureCore(state, in receipt);
+        return FinalizeReceiveRecoverySnapshot(
+            state,
+            in decision,
+            nameof(ConsumeReceiveRecoveryClosure),
+            receipt,
+            decision.Authority);
+    }
+
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private static FileTransferReceiveRecoveryDecision
+        ConsumeReceiveRecoveryClosureCore(
+            FileTransferCoordinatorState state,
+            in RuntimeUnlockRetryDispatchInstallReceipt receipt)
     {
         FileTransferReceiveRecoveryDecision Decision(
             FileTransferReceiveRecoveryTransitionStatus status,
             string reason,
             FileTransferReceiveRecoveryOperationAuthority? authority = null,
             FileTransferCoordinatorState? nextState = null)
-        {
-            var decision = new FileTransferReceiveRecoveryDecision(
+            => new FileTransferReceiveRecoveryDecision(
                 status,
                 reason,
                 authority)
             {
                 State = nextState ?? state,
             };
-            return FinalizeReceiveRecoverySnapshot(
-                state,
-                decision,
-                nameof(ConsumeReceiveRecoveryClosure),
-                receipt,
-                authority);
-        }
 
         var recoveryState = state.PersistentState.FileTransferReceiveRecovery;
         if (recoveryState.LastTerminalOperation is
@@ -23644,6 +23693,12 @@ internal static partial class FileTransferCoordinator
                     "fallback_tail_retry_dispatch_recheck_conflict");
         }
 
+        if (substate.LastReleasedHandoffReservation is { } released && released.Observation == observation)
+        {
+            return FallbackTailYieldTransition(state, FileTransferFallbackTailYieldTransitionStatus.Idempotent,
+                "fallback_handoff_already_released");
+        }
+
         if (substate.LastRetryDispatchRecheckReceipt is
             {
                 Status:
@@ -23688,6 +23743,7 @@ internal static partial class FileTransferCoordinator
                 substate with
                 {
                     PendingRetryDispatchRecheckCommand = command,
+                    HandoffReservation = command,
                     LastRetryDispatchRecheckGeneration = recheckGeneration,
                 }),
             FileTransferFallbackTailYieldTransitionStatus.Accepted,
@@ -23748,6 +23804,9 @@ internal static partial class FileTransferCoordinator
                     PendingRetryDispatchRecheckCommand = terminalReceipt
                         ? null
                         : receipt.Command,
+                    HandoffReservation = terminalReceipt && substate.HandoffReservation == receipt.Command
+                        ? null
+                        : substate.HandoffReservation,
                     LastRetryDispatchRecheckReceipt = receipt,
                 }),
             FileTransferFallbackTailYieldTransitionStatus.Accepted,
@@ -28163,6 +28222,14 @@ internal static partial class FileTransferCoordinator
         if (!IsRecoveryAuthorityAction(request.Kind))
         {
             return true;
+        }
+
+        if (request.Kind == FileTransferCoordinatorActionKind.RepairReplay &&
+            state.PersistentState.FallbackTailYield.HandoffReservation is { } handoff &&
+            IsFallbackHandoffReservationCurrent(state, handoff))
+        {
+            rejectionReason = "fallback_handoff_repair_deferred";
+            return false;
         }
 
         if (IsControlPlanePressureAuthorityRefresh(request))

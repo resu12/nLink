@@ -192,6 +192,7 @@ public sealed partial class SessionFileTransferV4SenderTests
         }
         else if (scenario == "new_active_repair")
         {
+            ExpireHandoff(service, context, command);
             var owner = GetPrivateProperty<RuntimeOwnerToken>(context, "CurrentRuntimeOwner");
             var publication = GetPrivateProperty<RoutePublicationToken>(context, "CurrentRoutePublicationToken");
             ApplyRequest("after_recheck", chunkCount: 3);
@@ -238,6 +239,180 @@ public sealed partial class SessionFileTransferV4SenderTests
             typeof(SessionFileTransferService)
                 .GetMethod("ApplyOutboundV6RepairRequestCore", BindingFlags.Instance | BindingFlags.NonPublic)!
                 .Invoke(service, [context, request, FileTransferTransportKind.RegularNkn, install, owner, receivedSession ?? dataSession, 1L, 0L]);
+        }
+    }
+
+    [Theory]
+    [InlineData("settled")]
+    [InlineData("intervening_repair")]
+    [InlineData("repeated_repairs")]
+    [InlineData("duplicate")]
+    [InlineData("stale_publication")]
+    [InlineData("terminal")]
+    [Trait("FileTransferRuntimeSuite", "FallbackTailUnblockRecheck")]
+    public void FallbackTailUnblockRecheck_SettlementToAuthorizationOrderingPreservesSafetyAndEventualGrant(string scenario)
+    {
+        var transferId = $"transfer_settled_recheck_ordering_{scenario}";
+        var sessionId = $"session_{transferId}";
+        using var bridge = new MissingDispatchRecheckTransport(sessionId);
+        using var service = new SessionFileTransferService();
+        using var dataSession = new RecordingDataSession(sessionId, transferId);
+        service.AttachTransport(bridge);
+        var context = CreatePostTunaFallbackV6OutboundContext(
+            transferId, remoteNextExpectedChunkIndex: 128,
+            startCoordinatorSnapshotStream: false, dataSession: dataSession);
+        var leg = GetPrivateProperty<FileTransferLeg>(context, "CurrentTransferLeg");
+        leg.State = FileTransferLegState.Active;
+        leg.CanSendData = true;
+        leg.CheckpointRequestId = null;
+        leg.CheckpointPriority = null;
+        leg.CheckpointRequestedUtc = null;
+        var serviceType = typeof(SessionFileTransferService);
+        serviceType.GetField("outboundTransfer", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .SetValue(service, context);
+        var gate = GetServiceGate(service);
+        lock (gate)
+        {
+            StartCoordinatorSnapshotStreamForTest(context);
+            PrepareMissingDispatchPairedTail(service, context, leg);
+        }
+        var request = Assert.IsType<RuntimeUnlockRetryDispatchAuthorityRequest>(
+            GetCoordinatorFallbackTailYieldSubstate(context).PendingRetryRecheckRequest);
+        var owner = GetPrivateProperty<RuntimeOwnerToken>(context, "CurrentRuntimeOwner");
+        var publication = GetPrivateProperty<RoutePublicationToken>(context, "CurrentRoutePublicationToken");
+        ApplyRepair(0);
+        bridge.RaiseAuthorityRequest(request);
+        AssertHeld();
+        var release = Assert.IsType<FileTransferFallbackTailYieldRetryDispatchHold>(
+            GetCoordinatorFallbackTailYieldSubstate(context).CurrentRetryDispatchHold).Release;
+
+        // After the bounded opportunity expires, repair is again eligible. Keep
+        // the original safety/eventual-grant coverage for that ordering.
+        var interveningRepairs = scenario == "repeated_repairs" ? 3 : scenario == "settled" ? 0 : 1;
+        for (var index = 0; index < interveningRepairs; index++)
+        {
+            var command = SettleAndCapture(index);
+            ExpireHandoff(service, context, command);
+            ApplyRepair(index + 1);
+            bridge.RaiseAuthorityRequest(command.Request);
+            AssertHeld();
+            var hold = Assert.IsType<FileTransferFallbackTailYieldRetryDispatchHold>(
+                GetCoordinatorFallbackTailYieldSubstate(context).CurrentRetryDispatchHold);
+            var repair = Assert.IsAssignableFrom<object>(
+                GetPrivatePropertyValue(context, "CurrentFallbackFrontierRepairContract"));
+            Assert.Equal(GetPrivateProperty<FallbackFrontierRepairAuthority>(repair, "Authority"), hold.BlockingRepair);
+            Assert.Equal(request, hold.Request);
+            Assert.Equal(release, hold.Release);
+            Assert.Null(GetCoordinatorFallbackTailYieldSubstate(context).PendingRetryDispatchRecheckCommand);
+            if (scenario == "duplicate")
+            {
+                bridge.RaiseAuthorityRequest(command.Request);
+                AssertHeld();
+                Assert.Equal(hold, GetCoordinatorFallbackTailYieldSubstate(context).CurrentRetryDispatchHold);
+                Assert.Equal(index + 1, bridge.Rechecks.Count);
+            }
+        }
+
+        var finalCommand = SettleAndCapture(interveningRepairs);
+        Assert.Equal(owner, GetPrivateProperty<RuntimeOwnerToken>(context, "CurrentRuntimeOwner"));
+        Assert.Equal(publication, GetPrivateProperty<RoutePublicationToken>(context, "CurrentRoutePublicationToken"));
+        Assert.Equal(0, bridge.StageCount);
+        Assert.Empty(dataSession.SentFrames);
+        var before = GetCoordinatorFallbackTailYieldSubstate(context);
+        Assert.Null(before.CurrentReservation);
+        if (scenario is "stale_publication" or "terminal")
+        {
+            ExpireHandoff(service, context, finalCommand);
+            before = GetCoordinatorFallbackTailYieldSubstate(context);
+            var delivered = finalCommand.Request;
+            if (scenario == "stale_publication")
+            {
+                delivered = delivered with
+                {
+                    SourcePublicationAuthority = delivered.SourcePublicationAuthority with
+                    {
+                        RoutePublicationGeneration = delivered.SourcePublicationAuthority.RoutePublicationGeneration + 1,
+                    },
+                };
+            }
+            else
+            {
+                SetPrivateProperty(context, "State", FileTransferTransferState.Completed);
+            }
+            bridge.RaiseAuthorityRequest(delivered);
+            Assert.Equal(RuntimeUnlockRetryDispatchDecisionStatus.Rejected, bridge.Decisions[^1].Status);
+            Assert.Equal(scenario == "terminal" ? "retry_dispatch_transfer_context_missing" : "retry_dispatch_source_publication_mismatch",
+                bridge.Decisions[^1].Reason);
+            Assert.Equal(before, GetCoordinatorFallbackTailYieldSubstate(context));
+            Assert.Equal(owner, GetPrivateProperty<RuntimeOwnerToken>(context, "CurrentRuntimeOwner"));
+            Assert.Equal(publication, GetPrivateProperty<RoutePublicationToken>(context, "CurrentRoutePublicationToken"));
+            Assert.Equal(0, bridge.StageCount);
+            return;
+        }
+
+        // Stop at authorization: this test does not claim Infra installation,
+        // offer delivery, authenticated Tuna payload, or route publication.
+        var authorize = serviceType.GetMethods(BindingFlags.Static | BindingFlags.NonPublic)
+            .Single(method => method.Name == "AuthorizeRuntimeUnlockRetryDispatchLocked" &&
+                method.GetParameters().Length == 3 && method.GetParameters()[0].ParameterType == context.GetType() &&
+                method.GetParameters()[1].ParameterType == typeof(RuntimeUnlockRetryDispatchAuthorityRequest));
+        RuntimeUnlockRetryDispatchDecision granted;
+        lock (gate)
+        {
+            granted = Assert.IsType<RuntimeUnlockRetryDispatchDecision>(
+                authorize.Invoke(null, [context, finalCommand.Request, finalCommand]));
+        }
+        Assert.Equal(RuntimeUnlockRetryDispatchDecisionStatus.Granted, granted.Status);
+        Assert.Equal(request, granted.Request);
+        Assert.NotNull(granted.Contract);
+        Assert.NotNull(GetCoordinatorFallbackTailYieldSubstate(context).CurrentReservation);
+        Assert.Equal(owner, GetPrivateProperty<RuntimeOwnerToken>(context, "CurrentRuntimeOwner"));
+        Assert.Equal(publication, GetPrivateProperty<RoutePublicationToken>(context, "CurrentRoutePublicationToken"));
+        Assert.Empty(dataSession.SentFrames);
+
+        void ApplyRepair(int index)
+        {
+            var repair = new FileTransferFrontierRequestFrameV6
+            {
+                SessionId = sessionId, TransferId = transferId, TransportEpoch = 3,
+                RepairRequestId = $"v6-frontier:ordering:{index}",
+                RequestCorrelationId = $"frq-ordering-{index}",
+                MissingRanges = [new FileTransferRangeV4 { StartChunkIndex = 128 + index, ChunkCount = 1 }],
+                Priority = "frontier", RecoveryMode = "regular_nkn_frontier_stall_control_bulk",
+            };
+            lock (gate)
+            {
+                serviceType.GetMethod("ApplyOutboundV6FrontierRequest", BindingFlags.Instance | BindingFlags.NonPublic)!
+                    .Invoke(service, [context, repair, FileTransferTransportKind.RegularNkn]);
+            }
+            var contract = Assert.IsAssignableFrom<object>(GetPrivatePropertyValue(context, "CurrentFallbackFrontierRepairContract"));
+            Assert.False(GetPrivateProperty<bool>(GetPrivatePropertyValue(contract, "Lifecycle")!, "IsSettled"));
+        }
+
+        FileTransferFallbackTailYieldRetryDispatchRecheckCommand SettleAndCapture(int index)
+        {
+            var settle = serviceType.GetMethod("TrySettleOutboundFallbackFrontierProgressLocked", BindingFlags.Instance | BindingFlags.NonPublic)!;
+            lock (gate)
+            {
+                settle.Invoke(service, [context, 128 + index, 129 + index, "ordering_regression_progress"]);
+                settle.Invoke(service, [context, 128 + index, 129 + index, "ordering_regression_duplicate_progress"]);
+            }
+            Assert.Equal(index + 1, bridge.Rechecks.Count);
+            var command = bridge.Rechecks[^1];
+            Assert.Equal(request, command.Request);
+            Assert.Equal(index + 1, command.RecheckGeneration);
+            Assert.Equal("ProgressObserved", command.Observation.SettlementOutcome);
+            Assert.Equal(command, GetCoordinatorFallbackTailYieldSubstate(context).PendingRetryDispatchRecheckCommand);
+            Assert.Null(GetCoordinatorFallbackTailYieldSubstate(context).CurrentReservation);
+            return command;
+        }
+
+        void AssertHeld()
+        {
+            Assert.Equal(RuntimeUnlockRetryDispatchDecisionStatus.Held, bridge.Decisions[^1].Status);
+            Assert.Equal("fallback_paired_tail_yield_pending", bridge.Decisions[^1].Reason);
+            Assert.Null(GetCoordinatorFallbackTailYieldSubstate(context).CurrentReservation);
+            Assert.Equal(0, bridge.StageCount);
         }
     }
 
@@ -292,6 +467,8 @@ public sealed partial class SessionFileTransferV4SenderTests
     {
         private RuntimeUnlockRetryDispatchAuthorityRequest? pendingRequest;
         public bool RejectRechecks { get; init; }
+        public bool RejectGrantedStage { get; init; }
+        public bool InstallGrantedStage { get; init; }
         public int StageCount { get; private set; }
         public List<RuntimeUnlockRetryDispatchDecision> Decisions { get; } = [];
         public List<FileTransferFallbackTailYieldRetryDispatchRecheckCommand> Rechecks { get; } = [];
@@ -302,10 +479,11 @@ public sealed partial class SessionFileTransferV4SenderTests
         public event EventHandler<RuntimeUnlockRetryDispatchExecutionObservedEventArgs>? RuntimeUnlockRetryDispatchExecutionObserved { add { } remove { } }
         public event EventHandler<RuntimeUnlockRetryDispatchSuccessorEvaluationEventArgs>? RuntimeUnlockRetryDispatchSuccessorEvaluationRequested { add { } remove { } }
 
-        public void RaiseAuthorityRequest(RuntimeUnlockRetryDispatchAuthorityRequest request)
+        public void RaiseAuthorityRequest(RuntimeUnlockRetryDispatchAuthorityRequest request,
+            FileTransferFallbackTailYieldRetryDispatchRecheckCommand? command = null)
         {
             pendingRequest = request;
-            RuntimeUnlockRetryDispatchAuthorityRequested?.Invoke(this, new(request));
+            RuntimeUnlockRetryDispatchAuthorityRequested?.Invoke(this, new(request, command));
         }
 
         public bool ObserveRuntimeUnlockRetryDispatchNonGrantDecision(RuntimeUnlockRetryDispatchDecision decision)
@@ -328,12 +506,30 @@ public sealed partial class SessionFileTransferV4SenderTests
         public RuntimeUnlockRetryDispatchDecisionStageResult StageRuntimeUnlockRetryDispatchDecision(RuntimeUnlockRetryDispatchDecision decision)
         {
             StageCount++;
+            if (RejectGrantedStage)
+            {
+                Decisions.Add(decision);
+                return new(RuntimeUnlockRetryDispatchDecisionStageStatus.Rejected, "test_stage_rejected", decision);
+            }
+            if (InstallGrantedStage)
+            {
+                Decisions.Add(decision);
+                var now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+                return new(RuntimeUnlockRetryDispatchDecisionStageStatus.Staged, "test_staged", decision)
+                {
+                    StageDisposition = RuntimeUnlockRetryDispatchStageDisposition.Retained,
+                    StagedUtcMs = now,
+                    StageExpiresUtcMs = decision.Contract!.Authority.FallbackHandoffDeadlineUtcMs,
+                };
+            }
             throw new NotSupportedException("The held-recheck fixture must not grant a retry while a repair is active.");
         }
-        public RuntimeUnlockRetryDispatchInstallResult CommitRuntimeUnlockRetryDispatchInstall(RuntimeUnlockRetryDispatchInstallReceipt receipt) => throw new NotSupportedException();
+        public RuntimeUnlockRetryDispatchInstallResult CommitRuntimeUnlockRetryDispatchInstall(RuntimeUnlockRetryDispatchInstallReceipt receipt)
+            => InstallGrantedStage ? new(RuntimeUnlockRetryDispatchInstallStatus.Installed, "test_installed", receipt)
+                : throw new NotSupportedException();
         public RuntimeUnlockRetryDispatchScopeInvalidationReceipt ApplyRuntimeUnlockRetryDispatchScopeInvalidation(RuntimeUnlockRetryDispatchScopeInvalidationCommand command) => throw new NotSupportedException();
         public RuntimeUnlockRetryDispatchScopeInvalidationStageResult StageRuntimeUnlockRetryDispatchScopeInvalidation(RuntimeUnlockRetryDispatchScopeInvalidationCommand command) => throw new NotSupportedException();
-        public bool ConfirmRuntimeUnlockRetryDispatchInstall(RuntimeUnlockRetryDispatchInstallReceipt receipt) => false;
+        public bool ConfirmRuntimeUnlockRetryDispatchInstall(RuntimeUnlockRetryDispatchInstallReceipt receipt) => InstallGrantedStage;
         public bool ObserveRuntimeUnlockRetryDispatchSettlementDecision(RuntimeUnlockRetryDispatchSettlementDecision decision) => false;
     }
 }

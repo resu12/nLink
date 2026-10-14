@@ -1354,10 +1354,10 @@ internal static partial class FileTransferCoordinator
     internal static FileTransferReceiveRecoveryDecision
         FinalizeReceiveRecoverySnapshot(
             FileTransferCoordinatorState before,
-            FileTransferReceiveRecoveryDecision decision,
+            in FileTransferReceiveRecoveryDecision decision,
             string decisionKind,
             object? command = null,
-            FileTransferReceiveRecoveryOperationAuthority? authority = null)
+            in FileTransferReceiveRecoveryOperationAuthority? authority = null)
     {
         var snapshot = CreateReceiveRecoveryTransitionSnapshot(
             before,
@@ -1557,6 +1557,12 @@ internal static partial class FileTransferCoordinator
         };
     }
 
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static (string? CoordinatorInstanceId, long Generation)
+        GetReceiveRecoverySnapshotOrigin(FileTransferCoordinatorState state)
+        => (state.PersistentState.CoordinatorInstanceId,
+            state.PersistentState.SnapshotStateGeneration);
+
     private static FileTransferCoordinatorSnapshotResult
         CreateReceiveRecoveryTransitionSnapshot(
             FileTransferCoordinatorState before,
@@ -1565,10 +1571,9 @@ internal static partial class FileTransferCoordinator
             string decisionStatus,
             string decisionReason,
             object? command,
-            FileTransferReceiveRecoveryOperationAuthority? authority)
+            in FileTransferReceiveRecoveryOperationAuthority? authority)
     {
-        var coordinatorInstanceId =
-            before.PersistentState.CoordinatorInstanceId;
+        var (coordinatorInstanceId, generation) = GetReceiveRecoverySnapshotOrigin(before);
         if (string.IsNullOrWhiteSpace(coordinatorInstanceId))
         {
             return new FileTransferCoordinatorSnapshotResult(after, null!);
@@ -1578,7 +1583,7 @@ internal static partial class FileTransferCoordinator
             before,
             after,
             coordinatorInstanceId,
-            before.PersistentState.SnapshotStateGeneration,
+            generation,
             decisionKind,
             decisionStatus,
             decisionReason,
@@ -1608,6 +1613,51 @@ internal static partial class FileTransferCoordinator
             command,
             authority);
 
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static IEnumerable<CoordinatorOperationDescriptor> FilterReceiveRecoveryProofDescriptors(
+        FileTransferCoordinatorState state,
+        FileTransferReceiveRecoverySubstate recovery,
+        IEnumerable<CoordinatorOperationDescriptor> descriptors,
+        FileTransferReceiveRecoveryProof proof,
+        string decisionStatus)
+    {
+        FileTransferReceiveRecoveryOperation? subject = null;
+        var subjectRole = "(none)";
+        if (recovery.LastTerminalOperation is { } terminal &&
+            terminal.Authority == proof.Authority)
+        {
+            subject = terminal;
+            subjectRole = "operation_terminal";
+        }
+        else if (recovery.CurrentOperation is { } current &&
+                 current.Authority == proof.Authority)
+        {
+            subject = current;
+            subjectRole = "operation_current";
+        }
+
+        var sourceBoundary = CreateReceiveRecoverySourceBoundary(
+            state,
+            proof.Authority.Observation);
+        return subject is null ||
+               (decisionStatus == "Idempotent" && subject.Value.ReceiveProof != proof)
+            ? []
+            : descriptors.Where(descriptor =>
+                descriptor.OperationRole == subjectRole &&
+                descriptor.OperationKind ==
+                    proof.Authority.BridgeRecoveryDecision.RecoveryKind.ToString() &&
+                descriptor.AuthorityId == proof.Authority.AuthorityId.ToString() &&
+                descriptor.OperationGeneration == proof.Authority.OperationGeneration &&
+                descriptor.ReceiveRecovery is
+                {
+                    SourceBoundary: var descriptorSourceBoundary,
+                    EffectiveBoundary: var descriptorEffectiveBoundary,
+                } &&
+                descriptorSourceBoundary == sourceBoundary &&
+                descriptorEffectiveBoundary == sourceBoundary);
+    }
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
     private static ImmutableArray<
         FileTransferCoordinatorOperationTransitionSnapshot>
         CreateReceiveRecoveryAttemptedDecisionSnapshots(
@@ -1616,8 +1666,9 @@ internal static partial class FileTransferCoordinator
             string decisionStatus,
             string decisionReason,
             object? command,
-            FileTransferReceiveRecoveryOperationAuthority? authority)
+            in FileTransferReceiveRecoveryOperationAuthority? authority)
     {
+        var recovery = GetReceiveRecoverySubstate(state);
         var descriptorBuilder =
             ImmutableArray.CreateBuilder<CoordinatorOperationDescriptor>();
         AddReceiveRecoveryOperationDescriptors(state, descriptorBuilder);
@@ -1656,46 +1707,8 @@ internal static partial class FileTransferCoordinator
                  command is FileTransferReceiveRecoveryProof proof)
         {
             requiresUniqueDescriptor = true;
-            var recovery =
-                state.PersistentState.FileTransferReceiveRecovery;
-            FileTransferReceiveRecoveryOperation? subject = null;
-            var subjectRole = "(none)";
-            if (recovery.LastTerminalOperation is { } terminal &&
-                terminal.Authority == proof.Authority)
-            {
-                subject = terminal;
-                subjectRole = "operation_terminal";
-            }
-            else if (recovery.CurrentOperation is { } current &&
-                     current.Authority == proof.Authority)
-            {
-                subject = current;
-                subjectRole = "operation_current";
-            }
-
-            var sourceBoundary = CreateReceiveRecoverySourceBoundary(
-                state,
-                proof.Authority.Observation);
-            descriptors = subject is null ||
-                          (decisionStatus == "Idempotent" &&
-                           subject.Value.ReceiveProof != proof)
-                ? []
-                : descriptors.Where(descriptor =>
-                    descriptor.OperationRole == subjectRole &&
-                    descriptor.OperationKind ==
-                        proof.Authority.BridgeRecoveryDecision.RecoveryKind
-                            .ToString() &&
-                    descriptor.AuthorityId ==
-                        proof.Authority.AuthorityId.ToString() &&
-                    descriptor.OperationGeneration ==
-                        proof.Authority.OperationGeneration &&
-                    descriptor.ReceiveRecovery is
-                    {
-                        SourceBoundary: var descriptorSourceBoundary,
-                        EffectiveBoundary: var descriptorEffectiveBoundary,
-                    } &&
-                    descriptorSourceBoundary == sourceBoundary &&
-                    descriptorEffectiveBoundary == sourceBoundary);
+            descriptors = FilterReceiveRecoveryProofDescriptors(
+                state, recovery, descriptors, proof, decisionStatus);
         }
         if (authority is { IsDefault: false } exactAuthority)
         {
@@ -1762,8 +1775,7 @@ internal static partial class FileTransferCoordinator
         var generation = Math.Max(
             1,
             authority?.OperationGeneration ??
-            state.PersistentState.FileTransferReceiveRecovery
-                .LastOperationGeneration + 1);
+            recovery.LastOperationGeneration + 1);
         var syntheticAuthority = authority is { IsDefault: false } exact
             ? exact.AuthorityId.ToString()
             : $"attempt:{commandFingerprint}";
@@ -5396,27 +5408,13 @@ internal static partial class FileTransferCoordinator
             attempt.SuccessorAuthorityId,
         });
 
+    [MethodImpl(MethodImplOptions.NoInlining)]
     private static void AddReceiveRecoveryOperationDescriptors(
         FileTransferCoordinatorState state,
         ImmutableArray<CoordinatorOperationDescriptor>.Builder builder)
     {
-        var recovery = state.PersistentState.FileTransferReceiveRecovery;
-        if (recovery.CurrentOperation is { } current)
-        {
-            builder.Add(CreateReceiveRecoveryOperationDescriptor(
-                state,
-                current,
-                "operation_current"));
-        }
-        if (recovery.LastTerminalOperation is { } terminal &&
-            (recovery.CurrentOperation is null ||
-             terminal.Authority != recovery.CurrentOperation.Value.Authority))
-        {
-            builder.Add(CreateReceiveRecoveryOperationDescriptor(
-                state,
-                terminal,
-                "operation_terminal"));
-        }
+        var recovery = GetReceiveRecoverySubstate(state);
+        AddReceiveRecoveryRootOperationDescriptors(state, recovery, builder);
 
         var proof = recovery.ProofStatePublication;
         if (proof?.PendingCommand is { } pendingProof)
@@ -5472,6 +5470,30 @@ internal static partial class FileTransferCoordinator
 
         AddReceiveRecoveryInitialActivationDescriptors(state, recovery, builder);
         AddReceiveRecoveryCheckpointDescriptors(state, recovery, builder);
+    }
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static void AddReceiveRecoveryRootOperationDescriptors(
+        FileTransferCoordinatorState state,
+        FileTransferReceiveRecoverySubstate recovery,
+        ImmutableArray<CoordinatorOperationDescriptor>.Builder builder)
+    {
+        if (recovery.CurrentOperation is { } current)
+        {
+            builder.Add(CreateReceiveRecoveryOperationDescriptor(
+                state,
+                current,
+                "operation_current"));
+        }
+        if (recovery.LastTerminalOperation is { } terminal &&
+            (recovery.CurrentOperation is null ||
+             terminal.Authority != recovery.CurrentOperation.Value.Authority))
+        {
+            builder.Add(CreateReceiveRecoveryOperationDescriptor(
+                state,
+                terminal,
+                "operation_terminal"));
+        }
     }
 
     private static void AddReceiveRecoveryInitialActivationDescriptors(
@@ -5725,7 +5747,7 @@ internal static partial class FileTransferCoordinator
     private static CoordinatorOperationDescriptor
         CreateReceiveRecoveryOperationDescriptor(
             FileTransferCoordinatorState state,
-            FileTransferReceiveRecoveryOperation operation,
+            in FileTransferReceiveRecoveryOperation operation,
             string role)
     {
         var authority = operation.Authority;
@@ -5743,8 +5765,8 @@ internal static partial class FileTransferCoordinator
 
     private static CoordinatorOperationDescriptor CreateReceiveRecoveryDescriptor(
         FileTransferCoordinatorState state,
-        FileTransferReceiveRecoveryOperationAuthority authority,
-        FileTransferReceiveRecoveryOperation? operation,
+        in FileTransferReceiveRecoveryOperationAuthority authority,
+        in FileTransferReceiveRecoveryOperation? operation,
         string role,
         string kind,
         long generation,
@@ -5752,7 +5774,7 @@ internal static partial class FileTransferCoordinator
         FileTransferCoordinatorReceiptTransitionSnapshot receipt,
         FileTransferCoordinatorStateBoundarySnapshot? effectiveBoundary)
     {
-        var recovery = state.PersistentState.FileTransferReceiveRecovery;
+        var recovery = GetReceiveRecoverySubstate(state);
         var checkpoint = recovery.ProofStatePublication?.FallbackCheckpoint;
         var heldRetryAuthority = operation?.HeldRetryRequest?.PredecessorAuthorityId;
         var reservedRetryAuthority = operation?.ReservedRetryAuthority?.AuthorityId;
@@ -5814,7 +5836,7 @@ internal static partial class FileTransferCoordinator
 
     private static FileTransferCoordinatorReceiptTransitionSnapshot
         CreateReceiveRecoveryOperationReceipt(
-            FileTransferReceiveRecoveryOperation operation)
+            in FileTransferReceiveRecoveryOperation operation)
     {
         var authority = operation.Authority;
         object? receipt = operation.ConsumingInstallReceipt ??
@@ -5856,7 +5878,7 @@ internal static partial class FileTransferCoordinator
             FileTransferCoordinatorState state,
             FileTransferReceiveRecoveryOperationAuthority authority)
     {
-        var recovery = state.PersistentState.FileTransferReceiveRecovery;
+        var recovery = GetReceiveRecoverySubstate(state);
         if (recovery.CurrentOperation is { } current &&
             current.Authority == authority)
         {
@@ -5873,7 +5895,7 @@ internal static partial class FileTransferCoordinator
     private static FileTransferCoordinatorStateBoundarySnapshot
         CreateReceiveRecoverySourceBoundary(
             FileTransferCoordinatorState state,
-            FileTransferReceiveRecoveryObservation observation)
+            in FileTransferReceiveRecoveryObservation observation)
     {
         var checkpointGeneration =
             string.Equals(

@@ -1418,6 +1418,8 @@ internal readonly record struct RuntimeUnlockRetryDispatchAuthority(
     FileTransferAuthorityId AuthorityId,
     FileTransferAuthorityId? PredecessorAuthorityId)
 {
+    public long FallbackHandoffDeadlineUtcMs { get; init; }
+
     public RuntimeUnlockRetryDispatchListenerRearmRequirement
         ListenerRearmRequirement { get; init; }
 
@@ -2121,9 +2123,11 @@ internal readonly record struct RuntimeUnlockRetryDispatchSettlementDecision(
 }
 
 internal sealed class RuntimeUnlockRetryDispatchAuthorityRequestedEventArgs(
-    RuntimeUnlockRetryDispatchAuthorityRequest request) : EventArgs
+    RuntimeUnlockRetryDispatchAuthorityRequest request,
+    FileTransferFallbackTailYieldRetryDispatchRecheckCommand? recheckCommand = null) : EventArgs
 {
     public RuntimeUnlockRetryDispatchAuthorityRequest Request { get; } = request;
+    public FileTransferFallbackTailYieldRetryDispatchRecheckCommand? RecheckCommand { get; } = recheckCommand;
 }
 
 internal sealed class RuntimeUnlockRetryDispatchInitialEvaluationRequestedEventArgs(

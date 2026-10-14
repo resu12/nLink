@@ -14999,7 +14999,7 @@ public sealed partial class SessionFileTransferService
                         out var authorityRejectionReason) ||
                     fallbackFrontierContract is null)
                 {
-                    if (string.Equals(
+                    if (authorityRejectionReason == "fallback_handoff_repair_deferred" || string.Equals(
                             authorityRejectionReason,
                             "checkpoint_pending_frontier_request_retained",
                             StringComparison.Ordinal) ||

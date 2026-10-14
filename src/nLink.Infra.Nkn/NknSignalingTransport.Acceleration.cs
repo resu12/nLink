@@ -20426,7 +20426,7 @@ public sealed partial class NknSignalingTransport
                 subscriber.Invoke(
                     this,
                     new RuntimeUnlockRetryDispatchAuthorityRequestedEventArgs(
-                        queued.Request));
+                        queued.Request, queued.RecheckCommand));
             }
             else if (testDecision is not null)
             {
@@ -21350,6 +21350,10 @@ public sealed partial class NknSignalingTransport
         string? tupleMismatchField = null;
         var contract = decision.Contract;
         RuntimeUnlockRetryDispatchInstallTelemetryContext telemetryContext = default;
+        if (contract is not null)
+        {
+            expiresUtcMs = FileTransferCoordinator.CapFallbackHandoffDeadline(contract.Authority, expiresUtcMs);
+        }
         lock (accelerationGate)
         {
             var state = runtimeUnlockRecoveryRetryState;
@@ -21384,6 +21388,10 @@ public sealed partial class NknSignalingTransport
                 contract is null)
             {
                 reason = "retry_dispatch_decision_stage_requires_granted_decision";
+            }
+            else if (nowMs >= expiresUtcMs)
+            {
+                reason = "retry_dispatch_handoff_deadline_expired";
             }
             else if (state is null || pending is null)
             {

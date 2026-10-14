@@ -760,6 +760,10 @@ public sealed partial class SessionFileTransferService
                 CreateCoordinatorStateLocked(context),
                 receipt);
         _ = AdoptCoordinatorStateLocked(context, application);
+        if (queued && issuance.Status == FileTransferFallbackTailYieldTransitionStatus.Accepted)
+        {
+            ScheduleFallbackHandoffExpiry(context, currentCommand);
+        }
         LogFallbackTailYieldRetryDispatchUnblockRecheck(
             context,
             hold,
@@ -1798,6 +1802,12 @@ public sealed partial class SessionFileTransferService
                     holdDecision.Reason);
             }
 
+            if (TryDeferFallbackHandoffRepairLocked(context, request, receivedTransportKind, retainedSparse: false))
+            {
+                return new RetainedPeerProofApplicationResult(
+                    RetainedPeerProofApplicationStatus.Held, "fallback_handoff_repair_deferred");
+            }
+
             var currentContract = context.CurrentFallbackFrontierRepairContract;
             var issuedNewContract = false;
             var activeAliasCoalesced = false;
@@ -2298,6 +2308,12 @@ public sealed partial class SessionFileTransferService
                     ? "hold_idempotent"
                     : "checkpoint_pending_frontier_request_retained"
                 : "checkpoint_pending_frontier_request";
+            return false;
+        }
+
+        if (TryDeferFallbackHandoffRepairLocked(context, request, receivedTransportKind, retainedSparse: true))
+        {
+            rejectionReason = "fallback_handoff_repair_deferred";
             return false;
         }
 
