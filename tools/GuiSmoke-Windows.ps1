@@ -38949,10 +38949,30 @@ function Assert-DefaultScreenShareTelemetryQuiet {
 
     $logPath = Join-Path $env:LOCALAPPDATA 'nLink\logs\nlink.log'
     if (Test-Path $logPath) {
-        foreach ($line in [System.IO.File]::ReadLines($logPath)) {
-            if ($line -match 'event=helper_chat_panel_state;') {
-                throw "Default runtime log emitted helper_chat_panel_state even though deep diagnostics are disabled."
+        $stream = $null
+        $reader = $null
+        $hasUnexpectedTelemetry = $false
+        try {
+            $stream = [System.IO.FileStream]::new(
+                $logPath, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read,
+                ([System.IO.FileShare]::ReadWrite -bor [System.IO.FileShare]::Delete))
+            $reader = [System.IO.StreamReader]::new($stream)
+            while ($null -ne ($line = $reader.ReadLine())) {
+                if ($line -match 'event=helper_chat_panel_state;') {
+                    $hasUnexpectedTelemetry = $true
+                    break
+                }
             }
+        }
+        catch {
+            throw "failure_reason=default_screenshare_telemetry_log_read_failed; detail=$($_.Exception.Message)"
+        }
+        finally {
+            if ($null -ne $reader) { $reader.Dispose() }
+            elseif ($null -ne $stream) { $stream.Dispose() }
+        }
+        if ($hasUnexpectedTelemetry) {
+            throw "Default runtime log emitted helper_chat_panel_state even though deep diagnostics are disabled."
         }
     }
 

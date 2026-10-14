@@ -14,6 +14,78 @@ namespace NLink.SmokeTests;
 [Collection(FakeNknNetworkCollection.Name)]
 public sealed class FileTransferPhase5PreflightTests : FileTransferAcceptancePhase5TestBase
 {
+    [Theory]
+    [InlineData("powershell")]
+    [InlineData("pwsh")]
+    public async Task PreflightClassification_SuccessfulChatCannotMaskLogReadFailure(string host)
+    {
+        if (!OperatingSystem.IsWindows()) { return; }
+        var script = """
+            param([string]$RepoRoot)
+            Set-StrictMode -Version Latest
+            $ErrorActionPreference = 'Stop'
+            $tokens = $null; $errors = $null
+            $ast = [Management.Automation.Language.Parser]::ParseFile(
+                (Join-Path $RepoRoot 'tools/Run-FileTransferRouteAcceptance.ps1'), [ref]$tokens, [ref]$errors)
+            if ($errors.Count) { throw 'acceptance script did not parse' }
+            foreach ($name in @(
+                'Get-Phase5BridgeReadinessPreflightFailureClass', 'Get-Phase5BridgeReadinessPreflightFailureSubreason',
+                'Test-Phase5BridgeReadinessPreflightRetryableFailure', 'Test-Phase5BridgeReadinessPreflightQuarantinableFailure')) {
+                $definition = @($ast.FindAll({ param($n)
+                    $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq $name
+                }, $true))
+                if ($definition.Count -ne 1) { throw "missing function $name" }
+                . ([scriptblock]::Create($definition[0].Extent.Text))
+            }
+            $preflight = @($ast.FindAll({ param($n)
+                $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Invoke-Phase5BridgeReadinessPreflight'
+            }, $true))
+            $classification = @($preflight[0].Body.FindAll({ param($n)
+                $n -is [Management.Automation.Language.IfStatementAst] -and $n.Clauses[0].Item1.Extent.Text -eq '$exitCode -ne 0'
+            }, $true))
+            if ($classification.Count -ne 1) { throw 'classification branch not unique' }
+            # Execute only the output-classification branch, never a GUI or live preflight.
+            $sent = '[GUI Smoke] event=gui_smoke_chat_submission_decided; method=enter; outcome=sent; reason=exact_chat_input_focus_acquired; authority_effect=none'
+            $passed = '[GUI Smoke][nkn_direct_connect] PASS (15.8s)'
+            # Sanitized copy of the preserved 171a49da preflight failure.
+            $locked = '[GUI Smoke] FAIL: Exception calling "ReadLines" with "1" argument(s): "The process cannot access the file ''C:\isolated\nLink\logs\nlink.log'' because it is being used by another process."'
+            $cases = @(
+                @{ Name='historical-lock'; Lines=@($sent,$passed,$locked); Code=1; Reason='default_screenshare_telemetry_log_read_failed'; Class='preflight_telemetry_log_read' }
+                @{ Name='explicit-read-failure'; Lines=@($sent,$passed,'[GUI Smoke] FAIL: failure_reason=default_screenshare_telemetry_log_read_failed; detail=access denied'); Code=1; Reason='default_screenshare_telemetry_log_read_failed'; Class='preflight_telemetry_log_read' }
+                @{ Name='unrelated-failure'; Lines=@($sent,$passed,'[GUI Smoke] FAIL: unrelated failure'); Code=1; Reason='nkn_direct_connect_preflight_failed'; Class='preflight_bridge_bootstrap' }
+                @{ Name='real-chat-failure'; Lines=@($sent,'[GUI Smoke] FAIL: failure_class=filetransfer_gui_nkn_direct_connect_chat_submission_missing; failure_reason=nkn_direct_connect_chat_submit_not_ready; failure_subreason=chat_submit_paths_unavailable'); Code=1; Reason='nkn_direct_connect_chat_submit_not_ready'; Class='preflight_gui_interaction' }
+                @{ Name='legacy-focus-failure'; Lines=@('[GUI Smoke] FAIL: Window did not become ready for Enter send within 1000 ms.'); Code=1; Reason='nkn_direct_connect_chat_submit_not_ready'; Class='preflight_gui_interaction' }
+                @{ Name='bridge-failure'; Lines=@($sent,'[GUI Smoke] FAIL: RPC call failed'); Code=1; Reason='nkn_bridge_bootstrap_network_unready'; Class='preflight_bridge_bootstrap' }
+                @{ Name='success'; Lines=@($sent,$passed); Code=0; Reason=''; Class='none' }
+            )
+            foreach ($case in $cases) {
+                $outputLines = $case.Lines
+                $exitCode = $case.Code
+                $failureReason = ''; $failureSubreason = ''
+                . ([scriptblock]::Create($classification[0].Extent.Text))
+                $class = if ($exitCode -eq 0) { 'none' } else {
+                    Get-Phase5BridgeReadinessPreflightFailureClass -FailureReason $failureReason -OutputText ($outputLines -join "`n")
+                }
+                if ($failureReason -ne $case.Reason -or $class -ne $case.Class -or $exitCode -ne $case.Code) {
+                    throw "$($case.Name): reason=$failureReason class=$class exit=$exitCode"
+                }
+                if ($class -eq 'preflight_telemetry_log_read') {
+                    $failure = [pscustomobject]@{ Passed=$false; FailureReason=$failureReason; FailureClass=$class }
+                    foreach ($StrictCampaignPreflight in @($false, $true)) {
+                        if ((Test-Phase5BridgeReadinessPreflightRetryableFailure -PreflightResult $failure) -or
+                            (Test-Phase5BridgeReadinessPreflightQuarantinableFailure -PreflightResult $failure)) {
+                            throw 'log-read failure must not be retried or quarantined'
+                        }
+                    }
+                }
+                Write-Output "preflight-classification-$($case.Name)-ok"
+            }
+            """;
+        var result = await RunPowerShellScriptTextAsync(script, [FindRepoRoot()], host);
+        Assert.True(result.ExitCode == 0, result.Stdout + Environment.NewLine + result.Stderr);
+        Assert.Contains("preflight-classification-success-ok", result.Stdout, StringComparison.Ordinal);
+    }
+
     [Fact]
     [Trait("Category", "Smoke")]
     public async Task RunFileTransferRouteAcceptance_Phase5HelpeeInviteReadinessTimeoutRerunsCleanAttempt()

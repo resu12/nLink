@@ -14,6 +14,79 @@ namespace NLink.SmokeTests;
 [Collection(FakeNknNetworkCollection.Name)]
 public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTestBase
 {
+    [Theory]
+    [InlineData("powershell", "quiet")]
+    [InlineData("pwsh", "quiet")]
+    [InlineData("powershell", "telemetry")]
+    [InlineData("pwsh", "telemetry")]
+    [InlineData("powershell", "exclusive")]
+    [InlineData("pwsh", "exclusive")]
+    [InlineData("powershell", "decoder")]
+    [InlineData("pwsh", "decoder")]
+    public async Task GuiSmoke_TelemetryQuietReadSupportsWriterAndFailsClosed(string host, string mode)
+    {
+        if (!OperatingSystem.IsWindows()) { return; }
+        var guiText = File.ReadAllText(Path.Combine(FindRepoRoot(), "tools", "GuiSmoke-Windows.ps1"));
+        var body = ExtractPowerShellFunctionBody(guiText, "Assert-DefaultScreenShareTelemetryQuiet", "Cleanup-Processes");
+        var script = $$"""
+            param([string]$Mode)
+            Set-StrictMode -Version Latest
+            $ErrorActionPreference = 'Stop'
+            function Assert-DefaultScreenShareTelemetryQuiet { {{body}} }
+            function Get-IsDeepDiagnosticsEnabled { return $false }
+            function Get-DecoderDebugSnapshot {
+                'existing-debug-entry'
+                if ($Mode -eq 'decoder') { 'new-debug-entry' }
+            }
+            # The existing test runner owns and deletes this isolated directory.
+            $oldLocalAppData = $env:LOCALAPPDATA
+            $env:LOCALAPPDATA = $PSScriptRoot
+            $writer = $null
+            try {
+                $dir = Join-Path $PSScriptRoot 'nLink/logs'
+                New-Item -ItemType Directory -Path $dir -Force | Out-Null
+                $path = Join-Path $dir 'nlink.log'
+                $line = if ($Mode -eq 'telemetry') { 'event=helper_chat_panel_state; visible=1' } else { 'event=ordinary_log;' }
+                [IO.File]::WriteAllText($path, $line + [Environment]::NewLine)
+                $share = if ($Mode -eq 'exclusive') { [IO.FileShare]::None } else { [IO.FileShare]::Read }
+                $writer = [IO.FileStream]::new($path, [IO.FileMode]::Append, [IO.FileAccess]::Write, $share)
+                $failure = ''
+                try { Assert-DefaultScreenShareTelemetryQuiet -DecoderDebugSnapshotBefore @('existing-debug-entry') }
+                catch { $failure = $_.Exception.Message }
+                switch ($Mode) {
+                    'quiet' { if ($failure) { throw "shared writer blocked telemetry read: $failure" } }
+                    'telemetry' {
+                        if ($failure -notlike 'Default runtime log emitted helper_chat_panel_state*') {
+                            throw "forbidden telemetry was not detected: $failure"
+                        }
+                    }
+                    'exclusive' {
+                        if ($failure -notlike '*failure_reason=default_screenshare_telemetry_log_read_failed;*') {
+                            throw "unreadable log did not fail explicitly: $failure"
+                        }
+                    }
+                    'decoder' {
+                        if ($failure -notlike 'Default runtime created decoder-debug artifacts*new-debug-entry*') {
+                            throw "decoder guard was bypassed: $failure"
+                        }
+                    }
+                }
+                $writer.Dispose()
+                $writer = $null
+                $exclusive = [IO.FileStream]::new($path, [IO.FileMode]::Open, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None)
+                $exclusive.Dispose()
+                Write-Output "telemetry-quiet-read-$Mode-ok"
+            }
+            finally {
+                if ($null -ne $writer) { $writer.Dispose() }
+                $env:LOCALAPPDATA = $oldLocalAppData
+            }
+            """;
+        var result = await RunPowerShellScriptTextAsync(script, [mode], host);
+        Assert.True(result.ExitCode == 0, result.Stdout + Environment.NewLine + result.Stderr);
+        Assert.Contains($"telemetry-quiet-read-{mode}-ok", result.Stdout, StringComparison.Ordinal);
+    }
+
     [Fact]
     public async Task GuiSmokeWindows_ReactivationPayloadWaitUsesFastLedgerWithoutRecountingFrames()
     {

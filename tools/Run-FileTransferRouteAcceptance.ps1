@@ -8125,9 +8125,14 @@ function Get-Phase5BridgeReadinessPreflightFailureClass {
         [string]$OutputText = ''
     )
 
+    if ([string]::Equals($FailureReason, 'default_screenshare_telemetry_log_read_failed', [System.StringComparison]::OrdinalIgnoreCase) -or
+        $OutputText.IndexOf('failure_reason=default_screenshare_telemetry_log_read_failed;', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+        $OutputText -match '(?im)^\[GUI Smoke\] FAIL: Exception calling "ReadLines" [^\r\n]*nlink\.log[^\r\n]*being used by another process\.') {
+        return 'preflight_telemetry_log_read'
+    }
+
     if ([string]::Equals($FailureReason, 'nkn_direct_connect_chat_submit_not_ready', [System.StringComparison]::OrdinalIgnoreCase) -or
         $OutputText.IndexOf('filetransfer_gui_nkn_direct_connect_chat_submission_missing', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
-        $OutputText.IndexOf('gui_smoke_chat_submission_decided', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
         $OutputText.IndexOf('Window did not become ready for Enter send', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
         return 'preflight_gui_interaction'
     }
@@ -8414,9 +8419,12 @@ function Invoke-Phase5BridgeReadinessPreflight {
     if ($exitCode -ne 0) {
         $joined = $outputLines -join "`n"
         $failureSubreason = Get-Phase5BridgeReadinessPreflightFailureSubreason -OutputText $joined
-        if ($joined.IndexOf('failure_reason=nkn_direct_connect_chat_submit_not_ready', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+        if ($joined.IndexOf('failure_reason=default_screenshare_telemetry_log_read_failed;', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+            $joined -match '(?im)^\[GUI Smoke\] FAIL: Exception calling "ReadLines" [^\r\n]*nlink\.log[^\r\n]*being used by another process\.') {
+            $failureReason = 'default_screenshare_telemetry_log_read_failed'
+        }
+        elseif ($joined.IndexOf('failure_reason=nkn_direct_connect_chat_submit_not_ready', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
             $joined.IndexOf('filetransfer_gui_nkn_direct_connect_chat_submission_missing', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
-            $joined.IndexOf('gui_smoke_chat_submission_decided', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
             $joined.IndexOf('Window did not become ready for Enter send', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
             $failureReason = 'nkn_direct_connect_chat_submit_not_ready'
         }
