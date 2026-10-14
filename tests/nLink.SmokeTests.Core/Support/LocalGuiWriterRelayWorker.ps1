@@ -41,6 +41,10 @@ try {
     if($RequireHashCmdlet) {
         $hashProbe=@{Version=$PSVersionTable.PSVersion.ToString();Module=(Get-Command Get-FileHash -ErrorAction Stop).Source
             Hash=(Get-FileHash -LiteralPath (Join-Path $RepoRoot 'VERSION') -Algorithm SHA256).Hash}
+        $manifestChecks=@(& (Join-Path $RepoRoot 'tests/nLink.SmokeTests.Core/TestData/FailedGuiAnalysisStatus.ps1') `
+            -RepoRoot $RepoRoot -OutputRoot (Join-Path $Directory 'manifest-checks'))
+        if($manifestChecks -cnotcontains 'failed-gui-analysis-status-ok') { throw 'Direct manifest checks did not complete' }
+        $hashProbe.DirectManifestChecksPassed=$true
     }
     [IO.File]::WriteAllText((Join-Path $Directory 'worker.json'),(@{WrapperPid=$PID;GuiPid=$(if($null -ne $private:completion){$private:completion.GuiProcessId}else{0})
         Probe=$Probe;Attached=$null -ne $private:relay;GuiCompletion=$null -ne $private:completion;HashProbe=$hashProbe} | ConvertTo-Json -Compress))

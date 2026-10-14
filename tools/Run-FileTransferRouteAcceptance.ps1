@@ -8019,11 +8019,9 @@ function Invoke-RouteAcceptanceChildScriptNoThrow {
             $private:relayStartInfo.CreateNoWindow = $true
             $private:relayStartInfo.RedirectStandardOutput = $true
             $private:relayStartInfo.RedirectStandardError = $true
-            if ($PSVersionTable.PSEdition -eq 'Core') {
-                # Direct ProcessStartInfo does not normalize PS7 module paths for
-                # Windows PowerShell. Let this child initialize its own defaults.
-                $private:relayStartInfo.EnvironmentVariables.Remove('PSModulePath')
-            }
+            # A Desktop parent can itself inherit PS7 module paths. Always let
+            # this Windows PowerShell child initialize its own module defaults.
+            $private:relayStartInfo.EnvironmentVariables.Remove('PSModulePath')
             $private:relayStartInfo.EnvironmentVariables['NLINK_GUI_WRITER_RELAY'] = $private:relayRequest.Name
             $private:relayStartInfo.EnvironmentVariables['NLINK_GUI_WRITER_RELAY_ID'] = $private:relayRequest.RequestId.ToString('D')
             $private:relayStartInfo.EnvironmentVariables.Remove('NLINK_GUI_FRONTIER_RELAY_START_V1')

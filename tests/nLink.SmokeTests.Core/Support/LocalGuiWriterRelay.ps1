@@ -121,7 +121,8 @@ foreach($script:mode in $modes) {
         try { $expectedHash=[BitConverter]::ToString($sha.ComputeHash([IO.File]::ReadAllBytes((Join-Path $RepoRoot 'VERSION')))).Replace('-','') }
         finally { $sha.Dispose() }
         if($worker.HashProbe.Version -notlike '5.1.*' -or $worker.HashProbe.Module -cne 'Microsoft.PowerShell.Utility' -or
-            $worker.HashProbe.Hash -cne $expectedHash -or $env:PSModulePath -cne $parentModulePath) { throw "Legacy hash/environment drift: $mode" }
+            $worker.HashProbe.Hash -cne $expectedHash -or -not $worker.HashProbe.DirectManifestChecksPassed -or
+            $env:PSModulePath -cne $parentModulePath) { throw "Legacy hash/environment drift: $mode" }
     }
     if($expected) {
         if($value.WrapperProcessId -ne $worker.WrapperPid -or $value.WriterContext.GuiProcessId -ne $worker.GuiPid -or

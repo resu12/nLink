@@ -51,24 +51,40 @@ public sealed class FileTransferLocalGuiWriterRelayTests : FileTransferOpsScript
     }
 
     [Theory]
-    [InlineData("powershell")]
-    [InlineData("pwsh")]
-    public async Task GuiWriterRelay_LegacyChildResolvesHashWithoutChangingParentEnvironment(string host)
+    [InlineData("powershell", false)]
+    [InlineData("pwsh", false)]
+    [InlineData("powershell", true)]
+    [InlineData("pwsh", true)]
+    public async Task GuiWriterRelay_LegacyChildResolvesHashWithoutChangingParentEnvironment(string host, bool inheritedCoreModulePath)
     {
         if (!OperatingSystem.IsWindows()) { return; }
         var root = FindRepoRoot();
         var directory = Path.Combine(root, "artifacts", "publication-relay-module-path-20260915", host + "-" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(directory);
         const string script = """
-            param([string]$RepoRoot,[string]$Directory)
+            param([string]$RepoRoot,[string]$Directory,[string]$InheritedCoreModulePath)
+            $ErrorActionPreference='Stop'
+            $cases=@('baseline','valid','wrapper-nonzero')
+            if($InheritedCoreModulePath -eq 'True') {
+                # Keep this parent functional while reproducing the environment
+                # inherited by a Desktop host launched from PowerShell 7.
+                Import-Module Microsoft.PowerShell.Utility
+                $coreHost=(Get-Command pwsh -CommandType Application | Select-Object -First 1).Source
+                $coreModules=Join-Path (Split-Path $coreHost) 'Modules'
+                if(-not (Test-Path -LiteralPath (Join-Path $coreModules 'Microsoft.PowerShell.Utility/Microsoft.PowerShell.Utility.psd1'))) {
+                    throw 'PowerShell 7 module fixture unavailable'
+                }
+                $env:PSModulePath=$coreModules+';'+$env:PSModulePath
+                $cases=@('valid','wrapper-nonzero')
+            }
             & (Join-Path $RepoRoot 'tests/nLink.SmokeTests.Core/Support/LocalGuiWriterRelay.ps1') `
-                -RepoRoot $RepoRoot -Directory $Directory -CaseSelection @('baseline','valid','wrapper-nonzero') -RequireHashCmdlet
+                -RepoRoot $RepoRoot -Directory $Directory -CaseSelection $cases -RequireHashCmdlet
             """;
-        var result = await RunPowerShellScriptTextAsync(script, [root, directory], host,
+        var result = await RunPowerShellScriptTextAsync(script, [root, directory, inheritedCoreModulePath.ToString()], host,
             initializeHostModulePath: true);
         await File.WriteAllTextAsync(Path.Combine(directory, "result.txt"), result.Stdout + result.Stderr);
         Assert.True(result.ExitCode == 0 && result.Stdout.Contains("gui-writer-relay=", StringComparison.Ordinal),
-            $"{host}: {result.Stdout}{Environment.NewLine}{result.Stderr}");
+            $"{host}, inheritedCoreModulePath={inheritedCoreModulePath}: {result.Stdout}{Environment.NewLine}{result.Stderr}");
     }
 
     [Theory]
