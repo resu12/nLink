@@ -37595,7 +37595,9 @@ function Invoke-FileTransferTunaHandoffFallbackCycle {
                 $prearmedSwitchOffToggle = if ([string]::Equals([string]$switchOffPrearmResult.Kind, 'toggle', [System.StringComparison]::OrdinalIgnoreCase)) { $switchOffPrearmResult.Toggle } else { $null }
                 $prearmedSwitchOffToggleWaitMs = [long]$switchOffPrearmResult.WaitMs
 
-                $activationProofTimeoutMs = if ($RouteMode -eq 'live-regular-activation-cycle' -or $RouteMode -eq 'live-reactivation-second-transfer') {
+                $activationProofTimeoutMs = if ($RouteMode -eq 'live-regular-activation-cycle' -or
+                    $RouteMode -eq 'live-reactivation-second-transfer' -or
+                    ($RouteMode -eq 'live-multi-toggle' -and $PayerMode -eq 'helper-to-helpee')) {
                     Get-GuiSmokeScenarioRemainingTimeoutMs -DefaultTimeoutMs 240000
                 }
                 else {

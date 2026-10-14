@@ -11256,6 +11256,131 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
         Assert.Contains("scenario-budget-ok", result.Stdout, StringComparison.Ordinal);
     }
 
+    [Theory]
+    [InlineData("powershell")]
+    [InlineData("pwsh")]
+    public async Task GuiSmokeWindows_PayerHandoffActivationWaitUsesScenarioBudget(string host)
+    {
+        if (!OperatingSystem.IsWindows()) { return; }
+        var guiPath = Path.Combine(FindRepoRoot(), "tools", "GuiSmoke-Windows.ps1");
+        var guiText = File.ReadAllText(guiPath);
+        var budgetBody = ExtractPowerShellFunctionBody(guiText, "Get-GuiSmokeScenarioRemainingTimeoutMs", "Wait-Until");
+        var script = $$"""
+            $ErrorActionPreference = 'Stop'
+            function Assert-GuiSmokeScenarioDeadline { throw 'scenario-deadline' }
+            function Get-GuiSmokeScenarioRemainingTimeoutMs { {{budgetBody}} }
+            $tokens = $null; $errors = $null
+            $ast = [Management.Automation.Language.Parser]::ParseFile(
+                '{{guiPath.Replace("'", "''", StringComparison.Ordinal)}}', [ref]$tokens, [ref]$errors)
+            if ($errors.Count -gt 0) { throw ($errors | Out-String) }
+            $assignments = @($ast.FindAll({ param($node)
+                $node -is [Management.Automation.Language.AssignmentStatementAst] -and
+                $node.Left.Extent.Text -ceq '$activationProofTimeoutMs' -and
+                $node.Extent.Text -match '\b90000\b'
+            }, $true))
+            if ($assignments.Count -ne 1) { throw 'activation timeout selection is ambiguous' }
+            $selectTimeout = [scriptblock]::Create($assignments[0].Extent.Text)
+            $script:GuiSmokeScenarioDeadlineUtc = [DateTimeOffset]::MaxValue
+            foreach ($case in @(
+                    @('live-multi-toggle', 'helper-to-helpee', 240000),
+                    @('live-multi-toggle', 'helper', 90000),
+                    @('live-multi-toggle', 'helpee', 90000),
+                    @('live-regular-activation-cycle', 'helpee', 240000),
+                    @('live-reactivation-second-transfer', 'helpee', 240000))) {
+                $RouteMode = $case[0]; $PayerMode = $case[1]
+                . $selectTimeout
+                if ($activationProofTimeoutMs -ne $case[2]) {
+                    throw "activation budget mismatch: $RouteMode/$PayerMode=$activationProofTimeoutMs"
+                }
+            }
+            $RouteMode = 'live-multi-toggle'; $PayerMode = 'helper-to-helpee'
+            $deadline = [DateTimeOffset]::UtcNow.AddSeconds(150)
+            $script:GuiSmokeScenarioDeadlineUtc = $deadline
+            . $selectTimeout
+            if ($activationProofTimeoutMs -le 120000 -or $activationProofTimeoutMs -gt 150000 -or
+                $script:GuiSmokeScenarioDeadlineUtc -ne $deadline) {
+                throw 'payer handoff truncated listener readiness or extended the scenario deadline'
+            }
+            $script:GuiSmokeScenarioDeadlineUtc = [DateTimeOffset]::UtcNow.AddMilliseconds(1200)
+            . $selectTimeout
+            if ($activationProofTimeoutMs -lt 1 -or $activationProofTimeoutMs -gt 1200) {
+                throw 'payer handoff ignored the remaining scenario budget'
+            }
+            $script:GuiSmokeScenarioDeadlineUtc = [DateTimeOffset]::UtcNow.AddMilliseconds(-1)
+            try { . $selectTimeout; throw 'expired deadline accepted' }
+            catch { if ($_.Exception.Message -ne 'scenario-deadline') { throw } }
+            'payer-handoff-activation-budget-ok'
+            """;
+        var result = await RunPowerShellScriptTextAsync(script, Array.Empty<string>(), host);
+        Assert.True(result.ExitCode == 0, result.Stdout + Environment.NewLine + result.Stderr);
+        Assert.Contains("payer-handoff-activation-budget-ok", result.Stdout, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("powershell")]
+    [InlineData("pwsh")]
+    public async Task GuiSmokeWindows_PayerHandoffActivationWaitPreservesProofAndDeadline(string host)
+    {
+        if (!OperatingSystem.IsWindows()) { return; }
+        var guiText = File.ReadAllText(Path.Combine(FindRepoRoot(), "tools", "GuiSmoke-Windows.ps1"));
+        var waitBody = ExtractPowerShellFunctionBody(guiText,
+            "Wait-TunaGuiAuthoritativeTunaFaultAdmission", "Get-TunaGuiLiveReactivationRecognitionFailure");
+        // Advance only the test's clock; execute the production wait without a two-minute sleep.
+        Assert.Contains("[Diagnostics.Stopwatch]::StartNew()", waitBody, StringComparison.Ordinal);
+        waitBody = waitBody.Replace("[Diagnostics.Stopwatch]::StartNew()", "$script:clock", StringComparison.Ordinal);
+        var script = $$"""
+            $ErrorActionPreference = 'Stop'
+            function Wait-TunaGuiAuthoritativeTunaFaultAdmission { {{waitBody}} }
+            function Assert-GuiSmokeScenarioDeadline {
+                if ($script:clock.ElapsedMilliseconds -ge $script:deadlineMs) { throw 'scenario-deadline' }
+            }
+            function Set-TunaGuiFaultAdmissionProjectionBoundary { param($Tracker, $RouteFamily, $MinimumBookmark) }
+            function Start-Sleep { param($Milliseconds) $script:clock.ElapsedMilliseconds += 60000 }
+            function Get-GuiSmokeFieldValue { param($Fields, $Name, $Default) return $Fields[$Name] }
+            function ConvertTo-GuiSmokeInt { param($Value, $Default) return [int]$Value }
+            function Update-TunaGuiFaultAdmissionTracker {
+                param($Tracker)
+                if ($script:mode -eq 'terminal') { $Tracker.TerminalPair = 'completed'; return }
+                if ($script:clock.ElapsedMilliseconds -lt 120000 -or $script:mode -eq 'missing') { return }
+                $lineIndex = if ($script:mode -eq 'stale') { 99 } else { 101 }
+                $direction = [pscustomobject]@{
+                    Commit = [pscustomobject]@{ LineIndex = $lineIndex }
+                    Publication = [pscustomobject]@{ Fields = @{ live_route_epoch = '2' } }
+                }
+                $Tracker.AuthoritativeTunaProjection = [pscustomobject]@{
+                    Inbound = $direction; Outbound = $direction; ScopeKey = 'session|transfer'
+                    ActionWindowGeneration = 1; MinimumBookmark = 100
+                }
+            }
+            foreach ($script:mode in @('ready', 'missing', 'stale', 'terminal', 'deadline')) {
+                $script:clock = [pscustomobject]@{ ElapsedMilliseconds = 0 }
+                $script:deadlineMs = if ($script:mode -eq 'deadline') { 60000 } else { 300000 }
+                $tracker = [pscustomobject]@{ TerminalPair = $null; AuthoritativeTunaProjection = $null; LineVisitCount = 0 }
+                $failure = ''; $projection = ''
+                try { $projection = Wait-TunaGuiAuthoritativeTunaFaultAdmission -Tracker $tracker -AfterBookmark 100 -TimeoutMs 240000 }
+                catch { $failure = $_.Exception.Message }
+                if ($script:mode -eq 'ready') {
+                    if ($failure -or $projection -notlike '*authoritative_direction_count=2*' -or
+                        $script:clock.ElapsedMilliseconds -ne 120000) { throw "late exact proof rejected: $failure" }
+                }
+                elseif ($script:mode -in @('missing', 'stale')) {
+                    if ($failure -ne 'Timed out waiting for both authoritative file_tuna_v4 coordinator projections.' -or
+                        $script:clock.ElapsedMilliseconds -ne 240000) { throw "missing/stale proof did not fail at the bound: $failure" }
+                }
+                elseif ($script:mode -eq 'terminal') {
+                    if ($failure -notlike 'live_toggle_window_missed_transfer_completed:*') { throw "terminal accepted: $failure" }
+                }
+                elseif ($failure -ne 'scenario-deadline' -or $script:clock.ElapsedMilliseconds -ne 60000) {
+                    throw "scenario deadline was ignored: $failure"
+                }
+            }
+            'payer-handoff-activation-proof-boundaries-ok'
+            """;
+        var result = await RunPowerShellScriptTextAsync(script, Array.Empty<string>(), host);
+        Assert.True(result.ExitCode == 0, result.Stdout + Environment.NewLine + result.Stderr);
+        Assert.Contains("payer-handoff-activation-proof-boundaries-ok", result.Stdout, StringComparison.Ordinal);
+    }
+
     [Fact]
     public void RunFileTransferTunaGuiSmoke_LiveRegularActivationCycleStartsRegularThenCyclesRoutes()
     {
