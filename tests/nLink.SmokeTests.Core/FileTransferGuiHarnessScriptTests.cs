@@ -6082,8 +6082,10 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
         Assert.Contains("gui-ack-before-probe-adoption-recheck-ok", result.Stdout, StringComparison.Ordinal);
     }
 
-    [Fact]
-    public async Task GuiSmokeFailureClassification_BoundResponderProbeUsesLocalOfferAndExactPeerProbeIndexes()
+    [Theory]
+    [InlineData("powershell")]
+    [InlineData("pwsh")]
+    public async Task GuiSmokeFailureClassification_BoundResponderProbeUsesLocalOfferAndExactPeerProbeIndexes(string host)
     {
         var guiText = File.ReadAllText(Path.Combine(FindRepoRoot(), "tools", "GuiSmoke-Windows.ps1"));
         var resultBody = ExtractPowerShellFunctionBody(guiText, "New-TunaGuiFileTransferFailureClassificationResult", "Get-TunaGuiExplicitFailureClassification");
@@ -6102,7 +6104,43 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
             function Get-TunaGuiExplicitFailureClassification { {{explicitBody}} }
             . '{{Path.Combine(FindRepoRoot(), "tools", "FileTransferOps", "CoordinatorSnapshotEvidence.ps1").Replace("'", "''", StringComparison.Ordinal)}}'
             . '{{Path.Combine(FindRepoRoot(), "tools", "FileTransferFrontierGraceHandoff.ps1").Replace("'", "''", StringComparison.Ordinal)}}'
-            function Get-TunaGuiFileTransferSetupFailureClassification { {{classifierBody}} }
+            function Invoke-BoundResponderClassification { {{classifierBody}} }
+            function Get-TunaGuiFileTransferSetupFailureClassification {
+                param($Bookmark, $ErrorMessage, $RouteMode, [string[]]$ImmutableEvidencePaths)
+                $script:fixtureStage = 'classification'
+                $script:fixtureInvocation = $MyInvocation.PositionMessage
+                $result = Invoke-BoundResponderClassification @PSBoundParameters
+                $script:fixtureStage = 'post_classification_exclusive_open'
+                foreach ($evidencePath in $ImmutableEvidencePaths) {
+                    $exclusive = $null
+                    try {
+                        $exclusive = [IO.FileStream]::new(
+                            $evidencePath, [IO.FileMode]::Open, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None)
+                    }
+                    finally {
+                        if ($null -ne $exclusive) { $exclusive.Dispose() }
+                    }
+                }
+                $script:readerLifetimeChecks++
+                $script:fixtureStage = 'assertion'
+                return $result
+            }
+            function Set-BoundResponderEvidence {
+                param([Parameter(ValueFromPipeline = $true)][string]$Line, [string]$LiteralPath)
+                begin {
+                    $inputLines = [Collections.Generic.List[string]]::new()
+                    $script:fixtureCase++
+                    $script:fixtureInvocation = $MyInvocation.PositionMessage
+                }
+                process { $inputLines.Add($Line) }
+                end {
+                    $script:fixtureStage = 'preserve_input'
+                    $script:fixtureInputPath = Join-Path $tempRoot ('case-{0:D2}-input.log' -f $script:fixtureCase)
+                    [IO.File]::WriteAllLines($script:fixtureInputPath, $inputLines.ToArray())
+                    $script:fixtureStage = 'evidence_write'
+                    $inputLines.ToArray() | Set-Content -LiteralPath $LiteralPath
+                }
+            }
             function Get-AppLogLinesAfterBookmark { throw 'live ledger was read' }
             function Read-GuiSmokeProcessOutputLinesSnapshot { throw 'process output was read' }
             function Test-TunaGuiBridgeBootstrapNotReadyEvidence { return $false }
@@ -6136,10 +6174,16 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
             }
             $tempRoot = Join-Path ([IO.Path]::GetTempPath()) ('nlink-gui-bound-responder-probe-' + [guid]::NewGuid().ToString('N'))
             [void][IO.Directory]::CreateDirectory($tempRoot)
+            $completed = $false
+            $script:fixtureCase = 0
+            $script:fixtureStage = 'setup'
+            $script:fixtureInvocation = ''
+            $script:fixtureInputPath = ''
+            $script:readerLifetimeChecks = 0
             try {
                 $path = Join-Path $tempRoot 'evidence.log'
                 @('event=file_transfer_inbound_terminal; direction=inbound; session_id=other; transfer_id=other; state=Failed; log_writer_id=writer') |
-                    Set-Content -LiteralPath $path
+                    Set-BoundResponderEvidence -LiteralPath $path
                 $explicit = Get-TunaGuiFileTransferSetupFailureClassification -Bookmark 0 -ErrorMessage 'failure_class=runtime_unlock_responder_acked_probe_route_transition_handoff_missing; failure_variant=runtime_unlock_responder_acked_probe_route_transition_handoff_missing_after_bound_probe' -RouteMode 'live-regular-activation-cycle' -ImmutableEvidencePaths @($path)
                 if ($explicit.Phase -ne 'route_runtime' -or
                     $explicit.Reason -ne 'bound_responder_acked_peer_probe_route_transition_handoff_invalidated' -or
@@ -6171,7 +6215,7 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
                     'event=filetransfer_runtime_unlock_precommit_probe_launch_handoff_decided; direction=outbound; session_id=sess; transfer_id=transfer; transaction_generation=1; offer_generation=12; launch_generation=6; tuna_path_lease_generation=3; tuna_path_lease_listener_run_id=peer-offer-dialer-3; status=Invalidated; decision_reason=transfer_context_replaced; log_writer_id=writer',
                     'event=transfer_terminal; direction=inbound; session_id=sess; transfer_id=transfer; terminal_state=failed; log_writer_id=writer'
                 )
-                $invalidated | Set-Content -LiteralPath $path
+                $invalidated | Set-BoundResponderEvidence -LiteralPath $path
                 $result = Get-TunaGuiFileTransferSetupFailureClassification -Bookmark 0 -ErrorMessage 'evidence_enrichment_timeout; child_exit_code_unavailable' -RouteMode 'live-regular-activation-cycle' -ImmutableEvidencePaths @($path)
                 if ($result.Phase -ne 'route_runtime' -or
                     $result.Reason -ne 'bound_responder_acked_peer_probe_route_transition_handoff_invalidated_as_transfer_context_replaced' -or
@@ -6185,7 +6229,7 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
                 $dataSessionUnavailable = $prefix + @(
                     'event=filetransfer_runtime_unlock_precommit_probe_launch_handoff_decided; direction=inbound; session_id=sess; transfer_id=transfer; transaction_generation=1; offer_generation=12; launch_generation=6; tuna_path_lease_generation=3; tuna_path_lease_listener_run_id=peer-offer-dialer-3; status=Invalidated; decision_reason=data_session_unavailable; log_writer_id=writer'
                 )
-                $dataSessionUnavailable | Set-Content -LiteralPath $path
+                $dataSessionUnavailable | Set-BoundResponderEvidence -LiteralPath $path
                 $dataSessionUnavailableResult = Get-TunaGuiFileTransferSetupFailureClassification -Bookmark 0 -ErrorMessage 'scenario failed' -RouteMode 'live-regular-activation-cycle' -ImmutableEvidencePaths @($path)
                 if ($dataSessionUnavailableResult.Reason -ne 'bound_responder_acked_peer_probe_route_transition_handoff_invalidated' -or
                     -not $dataSessionUnavailableResult.RuntimeUnlockResponderPeerProbeRouteTransitionHandoffMissingAfterBoundProbe -or
@@ -6201,7 +6245,7 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
                     $invalidated[-2],
                     $invalidated[-1]
                 )
-                $legacyInvalidated | Set-Content -LiteralPath $path
+                $legacyInvalidated | Set-BoundResponderEvidence -LiteralPath $path
                 $legacyResult = Get-TunaGuiFileTransferSetupFailureClassification -Bookmark 0 -ErrorMessage 'evidence_enrichment_timeout; child_exit_code_unavailable' -RouteMode 'live-regular-activation-cycle' -ImmutableEvidencePaths @($path)
                 if ($legacyResult.Phase -ne 'route_runtime' -or
                     $legacyResult.Reason -ne 'bound_responder_acked_peer_probe_route_transition_handoff_invalidated_as_transfer_context_replaced' -or
@@ -6212,7 +6256,7 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
                 }
 
                 $exactBoundDuplicate = $prefix + @($prefix[-1].Replace('status=Accepted', 'status=Idempotent'))
-                $exactBoundDuplicate | Set-Content -LiteralPath $path
+                $exactBoundDuplicate | Set-BoundResponderEvidence -LiteralPath $path
                 Assert-AfterBoundResponderPeerProbeFailure `
                     -Result (Get-TunaGuiFileTransferSetupFailureClassification -Bookmark 0 -ErrorMessage 'scenario failed' -RouteMode 'live-regular-activation-cycle' -ImmutableEvidencePaths @($path)) `
                     -Case 'exact idempotent responder binding duplicate'
@@ -6222,7 +6266,7 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
                     $partialLegacyBound,
                     $invalidated[-2]
                 )
-                $partialLegacyInvalidated | Set-Content -LiteralPath $path
+                $partialLegacyInvalidated | Set-BoundResponderEvidence -LiteralPath $path
                 $partialLegacyResult = Get-TunaGuiFileTransferSetupFailureClassification -Bookmark 0 -ErrorMessage 'scenario failed' -RouteMode 'live-regular-activation-cycle' -ImmutableEvidencePaths @($path)
                 if (-not $partialLegacyResult.RuntimeUnlockResponderPeerProbeHandoffMissing -or
                     -not $partialLegacyResult.RuntimeUnlockResponderPeerProbeBindingMissing -or
@@ -6233,7 +6277,7 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
                 $terminalized = $prefix + @(
                     'event=transfer_terminal; direction=inbound; session_id=sess; transfer_id=transfer; terminal_state=failed; log_writer_id=writer'
                 )
-                $terminalized | Set-Content -LiteralPath $path
+                $terminalized | Set-BoundResponderEvidence -LiteralPath $path
                 $terminalizedResult = Get-TunaGuiFileTransferSetupFailureClassification -Bookmark 0 -ErrorMessage 'evidence_enrichment_timeout' -RouteMode 'live-regular-activation-cycle' -ImmutableEvidencePaths @($path)
                 if (-not $terminalizedResult.RuntimeUnlockResponderPeerProbeHandoffMissing -or
                     $terminalizedResult.RuntimeUnlockResponderPeerProbeBindingMissing -or
@@ -6245,7 +6289,7 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
                     'event=nkn_inbound_envelope_received; envelope_type=TransportAccelerationAnswerAck; source_matches_expected=1; msg_id=other-session-answer-ack; log_writer_id=writer',
                     'event=tuna_acceleration_answer_ack_received_raw; msg_id=other-session-answer-ack; log_writer_id=writer'
                 ) + @($prefix[8..($prefix.Count - 1)]) + @($invalidated[-2], $invalidated[-1])
-                $interleavedRaw | Set-Content -LiteralPath $path
+                $interleavedRaw | Set-BoundResponderEvidence -LiteralPath $path
                 $interleavedResult = Get-TunaGuiFileTransferSetupFailureClassification -Bookmark 0 -ErrorMessage 'scenario failed' -RouteMode 'live-regular-activation-cycle' -ImmutableEvidencePaths @($path)
                 if ($interleavedResult.RuntimeUnlockResponderPeerProbeHandoffMissing -or
                     $interleavedResult.RuntimeUnlockResponderPeerProbeBindingMissing -or
@@ -6256,14 +6300,14 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
                 $wrongSource = @($invalidated | ForEach-Object {
                         $_.Replace('source_matches_expected=1', 'source_matches_expected=0')
                     })
-                $wrongSource | Set-Content -LiteralPath $path
+                $wrongSource | Set-BoundResponderEvidence -LiteralPath $path
                 Assert-NoResponderPeerProbeFailure `
                     -Result (Get-TunaGuiFileTransferSetupFailureClassification -Bookmark 0 -ErrorMessage 'scenario failed' -RouteMode 'live-regular-activation-cycle' -ImmutableEvidencePaths @($path)) `
                     -Case 'unexpected AnswerAck source'
 
                 $rawBeforeCoreProbe = @($prefix[0..4]) + @($prefix[6], $prefix[7], $prefix[5]) +
                     @($prefix[8..($prefix.Count - 1)]) + @($invalidated[-2])
-                $rawBeforeCoreProbe | Set-Content -LiteralPath $path
+                $rawBeforeCoreProbe | Set-BoundResponderEvidence -LiteralPath $path
                 Assert-NoResponderPeerProbeFailure `
                     -Result (Get-TunaGuiFileTransferSetupFailureClassification -Bookmark 0 -ErrorMessage 'scenario failed' -RouteMode 'live-regular-activation-cycle' -ImmutableEvidencePaths @($path)) `
                     -Case 'raw AnswerAck before Core probe ACK'
@@ -6274,7 +6318,7 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
                         }
                         else { $_ }
                     }) + @($invalidated[-2])
-                $crossTransferLaunch | Set-Content -LiteralPath $path
+                $crossTransferLaunch | Set-BoundResponderEvidence -LiteralPath $path
                 Assert-NoResponderPeerProbeFailure `
                     -Result (Get-TunaGuiFileTransferSetupFailureClassification -Bookmark 0 -ErrorMessage 'scenario failed' -RouteMode 'live-regular-activation-cycle' -ImmutableEvidencePaths @($path)) `
                     -Case 'cross-transfer responder launch'
@@ -6285,7 +6329,7 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
                         }
                         else { $_ }
                     }) + @($invalidated[-2])
-                $crossTransferBound | Set-Content -LiteralPath $path
+                $crossTransferBound | Set-BoundResponderEvidence -LiteralPath $path
                 $crossTransferBoundResult = Get-TunaGuiFileTransferSetupFailureClassification -Bookmark 0 -ErrorMessage 'scenario failed' -RouteMode 'live-regular-activation-cycle' -ImmutableEvidencePaths @($path)
                 if (-not $crossTransferBoundResult.RuntimeUnlockResponderPeerProbeHandoffMissing -or
                     -not $crossTransferBoundResult.RuntimeUnlockResponderPeerProbeBindingMissing -or
@@ -6297,7 +6341,7 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
                     $prefix[-1].Replace('transfer_id=transfer', 'transfer_id=other-transfer'),
                     $invalidated[-2]
                 )
-                $crossTransferBoundDuplicate | Set-Content -LiteralPath $path
+                $crossTransferBoundDuplicate | Set-BoundResponderEvidence -LiteralPath $path
                 Assert-NoResponderPeerProbeFailure `
                     -Result (Get-TunaGuiFileTransferSetupFailureClassification -Bookmark 0 -ErrorMessage 'scenario failed' -RouteMode 'live-regular-activation-cycle' -ImmutableEvidencePaths @($path)) `
                     -Case 'cross-transfer responder binding duplicate'
@@ -6314,7 +6358,7 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
                             }
                             else { $_ }
                         }) + @($invalidated[-2])
-                    $mutatedLaunch | Set-Content -LiteralPath $path
+                    $mutatedLaunch | Set-BoundResponderEvidence -LiteralPath $path
                     Assert-NoResponderPeerProbeFailure `
                         -Result (Get-TunaGuiFileTransferSetupFailureClassification -Bookmark 0 -ErrorMessage 'scenario failed' -RouteMode 'live-regular-activation-cycle' -ImmutableEvidencePaths @($path)) `
                         -Case ([string]$launchMutation.To)
@@ -6324,7 +6368,7 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
                 $currentCompatibilityInvalidation = 'event=filetransfer_runtime_unlock_precommit_probe_launch_handoff_decided; direction=inbound; session_id=sess; transfer_id=transfer; transaction_generation=1; offer_generation=12; launch_generation=6; tuna_path_lease_generation=3; tuna_path_lease_listener_run_id=peer-offer-dialer-3; status=Invalidated; decision_reason=transfer_context_replaced; log_writer_id=writer'
                 $typedNoContextInvalidation = 'event=filetransfer_runtime_unlock_responder_peer_probe_route_transition_handoff_decided; direction=inbound; status=Invalidated; decision_status=Invalidated; decision_reason=transfer_context_replaced; session_id=sess; transfer_id=transfer; transaction_generation=1; offer_generation=12; pending_answer_ack_generation=12; payer_decision_id=7; lanes=file; answer_acceptance_source=SemanticAnswerAck; ack_message_id=answer-ack-12; ack_source_fingerprint=ack-fingerprint; peer_probe_frame_fingerprint=probe-frame-fingerprint; launch_generation=6; tuna_path_lease_generation=3; tuna_path_lease_listener_run_id=peer-offer-dialer-3; probe_id=probe-3; probe_state=Acked; probe_transport=tuna; probe_acked_utc_ms=900; fallback_yield_authority_id=(none); fallback_yield_generation=0; pairing_generation=0; pair_key=(none); pair_state=None; responder_handoff_authority_id=(none); responder_handoff_generation=0; admission_generation=0; pending_precommit_generation=0; transition_authority_id=(none); transition_generation=0; activation_authority_mode=none; route=(none); protocol_version=0; live_route_epoch=0; runtime_generation=0; route_publication_generation=0; route_commit_generation=0; terminal_generation=0; leg_generation=0; transport_epoch=0; bridge_recovery_generation=0; checkpoint_request_id=(none); checkpoint_generation=0; data_session_identity=(none); data_session_generation=0; target_route=file_tuna_v4; target_protocol_version=4; target_transport=tuna; log_writer_id=writer'
                 $typedNoContext = $prefix + @($typedNoContextInvalidation)
-                $typedNoContext | Set-Content -LiteralPath $path
+                $typedNoContext | Set-BoundResponderEvidence -LiteralPath $path
                 Assert-AfterBoundResponderPeerProbeFailure `
                     -Result (Get-TunaGuiFileTransferSetupFailureClassification -Bookmark 0 -ErrorMessage 'scenario failed' -RouteMode 'live-regular-activation-cycle' -ImmutableEvidencePaths @($path)) `
                     -Case 'typed no-context invalidation'
@@ -6334,7 +6378,7 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
                     $typedNoContextInvalidation,
                     'event=transfer_terminal; direction=inbound; session_id=sess; transfer_id=transfer; terminal_state=failed; log_writer_id=writer'
                 )
-                $currentNoContext | Set-Content -LiteralPath $path
+                $currentNoContext | Set-BoundResponderEvidence -LiteralPath $path
                 Assert-AfterBoundResponderPeerProbeFailure `
                     -Result (Get-TunaGuiFileTransferSetupFailureClassification -Bookmark 0 -ErrorMessage 'scenario failed' -RouteMode 'live-regular-activation-cycle' -ImmutableEvidencePaths @($path)) `
                     -Case 'current inbound compatibility plus typed no-context invalidation'
@@ -6344,7 +6388,7 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
                     $typedNoContextInvalidation.Replace('transfer_context_replaced', 'data_session_unavailable'),
                     'event=transfer_terminal; direction=inbound; session_id=sess; transfer_id=transfer; terminal_state=failed; log_writer_id=writer'
                 )
-                $dataSessionUnavailableSiblings | Set-Content -LiteralPath $path
+                $dataSessionUnavailableSiblings | Set-BoundResponderEvidence -LiteralPath $path
                 $dataSessionUnavailableSiblingResult = Get-TunaGuiFileTransferSetupFailureClassification -Bookmark 0 -ErrorMessage 'scenario failed' -RouteMode 'live-regular-activation-cycle' -ImmutableEvidencePaths @($path)
                 if ($dataSessionUnavailableSiblingResult.Reason -ne 'bound_responder_acked_peer_probe_route_transition_handoff_invalidated' -or
                     -not $dataSessionUnavailableSiblingResult.RuntimeUnlockResponderPeerProbeRouteTransitionHandoffMissingAfterBoundProbe -or
@@ -6356,7 +6400,7 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
                     $acceptedDecision,
                     ($acceptedDecision -replace 'data_session_identity=data-session-1', 'data_session_identity=data-session-2')
                 )
-                $mutatedDecision | Set-Content -LiteralPath $path
+                $mutatedDecision | Set-BoundResponderEvidence -LiteralPath $path
                 $mutatedResult = Get-TunaGuiFileTransferSetupFailureClassification -Bookmark 0 -ErrorMessage 'scenario failed' -RouteMode 'live-regular-activation-cycle' -ImmutableEvidencePaths @($path)
                 if ($mutatedResult.RuntimeUnlockResponderPeerProbeHandoffMissing -or
                     $mutatedResult.RuntimeUnlockResponderPeerProbeBindingMissing -or
@@ -6366,7 +6410,7 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
 
                 $decisionStatusMutation = $prefix + @(
                     $acceptedDecision.Replace('decision_status=Accepted', 'decision_status=Rejected'))
-                $decisionStatusMutation | Set-Content -LiteralPath $path
+                $decisionStatusMutation | Set-BoundResponderEvidence -LiteralPath $path
                 Assert-AfterBoundResponderPeerProbeFailure `
                     -Result (Get-TunaGuiFileTransferSetupFailureClassification -Bookmark 0 -ErrorMessage 'scenario failed' -RouteMode 'live-regular-activation-cycle' -ImmutableEvidencePaths @($path)) `
                     -Case 'conflicting typed coordinator decision status'
@@ -6382,7 +6426,7 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
                     "event=filetransfer_route_transition_disposition_applied; direction=inbound; session_id=sess; transfer_id=transfer; authority_id=transition; transition_generation=4; transition_kind=PostTunaFallbackV6ToTunaV4; $transitionScope; apply_status=applied; resulting_live_route_epoch=3; resulting_runtime_generation=4; resulting_route_publication_generation=4; resulting_route_commit_generation=1; resulting_terminal_generation=0; resulting_leg_generation=4; log_writer_id=writer",
                     'event=filetransfer_live_route_epoch_recovered; direction=inbound; session_id=sess; transfer_id=transfer; live_route_epoch=3; route=file_tuna_v4; protocol_version=4; runtime_generation=4; route_publication_generation=4; route_commit_generation=1; terminal_generation=0; leg_generation=4; target_route=file_tuna_v4; target_protocol_version=4; target_transport=tuna; route_publication_action_kind=RoutePublication; coordinator_decision_reason=filetransfer_route_transition_committed; transition_authority_id=transition; transition_generation=4; projection_source=coordinator_route_transition; log_writer_id=writer'
                 )
-                $recovered | Set-Content -LiteralPath $path
+                $recovered | Set-BoundResponderEvidence -LiteralPath $path
                 $recoveredResult = Get-TunaGuiFileTransferSetupFailureClassification -Bookmark 0 -ErrorMessage 'scenario failed' -RouteMode 'live-regular-activation-cycle' -ImmutableEvidencePaths @($path)
                 if ($recoveredResult.RuntimeUnlockResponderPeerProbeHandoffMissing -or
                     $recoveredResult.RuntimeUnlockResponderPeerProbeBindingMissing -or
@@ -6396,7 +6440,7 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
                     'transition_authority_id=(none); transition_generation=0',
                     'transition_authority_id=transition; transition_generation=4')
                 $preassignedTransitionRecovery = $prefix + @($preassignedTransitionDecision) + @($recoveryTail[1..($recoveryTail.Count - 1)])
-                $preassignedTransitionRecovery | Set-Content -LiteralPath $path
+                $preassignedTransitionRecovery | Set-BoundResponderEvidence -LiteralPath $path
                 Assert-AfterBoundResponderPeerProbeFailure `
                     -Result (Get-TunaGuiFileTransferSetupFailureClassification -Bookmark 0 -ErrorMessage 'scenario failed' -RouteMode 'live-regular-activation-cycle' -ImmutableEvidencePaths @($path)) `
                     -Case 'pre-Prepare transition authority mutation'
@@ -6408,13 +6452,13 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
                     $heldDecision,
                     'event=transfer_terminal; direction=inbound; session_id=sess; transfer_id=transfer; terminal_state=failed; log_writer_id=writer'
                 )
-                $heldTerminal | Set-Content -LiteralPath $path
+                $heldTerminal | Set-BoundResponderEvidence -LiteralPath $path
                 Assert-AfterBoundResponderPeerProbeFailure `
                     -Result (Get-TunaGuiFileTransferSetupFailureClassification -Bookmark 0 -ErrorMessage 'scenario failed' -RouteMode 'live-regular-activation-cycle' -ImmutableEvidencePaths @($path)) `
                     -Case 'terminal Held responder handoff'
 
                 $heldThenRecovered = $heldTerminal + $recoveryTail
-                $heldThenRecovered | Set-Content -LiteralPath $path
+                $heldThenRecovered | Set-BoundResponderEvidence -LiteralPath $path
                 Assert-NoResponderPeerProbeFailure `
                     -Result (Get-TunaGuiFileTransferSetupFailureClassification -Bookmark 0 -ErrorMessage 'scenario failed' -RouteMode 'live-regular-activation-cycle' -ImmutableEvidencePaths @($path)) `
                     -Case 'exact recovery after terminal Held'
@@ -6422,7 +6466,7 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
                 $oppositeDirectionTerminalThenRecovered = $prefix + @(
                     'event=transfer_terminal; direction=outbound; session_id=sess; transfer_id=transfer; terminal_state=failed; log_writer_id=writer'
                 ) + $recoveryTail
-                $oppositeDirectionTerminalThenRecovered | Set-Content -LiteralPath $path
+                $oppositeDirectionTerminalThenRecovered | Set-BoundResponderEvidence -LiteralPath $path
                 Assert-NoResponderPeerProbeFailure `
                     -Result (Get-TunaGuiFileTransferSetupFailureClassification -Bookmark 0 -ErrorMessage 'scenario failed' -RouteMode 'live-regular-activation-cycle' -ImmutableEvidencePaths @($path)) `
                     -Case 'opposite-direction terminal'
@@ -6430,7 +6474,7 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
                 $inboundTerminalThenRecovery = $prefix + @(
                     'event=transfer_terminal; direction=inbound; session_id=sess; transfer_id=transfer; terminal_state=failed; log_writer_id=writer'
                 ) + $recoveryTail
-                $inboundTerminalThenRecovery | Set-Content -LiteralPath $path
+                $inboundTerminalThenRecovery | Set-BoundResponderEvidence -LiteralPath $path
                 Assert-AfterBoundResponderPeerProbeFailure `
                     -Result (Get-TunaGuiFileTransferSetupFailureClassification -Bookmark 0 -ErrorMessage 'scenario failed' -RouteMode 'live-regular-activation-cycle' -ImmutableEvidencePaths @($path)) `
                     -Case 'exact inbound terminal recovery veto'
@@ -6438,7 +6482,7 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
                 $intrinsicInboundTerminalThenRecovery = $prefix + @(
                     'event=file_transfer_inbound_terminal; session_id=sess; transfer_id=transfer; state=failed; log_writer_id=writer'
                 ) + $recoveryTail
-                $intrinsicInboundTerminalThenRecovery | Set-Content -LiteralPath $path
+                $intrinsicInboundTerminalThenRecovery | Set-BoundResponderEvidence -LiteralPath $path
                 Assert-AfterBoundResponderPeerProbeFailure `
                     -Result (Get-TunaGuiFileTransferSetupFailureClassification -Bookmark 0 -ErrorMessage 'scenario failed' -RouteMode 'live-regular-activation-cycle' -ImmutableEvidencePaths @($path)) `
                     -Case 'intrinsic inbound terminal recovery veto'
@@ -6446,7 +6490,7 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
                 $runtimeTerminalThenRecovery = $prefix + @(
                     'event=filetransfer_runtime_terminalized; direction=inbound; session_id=sess; transfer_id=transfer; log_writer_id=writer'
                 ) + $recoveryTail
-                $runtimeTerminalThenRecovery | Set-Content -LiteralPath $path
+                $runtimeTerminalThenRecovery | Set-BoundResponderEvidence -LiteralPath $path
                 Assert-AfterBoundResponderPeerProbeFailure `
                     -Result (Get-TunaGuiFileTransferSetupFailureClassification -Bookmark 0 -ErrorMessage 'scenario failed' -RouteMode 'live-regular-activation-cycle' -ImmutableEvidencePaths @($path)) `
                     -Case 'runtime terminal recovery veto'
@@ -6455,7 +6499,7 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
                     $acceptedDecision,
                     'event=filetransfer_runtime_owner_changed; direction=inbound; session_id=sess; transfer_id=transfer; route=post_tuna_fallback_v6; protocol_version=6; live_route_epoch=2; runtime_generation=4; route_publication_generation=3; route_commit_generation=0; terminal_generation=0; leg_generation=3; transport_epoch=1; bridge_recovery_generation=1; checkpoint_generation=1; checkpoint_request_id=(none); data_session_identity=data-session-1; data_session_generation=1; log_writer_id=writer'
                 ) + @($recoveryTail[1..($recoveryTail.Count - 1)])
-                $runtimeOwnerChangedThenRecovery | Set-Content -LiteralPath $path
+                $runtimeOwnerChangedThenRecovery | Set-BoundResponderEvidence -LiteralPath $path
                 Assert-AfterBoundResponderPeerProbeFailure `
                     -Result (Get-TunaGuiFileTransferSetupFailureClassification -Bookmark 0 -ErrorMessage 'scenario failed' -RouteMode 'live-regular-activation-cycle' -ImmutableEvidencePaths @($path)) `
                     -Case 'runtime owner replacement recovery veto'
@@ -6466,7 +6510,7 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
                         }
                         else { $_ }
                     })
-                $mutatedDrain | Set-Content -LiteralPath $path
+                $mutatedDrain | Set-BoundResponderEvidence -LiteralPath $path
                 Assert-AfterBoundResponderPeerProbeFailure `
                     -Result (Get-TunaGuiFileTransferSetupFailureClassification -Bookmark 0 -ErrorMessage 'scenario failed' -RouteMode 'live-regular-activation-cycle' -ImmutableEvidencePaths @($path)) `
                     -Case 'mutated Draining responder scope'
@@ -6477,19 +6521,49 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
                         }
                         else { $_ }
                     })
-                $projectionOnly | Set-Content -LiteralPath $path
+                $projectionOnly | Set-BoundResponderEvidence -LiteralPath $path
                 Assert-AfterBoundResponderPeerProbeFailure `
                     -Result (Get-TunaGuiFileTransferSetupFailureClassification -Bookmark 0 -ErrorMessage 'scenario failed' -RouteMode 'live-regular-activation-cycle' -ImmutableEvidencePaths @($path)) `
                     -Case 'projection-only route publication'
+                if ($script:readerLifetimeChecks -ne 33) {
+                    throw "Expected 33 reader lifetime checks; observed $script:readerLifetimeChecks"
+                }
+                Write-Output "gui-bound-responder-reader-lifetime-checks=$script:readerLifetimeChecks"
                 Write-Output 'gui-bound-responder-peer-probe-fast-path-ok'
+                $completed = $true
+            }
+            catch {
+                $failure = $_
+                [Console]::Error.WriteLine("Bound responder fixture evidence retained: $tempRoot")
+                try {
+                    $details = [ordered]@{
+                        caseNumber = $script:fixtureCase
+                        stage = $script:fixtureStage
+                        invocation = $script:fixtureInvocation
+                        inputPath = $script:fixtureInputPath
+                        evidencePath = $path
+                        readerLifetimeChecks = $script:readerLifetimeChecks
+                        powerShellVersion = $PSVersionTable.PSVersion.ToString()
+                        processId = $PID
+                        errorId = $failure.FullyQualifiedErrorId
+                        exception = $failure.Exception.ToString()
+                        position = $failure.InvocationInfo.PositionMessage
+                        scriptStackTrace = $failure.ScriptStackTrace
+                    }
+                    [IO.File]::WriteAllText((Join-Path $tempRoot 'failure.json'), ($details | ConvertTo-Json -Depth 4))
+                    [IO.File]::WriteAllText((Join-Path $tempRoot 'harness.ps1'), [IO.File]::ReadAllText($PSCommandPath))
+                }
+                catch { [Console]::Error.WriteLine("Failure metadata capture failed: $($_.Exception.Message)") }
+                throw $failure
             }
             finally {
-                if (Test-Path -LiteralPath $tempRoot) { Remove-Item -LiteralPath $tempRoot -Recurse -Force }
+                if ($completed -and (Test-Path -LiteralPath $tempRoot)) { Remove-Item -LiteralPath $tempRoot -Recurse -Force }
             }
             """;
 
-        var result = await RunPowerShellScriptTextAsync(scriptText, Array.Empty<string>());
+        var result = await RunPowerShellScriptTextAsync(scriptText, Array.Empty<string>(), host);
         Assert.True(result.ExitCode == 0, $"Bound responder peer-probe GUI fast path failed.{Environment.NewLine}{result.Stdout}{Environment.NewLine}{result.Stderr}");
+        Assert.Contains("gui-bound-responder-reader-lifetime-checks=33", result.Stdout, StringComparison.Ordinal);
         Assert.Contains("gui-bound-responder-peer-probe-fast-path-ok", result.Stdout, StringComparison.Ordinal);
     }
 

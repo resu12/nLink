@@ -68,13 +68,22 @@ public sealed partial class FileTransferCoordinatorTests
         Assert.Equal(FileTransferFallbackTailYieldTransitionStatus.Idempotent, duplicateReceipt.Status);
         Assert.Equal(fixture.Receipt, duplicateReceipt.State.PersistentState.FallbackTailYield.LastRetryDispatchRecheckReceipt);
         fixture.Capture(duplicateReceipt.SnapshotEnvelope!);
+        var command = fixture.Receipt.Command;
+        Assert.Equal(command, duplicateReceipt.State.PersistentState.FallbackTailYield.HandoffReservation);
+        Assert.InRange(DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+            command.Observation.ObservedUtcMs, command.DeadlineUtcMs - 1);
         var granted = FileTransferCoordinator.AuthorizeRuntimeUnlockRetryDispatch(
             duplicateReceipt.State, fixture.Request, RuntimeUnlockRetryReleaseKind.FallbackPairedTailYield,
-            fixture.Yield.AuthorityId, fixture.Yield.YieldGeneration, fixture.Yield.YieldKind.ToString());
+            fixture.Yield.AuthorityId, fixture.Yield.YieldGeneration, fixture.Yield.YieldKind.ToString(), command);
         Assert.True(granted.Granted, granted.Reason);
+        Assert.Equal(command.DeadlineUtcMs, granted.Contract!.Authority.FallbackHandoffDeadlineUtcMs);
         fixture.Capture(granted.SnapshotEnvelope!);
+        var stagedUtcMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+        Assert.InRange(stagedUtcMs + 2, command.Observation.ObservedUtcMs, command.DeadlineUtcMs - 1);
         var installed = StageAndInstallPersistentRetryLifecycle(
-            granted.State, granted, fixture.Request, stagedUtcMs: 30_000, capture: fixture.Capture);
+            granted.State, granted, fixture.Request, stagedUtcMs, capture: fixture.Capture);
+        Assert.Equal(command.DeadlineUtcMs, installed.Receipt.StageExpiresUtcMs);
+        Assert.Equal(command.DeadlineUtcMs, installed.Receipt.DispatchDeadlineUtcMs);
         Assert.Equal(fixture.Receipt, installed.State.PersistentState.FallbackTailYield.LastRetryDispatchRecheckReceipt);
         Assert.Null(installed.State.PersistentState.FallbackTailYield.PendingRetryDispatchRecheckCommand);
         fixture.State = installed.State;
@@ -116,7 +125,7 @@ public sealed partial class FileTransferCoordinatorTests
         var previewDecision = Assert.IsType<FallbackTailYieldDecision>(preview.FallbackTailYieldDecision);
         fixture.InitialProof = FileTransferCoordinator.CreateFallbackTailPeerProofReceipt(
             fixture.State, CreateCoordinatorFallbackTailPeerProof(preview.State, previewDecision),
-            "retained-recheck-peer-first-proof", 40_000);
+            "retained-recheck-peer-first-proof", DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
         var retained = FileTransferCoordinator.ApplyFallbackTailPeerProofReceipt(fixture.State, fixture.InitialProof.Value);
         Assert.True(retained.Accepted, retained.Reason);
         fixture.Capture(retained.SnapshotEnvelope!);
@@ -378,7 +387,8 @@ public sealed partial class FileTransferCoordinatorTests
     {
         var issued = FileTransferCoordinator.IssueFallbackTailYieldRetryDispatchRecheck(fixture.State,
             new(fixture.State.PersistentState.FallbackTailYield.CurrentRetryDispatchHold!.Value,
-                fixture.Repair, "ProgressObserved", SuccessorAuthorityId: null, ObservedUtcMs: 25_000));
+                fixture.Repair, "ProgressObserved", SuccessorAuthorityId: null,
+                ObservedUtcMs: DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()));
         Assert.True(issued.Accepted, issued.Reason);
         fixture.Capture(issued.SnapshotEnvelope!);
         fixture.Receipt = new FileTransferFallbackTailYieldRetryDispatchRecheckReceipt(
