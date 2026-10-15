@@ -209,6 +209,24 @@ function Get-NLinkAppVersion {
     return $version
 }
 
+function Get-BridgeToolVersion {
+    param(
+        [Parameter(Mandatory = $true)][string]$ToolPath
+    )
+
+    # Drain output before selecting a line so the native process can exit normally.
+    $output = @(& $ToolPath --version)
+    $exitCode = $LASTEXITCODE
+    if ($exitCode -ne 0) {
+        throw "Bridge tool version probe failed for '$ToolPath' with exit code $exitCode."
+    }
+    if ($output.Count -eq 0 -or [string]::IsNullOrWhiteSpace([string]$output[0])) {
+        throw "Bridge tool version probe returned an empty version for '$ToolPath'."
+    }
+
+    return ([string]$output[0]).Trim()
+}
+
 function Write-BridgeBundleManifest {
     param(
         [Parameter(Mandatory = $true)][string]$RepoRoot,
@@ -230,10 +248,7 @@ function Write-BridgeBundleManifest {
 
     $appVersion = Get-NLinkAppVersion -RepoRoot $RepoRoot
     $scriptSha256 = (Get-FileHash -Path $scriptPath -Algorithm SHA256).Hash.ToLowerInvariant()
-    $nodeVersion = (& $NodePath --version | Select-Object -First 1).Trim()
-    if ([string]::IsNullOrWhiteSpace($nodeVersion)) {
-        throw "Bridge manifest generation failed: could not resolve node version from $NodePath"
-    }
+    $nodeVersion = Get-BridgeToolVersion -ToolPath $NodePath
 
     $manifest = [ordered]@{
         manifestVersion = 1
@@ -529,6 +544,9 @@ function Test-BridgeBundleHealth {
         if (-not $proc.WaitForExit(4000)) {
             throw "Bridge health check failed: shutdown timed out."
         }
+        if ($proc.ExitCode -ne 0) {
+            throw "Bridge health check failed: shutdown exited with code $($proc.ExitCode)."
+        }
     }
     finally {
         try {
@@ -596,8 +614,8 @@ New-Item -ItemType Directory -Force -Path $outAbs | Out-Null
 
 $bundleOutDir = Bundle-BridgeScript -BridgeSourceDir $bridgeSource -NodePath $toolchain.NodePath
 $bundleEntryScript = Join-Path $bundleOutDir "index.js"
-$nodeVersion = (& $toolchain.NodePath --version | Select-Object -First 1).Trim()
-$npmVersion = (& $toolchain.NpmPath --version | Select-Object -First 1).Trim()
+$nodeVersion = Get-BridgeToolVersion -ToolPath $toolchain.NodePath
+$npmVersion = Get-BridgeToolVersion -ToolPath $toolchain.NpmPath
 
 Copy-Item -Force $toolchain.NodePath (Join-Path $outAbs "node.exe")
 Copy-Item -Force $bundleEntryScript (Join-Path $outAbs "index.js")
