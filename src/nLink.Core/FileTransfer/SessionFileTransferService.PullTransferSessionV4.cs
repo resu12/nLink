@@ -22773,6 +22773,21 @@ public sealed partial class SessionFileTransferService
             InboundBootstrapWriteIngress? writeIngress = null;
             while (!context.LifetimeCts.IsCancellationRequested)
             {
+                lock (gate)
+                {
+                    // Expiry only asks the coordinator to restore an exact, drained hold.
+                    // A superseded reader cannot trigger recovery for its replacement.
+                    if (runtimeEvidence is { } runtime &&
+                        ReferenceEquals(context.SparseReceiverRuntimeEvidence, runtime) &&
+                        ReferenceEquals(context.DataSession, runtime.DataSession) &&
+                        context.DataSessionGeneration == runtime.ServiceGeneration &&
+                        (runtime.DataSession as IFileTransferDataSessionGenerationProvider)?.Generation == runtime.ProviderGeneration &&
+                        context.PullTransportGraceDeadlineUtc is { } deadline && DateTimeOffset.UtcNow >= deadline)
+                    {
+                        _ = TryRestoreInboundFallbackRepairHandoffLocked(context);
+                    }
+                }
+
                 if (pendingReceiveTask is null)
                 {
                     lock (gate)
