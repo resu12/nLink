@@ -114,7 +114,7 @@ Historical references (not proof of the current live-route contract):
 
 ## Current Release Qualification
 
-Use the [runbook's dated candidate evidence](ReleaseRunbook.md#070-candidate-evidence-2026-10-08) rather than May benchmarks as the current reference. The October 7 full six-scenario Phase 5 run passed strict correctness and retained performance **FAIL**. It covers regular V4, authenticated Tuna V4, switch-off on either peer, the 256 MiB regular/Tuna/fallback/reactivation cycle, and a subsequent Tuna transfer.
+Use the [runbook's current candidate evidence](ReleaseRunbook.md#current-qualification-update-2026-10-15) rather than historical benchmarks as the current reference. The October 15 seven-scenario Phase 5 gate on `cf8ea296` passed strict correctness; authenticated-delivery closeout also passed. It covers regular V4, authenticated Tuna V4, switch-off on either peer, helper-to-helpee payer handoff, the 256 MiB regular/Tuna/fallback/reactivation cycle, and a subsequent Tuna transfer. Separate performance FAIL/WARN results remain recorded.
 
 The route cycle requires `regular_nkn_v4_fast -> file_tuna_v4 -> post_tuna_fallback_v6 -> file_tuna_v4 -> post_tuna_fallback_v6`, including the second coordinator publication and authenticated Tuna delivery at both activations. SHA OK or fallback completion alone is insufficient. Evidence is reusable only when the covered source, contracts, and packaged hashes remain applicable; it does not prove all network conditions or a throughput guarantee.
 

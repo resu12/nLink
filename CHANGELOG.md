@@ -27,7 +27,7 @@
 - Active file Tuna uses V4. Disabling Tuna during a live transfer moves that same transfer to controlled V6 fallback over regular NKN; explicit reactivation can return it to Tuna V4. After successful final fallback completion, the next transfer resolves from current transport state rather than stale fallback state.
 - File-transfer progress presentation uses peer-comparable accepted progress and bounded smoothing, rather than locally queued bytes or predicted future delivery.
 - Tuna startup status and fish pulsing share the connection-state presentation; an attempt is not displayed as proof of active delivery.
-- Listener retries no longer supersede an in-flight Tuna lane start. Focused startup/IPC payload regressions pass; live helper-to-helpee payer-switch validation remains pending.
+- Listener retries no longer supersede an in-flight Tuna lane start. The October 15 seven-scenario GUI gate on `cf8ea296` passed helper-to-helpee payer handoff, repeated Tuna/fallback activation, and a subsequent Tuna transfer with strict delivery, integrity, and coordinator-route proof.
 
 ### Packaging
 

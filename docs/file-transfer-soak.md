@@ -113,12 +113,13 @@ Required Phase 5 matrix (all require actual delivery, SHA integrity, terminal GU
 - active Tuna V4 64 MiB: authenticated Tuna delivery on `file_tuna_v4`, protocol `4`,
 - live switch-off from helpee: final `post_tuna_fallback_v6`, protocol `6`,
 - live switch-off from helper: final `post_tuna_fallback_v6`, protocol `6`,
+- helper-to-helpee payer handoff 128 MiB: coordinator-published `file_tuna_v4,post_tuna_fallback_v6,file_tuna_v4,post_tuna_fallback_v6`, with authenticated payload delivery in both Tuna phases,
 - `regular-v4-live-activation-off-on-off-256mb`: coordinator-published `regular_nkn_v4_fast,file_tuna_v4,post_tuna_fallback_v6,file_tuna_v4,post_tuna_fallback_v6`, including authenticated Tuna payload delivery at both activations; SHA or fallback completion cannot replace the second publication/delivery proof,
 - second transfer after live reactivation: first transfer proves `post_tuna_fallback_v6,file_tuna_v4`, then the next transfer selects `file_tuna_v4`, protocol `4`.
 
 Fallback retry is allowed only for retryable pre-measured failures, such as measured fallback never starting or a progress timeout before measured fallback produced terminal/integrity evidence. Route mismatch, protocol mismatch, missing `filetransfer_route_selected`, SHA failure, terminal failure, zombie terminal, diagnostic V6 during acceptance, or regular-NKN bridge bulk failure must not be retried into a pass.
 
-For remediation, add `-ScenarioName <existing-scenario-name>` to select only the failing scenario after rebuilding and rerunning affected tests. Omit that filter for the final six-scenario gate. After two focused fix-and-validation iterations without closing the blocker, stop patch expansion and review the implicated architectural boundary. Current dated results and exact payload provenance are in [ReleaseRunbook.md](ReleaseRunbook.md#070-candidate-evidence-2026-10-08).
+For remediation, add `-ScenarioName <existing-scenario-name>` to select only the failing scenario after rebuilding and rerunning affected tests. The final gate covers all seven scenarios. When a campaign must stop at the first failure, invoke each selected scenario once and inspect its strict result before starting the next; the matrix wrapper can otherwise continue collecting results after a failure. After two focused fix-and-validation iterations without closing the blocker, stop patch expansion and review the implicated architectural boundary. Current dated results and exact payload provenance are in [ReleaseRunbook.md](ReleaseRunbook.md#current-qualification-update-2026-10-15).
 
 ## Paid Tuna GUI Smoke
 

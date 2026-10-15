@@ -10,7 +10,7 @@ Minimal `.NET 8` / Avalonia desktop app for Windows with deterministic smoke tes
 
 ## 0.7.0 Release Candidate
 
-This branch prepares `0.7.0`; it is not a published release. It keeps H.264 screen sharing and regular NKN file transfer, and adds optional, default-off Tuna acceleration and wallet controls. The October 7 six-scenario GUI qualification passed strict file-transfer correctness; its separate performance verdict remains **FAIL**. Installer upgrade/uninstall qualification passed on October 8. Final CI sign-off is still pending. See the [release notes](docs/releases/0.7.0.md) and [candidate evidence in the release runbook](docs/ReleaseRunbook.md#070-candidate-evidence-2026-10-08).
+This branch prepares `0.7.0`; it is not a published release. It keeps H.264 screen sharing and regular NKN file transfer, and adds optional, default-off Tuna acceleration and wallet controls. The October 15 seven-scenario GUI gate passed strict file-transfer correctness on `cf8ea296`, including helper-to-helpee payer handoff. Authenticated-delivery proof and exact-payload installer upgrade/uninstall checks passed; separate performance FAIL/WARN results remain recorded. Final CI and release sign-off are still pending. See the [release notes](docs/releases/0.7.0.md) and [current candidate evidence](docs/ReleaseRunbook.md#current-qualification-update-2026-10-15).
 
 ## Quick Start (Windows)
 
@@ -22,7 +22,7 @@ This branch prepares `0.7.0`; it is not a published release. It keeps H.264 scre
 6. Chat opens on both sides.
 7. If `Transfer files` is allowed for the session, either side can click `Send file`.
 
-The screenshots below illustrate the 0.4.5 workflow; they are not current 0.7.0 UI captures.
+The screenshots below use a historical baseline: nLink 0.4.5; they are not current 0.7.0 UI captures.
 
 Home:
 

@@ -1,6 +1,6 @@
 # nLink Docs
 
-Start here for current repo guidance. `0.7.0` is a release candidate, not yet published. Its current qualification status and retained evidence are summarized in the [release runbook](ReleaseRunbook.md#070-candidate-evidence-2026-10-08); candidate notes live in [releases/0.7.0.md](releases/0.7.0.md).
+Start here for current repo guidance. `0.7.0` is a release candidate, not yet published. Its current qualification status and retained evidence are summarized in the [release runbook](ReleaseRunbook.md#current-qualification-update-2026-10-15); candidate notes live in [releases/0.7.0.md](releases/0.7.0.md).
 
 ## Current Operator Guides
 
@@ -11,7 +11,7 @@ Start here for current repo guidance. `0.7.0` is a release candidate, not yet pu
 - [`docs/file-transfer-implementation.md`](file-transfer-implementation.md): current route-aware single-file transfer protocol, V4 regular/Tuna routes, controlled V6 fallback, lifecycle safety, and diagnostics design.
 - [`docs/file-transfer-operability.md`](file-transfer-operability.md): start here for file transfer/Tuna usage, support capture, operator triage, and the distinction between correctness and performance.
 - [`docs/nkn-tuna-implementation.md`](nkn-tuna-implementation.md): experimental NKN Tuna wallet, sidecar, session binding, runtime unlock, caps, and fallback design.
-- [`docs/file-transfer-soak.md`](file-transfer-soak.md): targeted local/live commands and the strict six-scenario Phase 5 release gate.
+- [`docs/file-transfer-soak.md`](file-transfer-soak.md): targeted local/live commands and the strict seven-scenario Phase 5 release gate.
 - [`docs/file-transfer-stabilization-protocol.md`](file-transfer-stabilization-protocol.md): coordinator-authority invariants and bounded remediation rules.
 - [`docs/screenshare-soak.md`](screenshare-soak.md): technical reference for local screenshare soak output and retained Track B evidence.
 - [`docs/screenshare-stabilization-protocol.md`](screenshare-stabilization-protocol.md): promotion rules for planned screenshare runtime behavior changes.
