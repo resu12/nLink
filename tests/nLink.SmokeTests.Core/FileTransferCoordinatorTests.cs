@@ -6285,9 +6285,11 @@ public sealed partial class FileTransferCoordinatorTests
             exact => Assert.Equal("receive_recovery", exact.Family));
     }
 
-    [Fact]
+    [Theory]
+    [InlineData("\n")]
+    [InlineData("\r\n")]
     [Trait("FileTransferCoordinatorSuite", "CoordinatorSnapshots")]
-    public void SnapshotAttemptBuilders_UseOnlyFamilyLocalDescriptors()
+    public void SnapshotAttemptBuilders_UseOnlyFamilyLocalDescriptors(string lineEnding)
     {
         var repoRoot = FindRepoRootForSnapshotTests();
         var source = File.ReadAllText(Path.Combine(
@@ -6295,7 +6297,9 @@ public sealed partial class FileTransferCoordinatorTests
             "src",
             "nLink.Core",
             "FileTransfer",
-            "FileTransferCoordinator.Snapshots.cs"));
+            "FileTransferCoordinator.Snapshots.cs")).ReplaceLineEndings(lineEnding);
+        // Source layout checks must not depend on Git's checkout line-ending policy.
+        source = source.ReplaceLineEndings("\n");
         var expectations = new Dictionary<string, string>(
             StringComparer.Ordinal)
         {
