@@ -19,7 +19,7 @@ on:
         type: boolean
 
 jobs:
-  smoke:
+  runtime_contracts:
     runs-on: windows-latest
     env:
       NLINK_BRIDGE_RUNTIME_DIR: artifacts/bridge/win-x64
@@ -115,9 +115,157 @@ jobs:
         shell: powershell
         run: .\tools\Test-Lanes.ps1 -Lane FileTransferContract -Configuration Release -NoBuild -Logger "trx;LogFilePrefix=filetransfer-contract-results"
 
+      - name: Upload runtime contract test results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: runtime-contract-test-results
+          path: |
+            **/core-contract-results*.trx
+            **/filetransfer-contract-results*.trx
+          if-no-files-found: ignore
+
+      - name: Upload verified bridge bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: ci-bridge-bundle
+          path: artifacts/bridge/win-x64/**
+          if-no-files-found: error
+
+  analyzer:
+    name: Analyzer (${{ matrix.lane }})
+    needs: runtime_contracts
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        lane:
+          - FileTransferAnalyzerAuthority
+          - FileTransferAnalyzerRouteLaw
+          - FileTransferAnalyzerFallback
+          - FileTransferAnalyzerRuntimeUnlock
+          - FileTransferAnalyzerV4Transport
+    env:
+      NLINK_BRIDGE_RUNTIME_DIR: artifacts/bridge/win-x64
+      NLINK_ANALYZER_LANE: ${{ matrix.lane }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET 8
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+
+      - name: Cache NuGet packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.nuget/packages
+          key: ${{ runner.os }}-nuget-${{ hashFiles('**/*.csproj', '**/*.props', '**/*.targets', 'global.json') }}
+          restore-keys: |
+            ${{ runner.os }}-nuget-
+
+      - name: Restore analyzer test project
+        run: dotnet restore tests/nLink.SmokeTests.Core/nLink.SmokeTests.Core.csproj
+
+      - name: Build analyzer test project (Release)
+        shell: powershell
+        run: |
+          $version = (Get-Content VERSION -Raw).Trim()
+          if ([string]::IsNullOrWhiteSpace($version)) {
+            throw "VERSION file is empty."
+          }
+          dotnet build tests/nLink.SmokeTests.Core/nLink.SmokeTests.Core.csproj -c Release --no-restore /p:NLinkVersion=$version
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Download verified bridge bundle
+        uses: actions/download-artifact@v4
+        with:
+          name: ci-bridge-bundle
+          path: artifacts/bridge/win-x64
+
       - name: File-transfer analyzer contract tests
         shell: powershell
-        run: .\tools\Test-Lanes.ps1 -Lane FileTransferAnalyzer -Configuration Release -NoBuild -Logger "trx;LogFilePrefix=filetransfer-analyzer-results"
+        run: |
+          New-Item -ItemType Directory -Force -Path artifacts/ci-analyzer | Out-Null
+          Start-Transcript -Path artifacts/ci-analyzer/progress.log | Out-Null
+          try {
+            .\tools\Test-Lanes.ps1 -Lane $env:NLINK_ANALYZER_LANE -Configuration Release -NoBuild -Logger @("trx;LogFilePrefix=filetransfer-analyzer-results", "console;verbosity=detailed") | Out-Host
+          }
+          finally {
+            Stop-Transcript | Out-Null
+          }
+
+      - name: Upload analyzer results and per-test progress
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: filetransfer-analyzer-${{ matrix.lane }}
+          path: |
+            **/filetransfer-analyzer-results*.trx
+            artifacts/ci-analyzer/progress.log
+          if-no-files-found: warn
+
+  smoke:
+    needs: [runtime_contracts, analyzer]
+    if: ${{ always() }}
+    runs-on: windows-latest
+    env:
+      NLINK_BRIDGE_RUNTIME_DIR: artifacts/bridge/win-x64
+
+    steps:
+      - name: Require runtime and every analyzer lane
+        shell: powershell
+        env:
+          RUNTIME_RESULT: ${{ needs.runtime_contracts.result }}
+          ANALYZER_RESULT: ${{ needs.analyzer.result }}
+        run: |
+          if ($env:RUNTIME_RESULT -ne 'success' -or $env:ANALYZER_RESULT -ne 'success') {
+            throw "Required qualification failed: runtime=$env:RUNTIME_RESULT; analyzers=$env:ANALYZER_RESULT"
+          }
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET 8
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+
+      - name: Cache NuGet packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.nuget/packages
+          key: ${{ runner.os }}-nuget-${{ hashFiles('**/*.csproj', '**/*.props', '**/*.targets', 'global.json') }}
+          restore-keys: |
+            ${{ runner.os }}-nuget-
+
+      - name: Restore
+        run: dotnet restore
+
+      - name: Resolve VERSION
+        shell: powershell
+        run: |
+          $version = (Get-Content VERSION -Raw).Trim()
+          if ([string]::IsNullOrWhiteSpace($version)) {
+            throw "VERSION file is empty."
+          }
+          "NLINK_VERSION=$version" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          Write-Host "Resolved nLink version from VERSION: $version"
+
+      - name: Build (Release)
+        shell: powershell
+        run: |
+          Write-Host "Building nLink version: $env:NLINK_VERSION"
+          dotnet build nLink.sln -c Release --no-restore /p:NLinkVersion=$env:NLINK_VERSION
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Download verified bridge bundle
+        uses: actions/download-artifact@v4
+        with:
+          name: ci-bridge-bundle
+          path: artifacts/bridge/win-x64
 
       - name: File-transfer fake acceptance tests
         shell: powershell
@@ -171,9 +319,6 @@ jobs:
         with:
           name: deterministic-test-results
           path: |
-            **/core-contract-results*.trx
-            **/filetransfer-contract-results*.trx
-            **/filetransfer-analyzer-results*.trx
             **/filetransfer-acceptance-results*.trx
             **/smoke-results*.trx
           if-no-files-found: ignore
