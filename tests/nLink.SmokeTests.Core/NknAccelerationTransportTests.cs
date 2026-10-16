@@ -29199,7 +29199,11 @@ public sealed partial class NknAccelerationTransportTests : CoreSmokeTestsBase, 
             var options = NknTransportOptions.Load();
             var hostClient = new FakeNknClient("host.tuna.answer-cutthrough-runtime-unlock.address");
             var helperClient = new FakeNknClient("helper.tuna.answer-cutthrough-runtime-unlock.address");
-            var hostLane = new FakeNknAccelerationLane(isAvailable: true);
+            var hostLane = new RetryableTunaAccelerationSession(
+                canListen: true,
+                failedDialAttemptsBeforeSuccess: 0,
+                listenerAttemptOutcome: new TaskCompletionSource<bool>(
+                    TaskCreationOptions.RunContinuationsAsynchronously));
             using var host = new NknSignalingTransport(
                 hostClient,
                 options,
@@ -29215,8 +29219,10 @@ public sealed partial class NknAccelerationTransportTests : CoreSmokeTestsBase, 
                 host,
                 helper,
                 cts.Token,
-                InviteCapabilities.Chat | InviteCapabilities.FileTransfer | InviteCapabilities.ScreenShare);
+                InviteCapabilities.Chat | InviteCapabilities.FileTransfer | InviteCapabilities.ScreenShare,
+                suppressAutomaticAccelerationNegotiation: true);
             const string transferId = "transfer_runtime_unlock_answer_timeout_cutthrough";
+            InstallRuntimeUnlockRetryDispatchCoordinatorForTests(host);
             _ = await host.OpenFileTransferDataSessionAsync(sessionId, transferId, cts.Token);
             TrackAuthorizedRegularV4RouteForTests(host, transferId);
             InvokePrivateMethod(
@@ -29226,6 +29232,10 @@ public sealed partial class NknAccelerationTransportTests : CoreSmokeTestsBase, 
                 sessionId,
                 "runtime_unlock_offer_send_not_observed",
                 "tuna_activation_offer_send_timeout");
+            await host.DrainRuntimeUnlockRetryDispatchInstallFollowUpsForTestsAsync();
+            await WaitUntilAsync(
+                () => hostLane.EnsureListenerCalls == 1,
+                TimeSpan.FromSeconds(3));
             InvokePrivateMethod(
                 host,
                 "MarkRuntimeUnlockRecoveryContractRetryDispatched",
@@ -38585,6 +38595,8 @@ public sealed partial class NknAccelerationTransportTests : CoreSmokeTestsBase, 
 
         public NknTunaListenerStartRequest? LastListenerRequest { get; private set; }
 
+        public Func<NknTunaListenerStartRequest, CancellationToken, Task<bool>>? BeforeListenerReadyForTests { get; set; }
+
         public void SetCanListen(bool value)
             => Volatile.Write(ref canListen, value ? 1 : 0);
 
@@ -38710,6 +38722,9 @@ public sealed partial class NknAccelerationTransportTests : CoreSmokeTestsBase, 
             {
                 return false;
             }
+
+            if (BeforeListenerReadyForTests is { } beforeReady &&
+                !await beforeReady(request, ct).ConfigureAwait(false)) return false;
 
             LocalTunaAddress = "nlink-tuna-sidecar.test-listener-address";
             if (request.LifetimePolicy ==

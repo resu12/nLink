@@ -9,6 +9,42 @@ public sealed partial class NknSignalingTransport
     internal Func<Task>? SessionPreparationBeforeTransferActivationOfferForTests;
     private SessionPreparationActivationHandoff? sessionPreparationActivationHandoff;
 
+    private sealed record StartupTransferActivationBinding(
+        FileTransferSessionPreparationAttachment Attachment,
+        FileTransferSessionPreparationSecurityEpoch Epoch,
+        FileTransferRoutePublicationAuthority Publication);
+    private StartupTransferActivationBinding? pendingStartupTransferActivation;
+    private StartupTransferActivationBinding? pendingRuntimeUnlockStartupBinding;
+    internal Func<Task>? StartupTransferActivationBeforeRetryForTests;
+    internal Task? StartupTransferActivationRetryForTests;
+    internal Task? StartupTransferActivationWakeForTests;
+
+    private bool IsStartupTransferActivationBindingCurrent(StartupTransferActivationBinding binding)
+        => IsSessionPreparationRequestBindingCurrent(binding.Attachment, binding.Epoch) &&
+           !IsAccelerationUserStoppedForCurrentSession() &&
+           !IsAccelerationPeerUserStoppedForFallbackSession(binding.Epoch.SessionId) &&
+           binding.Attachment.Authority.SelectRequest(binding.Attachment, binding.Epoch).Purpose ==
+               FileTransferAccelerationRequestPurpose.TransferActivation &&
+           TryCaptureCurrentRuntimeUnlockFileTransferOwnerAuthority(binding.Epoch.SessionId, out var current, out _) &&
+           current == binding.Publication;
+
+    private void RecheckPendingStartupTransferActivation()
+    {
+        var binding = Volatile.Read(ref pendingStartupTransferActivation);
+        if (binding is null) return;
+        if (!IsStartupTransferActivationBindingCurrent(binding))
+        {
+            Interlocked.CompareExchange(ref pendingStartupTransferActivation, null, binding);
+            return;
+        }
+        // Registration is a wake-up only; the exact Core publication still owns
+        // activation and the normal preflight revalidates the data-session scope.
+        if (Volatile.Read(ref accelerationNegotiationScheduled) != 0 ||
+            !TryCaptureRuntimeUnlockInitialActivationReceiveRecoveryExpectedScope(binding.Publication, out _, out _)) return;
+        ScheduleAccelerationNegotiationIfEligible("runtime_unlock_automatic_transfer",
+            runtimeUnlockActivation: true, startupBinding: binding);
+    }
+
     private sealed class SessionPreparationActivationHandoff(
         FileTransferSessionPreparationAttachment attachment, FileTransferSessionPreparationSecurityEpoch epoch,
         FileTransferSessionPreparationPermit permit, CancellationToken cancellation)

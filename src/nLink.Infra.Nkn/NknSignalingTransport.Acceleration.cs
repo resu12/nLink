@@ -614,7 +614,10 @@ public sealed partial class NknSignalingTransport
         string ControlEnvelopeFingerprint,
         RuntimeUnlockRetryDispatchInstallReceipt? InstallReceipt,
         RuntimeUnlockInitialActivationReceiveRecoveryExpectedScope
-            InitialActivationExpectedScope = default);
+            InitialActivationExpectedScope = default)
+    {
+        public StartupTransferActivationBinding? StartupBinding { get; init; }
+    }
 
     private enum RuntimeUnlockRetiredAnswerBarrierPhase
     {
@@ -13822,15 +13825,18 @@ public sealed partial class NknSignalingTransport
         string reason,
         RuntimeUnlockRetryDispatchInstallReceipt? expectedInstallReceipt = null,
         RuntimeUnlockOfferAuthorityMode authorityMode =
-            RuntimeUnlockOfferAuthorityMode.InitialActivation)
+            RuntimeUnlockOfferAuthorityMode.InitialActivation,
+        StartupTransferActivationBinding? startupBinding = null)
     {
+        if (startupBinding is not null && !IsStartupTransferActivationBindingCurrent(startupBinding)) return;
         var normalizedReason = SanitizeLogToken(reason);
         lock (accelerationGate)
         {
             _ = TryBindPendingRuntimeUnlockAccelerationNegotiationUnsafe(
                 normalizedReason,
                 expectedInstallReceipt,
-                authorityMode);
+                authorityMode,
+                startupBinding);
         }
     }
 
@@ -13839,8 +13845,10 @@ public sealed partial class NknSignalingTransport
         string waitReason,
         RuntimeUnlockRetryDispatchInstallReceipt? expectedInstallReceipt = null,
         RuntimeUnlockOfferAuthorityMode authorityMode =
-            RuntimeUnlockOfferAuthorityMode.InitialActivation)
+            RuntimeUnlockOfferAuthorityMode.InitialActivation,
+        StartupTransferActivationBinding? startupBinding = null)
     {
+        if (startupBinding is not null && !IsStartupTransferActivationBindingCurrent(startupBinding)) return false;
         var normalizedReason = SanitizeLogToken(reason);
         bool hasOffer;
         bool hasAnswerAck;
@@ -13856,7 +13864,8 @@ public sealed partial class NknSignalingTransport
             if (!TryBindPendingRuntimeUnlockAccelerationNegotiationUnsafe(
                     normalizedReason,
                     expectedInstallReceipt,
-                    authorityMode))
+                    authorityMode,
+                    startupBinding))
             {
                 return false;
             }
@@ -14285,7 +14294,8 @@ public sealed partial class NknSignalingTransport
     private bool TryBindPendingRuntimeUnlockAccelerationNegotiationUnsafe(
         string normalizedReason,
         RuntimeUnlockRetryDispatchInstallReceipt? expectedInstallReceipt,
-        RuntimeUnlockOfferAuthorityMode authorityMode)
+        RuntimeUnlockOfferAuthorityMode authorityMode,
+        StartupTransferActivationBinding? startupBinding = null)
     {
         if (!TryValidatePendingRuntimeUnlockOfferAuthorityUnsafe(
                 authorityMode,
@@ -14304,6 +14314,7 @@ public sealed partial class NknSignalingTransport
         }
 
         pendingRuntimeUnlockAccelerationNegotiationReason = normalizedReason;
+        pendingRuntimeUnlockStartupBinding = startupBinding;
         pendingRuntimeUnlockAccelerationNegotiationAuthorityMode = authorityMode;
         pendingRuntimeUnlockAccelerationNegotiationInstallReceipt =
             authorityMode == RuntimeUnlockOfferAuthorityMode.InstalledRetry
@@ -14316,7 +14327,8 @@ public sealed partial class NknSignalingTransport
     private bool TryConsumePendingRuntimeUnlockAccelerationNegotiation(
         out string reason,
         out RuntimeUnlockRetryDispatchInstallReceipt? expectedInstallReceipt,
-        out RuntimeUnlockOfferAuthorityMode authorityMode)
+        out RuntimeUnlockOfferAuthorityMode authorityMode,
+        out StartupTransferActivationBinding? startupBinding)
     {
         reason = "runtime_unlock";
         authorityMode = RuntimeUnlockOfferAuthorityMode.InitialActivation;
@@ -14325,15 +14337,18 @@ public sealed partial class NknSignalingTransport
             return TryConsumePendingRuntimeUnlockAccelerationNegotiationUnsafe(
                 out reason,
                 out expectedInstallReceipt,
-                out authorityMode);
+                out authorityMode,
+                out startupBinding);
         }
     }
 
     private bool TryConsumePendingRuntimeUnlockAccelerationNegotiationUnsafe(
         out string reason,
         out RuntimeUnlockRetryDispatchInstallReceipt? expectedInstallReceipt,
-        out RuntimeUnlockOfferAuthorityMode authorityMode)
+        out RuntimeUnlockOfferAuthorityMode authorityMode,
+        out StartupTransferActivationBinding? startupBinding)
     {
+        startupBinding = null;
         reason = "runtime_unlock";
         expectedInstallReceipt = null;
         authorityMode = RuntimeUnlockOfferAuthorityMode.InitialActivation;
@@ -14353,6 +14368,8 @@ public sealed partial class NknSignalingTransport
             pendingRuntimeUnlockAccelerationNegotiationAuthorityMode ??
             RuntimeUnlockOfferAuthorityMode.InitialActivation;
         expectedInstallReceipt = pendingRuntimeUnlockAccelerationNegotiationInstallReceipt;
+        startupBinding = pendingRuntimeUnlockStartupBinding;
+        pendingRuntimeUnlockStartupBinding = null;
         pendingRuntimeUnlockAccelerationNegotiationReason = null;
         pendingRuntimeUnlockAccelerationNegotiationAuthorityMode = null;
         pendingRuntimeUnlockAccelerationNegotiationInstallReceipt = null;
@@ -14377,7 +14394,8 @@ public sealed partial class NknSignalingTransport
         if (!TryConsumePendingRuntimeUnlockAccelerationNegotiation(
                 out var pendingReason,
                 out var expectedInstallReceipt,
-                out var authorityMode))
+                out var authorityMode,
+                out var startupBinding))
         {
             return;
         }
@@ -14386,7 +14404,8 @@ public sealed partial class NknSignalingTransport
             pendingReason,
             trigger,
             expectedInstallReceipt,
-            authorityMode);
+            authorityMode,
+            startupBinding);
     }
 
     private void SchedulePendingRuntimeUnlockAccelerationNegotiationAfterCurrentOperationUnsafe(string trigger)
@@ -14407,7 +14426,8 @@ public sealed partial class NknSignalingTransport
         if (!TryConsumePendingRuntimeUnlockAccelerationNegotiationUnsafe(
                 out var pendingReason,
                 out var expectedInstallReceipt,
-                out var authorityMode))
+                out var authorityMode,
+                out var startupBinding))
         {
             return;
         }
@@ -14416,26 +14436,30 @@ public sealed partial class NknSignalingTransport
             pendingReason,
             trigger,
             expectedInstallReceipt,
-            authorityMode);
+            authorityMode,
+            startupBinding);
     }
 
     private void ScheduleRuntimeUnlockAccelerationNegotiationWake(
         string pendingReason,
         string trigger,
         RuntimeUnlockRetryDispatchInstallReceipt? expectedInstallReceipt,
-        RuntimeUnlockOfferAuthorityMode authorityMode)
+        RuntimeUnlockOfferAuthorityMode authorityMode,
+        StartupTransferActivationBinding? startupBinding)
     {
         LocalOperationalLog.Info(
             "NKN.Tuna",
             $"event=tuna_acceleration_runtime_unlock_pending_negotiation_wake_scheduled; reason={SanitizeLogToken(pendingReason)}; authority_mode={SanitizeLogToken(authorityMode.ToString())}; trigger={SanitizeLogToken(trigger)}");
-        _ = Task.Run(
+        var wakeTask = Task.Run(
             () => ScheduleAccelerationNegotiationIfEligible(
                 pendingReason,
                 expectedInstallReceipt,
                 requireRuntimeUnlockRetryDispatchInstall:
                     authorityMode == RuntimeUnlockOfferAuthorityMode.InstalledRetry,
-                runtimeUnlockActivation: true),
+                runtimeUnlockActivation: true,
+                startupBinding: startupBinding),
             CancellationToken.None);
+        if (startupBinding is not null) StartupTransferActivationWakeForTests = wakeTask;
     }
 
     private void SchedulePendingRuntimeUnlockRegularV4FrontierRepairRecheck(
@@ -14538,6 +14562,7 @@ public sealed partial class NknSignalingTransport
     {
         lock (accelerationGate)
         {
+            pendingRuntimeUnlockStartupBinding = null;
             pendingRuntimeUnlockAccelerationNegotiation = 0;
             pendingRuntimeUnlockAccelerationNegotiationReason = null;
             pendingRuntimeUnlockAccelerationNegotiationAuthorityMode = null;
@@ -14551,8 +14576,10 @@ public sealed partial class NknSignalingTransport
         bool requireRuntimeUnlockRetryDispatchInstall = false,
         bool runtimeUnlockActivation = false,
         long reservedSlotGeneration = 0,
-        SessionPreparationActivationHandoff? preparationHandoff = null)
+        SessionPreparationActivationHandoff? preparationHandoff = null,
+        StartupTransferActivationBinding? startupBinding = null)
     {
+        if (startupBinding is not null && !IsStartupTransferActivationBindingCurrent(startupBinding)) return;
         runtimeUnlockActivation |= requireRuntimeUnlockRetryDispatchInstall;
         // A published regular-v4 transfer needs the coordinator-owned activation
         // transaction, not the session-only readiness handoff. The activation
@@ -14626,7 +14653,8 @@ public sealed partial class NknSignalingTransport
                     expectedInstallReceipt,
                     requireRuntimeUnlockRetryDispatchInstall
                         ? RuntimeUnlockOfferAuthorityMode.InstalledRetry
-                        : RuntimeUnlockOfferAuthorityMode.InitialActivation))
+                        : RuntimeUnlockOfferAuthorityMode.InitialActivation,
+                    startupBinding))
             {
                 ReleaseReservedSlot(
                     "negotiation_schedule_pending_generation");
@@ -14700,7 +14728,8 @@ public sealed partial class NknSignalingTransport
                         expectedInstallReceipt,
                         requireRuntimeUnlockRetryDispatchInstall
                             ? RuntimeUnlockOfferAuthorityMode.InstalledRetry
-                            : RuntimeUnlockOfferAuthorityMode.InitialActivation);
+                            : RuntimeUnlockOfferAuthorityMode.InitialActivation,
+                        startupBinding);
                     if (requireRuntimeUnlockRetryDispatchInstall)
                     {
                         MarkRuntimeUnlockRecoveryContractQueuedBehindActiveNegotiation(reason);
@@ -14754,6 +14783,7 @@ public sealed partial class NknSignalingTransport
                 var dispositionReason = "negotiation_operation_completed";
                 try
                 {
+                    if (startupBinding is not null && !IsStartupTransferActivationBindingCurrent(startupBinding)) return;
                     if (preparationHandoff is not null)
                     {
                         if (SessionPreparationBeforeTransferActivationOfferForTests is { } beforeOffer)
@@ -14782,7 +14812,8 @@ public sealed partial class NknSignalingTransport
                             expectedInstallReceipt,
                             requireRuntimeUnlockRetryDispatchInstall,
                             runtimeUnlockActivation,
-                            preparationHandoff)
+                            preparationHandoff,
+                            startupBinding)
                         .ConfigureAwait(false);
                     (disposition, dispositionReason) =
                         requireRuntimeUnlockRetryDispatchInstall
@@ -14819,6 +14850,7 @@ public sealed partial class NknSignalingTransport
                         negotiationSlotGeneration,
                         negotiationSlotOwner,
                         "negotiation_complete");
+                    RecheckPendingStartupTransferActivation();
                 }
             },
             CancellationToken.None);
@@ -15573,7 +15605,8 @@ public sealed partial class NknSignalingTransport
         RuntimeUnlockRetryDispatchInstallReceipt? expectedInstallReceipt = null,
         bool requireRuntimeUnlockRetryDispatchInstall = false,
         bool runtimeUnlockActivation = false,
-        SessionPreparationActivationHandoff? preparationHandoff = null)
+        SessionPreparationActivationHandoff? preparationHandoff = null,
+        StartupTransferActivationBinding? startupBinding = null)
     {
         if (!requireRuntimeUnlockRetryDispatchInstall ||
             expectedInstallReceipt is not { } installReceipt)
@@ -15586,7 +15619,8 @@ public sealed partial class NknSignalingTransport
                     requireRuntimeUnlockRetryDispatchInstall,
                     runtimeUnlockActivation,
                     physicalSendScope: null,
-                    preparationHandoff)
+                    preparationHandoff,
+                    startupBinding)
                 .ConfigureAwait(false);
             return;
         }
@@ -15680,8 +15714,11 @@ public sealed partial class NknSignalingTransport
         bool requireRuntimeUnlockRetryDispatchInstall,
         bool runtimeUnlockActivation,
         RuntimeUnlockRetryPhysicalSendScope? physicalSendScope,
-        SessionPreparationActivationHandoff? preparationHandoff = null)
+        SessionPreparationActivationHandoff? preparationHandoff = null,
+        StartupTransferActivationBinding? startupBinding = null)
     {
+        if (startupBinding is not null)
+            Interlocked.CompareExchange(ref pendingStartupTransferActivation, null, startupBinding);
         var offerAuthorityMode = requireRuntimeUnlockRetryDispatchInstall
             ? RuntimeUnlockOfferAuthorityMode.InstalledRetry
             : runtimeUnlockActivation
@@ -15693,6 +15730,7 @@ public sealed partial class NknSignalingTransport
 
         bool ValidateOfferAuthority(string boundary)
             => (preparationHandoff is null || IsSessionPreparationActivationHandoffLifetimeCurrent(preparationHandoff)) &&
+                (startupBinding is null || IsStartupTransferActivationBindingCurrent(startupBinding)) &&
                 (offerAuthorityMode is { } mode
                 ? ValidatePendingRuntimeUnlockOfferAuthority(
                     mode,
@@ -15703,11 +15741,12 @@ public sealed partial class NknSignalingTransport
                     boundary));
 
         bool ScheduleOfferRetry(string retryReason)
-            => offerAuthorityMode switch
+            => (startupBinding is null || IsStartupTransferActivationBindingCurrent(startupBinding)) &&
+               (offerAuthorityMode switch
             {
                 RuntimeUnlockOfferAuthorityMode.InitialActivation =>
                     ScheduleInitialRuntimeUnlockAccelerationNegotiationRetry(
-                        retryReason),
+                        retryReason, startupBinding),
                 RuntimeUnlockOfferAuthorityMode.InstalledRetry =>
                     ScheduleRuntimeUnlockAccelerationNegotiationRetry(
                         retryReason,
@@ -15715,7 +15754,7 @@ public sealed partial class NknSignalingTransport
                 _ => ScheduleAccelerationNegotiationRetry(
                     retryReason,
                     expectedInstallReceipt),
-            };
+            });
 
         if (!ValidateOfferAuthority("offer_preflight"))
         {
@@ -15737,7 +15776,8 @@ public sealed partial class NknSignalingTransport
                 "missing_tuna_session",
                 retryable: false,
                 expectedInstallReceipt: expectedInstallReceipt,
-                offerAuthorityMode: offerAuthorityMode);
+                offerAuthorityMode: offerAuthorityMode,
+                startupBinding: startupBinding);
             return;
         }
 
@@ -15748,7 +15788,8 @@ public sealed partial class NknSignalingTransport
                 "missing_remote_endpoint",
                 retryable: true,
                 expectedInstallReceipt: expectedInstallReceipt,
-                offerAuthorityMode: offerAuthorityMode);
+                offerAuthorityMode: offerAuthorityMode,
+                startupBinding: startupBinding);
             return;
         }
 
@@ -15759,7 +15800,8 @@ public sealed partial class NknSignalingTransport
                 "session_not_eligible",
                 retryable: false,
                 expectedInstallReceipt: expectedInstallReceipt,
-                offerAuthorityMode: offerAuthorityMode);
+                offerAuthorityMode: offerAuthorityMode,
+                startupBinding: startupBinding);
             return;
         }
 
@@ -15772,10 +15814,19 @@ public sealed partial class NknSignalingTransport
                 retryable: false,
                 eligibleLanes,
                 expectedInstallReceipt,
-                offerAuthorityMode);
+                offerAuthorityMode,
+                startupBinding: startupBinding);
             NotifyTransportAccelerationStateChanged("no_eligible_lane");
             return;
         }
+
+        // A mixed-lane session startup may outlive admission of the first file.
+        // Keep its original Core/security binding across the listener await;
+        // readiness alone must never turn that file into a Tuna transfer.
+        var startupAttachment = !isRuntimeUnlockActivation &&
+            (preflightLanes & NknAccelerationLaneKind.File) != 0
+                ? sessionPreparationLifecycle.Attachment : null;
+        var startupEpoch = startupAttachment is not null ? sessionPreparationLifecycle.Current : null;
 
         var sessionId = currentSessionSecurityState.SessionId?.Value;
         if (string.IsNullOrWhiteSpace(sessionId) || !TryGetCurrentEnvelopeCode(out var envelopeCode))
@@ -15786,7 +15837,8 @@ public sealed partial class NknSignalingTransport
                 retryable: true,
                 preflightLanes,
                 expectedInstallReceipt,
-                offerAuthorityMode);
+                offerAuthorityMode,
+                startupBinding: startupBinding);
             return;
         }
 
@@ -15870,6 +15922,10 @@ public sealed partial class NknSignalingTransport
             {
                 return;
             }
+            if (startupBinding is not null && capturedOwnerAuthority != startupBinding.Publication)
+            {
+                return;
+            }
             runtimeUnlockFileTransferOwnerAuthority = capturedOwnerAuthority;
             LogRuntimeUnlockFileTransferOwnerAcceptedBeforePathLease(
                 capturedOwnerAuthority,
@@ -15882,6 +15938,14 @@ public sealed partial class NknSignalingTransport
                         out var capturedExpectedScope,
                         out var expectedScopeRejectionReason))
                 {
+                    if (startupBinding is not null &&
+                        expectedScopeRejectionReason == "runtime_unlock_initial_activation_data_session_not_current" &&
+                        IsStartupTransferActivationBindingCurrent(startupBinding))
+                    {
+                        Volatile.Write(ref pendingStartupTransferActivation, startupBinding);
+                        LocalOperationalLog.Info("NKN.Tuna",
+                            $"event=runtime_unlock_startup_transfer_waiting_for_data_session; session_id={SanitizeLogToken(sessionId)}; transfer_id={SanitizeLogToken(capturedOwnerAuthority.TransferId)}; authority_effect=none");
+                    }
                     LogRuntimeUnlockFileTransferOwnerRejectedBeforePathLease(
                         sessionId,
                         reason,
@@ -16074,12 +16138,15 @@ public sealed partial class NknSignalingTransport
                 retryable: true,
                 eligibleLanes,
                 expectedInstallReceipt,
-                offerAuthorityMode);
+                offerAuthorityMode,
+                startupBinding: startupBinding);
             return;
         }
 
         NotifyTransportAccelerationStateChanged("checking_payer_priority");
-        if (await ShouldSuppressLocalPaidOfferForHelpeePriorityAsync(localRole, reason, ct).ConfigureAwait(false))
+        var suppressForPayerPriority = await ShouldSuppressLocalPaidOfferForHelpeePriorityAsync(localRole, reason, ct).ConfigureAwait(false);
+        if (startupBinding is not null && !IsStartupTransferActivationBindingCurrent(startupBinding)) return;
+        if (suppressForPayerPriority)
         {
             ResumeActivationPauseIfNeeded("tuna_activation_failed_regular_v4_resumed", "payer_priority_suppressed");
             return;
@@ -16103,7 +16170,8 @@ public sealed partial class NknSignalingTransport
                 "session_not_eligible_after_payer_priority",
                 retryable: false,
                 expectedInstallReceipt: expectedInstallReceipt,
-                offerAuthorityMode: offerAuthorityMode);
+                offerAuthorityMode: offerAuthorityMode,
+                startupBinding: startupBinding);
             return;
         }
 
@@ -16116,7 +16184,8 @@ public sealed partial class NknSignalingTransport
                 retryable: false,
                 eligibleLanes,
                 expectedInstallReceipt,
-                offerAuthorityMode);
+                offerAuthorityMode,
+                startupBinding: startupBinding);
             return;
         }
 
@@ -16130,7 +16199,8 @@ public sealed partial class NknSignalingTransport
                 retryable: false,
                 eligibleLanes,
                 expectedInstallReceipt,
-                offerAuthorityMode);
+                offerAuthorityMode,
+                startupBinding: startupBinding);
             NotifyTransportAccelerationStateChanged("no_eligible_lane");
             return;
         }
@@ -16282,11 +16352,13 @@ public sealed partial class NknSignalingTransport
                 : new NknTunaListenerStartRequest(
                     remoteEndpoint,
                     preflightLanes));
-        if ((listenerAdoptionReceipt is null &&
-             !await tunaSession.EnsureListenerSidecarConnectedAsync(
+        var listenerConnected = listenerAdoptionReceipt is not null ||
+             await tunaSession.EnsureListenerSidecarConnectedAsync(
                      listenerStartRequest,
-                     ct).ConfigureAwait(false)) ||
-            string.IsNullOrWhiteSpace(tunaSession.LocalTunaAddress))
+                     ct).ConfigureAwait(false);
+        // A failed listener callback is no more authoritative than a ready one.
+        if (startupBinding is not null && !IsStartupTransferActivationBindingCurrent(startupBinding)) return;
+        if (!listenerConnected || string.IsNullOrWhiteSpace(tunaSession.LocalTunaAddress))
         {
             NotifyTransportAccelerationStateChanged("listener_sidecar_unavailable");
             if (isRuntimeUnlockActivation)
@@ -16339,6 +16411,32 @@ public sealed partial class NknSignalingTransport
                 _ = ScheduleOfferRetry(listenerRetryReason);
             }
             return;
+        }
+
+        if (!isRuntimeUnlockActivation && startupAttachment is not null && startupEpoch is not null)
+        {
+            if (ct.IsCancellationRequested || IsStaleLocalPayerDecision(payerDecisionId) ||
+                !IsSessionPreparationRequestBindingCurrent(startupAttachment, startupEpoch) ||
+                IsAccelerationUserStoppedForCurrentSession() ||
+                IsAccelerationPeerUserStoppedForFallbackSession(startupEpoch.SessionId)) return;
+
+            var selection = startupAttachment.Authority.SelectRequest(startupAttachment, startupEpoch);
+            if (selection.Purpose == FileTransferAccelerationRequestPurpose.TransferActivation)
+            {
+                if (!TryCaptureCurrentRuntimeUnlockFileTransferOwnerAuthority(sessionId, out var publication, out _) ||
+                    publication.RouteToken != FileTransferRouteResolver.RegularNknV4FastToken ||
+                    publication.ProtocolVersion != FileTransferProtocol.ProtocolVersionV4) return;
+
+                LocalOperationalLog.Info("NKN.Tuna",
+                    $"event=runtime_unlock_startup_transfer_activation_requested; session_id={SanitizeLogToken(sessionId)}; transfer_id={SanitizeLogToken(publication.TransferId)}; decision_reason=current_coordinator_publication_after_listener_start; authority_effect=none");
+                // Re-enter the existing source-current preflight and scoped listener
+                // path once. It alone may create the lease, offer and probe boundary.
+                await TrySendAccelerationOfferCoreAsync("runtime_unlock_automatic_transfer", payerDecisionId, ct,
+                    null, false, true, null,
+                    startupBinding: new(startupAttachment, startupEpoch, publication)).ConfigureAwait(false);
+                return;
+            }
+            if (selection.Purpose == FileTransferAccelerationRequestPurpose.Unavailable) return;
         }
 
         if (isRuntimeUnlockActivation)
@@ -16773,7 +16871,7 @@ public sealed partial class NknSignalingTransport
                             outboundAccelerationOfferInstallReceipt,
                         InitialActivationExpectedScope:
                             runtimeUnlockInitialActivationExpectedScope
-                                .GetValueOrDefault());
+                                .GetValueOrDefault()) { StartupBinding = startupBinding };
                 outboundRuntimeUnlockOfferAuthorityBoundary =
                     runtimeUnlockOfferAuthorityBoundary;
                 if (offerAuthorityMode ==
@@ -16946,7 +17044,7 @@ public sealed partial class NknSignalingTransport
                 if (retired)
                 {
                     _ = ScheduleInitialRuntimeUnlockAccelerationNegotiationRetry(
-                        payerIntentRetryReason);
+                        payerIntentRetryReason, startupBinding);
                 }
                 return;
             }
@@ -17501,7 +17599,7 @@ public sealed partial class NknSignalingTransport
                 var retryScheduled =
                     retired &&
                     ScheduleInitialRuntimeUnlockAccelerationNegotiationRetry(
-                        retryReason);
+                        retryReason, startupBinding);
                 LocalOperationalLog.Warn(
                     "NKN.Tuna",
                     $"event=tuna_acceleration_activation_offer_not_observed; trigger={SanitizeLogToken(reason)}; session_id={SanitizeLogToken(sessionId)}; payer_decision_id={payerDecisionId}; generation={offerGeneration}; authority_mode={SanitizeLogToken(RuntimeUnlockOfferAuthorityMode.InitialActivation.ToString())}; retry_scheduled={(retryScheduled ? 1 : 0)}; retry_after_recovery_armed=0; dispatch_successor_requested=0; replay_scheduled=0; answer_timeout_scheduled=0; pause_deferred={(pausedForActivationNegotiation ? 0 : 1)}; recovery_requested={(offerSend.RecoveryRequested ? 1 : 0)}; recovery_reason={SanitizeLogToken(offerSend.RecoveryReason)}");
@@ -25197,6 +25295,7 @@ public sealed partial class NknSignalingTransport
         pendingRuntimeUnlockAccelerationNegotiationAuthorityMode = null;
         pendingRuntimeUnlockAccelerationNegotiationInstallReceipt = null;
         pendingRuntimeUnlockRegularV4FrontierRepairRecheckScheduled = 0;
+        pendingRuntimeUnlockStartupBinding = null;
     }
 
     private void CloseRuntimeUnlockRetryDispatchChainUnsafe(
@@ -25276,6 +25375,7 @@ public sealed partial class NknSignalingTransport
         pendingRuntimeUnlockAccelerationNegotiationAuthorityMode = null;
         pendingRuntimeUnlockAccelerationNegotiationInstallReceipt = null;
         pendingRuntimeUnlockRegularV4FrontierRepairRecheckScheduled = 0;
+        pendingRuntimeUnlockStartupBinding = null;
     }
 
     private bool RequiresRuntimeUnlockRetryDispatchProof(RuntimeUnlockRecoveryRetryState state)
@@ -29657,6 +29757,7 @@ public sealed partial class NknSignalingTransport
                 pendingRuntimeUnlockAccelerationNegotiationInstallReceipt =
                     expectedInstallReceipt;
                 pendingRuntimeUnlockAccelerationNegotiation = 1;
+                pendingRuntimeUnlockStartupBinding = null;
                 activeNegotiationHeldState = state;
                 stateToSchedule = state;
             }
@@ -38843,12 +38944,14 @@ public sealed partial class NknSignalingTransport
                 .RuntimeUnlockRetryDispatchInstall);
 
     private bool ScheduleInitialRuntimeUnlockAccelerationNegotiationRetry(
-        string reason)
+        string reason,
+        StartupTransferActivationBinding? startupBinding = null)
         => ScheduleAccelerationNegotiationRetryCore(
             reason,
             expectedInstallReceipt: null,
             AccelerationNegotiationRetryAuthorityRequirement
-                .InitialRuntimeUnlock);
+                .InitialRuntimeUnlock,
+            startupBinding);
 
     private bool ScheduleRuntimeUnlockOfferAuthorityRetry(
         string reason,
@@ -38869,7 +38972,7 @@ public sealed partial class NknSignalingTransport
         }
 
         return authorityBoundary.Mode == RuntimeUnlockOfferAuthorityMode.InitialActivation
-            ? ScheduleInitialRuntimeUnlockAccelerationNegotiationRetry(reason)
+            ? ScheduleInitialRuntimeUnlockAccelerationNegotiationRetry(reason, authorityBoundary.StartupBinding)
             : ScheduleRuntimeUnlockAccelerationNegotiationRetry(
                 reason,
                 expectedInstallReceipt);
@@ -38878,8 +38981,10 @@ public sealed partial class NknSignalingTransport
     private bool ScheduleAccelerationNegotiationRetryCore(
         string reason,
         RuntimeUnlockRetryDispatchInstallReceipt? expectedInstallReceipt,
-        AccelerationNegotiationRetryAuthorityRequirement authorityRequirement)
+        AccelerationNegotiationRetryAuthorityRequirement authorityRequirement,
+        StartupTransferActivationBinding? startupBinding = null)
     {
+        if (startupBinding is not null && !IsStartupTransferActivationBindingCurrent(startupBinding)) return false;
         var normalizedReason = SanitizeLogToken(reason);
         var requiresRuntimeUnlockRetryDispatchInstall =
             authorityRequirement ==
@@ -39055,12 +39160,18 @@ public sealed partial class NknSignalingTransport
                 $"event=runtime_unlock_precommit_probe_sidecar_rearm_scheduled; session_id={SanitizeLogToken(currentSessionSecurityState.SessionId?.Value ?? "none")}; retry_reason={normalizedReason}; trigger=schedule_retry; listener_ready_reuse={(useListenerReadyFastRetry ? 1 : 0)}; decision_reason=sidecar_closed_requires_listener_rearm");
         }
 
-        _ = Task.Run(
+        var retryTask = Task.Run(
             async () =>
             {
                 try
                 {
                     await Task.Delay(delay, CancellationToken.None).ConfigureAwait(false);
+                    if (startupBinding is not null)
+                    {
+                        if (StartupTransferActivationBeforeRetryForTests is { } beforeRetry)
+                            await beforeRetry().ConfigureAwait(false);
+                        if (!IsStartupTransferActivationBindingCurrent(startupBinding)) return;
+                    }
                     if (authorityRequirement !=
                             AccelerationNegotiationRetryAuthorityRequirement
                                 .InitialRuntimeUnlock &&
@@ -39098,7 +39209,8 @@ public sealed partial class NknSignalingTransport
                                 expectedInstallReceipt,
                                 requiresRuntimeUnlockRetryDispatchInstall
                                     ? RuntimeUnlockOfferAuthorityMode.InstalledRetry
-                                    : RuntimeUnlockOfferAuthorityMode.InitialActivation))
+                                    : RuntimeUnlockOfferAuthorityMode.InitialActivation,
+                                startupBinding))
                         {
                             LogAccelerationRetryNotScheduled(normalizedReason, "delayed_pending_offer_queued");
                             return;
@@ -39117,7 +39229,8 @@ public sealed partial class NknSignalingTransport
                                 expectedInstallReceipt,
                                 requiresRuntimeUnlockRetryDispatchInstall
                                     ? RuntimeUnlockOfferAuthorityMode.InstalledRetry
-                                    : RuntimeUnlockOfferAuthorityMode.InitialActivation))
+                                    : RuntimeUnlockOfferAuthorityMode.InitialActivation,
+                                startupBinding))
                         {
                             LogAccelerationRetryNotScheduled(normalizedReason, "delayed_pending_answer_ack_queued");
                             return;
@@ -39182,7 +39295,8 @@ public sealed partial class NknSignalingTransport
                         requireRuntimeUnlockRetryDispatchInstall:
                             requiresRuntimeUnlockRetryDispatchInstall,
                         runtimeUnlockActivation:
-                            usesRuntimeUnlockRetryPolicy);
+                            usesRuntimeUnlockRetryPolicy,
+                        startupBinding: startupBinding);
                 }
                 catch (Exception ex) when (ex is not OperationCanceledException)
                 {
@@ -39192,6 +39306,7 @@ public sealed partial class NknSignalingTransport
                 }
             },
             CancellationToken.None);
+        if (startupBinding is not null) StartupTransferActivationRetryForTests = retryTask;
         return true;
     }
 
@@ -39495,8 +39610,10 @@ public sealed partial class NknSignalingTransport
         bool retryable,
         NknAccelerationLaneKind eligibleLanes = NknAccelerationLaneKind.None,
         RuntimeUnlockRetryDispatchInstallReceipt? expectedInstallReceipt = null,
-        RuntimeUnlockOfferAuthorityMode? offerAuthorityMode = null)
+        RuntimeUnlockOfferAuthorityMode? offerAuthorityMode = null,
+        StartupTransferActivationBinding? startupBinding = null)
     {
+        if (startupBinding is not null && !IsStartupTransferActivationBindingCurrent(startupBinding)) return;
         var normalizedReason = SanitizeLogToken(reason);
         var normalizedTrigger = SanitizeLogToken(trigger);
         var sessionId = currentSessionSecurityState.SessionId?.Value;
@@ -39565,7 +39682,7 @@ public sealed partial class NknSignalingTransport
             else if (offerAuthorityMode == RuntimeUnlockOfferAuthorityMode.InitialActivation)
             {
                 ScheduleInitialRuntimeUnlockAccelerationNegotiationRetry(
-                    retryReason);
+                    retryReason, startupBinding);
             }
             else
             {

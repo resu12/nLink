@@ -175,20 +175,93 @@ public sealed partial class NknAccelerationTransportTests
     public Task AutomaticFileHandoff_BindsActivationAndPauseGuardBeforeAnswer(bool helperPays)
         => RunAutomaticFileHandoffAsync(helperPays, stopBeforeAnswer: true);
 
-    private async Task RunAutomaticFileHandoffAsync(bool helperPays, bool stopBeforeAnswer)
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    [Trait("FileTransferInfraSuite", "AutomaticFileHandoff")]
+    public Task AutomaticFileHandoff_MixedLaneStartupAdoptsTransferBeforeOffer(bool helperPays)
+        => RunAutomaticFileHandoffAsync(helperPays, stopBeforeAnswer: false, startupBeforeTransfer: true);
+
+    [Theory]
+    [InlineData(false, "cancel")]
+    [InlineData(true, "cancel")]
+    [InlineData(false, "key_reset")]
+    [InlineData(true, "key_reset")]
+    [InlineData(false, "stop")]
+    [InlineData(true, "stop")]
+    [InlineData(false, "cancel_after_binding")]
+    [InlineData(true, "cancel_after_binding")]
+    [Trait("FileTransferInfraSuite", "AutomaticFileHandoff")]
+    public Task AutomaticFileHandoff_MixedLaneStartupRejectsRetiredScope(bool helperPays, string change)
+        => RunAutomaticFileHandoffAsync(helperPays, stopBeforeAnswer: false,
+            startupBeforeTransfer: true, startupChange: change);
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    [Trait("FileTransferInfraSuite", "AutomaticFileHandoff")]
+    public Task AutomaticFileHandoff_MixedLaneStartupWaitsForAcceptedDataSession(bool helperPays)
+        => RunAutomaticFileHandoffAsync(helperPays, stopBeforeAnswer: false,
+            startupBeforeTransfer: true, acceptAfterStartup: true);
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    [Trait("FileTransferInfraSuite", "AutomaticFileHandoff")]
+    public Task AutomaticFileHandoff_MixedLaneStartupRegistrationCannotReviveCanceledTransfer(bool helperPays)
+        => RunAutomaticFileHandoffAsync(helperPays, stopBeforeAnswer: false,
+            startupBeforeTransfer: true, startupChange: "cancel_before_registration", acceptAfterStartup: true);
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    [Trait("FileTransferInfraSuite", "AutomaticFileHandoff")]
+    public Task AutomaticFileHandoff_MixedLaneStartupFailedListenerCannotRetryCanceledTransfer(bool helperPays)
+        => RunAutomaticFileHandoffAsync(helperPays, stopBeforeAnswer: false,
+            startupBeforeTransfer: true, startupChange: "cancel_after_binding_failure");
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    [Trait("FileTransferInfraSuite", "AutomaticFileHandoff")]
+    public Task AutomaticFileHandoff_MixedLaneStartupListenerRetryKeepsCoordinatorBinding(bool helperPays)
+        => RunAutomaticFileHandoffAsync(helperPays, stopBeforeAnswer: false,
+            startupBeforeTransfer: true, retryScopedListener: true);
+
+    private async Task RunAutomaticFileHandoffAsync(bool helperPays, bool stopBeforeAnswer,
+        bool startupBeforeTransfer = false, string? startupChange = null, bool acceptAfterStartup = false,
+        bool retryScopedListener = false)
     {
         using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(25));
         var previousPriority = NknSignalingTransport.HelperPaidOfferHelpeePriorityDelayOverrideForTests;
         NknSignalingTransport.HelperPaidOfferHelpeePriorityDelayOverrideForTests = TimeSpan.Zero;
         var releaseAnswer = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var answerHeld = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var listenerReady = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var scopedListenerEntered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var scopedListenerRelease = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         try
         {
             var scope = Guid.NewGuid().ToString("N");
             var hostClient = new FakeNknClient($"host.automatic-file-handoff-{scope}.address");
             var helperClient = new FakeNknClient($"helper.automatic-file-handoff-{scope}.address");
-            using var hostLane = new RetryableTunaAccelerationSession(!helperPays, 0) { StrictPayerHandoffForTests = true };
-            using var helperLane = new RetryableTunaAccelerationSession(helperPays, 0) { StrictPayerHandoffForTests = true };
+            using var hostLane = new RetryableTunaAccelerationSession(!helperPays, 0,
+                listenerAttemptOutcome: startupBeforeTransfer && !helperPays ? listenerReady : null) { StrictPayerHandoffForTests = true };
+            using var helperLane = new RetryableTunaAccelerationSession(helperPays, 0,
+                listenerAttemptOutcome: startupBeforeTransfer && helperPays ? listenerReady : null) { StrictPayerHandoffForTests = true };
+            var scopedStarts = 0;
+            if (retryScopedListener)
+                (helperPays ? helperLane : hostLane).BeforeListenerReadyForTests = (request, _) => Task.FromResult(
+                    request.LifetimePolicy != NknTunaListenerLifetimePolicy.CoordinatorScopedInitialActivation ||
+                    Interlocked.Increment(ref scopedStarts) > 1);
+            if (startupChange is "cancel_after_binding" or "cancel_after_binding_failure")
+                (helperPays ? helperLane : hostLane).BeforeListenerReadyForTests = async (request, ct) =>
+                {
+                    if (request.LifetimePolicy != NknTunaListenerLifetimePolicy.CoordinatorScopedInitialActivation) return true;
+                    scopedListenerEntered.TrySetResult();
+                    await scopedListenerRelease.Task.WaitAsync(ct);
+                    return startupChange != "cancel_after_binding_failure";
+                };
             var options = NknTransportOptions.Load();
             var hostIdentity = new NknIdentity("host-automatic-file-handoff", hostClient.Address);
             var helperIdentity = new NknIdentity("helper-automatic-file-handoff", helperClient.Address);
@@ -204,7 +277,9 @@ public sealed partial class NknAccelerationTransportTests
             sender.AttachTransport(host);
             receiver.AttachTransport(helper);
             var sessionId = await ApproveNknSessionAsync(host, helper, timeout.Token,
-                InviteCapabilities.Chat | InviteCapabilities.FileTransfer, suppressAutomaticAccelerationNegotiation: true);
+                InviteCapabilities.Chat | InviteCapabilities.FileTransfer |
+                (startupBeforeTransfer ? InviteCapabilities.ScreenShare : InviteCapabilities.None),
+                suppressAutomaticAccelerationNegotiation: true);
             var transferId = $"automatic-file-handoff-{scope}";
             var releasePayload = 0;
             var tunaPayloads = 0;
@@ -245,19 +320,82 @@ public sealed partial class NknAccelerationTransportTests
             };
             var payload = Enumerable.Range(0, 512 * 1024).Select(i => (byte)(i % 251)).ToArray();
             using var destination = new MemoryStream();
+            if (startupBeforeTransfer)
+            {
+                await (helperPays ? helper : host).RequestAccelerationNegotiationAsync("session_security_state_ready", timeout.Token);
+                await WaitUntilAsync(() => (helperPays ? helperLane : hostLane).EnsureListenerCalls == 1,
+                    TimeSpan.FromSeconds(3));
+                Assert.Null(GetPrivateField(helperPays ? helper : host, "outboundRuntimeUnlockOfferAuthorityBoundary"));
+            }
             await sender.TryStartSendAsync(new("handoff.bin", payload.Length, transferId),
                 _ => Task.FromResult<Stream>(new MemoryStream(payload, writable: false)), timeout.Token);
             await WaitUntilAsync(() => receiver.Snapshot.Inbound?.State == FileTransferTransferState.PendingDecision,
                 TimeSpan.FromSeconds(3));
+            if (acceptAfterStartup)
+            {
+                var startupPayer = helperPays ? helper : host;
+                listenerReady.TrySetResult(true);
+                await WaitUntilAsync(() => GetPrivateField(startupPayer, "pendingStartupTransferActivation") is not null &&
+                    (int)GetPrivateField(startupPayer, "accelerationNegotiationScheduled")! == 0, TimeSpan.FromSeconds(3));
+                Assert.Null(GetPrivateField(startupPayer, "outboundRuntimeUnlockOfferAuthorityBoundary"));
+                Assert.False(sender.Snapshot.Outbound!.IsPauseBlockedByTransport);
+                Assert.False(receiver.Snapshot.Inbound!.IsPauseBlockedByTransport);
+                if (startupChange == "cancel_before_registration")
+                {
+                    await sender.CancelTransferAsync(transferId, "test_startup_cancel", timeout.Token);
+                    await WaitUntilAsync(() => receiver.Snapshot.Inbound!.IsTerminal, TimeSpan.FromSeconds(3));
+                    using var staleSession = await startupPayer.OpenFileTransferDataSessionAsync(sessionId, transferId, timeout.Token);
+                    Assert.Null(GetPrivateField(startupPayer, "pendingStartupTransferActivation"));
+                    Assert.Null(GetPrivateField(startupPayer, "outboundRuntimeUnlockOfferAuthorityBoundary"));
+                    Assert.Equal(0, (int)GetPrivateField(startupPayer, "accelerationNegotiationScheduled")!);
+                    Assert.False(answerHeld.Task.IsCompleted);
+                    Assert.False(host.IsFileTunaActiveForRouteSelection);
+                    Assert.False(helper.IsFileTunaActiveForRouteSelection);
+                    Assert.Equal(0, Volatile.Read(ref tunaPayloads));
+                    return;
+                }
+            }
             await receiver.AcceptIncomingTransferAsync(transferId, (_, _) => Task.FromResult<Stream>(destination), timeout.Token);
             await WaitUntilAsync(() => sender.Snapshot.Outbound?.State == FileTransferTransferState.Sending &&
-                receiver.Snapshot.Inbound?.BytesTransferred > 0, TimeSpan.FromSeconds(3));
+                (acceptAfterStartup || receiver.Snapshot.Inbound?.BytesTransferred > 0), TimeSpan.FromSeconds(3));
             var outbound = GetPrivateField(sender, "outboundTransfer")!;
             var inbound = GetPrivateField(receiver, "inboundTransfer")!;
             AssertPublication(sender, outbound, FileTransferRoute.RegularNknV4Fast);
             AssertPublication(receiver, inbound, FileTransferRoute.RegularNknV4Fast);
 
-            await (helperPays ? helper : host).RequestAccelerationNegotiationAsync("session_security_state_ready", timeout.Token);
+            var payer = helperPays ? helper : host;
+            if (startupChange == "cancel")
+            {
+                await sender.CancelTransferAsync(transferId, "test_startup_cancel", timeout.Token);
+                await WaitUntilAsync(() => receiver.Snapshot.Inbound!.IsTerminal, TimeSpan.FromSeconds(3));
+            }
+            if (startupChange == "key_reset") InvokePrivateMethod(payer, "ResetControlSecureState");
+            if (startupChange == "stop") await payer.StopAccelerationAsync("user_stopped_tuna", timeout.Token);
+            if (startupBeforeTransfer)
+                listenerReady.TrySetResult(true);
+            else
+                await payer.RequestAccelerationNegotiationAsync("session_security_state_ready", timeout.Token);
+            if (startupChange is "cancel_after_binding" or "cancel_after_binding_failure")
+            {
+                await scopedListenerEntered.Task.WaitAsync(timeout.Token);
+                await sender.CancelTransferAsync(transferId, "test_startup_cancel", timeout.Token);
+                await WaitUntilAsync(() => receiver.Snapshot.Inbound!.IsTerminal, TimeSpan.FromSeconds(3));
+                scopedListenerRelease.TrySetResult();
+            }
+            if (startupChange is not null)
+            {
+                await WaitUntilAsync(() => (int)GetPrivateField(payer, "accelerationNegotiationScheduled")! == 0,
+                    TimeSpan.FromSeconds(3));
+                Assert.Null(GetPrivateField(payer, "outboundRuntimeUnlockOfferAuthorityBoundary"));
+                Assert.False(host.IsFileTunaActiveForRouteSelection);
+                Assert.False(helper.IsFileTunaActiveForRouteSelection);
+                Assert.False(answerHeld.Task.IsCompleted);
+                Assert.Equal(0, Volatile.Read(ref tunaPayloads));
+                Assert.NotEqual("file_tuna_v4", sender.Snapshot.Outbound?.RouteToken);
+                Assert.NotEqual("file_tuna_v4", receiver.Snapshot.Inbound?.RouteToken);
+                Assert.Equal(0, (int)GetPrivateField(payer, "accelerationNegotiationRetryAttempts")!);
+                return;
+            }
             await answerHeld.Task.WaitAsync(TimeSpan.FromSeconds(5), timeout.Token);
             await WaitUntilAsync(() => sender.Snapshot.Outbound!.IsPauseBlockedByTransport &&
                 receiver.Snapshot.Inbound!.IsPauseBlockedByTransport, TimeSpan.FromSeconds(3));
@@ -276,6 +414,13 @@ public sealed partial class NknAccelerationTransportTests
                 GetPrivateField(helperPays ? helper : host, "runtimeUnlockTransactionState"));
             var boundary = GetPrivateField(helperPays ? helper : host, "outboundRuntimeUnlockOfferAuthorityBoundary");
             Assert.NotNull(boundary);
+            if (startupBeforeTransfer)
+            {
+                var retainedBinding = Value(boundary!, "StartupBinding");
+                Assert.NotNull(retainedBinding);
+                Assert.Equal(transferId, Assert.IsType<FileTransferRoutePublicationAuthority>(Value(retainedBinding!, "Publication")).TransferId);
+            }
+            if (retryScopedListener) Assert.Equal(2, Volatile.Read(ref scopedStarts));
             Assert.Equal("InitialActivation", Value(boundary!, "Mode")!.ToString());
             Assert.Equal(sessionId, Value(boundary!, "SessionId"));
             Assert.Equal(transferId, Value(boundary!, "TransferId"));
@@ -338,6 +483,8 @@ public sealed partial class NknAccelerationTransportTests
         }
         finally
         {
+            listenerReady.TrySetResult(false);
+            scopedListenerRelease.TrySetResult();
             releaseAnswer.TrySetResult();
             timeout.Cancel();
             NknSignalingTransport.HelperPaidOfferHelpeePriorityDelayOverrideForTests = previousPriority;

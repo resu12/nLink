@@ -570,6 +570,8 @@ public sealed partial class NknSignalingTransport : IFileTransferControlPlanePhy
             ApplyActiveTunaActivationPauseToNewFileTransferDataSession(session!, "local_open");
         }
 
+        RecheckPendingStartupTransferActivation();
+
         return Task.FromResult<IFileTransferDataSession>(session!);
     }
 
@@ -7593,6 +7595,8 @@ public sealed partial class NknSignalingTransport : IFileTransferControlPlanePhy
         {
             ApplyActiveTunaActivationPauseToNewFileTransferDataSession(session!, "remote_open");
         }
+
+        if (createdSession) RecheckPendingStartupTransferActivation();
 
         session!.Deliver(frame, channel, receivedTransportKind, source, yieldEvidence);
     }
