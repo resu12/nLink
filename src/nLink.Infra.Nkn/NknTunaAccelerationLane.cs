@@ -167,9 +167,34 @@ internal sealed partial class NknTunaAccelerationLane : INknTunaAccelerationSess
             // Listener retries must not supersede an in-flight dialer or listener start.
             if (pendingLaneStart is not null || dialerStartTask is not null) return false;
             operation = BeginLaneStartUnsafe();
+            currentFailureOrigin = null;
+            if (clientRole == ClientRole.Listener)
+            {
+                // Retire the old IPC owner before the supervisor can stop its
+                // process. A queued shutdown callback must not reset the payer
+                // decision belonging to this replacement start.
+                var retiredListenerClient = client;
+                CaptureClientDiagnostics_NoLock(retiredListenerClient);
+                if (retiredListenerClient is not null)
+                {
+                    retiredListenerClients.Add((retiredListenerClient, clientListenerLease));
+                    retiredListenerClient.MessageReceived -= OnClientMessageReceived;
+                    retiredListenerClient.StateChanged -= OnClientStateChanged;
+                }
+                currentClientStart?.Revocation.Unregister();
+                currentClientStart = null;
+                client = null;
+                clientRole = ClientRole.None;
+                listenerRequest = null;
+                clientListenerLease = null;
+            }
         }
 
-        try { return await ConnectListenerAsync(request, operation, ct).ConfigureAwait(false); }
+        try
+        {
+            lock (gate) { if (!IsLaneStartCurrentUnsafe(operation, ct)) return false; }
+            return await ConnectListenerAsync(request, operation, ct).ConfigureAwait(false);
+        }
         finally { FinishLaneStart(operation); }
     }
 
@@ -342,6 +367,7 @@ internal sealed partial class NknTunaAccelerationLane : INknTunaAccelerationSess
                     dialerStartTask = null;
                 }
             }
+            CleanupRetiredListenerClients();
         }
     }
 
@@ -349,7 +375,9 @@ internal sealed partial class NknTunaAccelerationLane : INknTunaAccelerationSess
         LaneStartOperation operation, CancellationToken ct)
     {
         try { return await StartDialerSidecarCoreAsync(tunaAddress, expectedRemotePeer, operation, ct).ConfigureAwait(false); }
-        finally { FinishLaneStart(operation); }
+        // Startup may finish synchronously under StartDialerSidecarAsync's gate.
+        // Its outer finally settles retired listeners after that gate is released.
+        finally { FinishLaneStart(operation, cleanupRetiredListeners: false); }
     }
 
     private async Task<bool> StartDialerSidecarCoreAsync(string tunaAddress, string expectedRemotePeer,
@@ -623,6 +651,7 @@ internal sealed partial class NknTunaAccelerationLane : INknTunaAccelerationSess
 
         clientToDispose?.Dispose();
         listenerSupervisor?.Stop(string.IsNullOrWhiteSpace(reason) ? "stopped" : reason.Trim());
+        CleanupRetiredListenerClients();
         if (processToStop is not null)
         {
             processToStop.Stop(reason);
@@ -669,6 +698,7 @@ internal sealed partial class NknTunaAccelerationLane : INknTunaAccelerationSess
             listenerSupervisor.StateChanged -= OnListenerSupervisorStateChanged;
             listenerSupervisor.Dispose();
         }
+        CleanupRetiredListenerClients();
         if (processToStop is not null)
         {
             processToStop.Stop("disposed");

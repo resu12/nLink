@@ -12,6 +12,406 @@ namespace NLink.SmokeTests;
 public sealed class NknTunaLaneOwnershipTests
 {
     [Theory]
+    [InlineData("File")]
+    [InlineData("Screen")]
+    [InlineData("File, Screen")]
+    public async Task ListenerReplacement_RetiresOldCallbacksBeforeSupervisorShutdown(string configuredLanes)
+    {
+        var lanes = Enum.Parse<NknAccelerationLaneKind>(configuredLanes);
+        using var lifetime = new CancellationTokenSource(TimeSpan.FromSeconds(8));
+        var server = new TcpListener(IPAddress.Loopback, 0);
+        server.Start();
+        try
+        {
+            using var supervisor = new ExactSupervisor(((IPEndPoint)server.LocalEndpoint).ToString());
+            using var lane = CreateLane(supervisor, lanes);
+            var startup = supervisor.Request with { Lanes = lanes, LifetimePolicy = NknTunaListenerLifetimePolicy.GenericBounded };
+            supervisor.BeforeStart = request => supervisor.ReplaceRun(request);
+            var firstStart = lane.EnsureListenerSidecarConnectedAsync(startup, lifetime.Token);
+            using var firstConnection = await server.AcceptTcpClientAsync(lifetime.Token);
+            await WriteStatusAsync(firstConnection, lifetime.Token, lanes);
+            Assert.True(await firstStart.WaitAsync(lifetime.Token));
+            var predecessor = Assert.IsType<NknTunaLaneLease>(lane.CaptureCurrentLaneLease());
+            // Capture the real subscriber to model an event queued before it is detached.
+            var lateState = (EventHandler<AccelerationStateChangedEventArgs>)Field(predecessor.Client, "StateChanged");
+            var events = new List<AccelerationStateChangedEventArgs>();
+            lane.StateChanged += (_, e) => events.Add(e);
+            var replacement = startup with
+            {
+                LifetimePolicy = NknTunaListenerLifetimePolicy.CoordinatorScopedInitialActivation,
+                ExecutionIdentity = "coordinator-transfer-owner",
+            };
+            var shutdowns = 0;
+            supervisor.BeforeStart = request =>
+            {
+                shutdowns++;
+                Assert.Equal(replacement, request);
+                Assert.False(Monitor.IsEntered(Field(lane, "gate")));
+                // Do not close IPC while the supervisor still owns the old process.
+                Assert.Equal(0, (int)Field(predecessor.Client, "disposed"));
+                supervisor.ReplaceRun(request);
+                lateState(predecessor.Client, new(false, "read_failed"));
+                Assert.Empty(events);
+                Assert.Null(lane.CaptureCurrentLaneLease());
+            };
+
+            var nextStart = lane.EnsureListenerSidecarConnectedAsync(replacement, lifetime.Token);
+            if (nextStart.IsCompleted) Assert.True(await nextStart);
+            using var nextConnection = await server.AcceptTcpClientAsync(lifetime.Token);
+            await WriteStatusAsync(nextConnection, lifetime.Token, lanes);
+            Assert.True(await nextStart.WaitAsync(lifetime.Token));
+            Assert.Equal(1, (int)Field(predecessor.Client, "disposed"));
+            var successor = Assert.IsType<NknTunaLaneLease>(lane.CaptureCurrentLaneLease());
+            Assert.Equal(replacement, successor.Listener!.CurrentRequest);
+            Assert.NotSame(predecessor.Client, successor.Client);
+            Assert.True(successor.ClientGeneration > predecessor.ClientGeneration);
+            Assert.Equal(lanes, lane.SupportedLanes);
+            Assert.True(Assert.Single(events).IsAvailable);
+            lateState(predecessor.Client, new(false, "read_failed"));
+            Assert.False(lane.TryStopCurrentLaneLease(predecessor, "late_cleanup"));
+            Assert.Equal(successor, lane.CaptureCurrentLaneLease());
+            Assert.Single(events);
+            Assert.Equal(1, shutdowns);
+
+            // Replacement does not suppress genuine failures of the current client.
+            successor.Client.MarkUnavailableFromSidecarEvent("read_failed");
+            Assert.Equal(2, events.Count);
+            var failure = events[1];
+            Assert.False(failure.IsAvailable);
+            Assert.Equal("read_failed", failure.Reason);
+            var origin = Assert.IsType<NknAccelerationFailureOrigin>(failure.FailureOrigin);
+            Assert.Equal(successor.Listener.ProcessRunId, origin.ProcessRunId);
+            Assert.True(lane.IsFailureOriginCurrent(origin));
+            lateState(predecessor.Client, new(false, "read_failed"));
+            Assert.Equal(2, events.Count);
+            Assert.True(lane.IsFailureOriginCurrent(origin));
+            Assert.Equal(0, supervisor.GlobalStops);
+        }
+        finally { server.Stop(); }
+    }
+
+    [Theory]
+    [InlineData("cancel")]
+    [InlineData("stop")]
+    [InlineData("successor")]
+    public async Task ListenerReplacement_RetiredStartCannotPublishOrTouchSuccessor(string change)
+    {
+        using var lifetime = new CancellationTokenSource(TimeSpan.FromSeconds(8));
+        using var cancellation = new CancellationTokenSource();
+        var server = new TcpListener(IPAddress.Loopback, 0);
+        server.Start();
+        try
+        {
+            using var supervisor = new ExactSupervisor(((IPEndPoint)server.LocalEndpoint).ToString());
+            using var lane = CreateLane(supervisor);
+            using var predecessor = ReadyClient();
+            using var successor = ReadyClient();
+            using var owner = Owner();
+            InstallReady(lane, predecessor, true, owner, supervisor.Request);
+            var events = new List<AccelerationStateChangedEventArgs>();
+            lane.StateChanged += (_, e) => events.Add(e);
+            var request = supervisor.Request with { ExecutionIdentity = "replacement-owner" };
+            supervisor.BeforeStart = next => supervisor.ReplaceRun(next);
+            var start = lane.EnsureListenerSidecarConnectedAsync(request, cancellation.Token);
+            using var connection = await server.AcceptTcpClientAsync(lifetime.Token);
+            Assert.Equal(0, (int)Field(predecessor, "disposed"));
+            Assert.Null(lane.CaptureCurrentLaneLease());
+            if (change == "cancel") cancellation.Cancel();
+            else if (change == "stop") await lane.StopAsync("stop_during_replacement", lifetime.Token);
+            else InstallReady(lane, successor, false, owner);
+            var current = lane.CaptureCurrentLaneLease();
+            if (change != "cancel") await WriteStatusAsync(connection, lifetime.Token);
+            try { Assert.False(await start.WaitAsync(lifetime.Token)); }
+            catch (OperationCanceledException) when (cancellation.IsCancellationRequested) { }
+            Assert.Equal(1, (int)Field(predecessor, "disposed"));
+            Assert.Empty(events);
+            Assert.Equal(current, lane.CaptureCurrentLaneLease());
+            Assert.Equal(change == "successor", lane.IsAvailable);
+            if (change == "successor") Assert.Same(successor, current!.Client);
+            Assert.Equal(change == "stop" ? 1 : 0, supervisor.GlobalStops);
+            Assert.Equal(0, supervisor.ExactStops);
+        }
+        finally { server.Stop(); }
+    }
+
+    [Fact]
+    public async Task ListenerReplacement_SupervisorCallbackCannotLaunchAfterSuccessorTakesOwnership()
+    {
+        using var supervisor = new ExactSupervisor();
+        using var lane = CreateLane(supervisor);
+        using var predecessor = ReadyClient();
+        using var successor = ReadyClient();
+        using var owner = Owner();
+        InstallReady(lane, predecessor, true, owner, supervisor.Request);
+        var starts = 0;
+        supervisor.BeforeStart = request =>
+        {
+            starts++;
+            Assert.False(Monitor.IsEntered(Field(lane, "gate")));
+            InstallReady(lane, successor, false, owner);
+        };
+
+        Assert.False(await lane.EnsureListenerSidecarConnectedAsync(
+            supervisor.Request with { ExecutionIdentity = "replacement-owner" }, CancellationToken.None));
+
+        Assert.Equal(1, starts);
+        Assert.Equal(1, (int)Field(predecessor, "disposed"));
+        Assert.Same(successor, lane.CaptureCurrentLaneLease()!.Client);
+        Assert.True(successor.IsAvailable);
+        Assert.Equal(0, supervisor.GlobalStops);
+    }
+
+    [Fact]
+    public async Task ListenerReplacement_NewStartRetiresPreviouslyCapturedFailureEvenIfStartFails()
+    {
+        using var supervisor = new ExactSupervisor();
+        using var lane = CreateLane(supervisor);
+        using var predecessor = ReadyClient();
+        using var owner = Owner();
+        InstallReady(lane, predecessor, true, owner, supervisor.Request);
+        NknAccelerationFailureOrigin? captured = null;
+        lane.StateChanged += (_, e) => captured = e.FailureOrigin;
+        Invoke(lane, "OnClientStateChanged", predecessor, new AccelerationStateChangedEventArgs(false, "read_failed"));
+        var failure = Assert.IsType<NknAccelerationFailureOrigin>(captured);
+        Assert.True(lane.IsFailureOriginCurrent(failure));
+        var applied = false;
+        supervisor.BeforeStart = request =>
+        {
+            Assert.False(lane.TryApplyFailureOrigin(failure, () => applied = true));
+            // Refuse startup without starting a process or an IPC connection.
+            Assert.True(supervisor.TryDetachCurrentListener(supervisor.CaptureCurrentListenerAdoptionSnapshot()!, out _));
+        };
+
+        Assert.False(await lane.EnsureListenerSidecarConnectedAsync(
+            supervisor.Request with { ExecutionIdentity = "replacement-owner" }, CancellationToken.None));
+
+        Assert.False(applied);
+        Assert.False(lane.IsFailureOriginCurrent(failure));
+        Assert.False(lane.IsAvailable);
+        Assert.Null(lane.CaptureCurrentLaneLease());
+        Assert.Equal(0, supervisor.GlobalStops);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task ListenerReplacement_EarlyAbortRetiresExactProcessBeforeClosingIpc(bool cancel)
+    {
+        using var cancellation = new CancellationTokenSource();
+        // Existing files pass preflight, but no password is returned and no process is launched.
+        var existingFile = typeof(NknTunaLaneOwnershipTests).Assembly.Location;
+        using var supervisor = new NknTunaListenerSidecarSupervisor(new()
+        {
+            SidecarExePath = existingFile, WalletPath = existingFile, TakeWalletPassword = () => null,
+            MaxPriceNknPerMb = "0", MaxTotalMiB = 1, MaxDurationSec = 60,
+        });
+        using var lane = CreateLane(supervisor);
+        using var predecessor = ReadyClient();
+        using var owner = Owner();
+        var process = (Process)Field(owner, "process");
+        var request = new NknTunaListenerStartRequest("test-peer", NknAccelerationLaneKind.File);
+        var snapshot = new NknTunaListenerAdoptionSnapshot(request, new("127.0.0.1:1", "test-listener"),
+            owner.Pid, owner.RunId, owner.StartedUtc, 1);
+        Set(supervisor, "processOwner", owner);
+        Set(supervisor, "currentRequest", request);
+        Set(supervisor, "endpoint", snapshot.Endpoint);
+        Set(supervisor, "ownershipGeneration", 1L);
+        InstallReady(lane, predecessor, true, owner, request);
+        // The unstarted test process cannot appear running to CaptureCurrentListenerAdoptionSnapshot.
+        Set(lane, "clientListenerLease", snapshot);
+        var events = new List<AccelerationStateChangedEventArgs>();
+        lane.StateChanged += (_, e) => events.Add(e);
+        var detachedBeforeIpcClose = false;
+        predecessor.StateChanged += (_, _) =>
+        {
+            detachedBeforeIpcClose = Field(supervisor, "processOwner") is null;
+            Invoke(supervisor, "HandleOwnedStdoutLine", owner, process,
+                "{\"event\":\"tuna_bridge_terminal\",\"terminalReason\":\"local_ipc_eof\"}",
+                new TaskCompletionSource<NknTunaListenerSidecarEndpoint>(), Stopwatch.StartNew());
+        };
+        var startGate = (SemaphoreSlim)Field(supervisor, "startGate");
+        if (cancel) await startGate.WaitAsync();
+        try
+        {
+            var start = lane.EnsureListenerSidecarConnectedAsync(request with { ExecutionIdentity = "replacement" }, cancellation.Token);
+            if (cancel)
+            {
+                Assert.False(start.IsCompleted);
+                cancellation.Cancel();
+                await Assert.ThrowsAnyAsync<OperationCanceledException>(() => start);
+            }
+            else Assert.False(await start);
+        }
+        finally { if (cancel) startGate.Release(); }
+
+        Assert.True(detachedBeforeIpcClose);
+        Assert.True((bool)Field(owner, "stopped"));
+        Assert.Equal(1, (int)Field(predecessor, "disposed"));
+        Assert.Empty(events);
+        Assert.Null(Field(lane, "pendingLaneStart"));
+        Assert.False(lane.IsAvailable);
+    }
+
+    [Theory]
+    [InlineData("same_client")]
+    [InlineData("same_process_adopted")]
+    [InlineData("new_process")]
+    [InlineData("pending_successor")]
+    public async Task ListenerReplacement_EarlyAbortCannotCleanUpSuccessor(string change)
+    {
+        using var cancellation = new CancellationTokenSource();
+        using var supervisor = new ExactSupervisor();
+        using var lane = CreateLane(supervisor);
+        using var predecessor = ReadyClient();
+        using var successor = ReadyClient();
+        using var owner = Owner();
+        InstallReady(lane, predecessor, true, owner, supervisor.Request);
+        var original = supervisor.CaptureCurrentListenerAdoptionSnapshot()!;
+        object? nextStart = null;
+        supervisor.BeforeStart = request =>
+        {
+            if (change is "same_client" or "same_process_adopted")
+                Assert.True(supervisor.TryAdoptCurrentListener(original, request));
+            if (change == "new_process") supervisor.ReplaceRun(request);
+            if (change == "same_client") InstallReady(lane, predecessor, true, owner, request);
+            else if (change == "pending_successor") nextStart = Begin(lane);
+            else if (change == "new_process") InstallReady(lane, successor, true, owner, request);
+            cancellation.Cancel();
+            cancellation.Token.ThrowIfCancellationRequested();
+        };
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => lane.EnsureListenerSidecarConnectedAsync(
+            supervisor.Request with { ExecutionIdentity = "successor-owner" }, cancellation.Token));
+
+        Assert.Equal(0, supervisor.ExactStops);
+        Assert.Equal(0, supervisor.GlobalStops);
+        Assert.NotNull(supervisor.CaptureCurrentListenerAdoptionSnapshot());
+        Assert.Equal(change == "new_process" ? 1 : 0, (int)Field(predecessor, "disposed"));
+        if (change is "same_client" or "new_process")
+            Assert.Same(change == "same_client" ? predecessor : successor, lane.CaptureCurrentLaneLease()!.Client);
+        if (change == "pending_successor") Assert.Same(nextStart, Field(lane, "pendingLaneStart"));
+    }
+
+    [Theory]
+    [InlineData("dialer_success")]
+    [InlineData("failure")]
+    [InlineData("synchronous_dialer_failure")]
+    [InlineData("cancel")]
+    [InlineData("adopt_client")]
+    [InlineData("adopt_process")]
+    [InlineData("adopt_process_new_client")]
+    [InlineData("new_listener")]
+    [InlineData("superseded")]
+    [InlineData("stop")]
+    [InlineData("dispose")]
+    public async Task ListenerReplacement_DeferredCleanupSettlesWithSuccessor(string outcome)
+    {
+        using var cancellation = new CancellationTokenSource();
+        using var supervisor = new ExactSupervisor();
+        using var lane = CreateLane(supervisor);
+        using var predecessor = ReadyClient();
+        using var successor = ReadyClient();
+        using var owner = Owner();
+        InstallReady(lane, predecessor, true, owner, supervisor.Request);
+        var original = supervisor.CaptureCurrentListenerAdoptionSnapshot()!;
+        object? retiredStart = null;
+        object? nextStart = null;
+        supervisor.BeforeStart = _ =>
+        {
+            retiredStart = Field(lane, "pendingLaneStart");
+            nextStart = Begin(lane);
+            cancellation.Cancel();
+            cancellation.Token.ThrowIfCancellationRequested();
+        };
+        var events = new List<AccelerationStateChangedEventArgs>();
+        lane.StateChanged += (_, e) => events.Add(e);
+        supervisor.BeforeExactStop = () =>
+        {
+            Assert.False(Monitor.IsEntered(Field(lane, "gate")));
+            Assert.Null(supervisor.CaptureCurrentListenerAdoptionSnapshot());
+            Assert.Equal(0, (int)Field(predecessor, "disposed"));
+        };
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => lane.EnsureListenerSidecarConnectedAsync(
+            supervisor.Request with { ExecutionIdentity = "replacement" }, cancellation.Token));
+        Assert.Equal(0, (int)Field(predecessor, "disposed"));
+        Assert.Equal(0, supervisor.ExactStops);
+        Assert.Same(nextStart, Field(lane, "pendingLaneStart"));
+
+        // Drive the same completion boundary used by awaited dialer startup,
+        // without launching a sidecar or using a live Tuna connection.
+        var request = supervisor.Request with { ExecutionIdentity = "successor" };
+        if (outcome == "dialer_success") Assert.True(Install(lane, successor, false, owner, nextStart!));
+        else if (outcome is "adopt_client" or "adopt_process" or "adopt_process_new_client")
+        {
+            Assert.True(supervisor.TryAdoptCurrentListener(original, request));
+            if (outcome == "adopt_client") Assert.True(Install(lane, predecessor, true, owner, nextStart!, request: request));
+            if (outcome == "adopt_process_new_client") Assert.True(Install(lane, successor, true, owner, nextStart!, request: request));
+        }
+        else if (outcome == "new_listener")
+        {
+            supervisor.ReplaceRun(request);
+            Assert.True(Install(lane, successor, true, owner, nextStart!, request: request));
+        }
+        else if (outcome == "superseded")
+        {
+            var newerStart = Begin(lane);
+            Finish(lane, nextStart!);
+            Assert.Same(newerStart, Field(lane, "pendingLaneStart"));
+            Assert.Equal(0, (int)Field(predecessor, "disposed"));
+            Assert.Equal(0, supervisor.ExactStops);
+            nextStart = newerStart;
+        }
+        else if (outcome == "stop") await lane.StopAsync("stop_pending_successor", CancellationToken.None);
+        else if (outcome == "dispose") lane.Dispose();
+        else if (outcome == "synchronous_dialer_failure")
+        {
+            Assert.False(File.Exists(Path.Combine(Environment.CurrentDirectory, "not-launched-sidecar.exe")));
+            Assert.False(await lane.StartDialerSidecarAsync("test-tuna", "test-peer", CancellationToken.None));
+        }
+
+        if (outcome is "stop" or "dispose") Assert.Equal(1, (int)Field(predecessor, "disposed"));
+        if (outcome == "cancel")
+        {
+            using var successorCancellation = new CancellationTokenSource();
+            successorCancellation.Cancel();
+            try { Assert.Throws<OperationCanceledException>(() => successorCancellation.Token.ThrowIfCancellationRequested()); }
+            finally { Finish(lane, nextStart!); }
+        }
+        else Finish(lane, nextStart!);
+
+        var adopted = outcome is "adopt_client" or "adopt_process" or "adopt_process_new_client";
+        Assert.Equal(adopted ? 0 : 1, (int)Field(predecessor, "disposed"));
+        Assert.Equal(outcome is "dialer_success" or "failure" or "synchronous_dialer_failure" or "cancel" or "superseded" ? 1 : 0, supervisor.ExactStops);
+        Assert.Equal(outcome == "stop" ? 1 : 0, supervisor.GlobalStops);
+        Assert.Null(Field(lane, "pendingLaneStart"));
+        Assert.Empty(events);
+        if (outcome is "adopt_client" or "adopt_process_new_client" or "new_listener" or "dialer_success")
+            Assert.Same(outcome == "adopt_client" ? predecessor : successor, lane.CaptureCurrentLaneLease()!.Client);
+        if (adopted || outcome == "new_listener") Assert.NotNull(supervisor.CaptureCurrentListenerAdoptionSnapshot());
+        else Assert.Null(supervisor.CaptureCurrentListenerAdoptionSnapshot());
+
+        var stops = supervisor.ExactStops;
+        Finish(lane, retiredStart!);
+        Finish(lane, nextStart!);
+        Assert.Equal(stops, supervisor.ExactStops);
+        if (outcome == "adopt_process_new_client")
+        {
+            Assert.True(lane.TryStopCurrentLaneLease(lane.CaptureCurrentLaneLease()!, "adopted_owner_finished"));
+            Assert.Equal(1, (int)Field(predecessor, "disposed"));
+            Assert.Equal(1, (int)Field(successor, "disposed"));
+            Assert.Equal(stops + 1, supervisor.ExactStops);
+            Assert.Equal(0, supervisor.GlobalStops);
+        }
+        else if (adopted)
+        {
+            await lane.StopAsync("adopted_owner_finished", CancellationToken.None);
+            Assert.Equal(1, (int)Field(predecessor, "disposed"));
+            Assert.Equal(stops, supervisor.ExactStops);
+        }
+    }
+
+    [Theory]
     [InlineData(false, "stop")]
     [InlineData(true, "stop")]
     [InlineData(false, "cancel")]
@@ -513,12 +913,13 @@ public sealed class NknTunaLaneOwnershipTests
         Assert.Null(await start.WaitAsync(TimeSpan.FromSeconds(2)));
     }
 
-    private static ValueTask WriteStatusAsync(TcpClient connection, CancellationToken ct)
+    private static ValueTask WriteStatusAsync(TcpClient connection, CancellationToken ct,
+        NknAccelerationLaneKind lanes = NknAccelerationLaneKind.File)
         => NknTunaSidecarFrameProtocol.WriteFrameAsync(connection.GetStream(), NknTunaSidecarFrameType.Status,
             NknTunaSidecarLane.Control, 0, DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
             JsonSerializer.SerializeToUtf8Bytes(new
             {
-                @event = "status", address = "test-listener", lanes = new[] { "file" },
+                @event = "status", address = "test-listener", lanes = NknAccelerationLaneCodec.ToNames(lanes),
                 appProtocolVersion = NknTunaSidecarCompatibility.AppProtocolVersion,
                 frameProtocolVersion = NknTunaSidecarFrameProtocol.ProtocolVersion,
                 sidecarVersion = NknTunaSidecarCompatibility.ExpectedSidecarVersion,
@@ -730,9 +1131,10 @@ public sealed class NknTunaLaneOwnershipTests
         finally { server.Stop(); }
     }
 
-    private static NknTunaAccelerationLane CreateLane(INknTunaListenerSidecarSupervisor? supervisor = null)
+    private static NknTunaAccelerationLane CreateLane(INknTunaListenerSidecarSupervisor? supervisor = null,
+        NknAccelerationLaneKind lanes = NknAccelerationLaneKind.File)
         => new(NknTunaAccelerationOptions.CreateRuntimePilot(
-            Path.Combine(Environment.CurrentDirectory, "not-launched-sidecar.exe"), NknAccelerationLaneKind.File, true), supervisor);
+            Path.Combine(Environment.CurrentDirectory, "not-launched-sidecar.exe"), lanes, true), supervisor);
 
     private static NknTunaSidecarClient ReadyClient()
     {
@@ -748,7 +1150,7 @@ public sealed class NknTunaLaneOwnershipTests
             .Invoke(new object?[] { "dialer", new Process(), null });
 
     private static object Begin(NknTunaAccelerationLane lane) => Invoke(lane, "BeginLaneStartUnsafe")!;
-    private static void Finish(NknTunaAccelerationLane lane, object operation) => Invoke(lane, "FinishLaneStart", operation);
+    private static void Finish(NknTunaAccelerationLane lane, object operation) => Invoke(lane, "FinishLaneStart", operation, true);
     private static bool Install(NknTunaAccelerationLane lane, NknTunaSidecarClient client, bool listener,
         NknTunaSidecarProcessOwner owner, object operation, CancellationToken ct = default,
         NknTunaListenerStartRequest? request = null)
@@ -780,9 +1182,11 @@ public sealed class NknTunaLaneOwnershipTests
         public int GlobalStops, ExactStops, IdleStarts;
         private readonly string ipc;
         public Action? BeforeExactStop;
+        public Action<NknTunaListenerStartRequest>? BeforeStart;
         public bool ReplaceBeforeStartReturns;
         public bool CanOfferListener => true;
-        public void ReplaceRun() => snapshot = snapshot! with { ProcessRunId = Guid.NewGuid().ToString("N") };
+        public void ReplaceRun(NknTunaListenerStartRequest? request = null)
+            => snapshot = snapshot! with { ProcessRunId = Guid.NewGuid().ToString("N"), CurrentRequest = request ?? snapshot.CurrentRequest };
         public event EventHandler<AccelerationStateChangedEventArgs>? StateChanged { add { } remove { } }
         public ExactSupervisor(string ipc = "127.0.0.1:1", bool initiallyIdle = false)
         {
@@ -799,7 +1203,10 @@ public sealed class NknTunaLaneOwnershipTests
             return Task.FromResult<NknTunaListenerAdoptionSnapshot?>(started);
         }
         public Task<NknTunaListenerSidecarEndpoint?> EnsureStartedAsync(NknTunaListenerStartRequest request, CancellationToken ct)
-            => Task.FromResult(snapshot?.Endpoint);
+        {
+            BeforeStart?.Invoke(request);
+            return Task.FromResult(snapshot?.Endpoint);
+        }
         public NknTunaListenerAdoptionSnapshot? CaptureCurrentListenerAdoptionSnapshot() => snapshot;
         public bool TryAdoptCurrentListener(NknTunaListenerAdoptionSnapshot expected, NknTunaListenerStartRequest request)
         {

@@ -9,6 +9,7 @@ internal sealed partial class NknTunaAccelerationLane
     private long startGeneration;
     private LaneStartOperation? pendingLaneStart;
     private LaneStartOperation? currentClientStart;
+    private readonly List<(NknTunaSidecarClient Client, NknTunaListenerAdoptionSnapshot? Listener)> retiredListenerClients = new();
 
     private bool IsPreparationOwnedUnsafe()
         => pendingLaneStart?.Preparation == true || client is not null && currentClientStart?.Preparation == true;
@@ -90,12 +91,13 @@ internal sealed partial class NknTunaAccelerationLane
         => !disposed && !ct.IsCancellationRequested && ReferenceEquals(pendingLaneStart, operation) &&
             operation.Generation == startGeneration;
 
-    private void FinishLaneStart(LaneStartOperation operation)
+    private void FinishLaneStart(LaneStartOperation operation, bool cleanupRetiredListeners = true)
     {
         lock (gate)
         {
             if (ReferenceEquals(pendingLaneStart, operation)) pendingLaneStart = null;
         }
+        if (cleanupRetiredListeners) CleanupRetiredListenerClients();
     }
 
     public NknTunaLaneLease? CaptureCurrentLaneLease()
@@ -147,6 +149,7 @@ internal sealed partial class NknTunaAccelerationLane
         retiredClient.Dispose();
         retiredDialer?.Stop(reason);
         stopListener?.Invoke(reason);
+        CleanupRetiredListenerClients();
         return true;
     }
 
@@ -164,6 +167,46 @@ internal sealed partial class NknTunaAccelerationLane
             currentClientStart = null;
             retained = lease with { ClientGeneration = clientGeneration };
             return true;
+        }
+    }
+
+    private void CleanupRetiredListenerClients()
+    {
+        List<(NknTunaSidecarClient Client, Action<string>? Stop)>? cleanup = null;
+        lock (gate)
+        {
+            // Custody stays with the lane while a successor is pending. Its
+            // completion (including failure/cancellation) revisits these exact
+            // receipts; a stale completion must not clear the successor slot.
+            if (pendingLaneStart is not null) return;
+            for (var i = retiredListenerClients.Count - 1; i >= 0; i--)
+            {
+                var retired = retiredListenerClients[i];
+                if (ReferenceEquals(client, retired.Client))
+                {
+                    // The installed client has resumed ownership of its lifetime.
+                    retiredListenerClients.RemoveAt(i);
+                    continue;
+                }
+                Action<string>? stop = null;
+                if (retired.Listener is { } listener && listenerSupervisor is not null)
+                {
+                    // Only the captured receipt may detach a process. A fresh
+                    // same-run snapshot protects an adopter; it grants no authority.
+                    if (!(clientRole == ClientRole.Listener && clientListenerLease == listener))
+                        listenerSupervisor.TryDetachCurrentListener(listener, out stop);
+                    if (stop is null && listenerSupervisor.CaptureCurrentListenerAdoptionSnapshot()?.ProcessRunId == listener.ProcessRunId)
+                        continue;
+                }
+                (cleanup ??= new()).Add((retired.Client, stop));
+                retiredListenerClients.RemoveAt(i);
+            }
+        }
+        if (cleanup is null) return;
+        foreach (var retired in cleanup)
+        {
+            retired.Stop?.Invoke("listener_replacement_retired");
+            retired.Client.Dispose();
         }
     }
 
