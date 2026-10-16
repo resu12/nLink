@@ -1,0 +1,43 @@
+{
+  "schemaVersion": 1,
+  "baselineName": "test-only-route-acceptance",
+  "source": "synthetic-test-fixture",
+  "note": "Deterministic inputs for fake acceptance tests only; not measured performance or release qualification evidence.",
+  "scenarios": [
+    {
+      "scenario": "regular-nkn-v4-64mb",
+      "route": "regular_nkn_v4_fast",
+      "protocolVersion": 4,
+      "payloadBytes": 67108864,
+      "goodputBytesPerSecond": 1500000
+    },
+    {
+      "scenario": "active-tuna-v4-64mb",
+      "route": "file_tuna_v4",
+      "protocolVersion": 4,
+      "payloadBytes": 67108864,
+      "goodputBytesPerSecond": 4000000
+    },
+    {
+      "scenario": "live-switch-off-helpee-64mb",
+      "route": "file_tuna_v4_to_post_tuna_fallback_v6",
+      "protocolVersion": 4,
+      "payloadBytes": 67108864,
+      "goodputBytesPerSecond": 4000000
+    },
+    {
+      "scenario": "live-switch-off-helper-64mb",
+      "route": "file_tuna_v4_to_post_tuna_fallback_v6",
+      "protocolVersion": 4,
+      "payloadBytes": 67108864,
+      "goodputBytesPerSecond": 4000000
+    },
+    {
+      "scenario": "live-multi-toggle-off-on-off-64mb",
+      "route": "file_tuna_v4_to_post_tuna_fallback_v6_multi_toggle",
+      "protocolVersion": 4,
+      "payloadBytes": 67108864,
+      "goodputBytesPerSecond": 4000000
+    }
+  ]
+}

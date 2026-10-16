@@ -47,8 +47,8 @@ public sealed partial class SessionFileTransferV4SenderTests
         var beforeFrontier = GetPrivateProperty<int>(context, "NextChunkIndex");
         Assert.Equal(100, beforeFrontier);
         Assert.Equal(100L * 21 * 1024, beforeBytes);
-        await Assert.IsAssignableFrom<Task>(typeof(SessionFileTransferService).GetMethod("HandleInboundV6ChunkBatchAsync",
-            BindingFlags.Instance | BindingFlags.NonPublic)!.Invoke(service, [context, batch, received.TransportKind]));
+        await CommitDurableFallbackBatchAndSettleYieldAsync(service, context, data, batch,
+            received.TransportKind, publication, previousExecution, destinationPath);
         Assert.Equal(102, GetPrivateProperty<int>(context, "NextChunkIndex"));
         Assert.Equal(beforeBytes + 42 * 1024, GetPrivateProperty<long>(context, "BytesTransferred"));
         Assert.Equal(publication, GetPrivateProperty<RoutePublicationToken>(context, "CurrentRoutePublicationToken"));
@@ -63,11 +63,26 @@ public sealed partial class SessionFileTransferV4SenderTests
         }
         Assert.Equal(batch.DataSegments.SelectMany(bytes => bytes), written);
         Assert.Equal(Enumerable.Repeat((byte)17, 21 * 1024).Concat(Enumerable.Repeat((byte)34, 21 * 1024)), written);
-        var afterWrite = SecondTunaStateFingerprint(context);
+        var logStart = GetOperationalLogLength();
+        var afterWrite = CaptureDurableFallbackState(service, context);
         var fileHash = HashDurableFixtureFile(destinationPath);
         await Assert.IsAssignableFrom<Task>(typeof(SessionFileTransferService).GetMethod("RecheckInboundFileTransferRouteTransitionDrainAsync",
             BindingFlags.Instance | BindingFlags.NonPublic)!.Invoke(service, [context, previousExecution]));
-        Assert.Equal(afterWrite, SecondTunaStateFingerprint(context));
+        var afterDrain = CaptureDurableFallbackState(service, context);
+        if (afterWrite.Fingerprint != afterDrain.Fingerprint)
+        {
+            var diff = FileTransferFixtureStateDiff.Describe(afterWrite.State, afterDrain.State);
+            var diagnosticPath = Path.Combine(Path.GetDirectoryName(destinationPath)!, "service-durable-state-diff.json");
+            await File.WriteAllTextAsync(diagnosticPath, JsonSerializer.Serialize(new
+            {
+                Before = afterWrite, After = afterDrain, Diff = diff,
+                InterveningLog = ReadOperationalLogTail(logStart),
+                Note = "Observation interval includes asynchronous work; this diff does not attribute changes to the stale callback.",
+            }, new JsonSerializerOptions { WriteIndented = true }));
+            Assert.Fail($"Coordinator state fingerprint changed across stale drain. Before={afterWrite.Fingerprint}; " +
+                $"After={afterDrain.Fingerprint}; diagnostics={diagnosticPath}{Environment.NewLine}{diff}");
+        }
+        Assert.Equal(afterWrite.Fingerprint, afterDrain.Fingerprint);
         Assert.Equal(fileHash, HashDurableFixtureFile(destinationPath));
         Assert.Equal(102, GetPrivateProperty<int>(context, "NextChunkIndex"));
         Assert.Equal(beforeBytes + 42 * 1024, GetPrivateProperty<long>(context, "BytesTransferred"));
@@ -82,6 +97,113 @@ public sealed partial class SessionFileTransferV4SenderTests
                 FlushedAndReopened = true, WholeTransferCompleted = false,
                 BoundSessionGeneration = sessionGeneration, StaleTunaDrainIgnored = true,
             }));
+    }
+
+    private sealed record DurableFallbackStateSnapshot(string Fingerprint, JsonElement State);
+
+    private static async Task CommitDurableFallbackBatchAndSettleYieldAsync(SessionFileTransferService service,
+        object context, InitialBootstrapRecordingDataSession data, FileTransferChunkBatchFrameV6 batch,
+        FileTransferTransportKind transportKind, RoutePublicationToken publication, object previousExecution,
+        string destinationPath)
+    {
+        var entered = new TaskCompletionSource<FileTransferFallbackTailYieldFrameV6>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var proofSendCount = 0;
+        var previousSend = data.BeforeSendAsyncForTest;
+        data.BeforeSendAsyncForTest = async (frame, ct) =>
+        {
+            if (previousSend is not null) { await previousSend(frame, ct); }
+            if (frame is FileTransferFallbackTailYieldFrameV6 yield && yield.LiveRouteEpoch == publication.LiveRouteEpoch)
+            {
+                Interlocked.Increment(ref proofSendCount);
+                entered.TrySetResult(yield);
+                await release.Task.WaitAsync(ct);
+            }
+        };
+        try
+        {
+            await Assert.IsAssignableFrom<Task>(typeof(SessionFileTransferService).GetMethod("HandleInboundV6ChunkBatchAsync",
+                BindingFlags.Instance | BindingFlags.NonPublic)!.Invoke(service, [context, batch, transportKind]))
+                .WaitAsync(TimeSpan.FromSeconds(5));
+            var frame = await entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            FileTransferFallbackTailYieldOperation pendingYield;
+            lock (GetServiceGate(service))
+            {
+                pendingYield = Assert.IsType<FileTransferFallbackTailYieldOperation>(
+                    CreateCoordinatorStateForTest(context).PersistentState.FallbackTailYield.CurrentOperation);
+                Assert.Equal(frame.AuthorityId, pendingYield.Decision.AuthorityId.ToString());
+                Assert.Equal(frame.YieldGeneration, pendingYield.Decision.YieldGeneration);
+                Assert.Null(pendingYield.LocalProof);
+            }
+            Assert.False(release.Task.IsCompleted);
+            var pending = CaptureDurableFallbackState(service, context);
+            await Assert.IsAssignableFrom<Task>(typeof(SessionFileTransferService).GetMethod("RecheckInboundFileTransferRouteTransitionDrainAsync",
+                BindingFlags.Instance | BindingFlags.NonPublic)!.Invoke(service, [context, previousExecution]));
+            Assert.Equal(pending.Fingerprint, CaptureDurableFallbackState(service, context).Fingerprint);
+
+            // The chunk handler does not await this proof. Observe its exact Coordinator
+            // receipt before the existing stale-drain assertion, not a delay or hash exemption.
+            var logStart = GetOperationalLogLength();
+            release.TrySetResult();
+            await WaitUntilAsync(() =>
+            {
+                lock (GetServiceGate(service))
+                {
+                    var current = CreateCoordinatorStateForTest(context).PersistentState.FallbackTailYield.CurrentOperation;
+                    return current is { LocalProof: { } receipt } &&
+                        current.Value.Decision == pendingYield.Decision && receipt.Decision == pendingYield.Decision;
+                }
+            }, 5000);
+            Assert.Equal(1, Volatile.Read(ref proofSendCount));
+            var settled = CaptureDurableFallbackState(service, context);
+            Assert.NotEqual(pending.Fingerprint, settled.Fingerprint);
+            await File.WriteAllTextAsync(Path.Combine(Path.GetDirectoryName(destinationPath)!, "service-durable-yield-settlement.json"),
+                JsonSerializer.Serialize(new
+                {
+                    Before = pending, After = settled,
+                    Diff = FileTransferFixtureStateDiff.Describe(pending.State, settled.State),
+                    InterveningLog = ReadOperationalLogTail(logStart),
+                    ChunkHandlerCompletedWhileProofHeld = true, StaleDrainPreservedPendingState = true,
+                    Note = "Only the held current proof was released between snapshots; no stale callback was invoked in this interval.",
+                }, new JsonSerializerOptions { WriteIndented = true }));
+        }
+        finally
+        {
+            release.TrySetResult();
+            data.BeforeSendAsyncForTest = previousSend;
+        }
+    }
+
+    private static DurableFallbackStateSnapshot CaptureDurableFallbackState(
+        SessionFileTransferService service, object context)
+    {
+        // Freeze each observation under the existing gate; never hold it across
+        // an asynchronous callback or proof settlement.
+        lock (GetServiceGate(service))
+        {
+            var state = CreateCoordinatorStateForTest(context);
+            var retry = state.PersistentState.RuntimeUnlockRetryLifecycle;
+            var snapshot = JsonSerializer.SerializeToElement(new
+            {
+                Coordinator = state,
+                RuntimeUnlockRetryLifecycle = retry with
+                {
+                    AttemptHistory = retry.AttemptHistory.IsDefault ? [] : retry.AttemptHistory,
+                },
+                state.PersistentState.FallbackTailYield,
+                state.PersistentState.FileTransferReceiveRecovery,
+                state.PersistentState.InitialActivationReceiverBarrier,
+                state.PersistentState.CheckpointRepairContinuityOrigin,
+                state.PersistentState.BootstrapSourceCallbackLineage,
+                state.PersistentState.CoordinatorInstanceId,
+                state.PersistentState.SnapshotStateGeneration,
+                state.PersistentState.SnapshotStateFingerprint,
+                Frontier = GetPrivateProperty<int>(context, "NextChunkIndex"),
+                BytesTransferred = GetPrivateProperty<long>(context, "BytesTransferred"),
+                TransitionExecution = GetPrivatePropertyValue(context, "FileTransferRouteTransitionExecution"),
+            });
+            return new(FileTransferCoordinator.CalculateSnapshotStateFingerprint(state), snapshot);
+        }
     }
 
     [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]

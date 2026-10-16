@@ -1381,7 +1381,7 @@ public abstract class FileTransferOpsScriptsTestBase
         process.StartInfo.ArgumentList.Add("Bypass");
         process.StartInfo.ArgumentList.Add("-File");
         process.StartInfo.ArgumentList.Add(scriptPath);
-        foreach (var argument in arguments)
+        foreach (var argument in WithFakeRouteAcceptanceBaseline(workingDirectory, scriptPath, arguments, environment))
         {
             process.StartInfo.ArgumentList.Add(argument);
         }
@@ -1411,6 +1411,24 @@ public abstract class FileTransferOpsScriptsTestBase
         }
 
         return new ScriptResult(process.ExitCode, await stdoutTask, await stderrTask);
+    }
+
+    protected static IReadOnlyList<string> WithFakeRouteAcceptanceBaseline(
+        string repoRoot, string scriptPath, IReadOnlyList<string> arguments,
+        IReadOnlyDictionary<string, string>? environment)
+    {
+        // Fake acceptance is self-contained; never substitute a test baseline for a live run
+        // or override an explicitly supplied path (including missing-manifest tests).
+        if (!string.Equals(Path.GetFileName(scriptPath), "Run-FileTransferRouteAcceptance.ps1", StringComparison.OrdinalIgnoreCase) ||
+            environment is null || !environment.TryGetValue("NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_GUI", out var fake) || fake != "1" ||
+            arguments.Any(argument => string.Equals(argument, "-BaselineManifestPath", StringComparison.OrdinalIgnoreCase) ||
+                argument.StartsWith("-BaselineManifestPath:", StringComparison.OrdinalIgnoreCase)))
+        {
+            return arguments;
+        }
+
+        return [.. arguments, "-BaselineManifestPath", Path.Combine(repoRoot, "tests", "nLink.SmokeTests.Core",
+            "Fixtures", "route-acceptance-baseline.json")];
     }
 
     protected static async Task<string> WaitForScriptOutputAsync(Task<string> outputTask)

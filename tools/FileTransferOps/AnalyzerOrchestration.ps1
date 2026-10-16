@@ -1976,10 +1976,21 @@ namespace NLink
         $stream.Dispose()
         $stream = $null
 
+        if ($isWindowsPlatform) {
+            # Managed creation accepts long paths; native rename must also handle
+            # the extended temporary path, including its GUID suffix.
+            $nativePaths = @($temporaryPath, $Path) | ForEach-Object {
+                $fullPath = [System.IO.Path]::GetFullPath($_)
+                if ($fullPath.StartsWith('\\?\')) { $fullPath }
+                elseif ($fullPath.StartsWith('\\')) { '\\?\UNC\' + $fullPath.Substring(2) }
+                else { '\\?\' + $fullPath }
+            }
+        }
+
         for ($attempt = 0; $attempt -lt 40; $attempt++) {
             try {
                 if ($isWindowsPlatform) {
-                    if (-not [NLink.FileTransferStageDiagnosticsNative]::MoveFileEx($temporaryPath, $Path, 0x9)) {
+                    if (-not [NLink.FileTransferStageDiagnosticsNative]::MoveFileEx($nativePaths[0], $nativePaths[1], 0x9)) {
                         $nativeError = [Runtime.InteropServices.Marshal]::GetLastWin32Error()
                         throw [System.IO.IOException]::new(
                             "Atomic diagnostics replacement failed: $Path (win32=$nativeError)",
