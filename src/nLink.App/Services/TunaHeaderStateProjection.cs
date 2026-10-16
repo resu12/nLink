@@ -1,4 +1,5 @@
 using System;
+using NLink.Core;
 using NLink.Core.FileTransfer;
 
 namespace NLink.App.Services;
@@ -13,13 +14,20 @@ internal static class TunaHeaderStateProjector
     public static TunaHeaderStateProjection FromSnapshot(
         SessionFileTransferSnapshot snapshot,
         bool transportActive,
-        string? transportReason)
+        string? transportReason,
+        TransportAccelerationPendingFileTransfer? pendingFileTransfer = null)
     {
         var hasActiveTransfer = false;
         var activeTransferUsesTuna = false;
 
         Inspect(snapshot.Outbound);
         Inspect(snapshot.Inbound);
+
+        if (!transportActive && !activeTransferUsesTuna && transportReason == "runtime_unlock_pending_route_commit" &&
+            HasFinishedPendingTransfer(snapshot, pendingFileTransfer))
+        {
+            return new TunaHeaderStateProjection(false, "file_transfer_tuna_idle");
+        }
 
         if (!hasActiveTransfer)
         {
@@ -47,5 +55,16 @@ internal static class TunaHeaderStateProjector
                 transfer.ProtocolVersion == 4 &&
                 string.Equals(transfer.RouteToken, FileTunaV4RouteToken, StringComparison.Ordinal);
         }
+    }
+
+    public static bool HasFinishedPendingTransfer(
+        SessionFileTransferSnapshot snapshot, TransportAccelerationPendingFileTransfer? pendingFileTransfer)
+    {
+        return Matches(snapshot.Outbound) || Matches(snapshot.Inbound);
+
+        bool Matches(FileTransferTransferSnapshot? transfer)
+            => pendingFileTransfer is not null && transfer is { IsTerminal: true } &&
+               string.Equals(transfer.SessionId, pendingFileTransfer.SessionId, StringComparison.Ordinal) &&
+               string.Equals(transfer.TransferId, pendingFileTransfer.TransferId, StringComparison.Ordinal);
     }
 }

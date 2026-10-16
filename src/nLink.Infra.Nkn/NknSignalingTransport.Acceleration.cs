@@ -41709,20 +41709,42 @@ public sealed partial class NknSignalingTransport
         var active = IsTransportAccelerationPublishedActive();
         var activeValue = active ? 1 : 0;
         var previousActiveValue = Interlocked.Exchange(ref transportAccelerationActivePublished, activeValue);
+        var suppressed = TryGetUncommittedRuntimeUnlockFileAccelerationStatusSuppression(out var pendingTransaction);
+        var pending = !active && suppressed;
         var normalizedReason = active
             ? GetActiveAccelerationStatusReason()
-            : TryGetUncommittedRuntimeUnlockFileAccelerationStatusSuppression(out _)
+            : pending
                 ? "runtime_unlock_pending_route_commit"
                 : IsFileTransferUsingRegularNknFallbackForCurrentSession(currentSessionSecurityState.SessionId?.Value)
                     ? "post_tuna_fallback_route_active"
                     : string.IsNullOrWhiteSpace(reason) ? "unknown" : SanitizeLogToken(reason);
         var reasonChanged = false;
+        TransportAccelerationPendingFileTransfer? pendingFileTransfer = null;
 
         lock (accelerationGate)
         {
-            if (!string.Equals(transportAccelerationStatusReason, normalizedReason, StringComparison.Ordinal))
+            // Correlate presentation to the existing exact attempt binding. Do not
+            // derive session/Screen activity from readiness or a file route cache.
+            var transaction = runtimeUnlockTransactionState;
+            var lease = runtimeUnlockTunaPathLeaseState;
+            if (pending && transaction == pendingTransaction && lease.LeaseGeneration > 0 &&
+                transaction.OfferGeneration > 0 &&
+                !string.IsNullOrWhiteSpace(lease.TransferId) &&
+                string.Equals(lease.SessionId, transaction.SessionId, StringComparison.Ordinal) &&
+                (string.IsNullOrWhiteSpace(transaction.TransferId) ||
+                 string.Equals(lease.TransferId, transaction.TransferId, StringComparison.Ordinal)) &&
+                lease.TransactionGeneration == transaction.TransactionGeneration &&
+                lease.OfferGeneration == transaction.OfferGeneration)
+            {
+                pendingFileTransfer = new(lease.SessionId, lease.TransferId,
+                    transaction.TransactionGeneration, transaction.OfferGeneration);
+            }
+
+            if (!string.Equals(transportAccelerationStatusReason, normalizedReason, StringComparison.Ordinal) ||
+                pendingAccelerationFileTransfer != pendingFileTransfer)
             {
                 transportAccelerationStatusReason = normalizedReason;
+                pendingAccelerationFileTransfer = pendingFileTransfer;
                 reasonChanged = true;
             }
         }
@@ -41747,7 +41769,7 @@ public sealed partial class NknSignalingTransport
             $"event=tuna_acceleration_timeline; status={normalizedReason}; active={activeValue}; session_id={sessionId ?? "(none)"}; lanes={FormatAccelerationLanesForLog(lanes)}; payer_decision_id={payerDecisionId}");
         TransportAccelerationStateChanged?.Invoke(
             this,
-            new TransportAccelerationStateChangedEventArgs(active, normalizedReason));
+            new TransportAccelerationStateChangedEventArgs(active, normalizedReason, pendingFileTransfer));
     }
 
     private bool TryGetUncommittedRuntimeUnlockFileAccelerationStatusSuppression(

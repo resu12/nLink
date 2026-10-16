@@ -75,6 +75,8 @@ internal static class TunaStatusPresentationMapper
                 => new TunaStatusPresentation("Negotiating Tuna acceleration.", true, localPayer),
             "runtime_unlock_pending_route_commit"
                 => new TunaStatusPresentation("Negotiating Tuna acceleration.", true, localPayer),
+            "file_transfer_tuna_idle"
+                => new TunaStatusPresentation("Tuna is idle for file transfer.", false),
             "free_dialer_active"
                 => new TunaStatusPresentation("Tuna is active and the other computer is paying.", false),
             "paid_listener_active"

@@ -109,6 +109,8 @@ public interface ITransportAccelerationStatus
     bool ShouldUseFileTransferV6ForAcceleration { get; }
 
     string TransportAccelerationStatusReason { get; }
+
+    TransportAccelerationPendingFileTransfer? PendingAccelerationFileTransfer => null;
 }
 
 public interface ITransportAccelerationControl
@@ -369,15 +371,28 @@ public sealed class TransportSessionSecurityStateChangedEventArgs : EventArgs
     public SessionSecurityState State { get; }
 }
 
+// Display correlation only. This identity grants no route, runtime, or Screen authority.
+public sealed record TransportAccelerationPendingFileTransfer(
+    string SessionId,
+    string TransferId,
+    long TransactionGeneration,
+    long OfferGeneration);
+
 public sealed class TransportAccelerationStateChangedEventArgs : EventArgs
 {
-    public TransportAccelerationStateChangedEventArgs(bool isActive, string reason)
+    public TransportAccelerationStateChangedEventArgs(
+        bool isActive,
+        string reason,
+        TransportAccelerationPendingFileTransfer? pendingFileTransfer = null)
     {
         IsActive = isActive;
         Reason = string.IsNullOrWhiteSpace(reason) ? "unknown" : reason.Trim();
+        PendingFileTransfer = pendingFileTransfer;
     }
 
     public bool IsActive { get; }
 
     public string Reason { get; }
+
+    public TransportAccelerationPendingFileTransfer? PendingFileTransfer { get; }
 }

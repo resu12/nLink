@@ -323,6 +323,46 @@ public sealed class Beta3SessionShellLayoutSmokeTests : Beta3DefaultUiSmokeTestB
 
     [Fact]
     [Trait("Category", "Smoke")]
+    public async Task SessionHeader_TunaFinishedFileStopsPendingPulse_AndFreshNegotiationCanPulse()
+    {
+        await fixture.Session.Dispatch(async () =>
+        {
+            EnsureAppServices();
+            var header = new SessionHeaderView { TunaStatusReason = "runtime_unlock_pending_route_commit" };
+            SetPrivateField(header, "tunaUnlockToggleOn", true);
+            SetPrivateField(header, "tunaRuntimeStatus", "listener_ready");
+            var timer = Assert.IsType<DispatcherTimer>(typeof(SessionHeaderView)
+                .GetField("tunaPulseTimer", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(header));
+            try
+            {
+                InvokePrivate(header, "UpdateTunaVisualState");
+                Assert.True(timer.IsEnabled);
+                header.TunaActive = true;
+                Assert.False(timer.IsEnabled);
+                header.TunaActive = false;
+                header.TunaStatusReason = "file_transfer_tuna_idle";
+                InvokePrivate(header, "UpdateTunaVisualState");
+                Assert.False(timer.IsEnabled);
+                Assert.Equal(1d, header.TunaPulseScale);
+                Assert.Equal(0d, header.TunaGlowOpacity);
+                Assert.Equal("Tuna is idle for file transfer.", header.TunaPictogramTip);
+                Assert.Equal(header.TunaPictogramTip, header.TunaUnlockTip);
+
+                header.TunaStatusReason = "waiting_for_answer";
+                Assert.True(timer.IsEnabled);
+                Assert.StartsWith("Negotiating Tuna acceleration.", header.TunaPictogramTip);
+            }
+            finally
+            {
+                InvokePrivate(header, "StopTunaPulse");
+            }
+            await FlushUiAsync();
+            return true;
+        }, CancellationToken.None);
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
     public async Task HelpeePage_WhenConnected_ShowsVisibleChatImmediately()
     {
         await fixture.Session.Dispatch(async () =>

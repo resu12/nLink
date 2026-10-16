@@ -2223,25 +2223,48 @@ public sealed partial class SessionRuntime
         }
 
         var wasActive = transportAccelerationActive;
-        SetTransportAccelerationActive(e.IsActive, e.Reason);
+        SetTransportAccelerationActive(e.IsActive, e.Reason, e.PendingFileTransfer);
         if (wasActive && !e.IsActive && ShouldStartScreenShareTransportRebindForAccelerationReason(e.Reason))
         {
             BeginScreenShareTransportRebindRecovery(e.Reason);
         }
     }
 
-    private void SetTransportAccelerationActive(bool isActive, string reason)
+    private void SetTransportAccelerationActive(
+        bool isActive,
+        string reason,
+        TransportAccelerationPendingFileTransfer? pendingFileTransfer = null)
     {
         var normalizedReason = string.IsNullOrWhiteSpace(reason) ? "unknown" : reason.Trim();
-        if (transportAccelerationActive == isActive &&
-            string.Equals(transportAccelerationStatusReason, normalizedReason, StringComparison.Ordinal))
+        lock (transportAccelerationPresentationGate)
         {
-            return;
-        }
+            // Compare raw status so a repeated notification for the same exact
+            // attempt cannot revive its already-settled display reason.
+            if (transportAccelerationActive == isActive &&
+                string.Equals(transportAccelerationStatusReason, normalizedReason, StringComparison.Ordinal) &&
+                transportAccelerationPresentation.PendingFileTransfer == pendingFileTransfer)
+            {
+                return;
+            }
 
-        transportAccelerationActive = isActive;
-        transportAccelerationStatusReason = normalizedReason;
+            transportAccelerationActive = isActive;
+            transportAccelerationStatusReason = normalizedReason;
+            transportAccelerationPresentation = new(isActive, normalizedReason, pendingFileTransfer);
+            SettleFinishedFileAccelerationPresentation(latestFileTransferSnapshot);
+        }
         TransportAccelerationStateChanged?.Invoke(this, EventArgs.Empty);
+    }
+
+    // Called under the presentation gate. Retain only the display settlement;
+    // raw transport state, coordinator authority, and runtime policy are untouched.
+    private void SettleFinishedFileAccelerationPresentation(SessionFileTransferSnapshot snapshot)
+    {
+        var status = transportAccelerationPresentation;
+        if (!status.IsActive && status.Reason == "runtime_unlock_pending_route_commit" &&
+            TunaHeaderStateProjector.HasFinishedPendingTransfer(snapshot, status.PendingFileTransfer))
+        {
+            transportAccelerationPresentation = new(false, "file_transfer_tuna_idle", status.PendingFileTransfer);
+        }
     }
 
     private static bool ShouldStartScreenShareTransportRebindForAccelerationReason(string? reason)
@@ -8312,7 +8335,13 @@ public sealed partial class SessionRuntime
 
     private void OnFileTransferChanged(object? sender, SessionFileTransferSnapshotChangedEventArgs e)
     {
-        latestFileTransferSnapshot = e.Snapshot;
+        lock (transportAccelerationPresentationGate)
+        {
+            latestFileTransferSnapshot = e.Snapshot;
+            // Observe terminal proof before a subsequent transfer replaces the
+            // snapshot or either page coalesces its queued UI refresh.
+            SettleFinishedFileAccelerationPresentation(e.Snapshot);
+        }
         ObserveFileTransferPeerVisibleProgressForSessionLiveness(e.Snapshot);
         ObserveFileTransferTerminalProofForSessionLiveness(e.Snapshot);
         RequestSessionLivenessHeartbeatAfterFileTransferTerminal(e.Snapshot);

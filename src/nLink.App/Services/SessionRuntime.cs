@@ -266,6 +266,8 @@ public sealed partial class SessionRuntime : IDisposable, ISessionRuntimeScreenS
     private volatile TransportState transportState = TransportState.Idle;
     private volatile bool transportAccelerationActive;
     private volatile string transportAccelerationStatusReason = "inactive";
+    private readonly object transportAccelerationPresentationGate = new();
+    private volatile TransportAccelerationStateChangedEventArgs transportAccelerationPresentation = new(false, "inactive");
     private PeerAddress? currentHelperTargetAddress;
     private HelperConnectOrigin helperConnectOrigin;
     private bool helperShouldReturnToListenerWaiting;
@@ -860,6 +862,7 @@ public sealed partial class SessionRuntime : IDisposable, ISessionRuntimeScreenS
 
     public bool IsTransportAccelerationActive => transportAccelerationActive;
     public string TransportAccelerationStatusReason => transportAccelerationStatusReason;
+    internal TransportAccelerationStateChangedEventArgs TransportAccelerationPresentation => transportAccelerationPresentation;
 
     public SessionRuntimeRole Role => role;
 

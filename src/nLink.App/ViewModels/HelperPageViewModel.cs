@@ -3110,10 +3110,12 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
 
     private void SyncTunaActiveFromRuntime()
     {
+        var status = sessionRuntime.TransportAccelerationPresentation;
         var projection = TunaHeaderStateProjector.FromSnapshot(
             sessionRuntime.FileTransferSnapshot,
-            sessionRuntime.IsTransportAccelerationActive,
-            sessionRuntime.TransportAccelerationStatusReason);
+            status.IsActive,
+            status.Reason,
+            status.PendingFileTransfer);
         IsTunaActive = projection.IsActive;
         TunaStatusReason = projection.StatusReason;
     }

@@ -169,7 +169,8 @@ public sealed partial class SessionRuntime
                 accelerationTransport.TransportAccelerationStateChanged += owner.OnTransportAccelerationStateChanged;
                 owner.SetTransportAccelerationActive(
                     accelerationTransport.IsTransportAccelerationActive,
-                    accelerationTransport.TransportAccelerationStatusReason);
+                    accelerationTransport.TransportAccelerationStatusReason,
+                    accelerationTransport.PendingAccelerationFileTransfer);
             }
             else
             {
