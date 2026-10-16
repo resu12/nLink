@@ -6906,12 +6906,20 @@ public sealed class FileTransferOpsScriptSurfaceTests : FileTransferOpsScriptsTe
     }
 
     [Theory]
-    [InlineData(NLink.Core.FileTransfer.FileTransferDirection.Outbound, "powershell")]
-    [InlineData(NLink.Core.FileTransfer.FileTransferDirection.Inbound, "powershell")]
-    [InlineData(NLink.Core.FileTransfer.FileTransferDirection.Outbound, "pwsh")]
-    [InlineData(NLink.Core.FileTransfer.FileTransferDirection.Inbound, "pwsh")]
+    [InlineData(NLink.Core.FileTransfer.FileTransferDirection.Outbound, "powershell", 1)]
+    [InlineData(NLink.Core.FileTransfer.FileTransferDirection.Outbound, "powershell", 2)]
+    [InlineData(NLink.Core.FileTransfer.FileTransferDirection.Outbound, "powershell", 3)]
+    [InlineData(NLink.Core.FileTransfer.FileTransferDirection.Inbound, "powershell", 1)]
+    [InlineData(NLink.Core.FileTransfer.FileTransferDirection.Inbound, "powershell", 2)]
+    [InlineData(NLink.Core.FileTransfer.FileTransferDirection.Inbound, "powershell", 3)]
+    [InlineData(NLink.Core.FileTransfer.FileTransferDirection.Outbound, "pwsh", 1)]
+    [InlineData(NLink.Core.FileTransfer.FileTransferDirection.Outbound, "pwsh", 2)]
+    [InlineData(NLink.Core.FileTransfer.FileTransferDirection.Outbound, "pwsh", 3)]
+    [InlineData(NLink.Core.FileTransfer.FileTransferDirection.Inbound, "pwsh", 1)]
+    [InlineData(NLink.Core.FileTransfer.FileTransferDirection.Inbound, "pwsh", 2)]
+    [InlineData(NLink.Core.FileTransfer.FileTransferDirection.Inbound, "pwsh", 3)]
     public async Task FileTransferOps_ReceiveRecoveryRouteCarryTerminalRolloverUsesExactSharedHistory(
-        NLink.Core.FileTransfer.FileTransferDirection direction, string host)
+        NLink.Core.FileTransfer.FileTransferDirection direction, string host, int partition)
     {
         if (!OperatingSystem.IsWindows()) { return; }
         var repoRoot = FindRepoRoot();
@@ -6931,8 +6939,19 @@ public sealed class FileTransferOpsScriptSurfaceTests : FileTransferOpsScriptsTe
                 "[" + string.Join(",", envelopes.Select(envelope => envelope.ToCanonicalJson())) + "]");
             var script = File.ReadAllText(Path.Combine(repoRoot, "tests", "nLink.SmokeTests.Core",
                 "Support", "ReceiveRecoveryRouteCarrySnapshotEvidence.ps1"));
-            var result = await RunPowerShellScriptTextAsync(script, [repoRoot, fixturePath, tempRoot], host);
+            var result = await RunPowerShellScriptTextAsync(script,
+                [repoRoot, fixturePath, tempRoot, partition.ToString(System.Globalization.CultureInfo.InvariantCulture)], host);
+            var profileDirectory = Environment.GetEnvironmentVariable("NLINK_TEST_SCRIPT_PROFILE_DIRECTORY");
+            if (!string.IsNullOrWhiteSpace(profileDirectory))
+            {
+                Directory.CreateDirectory(profileDirectory);
+                await File.WriteAllTextAsync(Path.Combine(profileDirectory, $"receive-route-carry-rollover-{direction}-{host}-{partition}.log"),
+                    result.Stdout + Environment.NewLine + result.Stderr);
+            }
             Assert.True(result.ExitCode == 0, $"STDOUT:{result.Stdout}{Environment.NewLine}STDERR:{result.Stderr}");
+            Assert.Equal(TimeSpan.FromSeconds(300), ScriptProcessTimeout);
+            Assert.Contains($"Recovery parity coverage: total=42; partition={partition}; cases=" +
+                string.Join(",", Enumerable.Range((partition - 1) * 14 + 1, 14)), result.Stdout, StringComparison.Ordinal);
         }
         finally { TryDeleteDirectory(tempRoot); }
     }

@@ -31329,16 +31329,34 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
         $runtimeUnlockRetryContractFailed -and
         $regularV4ReceiveRecoveryClosedNoDeferral -and
         (-not $runtimeUnlockTransactionStarted)
+    function Test-TunaGuiLegacyEvidenceMayContainEvent {
+        param([AllowEmptyString()][string]$Text, [string[]]$Events)
+
+        # Absence only: a name anywhere (including prefixes, whitespace-trimmed
+        # fields, or another field's value) must still reach the original predicate.
+        # This never establishes event identity, ordering, scope, or authority.
+        foreach ($eventName in $Events) {
+            if ($Text.IndexOf($eventName, [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
+                return $true
+            }
+        }
+        return $false
+    }
     $regularV4EvidenceLineText = [string[]]@($evidenceLines | ForEach-Object { [string]$_ })
+    # Reuse one search buffer to avoid constructing/scanning full legacy indexes
+    # when none of a predicate's entry events can be present. Keep all original lines.
+    $regularV4EvidenceSearchText = [string]::Join("`n", $regularV4EvidenceLineText)
     $retiredInitialActivationAnswerAuthorityTupleRejected =
         Test-TunaGuiRetiredInitialActivationAnswerAuthorityTupleRejected `
             -Lines $regularV4EvidenceLineText
     $initialActivationAnswerPeerDeliveryMissing =
-        Test-TunaGuiInitialActivationAnswerPeerDeliveryMissing `
-            -Lines $regularV4EvidenceLineText
+        (Test-TunaGuiLegacyEvidenceMayContainEvent -Text $regularV4EvidenceSearchText -Events @(
+            'tuna_acceleration_answer_ack_timeout', 'runtime_unlock_tuna_dial_offer_duplicate_ignored')) -and
+        (Test-TunaGuiInitialActivationAnswerPeerDeliveryMissing -Lines $regularV4EvidenceLineText)
     $installedRetryOfferPendingDuplicateNotReplayed =
-        Test-TunaGuiInstalledRetryOfferPendingDuplicateNotReplayed `
-            -Lines $regularV4EvidenceLineText
+        (Test-TunaGuiLegacyEvidenceMayContainEvent -Text $regularV4EvidenceSearchText -Events @(
+            'runtime_unlock_tuna_dial_offer_duplicate_ignored', 'runtime_unlock_tuna_dial_successor_offer_held')) -and
+        (Test-TunaGuiInstalledRetryOfferPendingDuplicateNotReplayed -Lines $regularV4EvidenceLineText)
     $initialActivationAnswerPeerDeliveryMissing =
         $initialActivationAnswerPeerDeliveryMissing -or
         $installedRetryOfferPendingDuplicateNotReplayed -or
@@ -31385,10 +31403,13 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
         Test-TunaGuiInitialActivationRetiredRefreshPredecessorRejected `
             -Lines $regularV4EvidenceLineText
     $bridgeRecoveryExecutionPayloadHoldMissing =
-        Test-TunaGuiBridgeRecoveryExecutionPayloadHoldFailure -Lines $regularV4EvidenceLineText
+        (Test-TunaGuiLegacyEvidenceMayContainEvent -Text $regularV4EvidenceSearchText -Events @(
+            'filetransfer_v4_sender_failed')) -and
+        (Test-TunaGuiBridgeRecoveryExecutionPayloadHoldFailure -Lines $regularV4EvidenceLineText)
     $postTunaSubmissionEpochTerminalizationFailure =
-        Test-TunaGuiPostTunaSubmissionEpochTerminalizationFailure `
-            -Lines $regularV4EvidenceLineText
+        (Test-TunaGuiLegacyEvidenceMayContainEvent -Text $regularV4EvidenceSearchText -Events @(
+            'filetransfer_v4_sender_failed')) -and
+        (Test-TunaGuiPostTunaSubmissionEpochTerminalizationFailure -Lines $regularV4EvidenceLineText)
     $postTunaLateSubmissionObservationFailure =
         Test-TunaGuiPostTunaLateSubmissionObservationFailure -Lines $regularV4EvidenceLineText
     $receiveRecoveryCompletedUnprovenPayloadHoldNotPreserved =
@@ -31408,14 +31429,20 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
         Test-TunaGuiBridgeRecoveryExecutionSubmissionBarrierDrainFailure `
             -Lines $regularV4EvidenceLineText
     $receiveRecoveryCompletedUnprovenSuccessorMissing =
-        Test-TunaGuiReceiveRecoveryCompletedUnprovenSuccessorMissing `
-            -Lines $regularV4EvidenceLineText
+        (Test-TunaGuiLegacyEvidenceMayContainEvent -Text $regularV4EvidenceSearchText -Events @(
+            'filetransfer_recovery_authority_rejected')) -and
+        (Test-TunaGuiReceiveRecoveryCompletedUnprovenSuccessorMissing -Lines $regularV4EvidenceLineText)
     $receiveRecoveryCompletedProvenSuccessorMissing =
         Test-TunaGuiReceiveRecoveryCompletedProvenSuccessorMissing `
             -Lines $regularV4EvidenceLineText
     $receiveRecoveryFallbackCheckpointScopeHandoffMissing =
-        Test-TunaGuiReceiveRecoveryFallbackCheckpointScopeHandoffMissing `
-            -Lines $regularV4EvidenceLineText
+        (Test-TunaGuiLegacyEvidenceMayContainEvent -Text $regularV4EvidenceSearchText -Events @(
+            'filetransfer_fallback_checkpoint_response_timeout_reissued',
+            'runtime_unlock_initial_activation_receive_recovery_hold_decided',
+            'filetransfer_outbound_sparse_worker_handoff_rejected',
+            'filetransfer_receive_recovery_fallback_checkpoint_lifecycle_advanced',
+            'filetransfer_receive_recovery_operation_invalidated')) -and
+        (Test-TunaGuiReceiveRecoveryFallbackCheckpointScopeHandoffMissing -Lines $regularV4EvidenceLineText)
     $receiveRecoveryFallbackCheckpointSparsePumpHandoffMissing =
         $receiveRecoveryFallbackCheckpointScopeHandoffMissing -and
         (Test-TunaGuiLogLinesContain -Lines $regularV4EvidenceLineText -Needles @(
@@ -31454,13 +31481,18 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
         $fallbackV6ProofBootstrapMissing = $false
     }
     $regularV4RecoveryPredecessorSettlementClosedSuccessor =
-        Test-TunaGuiRegularV4PredecessorSettlementClosedSuccessor -Lines $regularV4EvidenceLineText
+        (Test-TunaGuiLegacyEvidenceMayContainEvent -Text $regularV4EvidenceSearchText -Events @(
+            'runtime_unlock_regular_v4_frontier_repair_settlement_handoff_consumed',
+            'runtime_unlock_regular_v4_frontier_repair_precontract_settlement_consumed')) -and
+        (Test-TunaGuiRegularV4PredecessorSettlementClosedSuccessor -Lines $regularV4EvidenceLineText)
     $regularV4FrontierRepairSettlementClosed =
         Test-TunaGuiRegularV4FrontierRepairSettlementClosed `
             -Lines $regularV4EvidenceLineText `
             -Metrics $guiFailureEvidenceIndexMetrics
     $regularV4FrontierRepairStallUnresolved =
-        Test-TunaGuiRegularV4FrontierRepairStallUnresolved -Lines $regularV4EvidenceLineText
+        (Test-TunaGuiLegacyEvidenceMayContainEvent -Text $regularV4EvidenceSearchText -Events @(
+            'filetransfer_regular_v4_frontier_repair_stalled')) -and
+        (Test-TunaGuiRegularV4FrontierRepairStallUnresolved -Lines $regularV4EvidenceLineText)
     $regularV4FrontierRepairSettledStalledUnclosed = $regularV4FrontierRepairSettledStalledEvent -and (-not $regularV4FrontierRepairSettlementClosed)
     $regularV4FrontierMissingRanges = Test-TunaGuiLogLinesContain -Lines $evidenceLines -Needles @('event=filetransfer_v4_frontier_stall_missing_range_due')
     $regularV4RepairRequested = Test-TunaGuiLogLinesContain -Lines $evidenceLines -Needles @('event=filetransfer_v4_repair_requested')

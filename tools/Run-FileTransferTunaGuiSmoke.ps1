@@ -344,11 +344,19 @@ function Get-TunaGuiTerminalPhaseDeadlineRequest {
 
     try {
         $request = Get-Content -LiteralPath $Path -Raw | ConvertFrom-Json
+        if ($null -eq $request) { return $null }
+        # PowerShell 7 may materialize JSON timestamps as DateTime. A plain
+        # string cast uses culture formatting and drops fractional seconds.
+        $requestedUtcText = if ($request.requestedUtc -is [DateTime] -or $request.requestedUtc -is [DateTimeOffset]) {
+            $request.requestedUtc.ToString('O')
+        } else { [string]$request.requestedUtc }
+        $deadlineUtcText = if ($request.deadlineUtc -is [DateTime] -or $request.deadlineUtc -is [DateTimeOffset]) {
+            $request.deadlineUtc.ToString('O')
+        } else { [string]$request.deadlineUtc }
         $requestedUtc = [DateTimeOffset]::MinValue
         $deadlineUtc = [DateTimeOffset]::MinValue
         $expectedTimeoutMilliseconds = [long]$TimeoutSeconds * 1000L
-        if ($null -eq $request -or
-            -not [string]::Equals([string]$request.event, 'filetransfer_gui_terminal_phase_deadline_requested', [System.StringComparison]::Ordinal) -or
+        if (-not [string]::Equals([string]$request.event, 'filetransfer_gui_terminal_phase_deadline_requested', [System.StringComparison]::Ordinal) -or
             -not [string]::Equals([string]$request.acceptanceRunId, [string]$env:NLINK_FILETRANSFER_ACCEPTANCE_RUN_ID, [System.StringComparison]::Ordinal) -or
             -not [string]::Equals([string]$request.scenarioRunId, [string]$env:NLINK_FILETRANSFER_SCENARIO_RUN_ID, [System.StringComparison]::Ordinal) -or
             -not [string]::Equals([string]$request.routeMode, 'live-regular-activation-cycle', [System.StringComparison]::Ordinal) -or
@@ -358,8 +366,8 @@ function Get-TunaGuiTerminalPhaseDeadlineRequest {
             [long]$request.actionBookmark -lt 0L -or
             [long]$request.proofEndBookmark -lt [long]$request.actionBookmark -or
             [long]$request.timeoutMilliseconds -ne $expectedTimeoutMilliseconds -or
-            -not [DateTimeOffset]::TryParse([string]$request.requestedUtc, [ref]$requestedUtc) -or
-            -not [DateTimeOffset]::TryParse([string]$request.deadlineUtc, [ref]$deadlineUtc)) {
+            -not [DateTimeOffset]::TryParse($requestedUtcText, [ref]$requestedUtc) -or
+            -not [DateTimeOffset]::TryParse($deadlineUtcText, [ref]$deadlineUtc)) {
             return $null
         }
 

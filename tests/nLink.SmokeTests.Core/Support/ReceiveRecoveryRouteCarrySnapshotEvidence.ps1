@@ -1,4 +1,5 @@
-param([string]$RepoRoot, [string]$FixturePath, [string]$OutputRoot)
+param([string]$RepoRoot, [string]$FixturePath, [string]$OutputRoot,
+    [ValidateRange(0, 3)][int]$ParityPartition = 0)
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 . (Join-Path $RepoRoot 'tools/FileTransferOps/CoordinatorSnapshotEvidence.ps1')
@@ -70,8 +71,26 @@ function Semantic-Failures($evaluation) {
         "$($_.boundaryId)|$($_.taxonomyClass)|$($_.rawCount)|$($_.distinctCount)|$($_.recoveredCount)|$($_.unresolvedCount)"
     } | Sort-Object) -join ';'
 }
+$script:parityProfileClock = [Diagnostics.Stopwatch]::StartNew()
+$script:parityProfileCase = 0
+$script:parityExecutedCases = [System.Collections.Generic.List[int]]::new()
+function Write-ParityProfile([string]$stage, [string]$context, [int]$lineCount) {
+    if (-not [string]::IsNullOrWhiteSpace($env:NLINK_TEST_SCRIPT_PROFILE_DIRECTORY)) {
+        Write-Host "event=test_parity_stage; case=$script:parityProfileCase; stage=$stage; context=$context; lines=$lineCount; elapsed_ms=$($script:parityProfileClock.ElapsedMilliseconds)"
+    }
+}
 function Assert-Parity([string[]]$lines, [bool]$valid, [string]$reason = '', [string]$context = 'fixture') {
+    $script:parityProfileCase++
+    # The rollover matrix has 42 cases: three disjoint 14-case processes, each
+    # retaining the normal 300-second harness deadline and every parity assertion.
+    if ($ParityPartition -ne 0 -and
+        [Math]::Floor(($script:parityProfileCase - 1) / 14) + 1 -ne $ParityPartition) {
+        return
+    }
+    $script:parityExecutedCases.Add($script:parityProfileCase)
+    Write-ParityProfile 'full' $context $lines.Count
     $full = Get-FileTransferCoordinatorSnapshotEvaluation -Lines (@('event=unrelated') + $lines)
+    Write-ParityProfile 'compact' $context $lines.Count
     $compactLines = @($lines | Where-Object {
         $event = Get-FileTransferCoordinatorSnapshotEventName $_
         $catalog.SnapshotAuthorityV1 -contains $event -or $catalog.GenerationStampedEffects -contains $event
@@ -101,9 +120,11 @@ function Assert-Parity([string[]]$lines, [bool]$valid, [string]$reason = '', [st
         })
         if ($otherFailures.Count -ne 0) { throw "Unexpected independent semantic finding ($context)." }
     }
+    Write-ParityProfile 'gui' $context $lines.Count
     $path = Join-Path $OutputRoot 'compact.log'
     [IO.File]::WriteAllLines($path,$compactLines)
     $gui = Get-TunaGuiFileTransferSetupFailureClassification -Bookmark 0 -ErrorMessage 'fixture' -RouteMode 'regular-v4-live-activation-off-on-off-256mb' -ImmutableEvidencePaths @($path)
+    Write-ParityProfile 'completed' $context $lines.Count
     $boundary = $full.FirstUnresolvedBoundary
     if ($null -eq $boundary) {
         if ($null -ne $gui) { throw 'GUI invented a boundary.' }
@@ -129,6 +150,9 @@ if (-not (($issueCarries.Count -eq 1 -and $proofCarries.Count -eq 1 -and
     throw 'Expected one direct issue/proof pair or two exact rollover pairs.'
 }
 $hasTerminalRollover = $issueCarries.Count -eq 2
+if ($ParityPartition -ne 0 -and -not $hasTerminalRollover) {
+    throw 'Only the terminal-rollover matrix may be partitioned.'
+}
 $routeCarries = @($carries | Where-Object {
     $roles = @($_.aggregate.operations | Where-Object {
         $_.family -ceq 'route_transition' -and
@@ -580,4 +604,15 @@ foreach ($mutation in @('gap','hash','terminal','data-session','transport','tran
         throw "Poisoned retained history accepted: $mutation"
     }
 }
+$expectedCaseCount = if ($hasTerminalRollover) { 42 } else { 33 }
+$expectedCases = if ($ParityPartition -eq 0) {
+    1..$expectedCaseCount
+} else {
+    (($ParityPartition - 1) * 14 + 1)..($ParityPartition * 14)
+}
+if ($script:parityProfileCase -ne $expectedCaseCount -or
+    ($script:parityExecutedCases -join ',') -cne ($expectedCases -join ',')) {
+    throw "Recovery parity matrix coverage changed: visited=$script:parityProfileCase; executed=$($script:parityExecutedCases -join ',')"
+}
+Write-Output "Recovery parity coverage: total=$expectedCaseCount; partition=$ParityPartition; cases=$($script:parityExecutedCases -join ',')"
 Write-Output 'Receive-recovery route carry, immutable terminal history, no new route effects and full/compact/GUI parity passed.'

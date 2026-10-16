@@ -1127,8 +1127,10 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
         Assert.Contains("gui-finalization-stage-ok", result.Stdout, StringComparison.Ordinal);
     }
 
-    [Fact]
-    public async Task TunaGuiWrapper_HardDeadlinePersistsFailClosedEvidenceAndCleansChild()
+    [Theory]
+    [InlineData("powershell")]
+    [InlineData("pwsh")]
+    public async Task TunaGuiWrapper_HardDeadlinePersistsFailClosedEvidenceAndCleansChild(string host)
     {
         if (!OperatingSystem.IsWindows())
         {
@@ -1178,6 +1180,9 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
             wrapperText,
             "Invoke-TunaGuiSmokeWithHardDeadline",
             "Test-TunaGuiLateSetupCleanupLine");
+        // Freeze only this fixture's terminal-phase clock until the child publishes
+        // its request. The other real-process deadline/cleanup cases use real time.
+        watchdogBody = watchdogBody.Replace("[DateTimeOffset]::UtcNow", "(Get-TestWatchdogUtcNow)", StringComparison.Ordinal);
         var scriptText = $$"""
             $ErrorActionPreference = 'Stop'
             function ConvertTo-TunaGuiProcessArgument { {{convertArgumentBody}} }
@@ -1187,7 +1192,23 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
             function Stop-TunaGuiSmokeProcessTree { {{stopTreeBody}} }
             function Stop-TunaGuiSmokeApplicationDescendants { {{stopApplicationsBody}} }
             function Request-TunaGuiScenarioDeadline { {{requestDeadlineBody}} }
-            function Get-TunaGuiTerminalPhaseDeadlineRequest { {{terminalPhaseDeadlineBody}} }
+            function Read-TestTerminalPhaseDeadlineRequest { {{terminalPhaseDeadlineBody}} }
+            $script:terminalPhaseClock = $null
+            $script:terminalPhaseAdoptionCount = 0
+            function Get-TestWatchdogUtcNow {
+                if ($null -ne $script:terminalPhaseClock) { return $script:terminalPhaseClock }
+                return [DateTimeOffset]::UtcNow
+            }
+            function Get-TunaGuiTerminalPhaseDeadlineRequest {
+                param($Path, $StartedUtc, $OriginalScenarioDeadlineUtc, $TimeoutSeconds)
+                $request = Read-TestTerminalPhaseDeadlineRequest @PSBoundParameters
+                if ($null -ne $request -and $null -ne $script:terminalPhaseClock) {
+                    $script:terminalPhaseAdoptionCount++
+                    $script:terminalPhaseClock = $StartedUtc.AddMilliseconds(1200)
+                    [IO.File]::WriteAllText($Path + '.observed', 'observed')
+                }
+                return $request
+            }
             function Invoke-TunaGuiSmokeWithHardDeadline { {{watchdogBody}} }
             function Assert-GuiSmokeScenarioDeadline { {{scenarioDeadlineBody}} }
 
@@ -1330,8 +1351,8 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
 
                 @'
             param([string]$ExePath, [int]$TimeoutSeconds)
-            Start-Sleep -Milliseconds 600
-            $requestedUtc = [DateTimeOffset]::UtcNow
+            $state = Get-Content -LiteralPath $env:NLINK_FILETRANSFER_EVIDENCE_FINALIZATION_STATE_PATH -Raw | ConvertFrom-Json
+            $requestedUtc = ([DateTimeOffset]$state.startedUtc).AddMilliseconds(600)
             [ordered]@{
                 schemaVersion = 1
                 event = 'filetransfer_gui_terminal_phase_deadline_requested'
@@ -1347,19 +1368,32 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
                 requestedUtc = $requestedUtc.ToString('O')
                 deadlineUtc = $requestedUtc.AddSeconds(1).ToString('O')
                 authorityEffect = 'none'
-            } | ConvertTo-Json | Set-Content -LiteralPath $env:NLINK_FILETRANSFER_GUI_TERMINAL_PHASE_DEADLINE_PATH -Encoding UTF8
-            Start-Sleep -Milliseconds 800
+            } | ConvertTo-Json | Set-Content -LiteralPath ($env:NLINK_FILETRANSFER_GUI_TERMINAL_PHASE_DEADLINE_PATH + '.tmp') -Encoding UTF8
+            Move-Item -LiteralPath ($env:NLINK_FILETRANSFER_GUI_TERMINAL_PHASE_DEADLINE_PATH + '.tmp') -Destination $env:NLINK_FILETRANSFER_GUI_TERMINAL_PHASE_DEADLINE_PATH
+            $wait = [Diagnostics.Stopwatch]::StartNew()
+            while (-not (Test-Path -LiteralPath ($env:NLINK_FILETRANSFER_GUI_TERMINAL_PHASE_DEADLINE_PATH + '.observed'))) {
+                if ($wait.Elapsed.TotalSeconds -ge 10) { throw 'parent did not observe terminal phase request' }
+                Start-Sleep -Milliseconds 10
+            }
             exit 0
             '@ | Set-Content -LiteralPath $stubPath -Encoding UTF8
+                $script:terminalPhaseClock = [DateTimeOffset]::Parse('2026-01-01T00:00:00.9000000Z')
                 $terminalPhase = Invoke-TunaGuiSmokeWithHardDeadline `
                     -RepoRoot $tempRoot `
                     -ArtifactDir $terminalPhaseArtifact `
                     -ExePath 'unused.exe' `
                     -TimeoutSeconds 1
+                $script:terminalPhaseClock = $null
                 $terminalPhaseState = Get-Content -LiteralPath (Join-Path $terminalPhaseArtifact 'filetransfer-gui-evidence-finalization-state.json') -Raw | ConvertFrom-Json
                 if ($terminalPhase.TimedOut -or
+                    $script:terminalPhaseAdoptionCount -ne 1 -or
+                    -not $terminalPhase.ExitCodeAvailable -or [int]$terminalPhase.ExitCode -ne 0 -or
                     -not $terminalPhaseState.terminalPhaseDeadlineAdopted -or
                     [string]::IsNullOrWhiteSpace([string]$terminalPhaseState.terminalPhaseDeadlineUtc) -or
+                    [DateTimeOffset]$terminalPhaseState.terminalPhaseDeadlineUtc -ne ([DateTimeOffset]$terminalPhaseState.startedUtc).AddMilliseconds(1600) -or
+                    [DateTimeOffset]$terminalPhaseState.endedUtc -le ([DateTimeOffset]$terminalPhaseState.startedUtc).AddSeconds(1) -or
+                    [DateTimeOffset]$terminalPhaseState.endedUtc -ge [DateTimeOffset]$terminalPhaseState.terminalPhaseDeadlineUtc -or
+                    $terminalPhaseState.maximumHardDeadlineSeconds -ne 3 -or
                     $terminalPhaseState.scenarioDeadlineRequested -or
                     (Test-Path -LiteralPath (Join-Path $terminalPhaseArtifact 'filetransfer-gui-scenario-deadline-request.json'))) {
                     throw "terminal phase deadline was not adopted exactly once: result=$($terminalPhase | ConvertTo-Json -Compress); state=$($terminalPhaseState | ConvertTo-Json -Compress)"
@@ -1499,10 +1533,59 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
             }
             """;
 
-        var result = await RunPowerShellScriptTextAsync(scriptText, Array.Empty<string>());
+        var result = await RunPowerShellScriptTextAsync(scriptText, Array.Empty<string>(), host);
 
         Assert.True(result.ExitCode == 0, $"Tuna GUI watchdog test failed.{Environment.NewLine}{result.Stdout}{Environment.NewLine}{result.Stderr}");
         Assert.Contains("tuna-gui-watchdog-ok", result.Stdout, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("powershell")]
+    [InlineData("pwsh")]
+    public async Task TunaGuiWrapper_TerminalDeadlinePreservesTimestampPrecisionAndBounds(string host)
+    {
+        if (!OperatingSystem.IsWindows()) { return; }
+        var wrapperText = File.ReadAllText(Path.Combine(FindRepoRoot(), "tools", "Run-FileTransferTunaGuiSmoke.ps1"));
+        var parserBody = ExtractPowerShellFunctionBody(wrapperText,
+            "Get-TunaGuiTerminalPhaseDeadlineRequest", "Invoke-TunaGuiSmokeWithHardDeadline");
+        var scriptText = $$"""
+            $ErrorActionPreference = 'Stop'
+            function Get-TunaGuiTerminalPhaseDeadlineRequest { {{parserBody}} }
+            $path = Join-Path ([IO.Path]::GetTempPath()) ('nlink-deadline-' + [guid]::NewGuid().ToString('N') + '.json')
+            $env:NLINK_FILETRANSFER_ACCEPTANCE_RUN_ID = 'acceptance'
+            $env:NLINK_FILETRANSFER_SCENARIO_RUN_ID = 'scenario'
+            $started = [DateTimeOffset]::Parse('2026-01-01T00:00:00.9000000+05:30')
+            $request = [ordered]@{
+                event = 'filetransfer_gui_terminal_phase_deadline_requested'
+                acceptanceRunId = 'acceptance'; scenarioRunId = 'scenario'
+                routeMode = 'live-regular-activation-cycle'; phase = 'terminal_integrity'
+                phaseGeneration = 1; liveRouteEpoch = 4; actionBookmark = 10; proofEndBookmark = 20
+                timeoutMilliseconds = 1000
+                requestedUtc = $started.AddMilliseconds(600).ToString('O')
+                deadlineUtc = $started.AddMilliseconds(1600).ToString('O')
+            }
+            try {
+                foreach ($case in @('exact', 'maximum', 'beyond-maximum', 'original', 'malformed', 'foreign')) {
+                    $deadline = switch ($case) {
+                        'maximum' { $started.AddSeconds(2) }
+                        'beyond-maximum' { $started.AddSeconds(2).AddTicks(1) }
+                        'original' { $started.AddSeconds(1) }
+                        default { $started.AddMilliseconds(1600) }
+                    }
+                    $request.deadlineUtc = if ($case -eq 'malformed') { 'not-a-date' } else { $deadline.ToString('O') }
+                    $request.scenarioRunId = if ($case -eq 'foreign') { 'other' } else { 'scenario' }
+                    $request | ConvertTo-Json | Set-Content -LiteralPath $path -Encoding UTF8
+                    $result = Get-TunaGuiTerminalPhaseDeadlineRequest -Path $path -StartedUtc $started -OriginalScenarioDeadlineUtc ($started.AddSeconds(1)) -TimeoutSeconds 1
+                    if ($case -in @('exact', 'maximum')) {
+                        if ($null -eq $result -or $result.DeadlineUtc -ne $deadline) { throw "timestamp precision lost: $case" }
+                    } elseif ($null -ne $result) { throw "invalid terminal deadline accepted: $case" }
+                }
+                Write-Output 'terminal-deadline-precision-ok'
+            } finally { Remove-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue }
+            """;
+        var result = await RunPowerShellScriptTextAsync(scriptText, Array.Empty<string>(), host);
+        Assert.True(result.ExitCode == 0, $"Terminal deadline parser failed.{Environment.NewLine}{result.Stdout}{Environment.NewLine}{result.Stderr}");
+        Assert.Contains("terminal-deadline-precision-ok", result.Stdout, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -7852,6 +7935,75 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
     }
 
     [Theory]
+    [InlineData("powershell")]
+    [InlineData("pwsh")]
+    public async Task GuiSmokeFailureClassification_LegacyAbsenceGuardsPreservePredicateInputs(string host)
+    {
+        var scriptText = """
+            param([string]$GuiPath)
+            $ErrorActionPreference = 'Stop'
+            $ast = [Management.Automation.Language.Parser]::ParseFile($GuiPath, [ref]$null, [ref]$null)
+            $classifier = @($ast.FindAll({ param($n)
+                $n -is [Management.Automation.Language.FunctionDefinitionAst] -and
+                $n.Name -ceq 'Get-TunaGuiFileTransferSetupFailureClassification'
+            }, $true))[0]
+            $guard = @($classifier.FindAll({ param($n)
+                $n -is [Management.Automation.Language.FunctionDefinitionAst] -and
+                $n.Name -ceq 'Test-TunaGuiLegacyEvidenceMayContainEvent'
+            }, $true))[0]
+            . ([scriptblock]::Create($guard.Extent.Text))
+            $assignments = @($classifier.FindAll({ param($n)
+                $n -is [Management.Automation.Language.AssignmentStatementAst] -and
+                $n.Right.Extent.Text.Contains('(Test-TunaGuiLegacyEvidenceMayContainEvent ')
+            }, $true))
+            if ($assignments.Count -ne 8) { throw 'Expected all eight legacy absence guards.' }
+            foreach ($assignment in $assignments) {
+                $commands = @($assignment.Right.FindAll({ param($n)
+                    $n -is [Management.Automation.Language.CommandAst]
+                }, $true))
+                if ($commands.Count -ne 2) { throw 'Guard must call exactly one unchanged predicate.' }
+                $predicateName = $commands[1].GetCommandName()
+                Set-Item -Path "Function:\$predicateName" -Value {
+                    param([string[]]$Lines)
+                    $script:predicateCalls++
+                    if (($Lines -join "`n") -cne ($regularV4EvidenceLineText -join "`n") -or
+                        $Lines.Count -ne $regularV4EvidenceLineText.Count) {
+                        throw 'Guard filtered or reordered predicate evidence.'
+                    }
+                    return $script:predicateResult
+                }
+                $events = @($commands[0].FindAll({ param($n)
+                    $n -is [Management.Automation.Language.StringConstantExpressionAst] -and
+                    $n.Value -match '^(filetransfer_|runtime_unlock_|tuna_)'
+                }, $true) | ForEach-Object Value)
+                if ($events.Count -eq 0) { throw 'Guard lost its entry events.' }
+                foreach ($text in @('unrelated diagnostic') + @($events | ForEach-Object {
+                    "event=$_"; "event= $($_.ToUpperInvariant()) "; "note=$($_)_suffix"; "event=other; event=$_"
+                })) {
+                    foreach ($predicateResult in @($false, $true)) {
+                        [string[]]$regularV4EvidenceLineText = @('before', $text, 'after')
+                        $regularV4EvidenceSearchText = [string]::Join("`n", $regularV4EvidenceLineText)
+                        $script:predicateCalls = 0
+                        $script:predicateResult = $predicateResult
+                        . ([scriptblock]::Create($assignment.Extent.Text))
+                        $actual = Get-Variable -Name $assignment.Left.VariablePath.UserPath -ValueOnly
+                        $present = $text -cne 'unrelated diagnostic'
+                        if ($script:predicateCalls -ne [int]$present -or
+                            $actual -ne ($present -and $predicateResult)) {
+                            throw "Legacy guard changed predicate result: $predicateName / $text"
+                        }
+                    }
+                }
+            }
+            Write-Output 'legacy-absence-guards-ok'
+            """;
+        var result = await RunPowerShellScriptTextAsync(scriptText,
+            [Path.Combine(FindRepoRoot(), "tools", "GuiSmoke-Windows.ps1")], host);
+        Assert.True(result.ExitCode == 0, $"STDOUT:{result.Stdout}{Environment.NewLine}STDERR:{result.Stderr}");
+        Assert.Contains("legacy-absence-guards-ok", result.Stdout, StringComparison.Ordinal);
+    }
+
+    [Theory]
     [InlineData("healthy")]
     [InlineData("reverse_order")]
     [InlineData("cross_scope")]
@@ -7867,15 +8019,26 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
     [InlineData("broken_lineage")]
     [InlineData("redacted_recheck")]
     [InlineData("production_redacted_recheck")]
+    [InlineData("redacted_recheck", "pwsh")]
+    [InlineData("production_redacted_recheck", "pwsh")]
     [InlineData("wrong_recheck_authority")]
     [InlineData("ambiguous_redacted_recheck")]
     public async Task GuiSmokeFailureClassification_FallbackRepairRecoveryRequiresExactOrderedLineage(
-        string scenario)
+        string scenario, string host = "powershell")
     {
         var guiText = File.ReadAllText(Path.Combine(FindRepoRoot(), "tools", "GuiSmoke-Windows.ps1"));
         var resultBody = ExtractPowerShellFunctionBody(guiText, "New-TunaGuiFileTransferFailureClassificationResult", "Get-TunaGuiExplicitFailureClassification");
         var explicitBody = ExtractPowerShellFunctionBody(guiText, "Get-TunaGuiExplicitFailureClassification", "Resolve-TunaGuiFailureClassification");
         var classifierBody = ExtractPowerShellFunctionBody(guiText, "Get-TunaGuiFileTransferSetupFailureClassification", "Get-TunaGuiFailureClassificationBudgetMilliseconds");
+        var profileDirectory = Environment.GetEnvironmentVariable("NLINK_TEST_SCRIPT_PROFILE_DIRECTORY");
+        if (!string.IsNullOrWhiteSpace(profileDirectory))
+        {
+            // Instrument the extracted test copy, never the production classifier.
+            classifierBody = Regex.Replace(classifierBody,
+                @"(?m)^    (?=\$(?<stage>(?!classificationStopwatch\b)\w+)\s*=)",
+                match => "    Write-Host \"event=test_classifier_stage; stage=" + match.Groups["stage"].Value +
+                    "; elapsed_ms=$($classificationStopwatch.ElapsedMilliseconds)\"\n    ");
+        }
         var publishedContract = scenario == "cross_request" ? "2" : "1";
         var expectMissing = scenario is not (
             "healthy" or
@@ -8045,7 +8208,13 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
             }
             """;
 
-        var result = await RunPowerShellScriptTextAsync(scriptText, Array.Empty<string>());
+        var result = await RunPowerShellScriptTextAsync(scriptText, Array.Empty<string>(), host);
+        if (!string.IsNullOrWhiteSpace(profileDirectory))
+        {
+            Directory.CreateDirectory(profileDirectory);
+            await File.WriteAllTextAsync(Path.Combine(profileDirectory, $"fallback-{scenario}-{host}.log"),
+                result.Stdout + Environment.NewLine + result.Stderr);
+        }
         Assert.True(result.ExitCode == 0, $"Fallback repair recovery GUI fast path failed.{Environment.NewLine}{result.Stdout}{Environment.NewLine}{result.Stderr}");
         Assert.Contains("gui-fallback-repair-recovery-order-ok", result.Stdout, StringComparison.Ordinal);
     }
