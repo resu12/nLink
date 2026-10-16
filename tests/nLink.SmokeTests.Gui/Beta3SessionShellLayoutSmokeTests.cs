@@ -321,36 +321,73 @@ public sealed class Beta3SessionShellLayoutSmokeTests : Beta3DefaultUiSmokeTestB
         }, CancellationToken.None);
     }
 
-    [Fact]
+    [Theory]
+    [InlineData("listener_ready", true, true)]
+    [InlineData("dialer_ready", true, false)]
+    [InlineData("inactive", false, false)]
     [Trait("Category", "Smoke")]
-    public async Task SessionHeader_TunaFinishedFileStopsPendingPulse_AndFreshNegotiationCanPulse()
+    public async Task SessionHeader_TunaFinishedFileStopsPendingPulse_AndFreshNegotiationCanPulse(
+        string runtimeStatus, bool unlockOn, bool localPayer)
     {
         await fixture.Session.Dispatch(async () =>
         {
             EnsureAppServices();
             var header = new SessionHeaderView { TunaStatusReason = "runtime_unlock_pending_route_commit" };
-            SetPrivateField(header, "tunaUnlockToggleOn", true);
-            SetPrivateField(header, "tunaRuntimeStatus", "listener_ready");
+            SetPrivateField(header, "tunaUnlockToggleOn", unlockOn);
+            SetPrivateField(header, "tunaRuntimeStatus", runtimeStatus);
             var timer = Assert.IsType<DispatcherTimer>(typeof(SessionHeaderView)
                 .GetField("tunaPulseTimer", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(header));
             try
             {
                 InvokePrivate(header, "UpdateTunaVisualState");
-                Assert.True(timer.IsEnabled);
+                Assert.Equal(unlockOn, timer.IsEnabled);
                 header.TunaActive = true;
                 Assert.False(timer.IsEnabled);
-                header.TunaActive = false;
+                var activeColor = ((ISolidColorBrush)header.TunaPictogramBrush).Color;
+                Assert.Equal(localPayer ? Color.FromRgb(255, 211, 91) : Color.FromRgb(125, 220, 255), activeColor);
+                // An independently active session/Screen route wins when the file ends.
                 header.TunaStatusReason = "file_transfer_tuna_idle";
+                Assert.True(header.TunaActive);
+                Assert.Contains("active", header.TunaPictogramTip);
+                Assert.Equal(activeColor, ((ISolidColorBrush)header.TunaPictogramBrush).Color);
+                Assert.True(header.TunaGlowOpacity > 0d);
+                Assert.False(timer.IsEnabled);
+                header.TunaActive = false;
                 InvokePrivate(header, "UpdateTunaVisualState");
                 Assert.False(timer.IsEnabled);
                 Assert.Equal(1d, header.TunaPulseScale);
                 Assert.Equal(0d, header.TunaGlowOpacity);
+                Assert.Equal(activeColor, ((ISolidColorBrush)header.TunaPictogramBrush).Color);
+                Assert.Equal(1d, header.TunaPictogramOpacity);
+                Assert.False(header.TunaActive);
                 Assert.Equal("Tuna is idle for file transfer.", header.TunaPictogramTip);
                 Assert.Equal(header.TunaPictogramTip, header.TunaUnlockTip);
+                InvokePrivate(header, "OnTunaPulseTimerTick", null, EventArgs.Empty);
+                Assert.False(timer.IsEnabled);
+                Assert.Equal(activeColor, ((ISolidColorBrush)header.TunaPictogramBrush).Color);
 
                 header.TunaStatusReason = "waiting_for_answer";
-                Assert.True(timer.IsEnabled);
+                Assert.Equal(unlockOn, timer.IsEnabled);
                 Assert.StartsWith("Negotiating Tuna acceleration.", header.TunaPictogramTip);
+                header.TunaActive = true;
+                Assert.False(timer.IsEnabled);
+                Assert.Equal(activeColor, ((ISolidColorBrush)header.TunaPictogramBrush).Color);
+
+                header.TunaActive = false;
+                foreach (var reason in new[] { "header_switch_off", "remote_header_switch_off", "handoff_rejected" })
+                {
+                    header.TunaStatusReason = reason;
+                    Assert.False(timer.IsEnabled);
+                    Assert.Equal(Color.FromRgb(111, 122, 136), ((ISolidColorBrush)header.TunaPictogramBrush).Color);
+                    Assert.Equal(0d, header.TunaGlowOpacity);
+                }
+
+                SetPrivateField(header, "tunaUnlockToggleOn", false);
+                SetPrivateField(header, "tunaRuntimeStatus", "locked");
+                header.TunaStatusReason = "file_transfer_tuna_idle";
+                Assert.False(timer.IsEnabled);
+                Assert.Equal(Color.FromRgb(111, 122, 136), ((ISolidColorBrush)header.TunaPictogramBrush).Color);
+                Assert.StartsWith("Tuna wallet is locked.", header.TunaPictogramTip);
             }
             finally
             {

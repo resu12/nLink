@@ -480,7 +480,8 @@ public partial class SessionHeaderView : UserControl
                       tunaUnlockToggleOn &&
                       presentation.IsConnecting &&
                       !TunaStatusPresentationMapper.SuppressesPendingVisual(reason);
-        var highlighted = active || pulsing;
+        // Idle retains the enabled color without claiming an active route or pulsing.
+        var highlighted = active || pulsing || presentation.IsIdle;
         var paying = highlighted && presentation.IsLocalPayer;
         var nextPictogramBrush = highlighted ? (paying ? TunaPayerBrush : TunaActiveBrush) : TunaInactiveBrush;
         var nextGlowBrush = highlighted ? (paying ? TunaPayerGlowBrush : TunaActiveGlowBrush) : TunaInactiveGlowBrush;
@@ -488,7 +489,7 @@ public partial class SessionHeaderView : UserControl
         var nextGlowOpacity = active ? 0.38d : pulsing ? 0.55d : 0d;
         var nextInnerGlowOpacity = active ? 0.2d : pulsing ? 0.28d : 0d;
         var nextGillOpacity = active ? 0.92d : pulsing ? 0.72d : 0.55d;
-        var nextTip = paying && !presentation.Text.Contains("paying", StringComparison.OrdinalIgnoreCase)
+        var nextTip = paying && !presentation.IsIdle && !presentation.Text.Contains("paying", StringComparison.OrdinalIgnoreCase)
             ? $"{presentation.Text} This computer is paying as the Tuna listener."
             : presentation.Text;
 

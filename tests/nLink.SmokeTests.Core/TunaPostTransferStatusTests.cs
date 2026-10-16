@@ -38,7 +38,25 @@ public sealed class TunaPostTransferStatusTests
         // that observation nor file completion grants session/Screen activity.
         Assert.False(Present(finished, "listener_ready").IsConnecting);
         Assert.False(Present(finished, "peer_connected").IsConnecting);
+        Assert.True(Present(finished).IsIdle);
         Assert.Equal("Tuna is idle for file transfer.", Present(finished).Text);
+    }
+
+    [Theory]
+    [InlineData("listener_ready", true, true)]
+    [InlineData("dialer_ready", true, false)]
+    [InlineData("inactive", false, false)]
+    public void IdlePresentation_PreservesRoleWithoutClaimingActivity(
+        string runtimeStatus, bool unlockOn, bool localPayer)
+    {
+        var projection = Project(Transfer() with { State = FileTransferTransferState.Completed }, Scope);
+        var presentation = TunaStatusPresentationMapper.FromState(
+            projection.IsActive, projection.StatusReason, runtimeStatus, unlockOn);
+        Assert.False(projection.IsActive);
+        Assert.True(presentation.IsIdle);
+        Assert.False(presentation.IsConnecting);
+        Assert.Equal(localPayer, presentation.IsLocalPayer);
+        Assert.Equal("Tuna is idle for file transfer.", presentation.Text);
     }
 
     [Theory]
@@ -159,6 +177,7 @@ public sealed class TunaPostTransferStatusTests
         // allowed to show waiting-for-peer. Use an inactive runtime for teardown.
         Assert.Equal(change is not ("active" or "unwire"),
             Present(projection, change == "unwire" ? "inactive" : "listener_ready").IsConnecting);
+        Assert.False(Present(projection, change == "unwire" ? "inactive" : "listener_ready").IsIdle);
     }
 
     [Fact]
@@ -186,6 +205,38 @@ public sealed class TunaPostTransferStatusTests
         Assert.Equal(active, projection.IsActive);
         Assert.Equal(reason, projection.StatusReason);
         Assert.Equal(connecting, Present(projection).IsConnecting);
+        Assert.False(Present(projection).IsIdle);
+    }
+
+    [Theory]
+    [InlineData("free_dialer_active")]
+    [InlineData("paid_listener_active")]
+    public void SessionRuntime_FileCompletionPreservesIndependentSessionTunaActivity(string reason)
+    {
+        using var transport = new ScriptedSignalingTransport();
+        using var runtime = CreateRuntime(transport);
+        ObserveStatus(runtime, transport, new(true, reason));
+        var transfer = Transfer() with { RouteToken = "file_tuna_v4" };
+        ObserveSnapshot(runtime, new(transfer, null));
+
+        foreach (var snapshot in new SessionFileTransferSnapshot[]
+        {
+            new(transfer with { State = FileTransferTransferState.Completed }, null),
+            new(null, null),
+        })
+        {
+            ObserveSnapshot(runtime, snapshot);
+            // Independent session/Screen activity must survive file completion
+            // and removal of its card; idle presentation has no transport authority.
+            Assert.True(runtime.IsTransportAccelerationActive);
+            Assert.True(runtime.TransportAccelerationPresentation.IsActive);
+            Assert.Equal(reason, runtime.TransportAccelerationStatusReason);
+            var projection = ProjectRuntime(runtime, snapshot);
+            Assert.True(projection.IsActive);
+            Assert.Equal(reason, projection.StatusReason);
+            Assert.False(Present(projection).IsIdle);
+            Assert.False(Present(projection).IsConnecting);
+        }
     }
 
     [Theory]
