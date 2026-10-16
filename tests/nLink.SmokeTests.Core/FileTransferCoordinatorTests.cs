@@ -13125,6 +13125,36 @@ public sealed partial class FileTransferCoordinatorTests
             (FileTransferCoordinatorState State,
              FileTransferReceiveRecoveryDecision Decision) fixture)
     {
+        // Let each phase return before the next coordinator call copies the
+        // large value-type decision graph onto its Debug stack frame.
+        var lifecycle = CreateReceiveRecoveryFallbackCheckpointFrontierRequestLifecycle(fixture);
+        CompleteReceiveRecoveryFallbackCheckpointDelivery(lifecycle);
+        ProveReceiveRecoveryFallbackCheckpointAndRefresh(lifecycle);
+        ObserveReceiveRecoveryFallbackCheckpointFrontierRequests(lifecycle);
+        ApplyReceiveRecoveryFallbackCheckpointFrontierReceipts(lifecycle);
+    }
+
+    private sealed class ReceiveRecoveryFallbackCheckpointFrontierFixture
+    {
+        public FileTransferCoordinatorState State = null!;
+        public FileTransferReceiveRecoveryOperationAuthority Authority;
+        public FileTransferBridgeRecoveryExecutionReceipt Receipt;
+        public FileTransferRouteSelection Fallback;
+        public FileTransferFrontierRequestFrameV6 Frame = null!;
+        public PostTunaFallbackPeerProofFrameIdentity FrameIdentity = null!;
+        public FileTransferReceiveRecoveryFallbackCheckpointBinding Binding = null!;
+        public FileTransferReceiveRecoveryFallbackCheckpointDeliveryCommand Command = null!;
+        public RuntimeUnlockInitialActivationOfferEnvelopeRefreshCoordinatorDecision RefreshCommitted = null!;
+        public FileTransferReceiveRecoveryFallbackCheckpointFrontierRequestHold Hold81;
+        public FileTransferFrontierRequestFrameV6 PeerFrontierRequest81 = null!;
+    }
+
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private static ReceiveRecoveryFallbackCheckpointFrontierFixture
+        CreateReceiveRecoveryFallbackCheckpointFrontierRequestLifecycle(
+            (FileTransferCoordinatorState State,
+             FileTransferReceiveRecoveryDecision Decision) fixture)
+    {
         var authority =
             Assert.IsType<FileTransferReceiveRecoveryOperationAuthority>(
                 fixture.Decision.Authority);
@@ -13258,9 +13288,31 @@ public sealed partial class FileTransferCoordinatorTests
             prematureRetirement.MutationRejectedReason);
         Assert.Equal(held.State, prematureRetirement.State);
 
+        return new ReceiveRecoveryFallbackCheckpointFrontierFixture
+        {
+            State = held.State,
+            Authority = authority,
+            Receipt = receipt,
+            Fallback = fallback,
+            Frame = frame,
+            FrameIdentity = frameIdentity,
+            Binding = binding,
+            Command = command,
+        };
+    }
+
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private static void CompleteReceiveRecoveryFallbackCheckpointDelivery(
+        ReceiveRecoveryFallbackCheckpointFrontierFixture fixture)
+    {
+        var receipt = fixture.Receipt;
+        var command = fixture.Command;
+        var frameIdentity = fixture.FrameIdentity;
+        var fallback = fixture.Fallback;
+        var frame = fixture.Frame;
         var completed = FileTransferCoordinator
             .ObserveReceiveRecoveryExecutionReceipt(
-                held.State,
+                fixture.State,
                 receipt,
                 observedUtcMs: 20);
         Assert.True(completed.Accepted, completed.Reason);
@@ -13348,7 +13400,7 @@ public sealed partial class FileTransferCoordinatorTests
         var deliveredRetirement = RetireFallbackCheckpoint(
             delivered.State,
             fallback,
-            frame.RepairRequestId,
+            frame.RepairRequestId!,
             frame.TransportEpoch);
         Assert.Equal(
             "filetransfer_receive_recovery_fallback_checkpoint_peer_proof_required",
@@ -13413,8 +13465,20 @@ public sealed partial class FileTransferCoordinatorTests
                     "checkpoint_redelivered"),
                 observedUtcMs: 130);
         Assert.True(redelivered.Accepted, redelivered.Reason);
+        fixture.State = redelivered.State;
+    }
+
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private static void ProveReceiveRecoveryFallbackCheckpointAndRefresh(
+        ReceiveRecoveryFallbackCheckpointFrontierFixture fixture)
+    {
+        var authority = fixture.Authority;
+        var frameIdentity = fixture.FrameIdentity;
+        var fallback = fixture.Fallback;
+        var frame = fixture.Frame;
+        var binding = fixture.Binding;
         var proof = FileTransferCoordinator.ObserveReceiveRecoveryProof(
-            redelivered.State,
+            fixture.State,
             new FileTransferReceiveRecoveryProof(
                 authority,
                 "post-fallback-checkpoint-proof",
@@ -13469,7 +13533,7 @@ public sealed partial class FileTransferCoordinatorTests
         var acceptedBeforeRefresh = AcceptFallbackCheckpoint(
             proof.State,
             fallback,
-            frame.RepairRequestId,
+            frame.RepairRequestId!,
             frame.TransportEpoch,
             committedChunk: 7,
             highestObservedChunk: 7);
@@ -13528,6 +13592,16 @@ public sealed partial class FileTransferCoordinatorTests
                     refreshCommitted.State)
                 .CurrentOperation);
 
+        fixture.RefreshCommitted = refreshCommitted;
+    }
+
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private static void ObserveReceiveRecoveryFallbackCheckpointFrontierRequests(
+        ReceiveRecoveryFallbackCheckpointFrontierFixture fixture)
+    {
+        var refreshCommitted = fixture.RefreshCommitted;
+        var frame = fixture.Frame;
+        var authority = fixture.Authority;
         var retainedBinding = Assert.IsType<
             FileTransferReceiveRecoveryFallbackCheckpointBinding>(
                 FileTransferCoordinator.GetReceiveRecoverySubstate(
@@ -13689,10 +13763,24 @@ public sealed partial class FileTransferCoordinatorTests
                     invalidatedHeld.State)
                 .PendingFallbackCheckpointFrontierRequestRecheckCommand);
 
+        fixture.State = held81.State;
+        fixture.Hold81 = hold81;
+        fixture.PeerFrontierRequest81 = peerFrontierRequest81;
+    }
+
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private static void ApplyReceiveRecoveryFallbackCheckpointFrontierReceipts(
+        ReceiveRecoveryFallbackCheckpointFrontierFixture fixture)
+    {
+        var fallback = fixture.Fallback;
+        var frame = fixture.Frame;
+        var hold81 = fixture.Hold81;
+        var peerFrontierRequest81 = fixture.PeerFrontierRequest81;
+        var authority = fixture.Authority;
         var accepted = AcceptFallbackCheckpoint(
-            held81.State,
+            fixture.State,
             fallback,
-            frame.RepairRequestId,
+            frame.RepairRequestId!,
             frame.TransportEpoch,
             committedChunk: 7,
             highestObservedChunk: 7);
@@ -21655,9 +21743,14 @@ public sealed partial class FileTransferCoordinatorTests
     public void FileTransferRouteTransition_InitialResponderObservationUsesOnlyRegularV4AuthorityMode()
         => CreatePreparationFirstResponderSnapshotFixture();
 
+    [Fact]
+    [Trait("FileTransferCoordinatorSuite", "ResponderProbeHandoff")]
+    public void FileTransferRouteTransition_InitialListenerAnswerRequiresExactProbeCustody()
+        => CreatePreparationFirstResponderSnapshotFixture(listenerReceiver: true);
+
     [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
     internal static System.Collections.Immutable.ImmutableArray<FileTransferCoordinatorTransitionEnvelope>
-        CreatePreparationFirstResponderSnapshotFixture()
+        CreatePreparationFirstResponderSnapshotFixture(bool listenerReceiver = false)
     {
         var regular = FileTransferRouteResolver.Resolve(
             FileTransferRoute.RegularNknV4Fast);
@@ -21677,7 +21770,7 @@ public sealed partial class FileTransferCoordinatorTests
         var prefix = System.Collections.Immutable.ImmutableArray.CreateBuilder<FileTransferCoordinatorTransitionEnvelope>();
         prefix.Add(started.SnapshotEnvelope!);
         var setup = CreateRegularV4ToTunaRouteTransitionSetup(started.State, prefix.Add);
-        prefix.AddRange(CompletePreparationFirstResponderSnapshotFixture(setup));
+        prefix.AddRange(CompletePreparationFirstResponderSnapshotFixture(setup, listenerReceiver));
         for (var i = 1; i < prefix.Count; i++)
         {
             Assert.Equal(prefix[i - 1].Aggregate.AfterStateGeneration, prefix[i].Aggregate.BeforeStateGeneration);
@@ -21690,7 +21783,7 @@ public sealed partial class FileTransferCoordinatorTests
     private static System.Collections.Immutable.ImmutableArray<FileTransferCoordinatorTransitionEnvelope>
         CompletePreparationFirstResponderSnapshotFixture(
             (FileTransferCoordinatorState State, FileTransferRouteTransitionPrepareRequest Request,
-                RuntimeUnlockRouteCommitProof FinalProof) setup)
+                RuntimeUnlockRouteCommitProof FinalProof) setup, bool listenerReceiver)
     {
         var state = setup.State;
         var activation = Assert.IsType<
@@ -21723,7 +21816,7 @@ public sealed partial class FileTransferCoordinatorTests
                 PayerDecisionId: 11,
                 activation.LaunchGeneration,
                 Lanes: "file",
-                AnswerAcceptanceSource: "SemanticAnswerAck",
+                AnswerAcceptanceSource: listenerReceiver ? "AuthenticatedAnswer" : "SemanticAnswerAck",
                 AckMessageId: "initial-responder-coordinator-answer-ack",
                 AckSourceFingerprint: new string('a', 64),
                 PeerProbeFrameFingerprint: new string('b', 64),
@@ -21748,6 +21841,32 @@ public sealed partial class FileTransferCoordinatorTests
         {
             ProofBoundary = initialBoundary,
         };
+
+        if (listenerReceiver)
+        {
+            foreach (var invalid in new[]
+            {
+                observation with { AnswerAcceptanceSource = "RawAnswer" },
+                observation with { TunaPathLeaseListenerRunId = "peer-offer-dialer-23" },
+                observation with { AckMessageId = null },
+                observation with { PeerProbeFrameFingerprint = null },
+                observation with { ProbeState = RuntimeUnlockPathProbeState.None },
+                observation with { ProbeTransport = FileTransferTransportKind.RegularNkn },
+                observation with { TransactionGeneration = observation.TransactionGeneration + 1 },
+                observation with { TunaPathLeaseGeneration = observation.TunaPathLeaseGeneration + 1 },
+                observation with { PeerReceiveScope = receiveScope with { Admission = default } },
+                observation with { PeerReceiveScope = receiveScope with { RoutePublication = default } },
+                observation with { PeerReceiveScope = receiveScope with { TerminalGeneration = receiveScope.TerminalGeneration + 1 } },
+                observation with { PeerReceiveScope = receiveScope with { DataSessionGeneration = receiveScope.DataSessionGeneration + 1 } },
+            })
+            {
+                var rejected = FileTransferCoordinator.PrepareFileTransferRouteTransition(state,
+                    initialRequest with { ProofBoundary = initialBoundary with { InitialResponderPeerProbeObservation = invalid } });
+                Assert.Equal(FileTransferRouteTransitionDecisionStatus.Rejected, rejected.Status);
+                Assert.Same(state, rejected.State);
+                Assert.Equal(FileTransferRoute.RegularNknV4Fast, rejected.State.CurrentRoutePublicationToken!.Value.Route);
+            }
+        }
 
         var (preparedState, prepared) = PrepareInitialResponderSnapshotFixture(
             state, setup, initialRequest);

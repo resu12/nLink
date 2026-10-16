@@ -241,6 +241,9 @@ public sealed record FileTransferTransferSnapshot(
     // proof that a report has reached the peer. Raw progress counters stay intact.
     public long? PeerComparableProgressBytes { get; init; }
 
+    // Display-only projection of the service's Tuna activation pause guard.
+    public bool IsPauseBlockedByTransport { get; init; }
+
     public bool IsTerminal
         => State is FileTransferTransferState.Completed or
             FileTransferTransferState.Declined or

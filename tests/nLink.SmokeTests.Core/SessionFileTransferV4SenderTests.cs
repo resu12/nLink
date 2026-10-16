@@ -24465,6 +24465,7 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
                 TunaPathLeaseRequired: true,
                 TunaPathLeaseGeneration: 4,
                 TunaPathLeaseState: RuntimeUnlockTunaPathLeaseState.ListenerReady.ToString(),
+                TunaPathLeaseListenerRunId: "listener-precommit-missing-admission-4",
                 TunaPathLeaseCurrent: true)
         };
         service.AttachTransport(transport);
@@ -25246,6 +25247,7 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
                 TunaPathLeaseRequired: true,
                 TunaPathLeaseGeneration: 5,
                 TunaPathLeaseState: RuntimeUnlockTunaPathLeaseState.ListenerReady.ToString(),
+                TunaPathLeaseListenerRunId: "listener-precommit-under-fallback-5",
                 TunaPathLeaseCurrent: true)
         };
         service.AttachTransport(transport);

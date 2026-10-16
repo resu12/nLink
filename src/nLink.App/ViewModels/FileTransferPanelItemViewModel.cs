@@ -84,7 +84,7 @@ public sealed record FileTransferPanelItemViewModel(
             or FileTransferTransferState.Verifying;
         var canPauseResume = CanPauseResume(snapshot);
         var effectivePaused = snapshot.IsPaused || snapshot.IsPeerPaused;
-        var showPause = canPauseResume && !effectivePaused;
+        var showPause = canPauseResume && !effectivePaused && !snapshot.IsPauseBlockedByTransport;
         var showResume = canPauseResume && snapshot.IsPaused;
 
         return new FileTransferPanelItemViewModel(

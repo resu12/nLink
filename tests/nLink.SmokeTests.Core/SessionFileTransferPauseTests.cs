@@ -26,6 +26,7 @@ public sealed class SessionFileTransferPauseTests : SessionFileTransferServiceTe
             StatusMessage: null);
 
         Assert.False(snapshot.IsPaused);
+        Assert.False(snapshot.IsPauseBlockedByTransport);
         Assert.Null(snapshot.PauseReason);
         Assert.False(snapshot.IsPeerPaused);
         Assert.Null(snapshot.PeerPauseReason);
@@ -83,7 +84,7 @@ public sealed class SessionFileTransferPauseTests : SessionFileTransferServiceTe
                 TransferId = transferId,
                 FileName = "pause-inbound.bin",
                 FileSizeBytes = 16,
-                PreferredDataProtocolVersion = FileTransferProtocol.ProtocolVersionV6,
+                PreferredDataProtocolVersion = FileTransferProtocol.ProtocolVersionV4,
             },
             CancellationToken.None);
         await WaitUntilAsync(() => receiver.Snapshot.Inbound?.State == FileTransferTransferState.PendingDecision);
@@ -212,6 +213,7 @@ public sealed class SessionFileTransferPauseTests : SessionFileTransferServiceTe
         SetOutboundTransportPausedForTests(sender, true);
 
         Assert.False(sender.Snapshot.Outbound!.IsPaused);
+        Assert.False(sender.Snapshot.Outbound.IsPauseBlockedByTransport);
     }
 
     [Fact]

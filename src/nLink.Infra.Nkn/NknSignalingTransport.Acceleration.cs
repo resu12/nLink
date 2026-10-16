@@ -4115,16 +4115,37 @@ public sealed partial class NknSignalingTransport
         {
             if (IsRuntimeUnlockResponderWaitingForPeerProbe(snapshot))
             {
+                var transferId = ResolveSingleActiveFileTransferDataSessionTransferId(snapshot.SessionId, snapshot.TransferId);
                 if (!TryCaptureLiveExactRuntimeUnlockResponderWaitingConvergence(
                         snapshot,
-                        snapshot.TransferId,
-                        out _))
+                        transferId,
+                        out var handshake))
                 {
                     return false;
                 }
 
                 role = RuntimeUnlockPreCommitProbeLaunchRole
                     .ResponderWaitingForPeerProbe;
+                // Paying/listening does not determine the logical file sender.
+                // Request a probe only for the current coordinator-published sender;
+                // Service still owns admission, probe authorization and route commit.
+                if (TryCaptureCurrentRuntimeUnlockFileTransferOwnerAuthority(snapshot.SessionId,
+                        out var publication, out _) &&
+                    publication is { Direction: FileTransferDirection.Outbound,
+                        RouteToken: FileTransferRouteResolver.RegularNknV4FastToken, ProtocolVersion: 4 } &&
+                    publication.TransferId == transferId)
+                {
+                    if (handshake is not
+                        { AcceptanceSource: RuntimeUnlockResponderAnswerAcceptanceSource.SemanticAnswerAck,
+                          AckMessageId.Length: > 0, AckSourceFingerprint.Length: 64, AckFrameFingerprint.Length: 64,
+                          AckObservedUtcMs: > 0, PhysicalDialerLease: { DialerOwner: not null, Listener: null } } ||
+                        handshake.AckObservedUtcMs > handshake.AnswerDeadlineUtcMs ||
+                        !ResponderAcceptanceMatchesPhysicalRole(handshake.AcceptanceSource, snapshot.TunaPathLeaseListenerRunId!) ||
+                        (accelerationLane as INknTunaAccelerationSession)?.CaptureCurrentLaneLease() != handshake.PhysicalDialerLease)
+                        return false;
+
+                    role = RuntimeUnlockPreCommitProbeLaunchRole.Initiator;
+                }
             }
             else
             {
@@ -4266,8 +4287,19 @@ public sealed partial class NknSignalingTransport
         RuntimeUnlockRouteCommitSnapshot launchSnapshot;
         bool duplicate;
         bool tupleMutation;
+        // Match publication installation's gate order. A role selected before this
+        // boundary is evidence only; it cannot replace a newer launch or publication.
+        lock (gate)
         lock (accelerationGate)
         {
+            if (launchRole == RuntimeUnlockPreCommitProbeLaunchRole.Initiator &&
+                snapshot.TunaPathLeaseListenerRunId?.StartsWith("peer-offer-dialer-", StringComparison.OrdinalIgnoreCase) == true &&
+                (!TryResolveRuntimeUnlockPreCommitProbeLaunchRole(snapshot, responderPeerProbeEvidence, out var currentRole) ||
+                 currentRole != launchRole))
+            {
+                return;
+            }
+
             RuntimeUnlockResponderAnswerProbeConvergenceHold?
                 retainedWaitingConvergence = null;
             if (launchRole ==
@@ -14522,6 +14554,22 @@ public sealed partial class NknSignalingTransport
         SessionPreparationActivationHandoff? preparationHandoff = null)
     {
         runtimeUnlockActivation |= requireRuntimeUnlockRetryDispatchInstall;
+        // A published regular-v4 transfer needs the coordinator-owned activation
+        // transaction, not the session-only readiness handoff. The activation
+        // path revalidates this source before issuing an offer or committing.
+        if (!runtimeUnlockActivation &&
+            accelerationLane is INknTunaAccelerationSession automaticLane &&
+            (automaticLane.ConfiguredLanes & NknAccelerationLaneKind.File) != 0 &&
+            SelectSessionPreparationRequest().Purpose == FileTransferAccelerationRequestPurpose.TransferActivation &&
+            currentSessionSecurityState.SessionId is { } automaticSessionId &&
+            TryCaptureCurrentRuntimeUnlockFileTransferOwnerAuthority(automaticSessionId.Value, out var automaticOwner, out _) &&
+            automaticOwner.RouteToken == FileTransferRouteResolver.RegularNknV4FastToken &&
+            automaticOwner.ProtocolVersion == FileTransferProtocol.ProtocolVersionV4)
+        {
+            runtimeUnlockActivation = true;
+            reason = "runtime_unlock_automatic_transfer";
+        }
+
         void ReleaseReservedSlot(string releaseReason)
         {
             if (reservedSlotGeneration > 0 &&
@@ -37750,7 +37798,7 @@ public sealed partial class NknSignalingTransport
 
         if (isRuntimeUnlockOffer)
         {
-            RetainPostFallbackListenerAnswerForPeerProbe(
+            RetainListenerAnswerForPeerProbe(
                 expectedOfferAuthorityBoundary!, retainedAnswerHandoffBarrierGeneration,
                 env.MessageId, source, env.Payload, validation.AcceptedLanes);
             _ = Task.Run(

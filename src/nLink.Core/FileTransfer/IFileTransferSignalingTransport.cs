@@ -800,7 +800,8 @@ internal sealed record RuntimeUnlockResponderPeerProbeRouteTransitionObservation
 
     public bool HasAuthenticatedAnswerAcceptance =>
         string.Equals(AnswerAcceptanceSource, "SemanticAnswerAck", StringComparison.Ordinal) ||
-        (ResponderTransitionMode == RuntimeUnlockResponderPeerProbeTransitionMode.PostFallbackV6Paired &&
+        (ResponderTransitionMode is (RuntimeUnlockResponderPeerProbeTransitionMode.InitialRegularV4 or
+             RuntimeUnlockResponderPeerProbeTransitionMode.PostFallbackV6Paired) &&
          string.Equals(AnswerAcceptanceSource, "AuthenticatedAnswer", StringComparison.Ordinal) &&
          TunaPathLeaseListenerRunId?.StartsWith("listener-start-", StringComparison.Ordinal) == true);
 

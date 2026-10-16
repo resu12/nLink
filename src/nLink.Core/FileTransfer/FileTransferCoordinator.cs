@@ -29339,10 +29339,7 @@ internal static partial class FileTransferCoordinator
                     .InitialRegularV4 ||
             observation.ProbeState != RuntimeUnlockPathProbeState.Acked ||
             observation.ProbeAckedUtcMs <= 0 ||
-            !string.Equals(
-                observation.AnswerAcceptanceSource,
-                "SemanticAnswerAck",
-                StringComparison.Ordinal) ||
+            !observation.HasAuthenticatedAnswerAcceptance ||
             string.IsNullOrWhiteSpace(observation.AckMessageId) ||
             string.IsNullOrWhiteSpace(observation.AckSourceFingerprint) ||
             string.IsNullOrWhiteSpace(

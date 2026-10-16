@@ -4081,9 +4081,12 @@ public sealed partial class SessionFileTransferService :
         FileTransferBootstrapPhaseCommand? heldCorrelatedBootstrapPhase = null;
         FileTransferFallbackV6ProofBootstrapEvaluation?
             heldFallbackV6BootstrapEvaluation = null;
+        SessionFileTransferSnapshot? pauseEligibilitySnapshot = null;
 
         lock (gate)
         {
+            var outboundPauseBlocked = IsTunaActivationNegotiationTransportPauseReason(outboundTransfer?.PullTransportPauseReason);
+            var inboundPauseBlocked = IsTunaActivationNegotiationTransportPauseReason(inboundTransfer?.PullTransportPauseReason);
             if (effectiveIsAvailable &&
                 effectiveHandoffKind == FileTransferTransportHandoffKind.NormalToTunaActivation &&
                 effectiveTargetTransport == FileTransferTransportKind.Tuna &&
@@ -4415,6 +4418,19 @@ public sealed partial class SessionFileTransferService :
                         held.Observation.ObservedUtcMilliseconds);
                 }
             }
+
+            if (outboundPauseBlocked != IsTunaActivationNegotiationTransportPauseReason(outboundTransfer?.PullTransportPauseReason) ||
+                inboundPauseBlocked != IsTunaActivationNegotiationTransportPauseReason(inboundTransfer?.PullTransportPauseReason))
+            {
+                pauseEligibilitySnapshot = CreateSnapshotLocked();
+            }
+        }
+
+        // The activation barrier can stop progress events entirely. Notify its UI
+        // eligibility change outside the service gate, before asynchronous work.
+        if (pauseEligibilitySnapshot is not null)
+        {
+            RaiseTransferChanged(pauseEligibilitySnapshot);
         }
 
         if (heldCorrelatedBootstrapPhase is not null && heldFallbackV6BootstrapBridge is not null)
@@ -24737,6 +24753,8 @@ public sealed partial class SessionFileTransferService :
 
         public RuntimeUnlockPeerPreCommitProbeState? RuntimeUnlockPendingPeerPreCommitProbe { get; set; }
 
+        public RuntimeUnlockPeerPreCommitProbeRegistration? RuntimeUnlockPeerPreCommitProbeRegistration { get; set; }
+
         public RuntimeUnlockPendingPreCommitProbeRequest? RuntimeUnlockPendingPreCommitProbe { get; set; }
 
         public int LastRuntimeUnlockPendingPreCommitProbeGeneration { get; set; }
@@ -25462,7 +25480,10 @@ public sealed partial class SessionFileTransferService :
                 IsPeerPaused: PeerPaused,
                 PeerPauseReason: PeerPauseReason,
                 RouteToken: RouteSelection.TelemetryToken,
-                ProtocolVersion: NegotiatedDataProtocolVersion);
+                ProtocolVersion: NegotiatedDataProtocolVersion)
+            {
+                IsPauseBlockedByTransport = IsTunaActivationNegotiationTransportPauseReason(PullTransportPauseReason),
+            };
 
         public OutboundTransferContext(FileTransferSendDescriptor descriptor, FileTransferReadStreamFactory openReadStreamAsync)
             : this(descriptor, openReadStreamAsync, new()) { }
@@ -26049,6 +26070,8 @@ public sealed partial class SessionFileTransferService :
         public DateTimeOffset? RuntimeUnlockActivationWindowGrantedUtc { get; set; }
 
         public RuntimeUnlockPeerPreCommitProbeState? RuntimeUnlockPendingPeerPreCommitProbe { get; set; }
+
+        public RuntimeUnlockPeerPreCommitProbeRegistration? RuntimeUnlockPeerPreCommitProbeRegistration { get; set; }
 
         public RuntimeUnlockPendingPreCommitProbeRequest? RuntimeUnlockPendingPreCommitProbe { get; set; }
 
@@ -26923,6 +26946,7 @@ public sealed partial class SessionFileTransferService :
                 RouteToken: RouteSelection.TelemetryToken,
                 ProtocolVersion: NegotiatedDataProtocolVersion)
             {
+                IsPauseBlockedByTransport = IsTunaActivationNegotiationTransportPauseReason(PullTransportPauseReason),
                 PeerComparableProgressBytes = RouteRuntime.UsesV6RequestPump
                     ? Math.Clamp(BytesTransferred, 0L, Math.Max(0L, FileSizeBytes))
                     : ResolveInboundV4StateBytesCommittedLocked(this),

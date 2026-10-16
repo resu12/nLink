@@ -2051,6 +2051,9 @@ public sealed partial class SessionFileTransferService
             return;
         }
 
+        var peerProbeRegistration = accepted
+            ? BeginRuntimeUnlockPeerPreCommitProbeRegistration(direction, ack, dataSession)
+            : null;
         try
         {
             using var timeoutCts = new CancellationTokenSource(ResolveV6TransportProbeAckSendTimeout());
@@ -2270,6 +2273,116 @@ public sealed partial class SessionFileTransferService
                 "FileTransferService",
             $"event=runtime_unlock_precommit_probe_ack_failed; direction={direction.ToString().ToLowerInvariant()}; transfer_id={FormatProtocolLogValue(transferId)}; session_id={FormatProtocolLogValue(sessionId)}; transaction_generation={ack.TransactionGeneration}; offer_generation={ack.OfferGeneration}; tuna_path_lease_generation={ack.TunaPathLeaseGeneration}; probe_id={FormatProtocolLogValue(ack.ProbeId ?? "(none)")}; error={FormatProtocolLogValue(ex.GetType().Name)}");
         }
+        finally
+        {
+            CompleteRuntimeUnlockPeerPreCommitProbeRegistration(peerProbeRegistration);
+        }
+    }
+
+    // Scheduling only: a confirmation still needs the post-send receipt and all
+    // existing coordinator checks. Never manufacture acceptance before ACK success.
+    private sealed record RuntimeUnlockPeerPreCommitProbeRegistration(
+        IFileTransferDataSession DataSession,
+        FileTransferRuntimeUnlockPreCommitProbeAckFrame Ack)
+    {
+        public TaskCompletionSource Completed { get; } =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+    }
+
+    private RuntimeUnlockPeerPreCommitProbeRegistration?
+        BeginRuntimeUnlockPeerPreCommitProbeRegistration(
+            FileTransferDirection direction,
+            FileTransferRuntimeUnlockPreCommitProbeAckFrame ack,
+            IFileTransferDataSession dataSession)
+    {
+        lock (gate)
+        {
+            var registration = new RuntimeUnlockPeerPreCommitProbeRegistration(dataSession, ack);
+            if (direction == FileTransferDirection.Outbound &&
+                IsOutboundLifecycleMessageMatchLocked(ack.SessionId, ack.TransferId) &&
+                outboundTransfer is { IsTerminal: false } outbound &&
+                ReferenceEquals(outbound.DataSession, dataSession))
+            {
+                outbound.RuntimeUnlockPeerPreCommitProbeRegistration = registration;
+                return registration;
+            }
+
+            if (direction == FileTransferDirection.Inbound &&
+                IsInboundLifecycleMessageMatchLocked(ack.SessionId, ack.TransferId) &&
+                inboundTransfer is { IsTerminal: false } inbound &&
+                ReferenceEquals(inbound.DataSession, dataSession))
+            {
+                inbound.RuntimeUnlockPeerPreCommitProbeRegistration = registration;
+                return registration;
+            }
+
+            return null;
+        }
+    }
+
+    private Task? GetRuntimeUnlockPeerPreCommitProbeRegistrationTask(
+        FileTransferDirection direction,
+        FileTransferRuntimeUnlockPreCommitProbeAckFrame confirmation,
+        FileTransferTransportKind receivedTransportKind,
+        IFileTransferDataSession? dataSession)
+    {
+        if (!confirmation.Accepted ||
+            receivedTransportKind != FileTransferTransportKind.Tuna ||
+            !IsRuntimeUnlockPreCommitProbeCommitConfirmationReason(NormalizeReason(confirmation.Reason)))
+        {
+            return null;
+        }
+
+        lock (gate)
+        {
+            var registration = direction == FileTransferDirection.Outbound
+                ? outboundTransfer?.RuntimeUnlockPeerPreCommitProbeRegistration
+                : inboundTransfer?.RuntimeUnlockPeerPreCommitProbeRegistration;
+            if (registration is null || !ReferenceEquals(registration.DataSession, dataSession))
+            {
+                return null;
+            }
+
+            var ack = registration.Ack;
+            return ack.SessionId == confirmation.SessionId &&
+                   ack.TransferId == confirmation.TransferId &&
+                   ack.TransactionGeneration == confirmation.TransactionGeneration &&
+                   ack.OfferGeneration == confirmation.OfferGeneration &&
+                   ack.TunaPathLeaseGeneration == confirmation.TunaPathLeaseGeneration &&
+                   ack.ProbeId == confirmation.ProbeId &&
+                   ack.TargetProtocolVersion == confirmation.TargetProtocolVersion &&
+                   string.Equals(ack.TargetRoute, confirmation.TargetRoute, StringComparison.OrdinalIgnoreCase) &&
+                   string.Equals(ack.TargetTransport, confirmation.TargetTransport, StringComparison.OrdinalIgnoreCase) &&
+                   string.Equals(ack.HandoffKind, confirmation.HandoffKind, StringComparison.OrdinalIgnoreCase)
+                ? registration.Completed.Task
+                : null;
+        }
+    }
+
+    private void CompleteRuntimeUnlockPeerPreCommitProbeRegistration(
+        RuntimeUnlockPeerPreCommitProbeRegistration? registration)
+    {
+        if (registration is null)
+        {
+            return;
+        }
+
+        lock (gate)
+        {
+            if (outboundTransfer is { } outbound &&
+                ReferenceEquals(outbound.RuntimeUnlockPeerPreCommitProbeRegistration, registration))
+            {
+                outbound.RuntimeUnlockPeerPreCommitProbeRegistration = null;
+            }
+
+            if (inboundTransfer is { } inbound &&
+                ReferenceEquals(inbound.RuntimeUnlockPeerPreCommitProbeRegistration, registration))
+            {
+                inbound.RuntimeUnlockPeerPreCommitProbeRegistration = null;
+            }
+        }
+
+        registration.Completed.TrySetResult();
     }
 
     private bool TryCreateRuntimeUnlockPeerPreCommitAnswerAcceptanceReceiptLocked(
@@ -3203,6 +3316,12 @@ public sealed partial class SessionFileTransferService
             ack,
             receivedTransportKind,
             "core_handler_invoked");
+
+        if (GetRuntimeUnlockPeerPreCommitProbeRegistrationTask(
+                direction, ack, receivedTransportKind, dataSession) is { } registrationTask)
+        {
+            await registrationTask.ConfigureAwait(false);
+        }
 
         if (TryClassifyRuntimeUnlockCompletedPeerPreCommitProbeConfirmationLocked(
                 direction,

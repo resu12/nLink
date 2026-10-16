@@ -27424,7 +27424,8 @@ public sealed partial class NknAccelerationTransportTests : CoreSmokeTestsBase, 
         long PayerDecisionId)
         CreateRuntimeUnlockResponderWaitingFixtureForTests(
             string suffix,
-            string convergenceCase = "exact")
+            string convergenceCase = "exact",
+            INknAccelerationLane? accelerationLane = null)
     {
         var client = new FakeNknClient(
             $"runtime-unlock-responder-waiting-{suffix}.address");
@@ -27433,7 +27434,7 @@ public sealed partial class NknAccelerationTransportTests : CoreSmokeTestsBase, 
             NknTransportOptions.Load(),
             new NknIdentity(
                 $"runtime-unlock-responder-waiting-{suffix}-id",
-                client.Address));
+                client.Address), NknTunaAccelerationOptions.Disabled, accelerationLane);
         var nowUtcMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
         var answerDeadlineUtcMs = nowUtcMs + 60_000;
         const long pendingGeneration = 9;
@@ -32663,7 +32664,12 @@ public sealed partial class NknAccelerationTransportTests : CoreSmokeTestsBase, 
             var options = NknTransportOptions.Load();
             var hostClient = new FakeNknClient("host.tuna.file.uncommitted-v6-proof.address");
             var helperClient = new FakeNknClient("helper.tuna.file.uncommitted-v6-proof.address");
-            var fakeLane = new FakeNknAccelerationLane(isAvailable: true);
+            using var fakeLane = new RetryableTunaAccelerationSession(false, 0)
+            {
+                StrictPayerHandoffForTests = true,
+            };
+            Assert.True(await fakeLane.StartDialerSidecarAsync(
+                "test-listener", hostClient.Address, cts.Token));
             using var host = new NknSignalingTransport(
                 hostClient,
                 options,
@@ -32701,10 +32707,7 @@ public sealed partial class NknAccelerationTransportTests : CoreSmokeTestsBase, 
             var authorityModeType = typeof(NknSignalingTransport).GetNestedType(
                 "RuntimeUnlockOfferAuthorityMode",
                 BindingFlags.NonPublic)!;
-            SetPrivateField(
-                helper,
-                "runtimeUnlockResponderAnswerProbeConvergence",
-                CreateRuntimeUnlockResponderWaitingConvergenceForTests(
+            var convergence = CreateRuntimeUnlockResponderWaitingConvergenceForTests(
                     helper,
                     transactionState,
                     11,
@@ -32712,7 +32715,12 @@ public sealed partial class NknAccelerationTransportTests : CoreSmokeTestsBase, 
                     Enum.Parse(authorityModeType, "InitialActivation"),
                     offer.PayerDecisionId,
                     DateTimeOffset.UtcNow.AddSeconds(30).ToUnixTimeMilliseconds(),
-                    "uncommitted-v6-proof"));
+                    "uncommitted-v6-proof");
+            var dialerLease = Assert.IsType<NknTunaLaneLease>(fakeLane.CaptureCurrentLaneLease());
+            Assert.NotNull(dialerLease.DialerOwner);
+            Assert.Null(dialerLease.Listener);
+            convergence.GetType().GetProperty("PhysicalDialerLease")!.SetValue(convergence, dialerLease);
+            SetPrivateField(helper, "runtimeUnlockResponderAnswerProbeConvergence", convergence);
             InvokePrivateMethod(
                 helper,
                 "RequestRuntimeUnlockPreCommitProbeLaunch",
@@ -32747,7 +32755,7 @@ public sealed partial class NknAccelerationTransportTests : CoreSmokeTestsBase, 
             Assert.True(preCommit.LaunchGeneration > 0);
 
             var fallbackLogStart = GetOperationalLogLength();
-            fakeLane.SetAvailable(false, "byte_cap_reached");
+            await fakeLane.StopAsync("byte_cap_reached", cts.Token);
             await WaitUntilAsync(
                 () => ReadOperationalLogTail(fallbackLogStart).Contains(
                     "event=filetransfer_fallback_nkn_proof_pending;",

@@ -201,6 +201,38 @@ public sealed class FileTransferPanelItemViewModelTests
         Assert.Null(item.ResumeCommand);
     }
 
+    [Theory]
+    [InlineData(FileTransferDirection.Inbound, false)]
+    [InlineData(FileTransferDirection.Outbound, false)]
+    [InlineData(FileTransferDirection.Inbound, true)]
+    [InlineData(FileTransferDirection.Outbound, true)]
+    public void TunaActivationPauseGuard_HidesPauseWithoutChangingResumeOrCancel(
+        FileTransferDirection direction, bool userPaused)
+    {
+        var pauseCommand = new AsyncRelayCommand<string?>(_ => Task.CompletedTask);
+        var resumeCommand = new AsyncRelayCommand<string?>(_ => Task.CompletedTask);
+        var cancelCommand = new AsyncRelayCommand<string?>(_ => Task.CompletedTask);
+        var snapshot = new FileTransferTransferSnapshot(
+            "session-a", "transfer-a", direction,
+            direction == FileTransferDirection.Inbound ? FileTransferTransferState.Receiving : FileTransferTransferState.Sending,
+            "archive.bin", 4096, null, 1024, 1, 4, 1024, null, null, IsPaused: userPaused);
+
+        foreach (var blocked in new[] { false, true, false })
+        {
+            var item = FileTransferPanelItemViewModel.FromSnapshot(
+                snapshot with { IsPauseBlockedByTransport = blocked },
+                pauseCommand: pauseCommand, resumeCommand: resumeCommand, cancelCommand: cancelCommand);
+
+            Assert.NotNull(item);
+            Assert.Equal(!userPaused && !blocked, item!.ShowPause);
+            Assert.Same(item.ShowPause ? pauseCommand : null, item.PauseCommand);
+            Assert.Equal(userPaused, item.ShowResume);
+            Assert.Same(userPaused ? resumeCommand : null, item.ResumeCommand);
+            Assert.True(item.ShowCancel);
+            Assert.Same(cancelCommand, item.CancelCommand);
+        }
+    }
+
     [Fact]
     public void PausedTransfer_ShowsResumeCommand_AndCancel()
     {

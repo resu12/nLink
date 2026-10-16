@@ -95,14 +95,15 @@ public sealed partial class NknSignalingTransport
         return true;
     }
 
-    private void RetainPostFallbackListenerAnswerForPeerProbe(
+    private void RetainListenerAnswerForPeerProbe(
         RuntimeUnlockOfferAuthorityBoundary? boundary, long barrierGeneration,
         string answerMessageId, string source, byte[] authenticatedAnswer, NknAccelerationLaneKind lanes)
     {
         if (boundary is not { Mode: RuntimeUnlockOfferAuthorityMode.InitialActivation,
                 Direction: FileTransferDirection.Inbound } ||
             boundary.InitialActivationExpectedScope.SourcePublicationAuthority is not
-                { RouteToken: FileTransferRouteResolver.PostTunaFallbackV6Token, ProtocolVersion: 6 } ||
+                ({ RouteToken: FileTransferRouteResolver.RegularNknV4FastToken, ProtocolVersion: 4 } or
+                 { RouteToken: FileTransferRouteResolver.PostTunaFallbackV6Token, ProtocolVersion: 6 }) ||
             string.IsNullOrWhiteSpace(boundary.TunaPathLeaseListenerRunId) ||
             !ResponderAcceptanceMatchesPhysicalRole(RuntimeUnlockResponderAnswerAcceptanceSource.AuthenticatedAnswer,
                 boundary.TunaPathLeaseListenerRunId) ||
