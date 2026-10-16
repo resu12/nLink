@@ -229,7 +229,9 @@
                                                 HorizontalAlignment="Stretch"/>
                                         <Button Grid.Column="1"
                                                 Grid.Row="0"
-                                                Classes="appButton secondaryButton compactButton"
+                                                Classes="appButton compactButton"
+                                                Classes.secondaryButton="{Binding !NeedsTunaWalletBalanceCheck}"
+                                                Classes.positiveButton="{Binding NeedsTunaWalletBalanceCheck}"
                                                 Content="Validate balance"
                                                 Command="{Binding ValidateTunaWalletCommand}"
                                                 HorizontalAlignment="Stretch"/>

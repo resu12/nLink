@@ -553,6 +553,8 @@ public sealed class DiagnosticsPageViewModel : ViewModelBase, IDisposable
         : tunaWalletState.LastFailureReason;
     public bool IsTunaWalletLinked => tunaWalletState.IsLinked;
     public bool IsTunaWalletValidating => isTunaWalletValidating;
+    public bool NeedsTunaWalletBalanceCheck => tunaWalletState.IsLinked &&
+        tunaWalletState.Status == TunaWalletLinkStatus.LinkedUnverified && !isTunaWalletValidating;
     public bool ShowTunaWalletFailure => tunaWalletState.Status == TunaWalletLinkStatus.ValidationFailed &&
         !string.IsNullOrWhiteSpace(tunaWalletState.LastFailureReason);
     public string AuthoritativeConnectedAddress => nknDiagnosticsSnapshot.AuthoritativeConnectedAddressResolved ? "Yes" : "No";
@@ -899,6 +901,7 @@ public sealed class DiagnosticsPageViewModel : ViewModelBase, IDisposable
         OnPropertyChanged(nameof(TunaWalletLastVerified));
         OnPropertyChanged(nameof(TunaWalletLastFailure));
         OnPropertyChanged(nameof(IsTunaWalletLinked));
+        OnPropertyChanged(nameof(NeedsTunaWalletBalanceCheck));
         OnPropertyChanged(nameof(ShowTunaWalletFailure));
         ValidateTunaWalletCommand.NotifyCanExecuteChanged();
         UnlockTunaRuntimeCommand.NotifyCanExecuteChanged();

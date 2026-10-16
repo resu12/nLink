@@ -133,6 +133,71 @@ public sealed class TunaWalletDiagnosticsTests
         }
     }
 
+    [Theory]
+    [InlineData("funded")]
+    [InlineData("empty")]
+    [InlineData("failed")]
+    public async Task DiagnosticsTunaWallet_BalanceCheckHighlight_IsOneTimePerLink(string outcome)
+    {
+        var root = CreateTempRoot();
+        var result = outcome == "failed"
+            ? TunaWalletValidationResult.Fail("wrong_password")
+            : TunaWalletValidationResult.Ok("wallet.json", "NKN-public-address", outcome == "funded" ? "1" : "0");
+        var verifier = new BlockingTunaWalletVerifier(result);
+        try
+        {
+            var walletPath = Path.Combine(root, "wallet.json");
+            var store = new JsonTunaWalletLinkStore(() => Path.Combine(root, "state.json"));
+            using var vm = CreateViewModel(store, verifier);
+            Assert.False(vm.NeedsTunaWalletBalanceCheck);
+
+            await vm.LinkTunaWalletAsync(walletPath);
+            Assert.True(vm.NeedsTunaWalletBalanceCheck);
+            using (var reopened = CreateViewModel(store, verifier))
+            {
+                Assert.True(reopened.NeedsTunaWalletBalanceCheck);
+            }
+
+            // Opening or canceling the password prompt is not a balance check.
+            vm.ValidateTunaWalletCommand.Execute(null);
+            await vm.ValidateTunaWalletAsync(null);
+            Assert.True(vm.NeedsTunaWalletBalanceCheck);
+
+            var highlightChanges = new List<bool>();
+            vm.PropertyChanged += (_, e) =>
+            {
+                if (e.PropertyName == nameof(vm.NeedsTunaWalletBalanceCheck))
+                {
+                    highlightChanges.Add(vm.NeedsTunaWalletBalanceCheck);
+                }
+            };
+            var validation = vm.ValidateTunaWalletAsync("test-password".ToCharArray());
+            Assert.True(vm.IsTunaWalletValidating);
+            Assert.False(vm.NeedsTunaWalletBalanceCheck);
+            Assert.Contains(false, highlightChanges);
+            verifier.Release();
+            await validation;
+            Assert.False(vm.NeedsTunaWalletBalanceCheck);
+            using (var reopened = CreateViewModel(store, verifier))
+            {
+                Assert.False(reopened.NeedsTunaWalletBalanceCheck);
+            }
+
+            await vm.ValidateTunaWalletAsync("test-password".ToCharArray());
+            Assert.DoesNotContain(true, highlightChanges);
+
+            await vm.LinkTunaWalletAsync(walletPath);
+            Assert.True(vm.NeedsTunaWalletBalanceCheck);
+            await vm.UnlinkTunaWalletAsync();
+            Assert.False(vm.NeedsTunaWalletBalanceCheck);
+        }
+        finally
+        {
+            verifier.Release();
+            DeleteTempRoot(root);
+        }
+    }
+
     [Fact]
     [Trait("Category", "Smoke")]
     public void DiagnosticsTunaWallet_SidecarCompatibilityStatusUsesFriendlyLabelsAndRedactedExport()
