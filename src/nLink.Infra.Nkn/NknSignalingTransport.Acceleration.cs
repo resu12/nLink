@@ -30133,11 +30133,21 @@ public sealed partial class NknSignalingTransport
             return;
         }
 
-        ClearAccelerationUserStoppedForFreshPeerMessage("payer_intent", intent.Trigger, intent.SentAtUnixMs);
+        var clearedStop = ClearAccelerationUserStoppedForFreshPeerMessage("payer_intent", intent.Trigger, intent.SentAtUnixMs);
         ObserveRemotePayerIntentForPayerPriority(intent, validation);
         if (ShouldYieldLocalPaidListenerToRemoteHelpeeIntent(intent))
         {
             YieldLocalPaidListenerToRemoteHelpee("payer_intent_will_listen", intent.PayerDecisionId);
+        }
+
+        if (clearedStop)
+        {
+            // Peer readiness only wakes the exact Coordinator-prepared request; it grants no retry authority.
+            var boundary = CaptureRuntimeUnlockPostFallbackSchedulingBoundary(intent.SessionId);
+            if (boundary.Kind == RuntimeUnlockPostFallbackSchedulingBoundaryKind.AwaitingRetryAuthority)
+            {
+                RecheckPendingRuntimeUnlockRetryNegotiationIntentAfterUnlock(boundary, "peer_payer_intent");
+            }
         }
 
         if (IsHelpeeSessionRole(ResolveLocalSessionRole()) &&
@@ -41896,7 +41906,7 @@ public sealed partial class NknSignalingTransport
         }
     }
 
-    private void ClearAccelerationUserStoppedForFreshPeerMessage(
+    private bool ClearAccelerationUserStoppedForFreshPeerMessage(
         string messageType,
         string? trigger,
         long sentAtUnixMs,
@@ -41910,7 +41920,7 @@ public sealed partial class NknSignalingTransport
                string.Equals(SanitizeLogToken(trigger), "fallback_paired_tail_yield", StringComparison.Ordinal) &&
                TryRecaptureInboundPostFallbackPairedRetryOfferScope(pairedRetryOffer, paired, out _))))
         {
-            return;
+            return false;
         }
 
         var currentSessionId = currentSessionSecurityState.SessionId?.Value;
@@ -41950,6 +41960,8 @@ public sealed partial class NknSignalingTransport
                 "NKN.Tuna",
                 $"event=tuna_acceleration_peer_user_stop_cleared; trigger=peer_{SanitizeLogToken(messageType)}");
         }
+
+        return cleared || clearedPeerStop;
     }
 
     private static bool IsRuntimeUnlockNegotiationReason(string? reason)
