@@ -779,7 +779,8 @@ public sealed class DevLocalTransport : ISignalingTransport, IAddressTargetSigna
                 authority.TransferId,
                 out var candidate) &&
             !candidate.IsDisposed &&
-            candidate.Generation == authority.DataSessionGeneration &&
+            authority.DataSessionProviderGeneration > 0 &&
+            candidate.Generation == authority.DataSessionProviderGeneration &&
             string.Equals(
                 candidate.SessionId,
                 authority.SessionId,

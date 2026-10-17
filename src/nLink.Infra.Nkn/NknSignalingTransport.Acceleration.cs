@@ -2937,7 +2937,8 @@ public sealed partial class NknSignalingTransport
                        authority.TransferId,
                        out var session) &&
                    !session.IsDisposed &&
-                   session.Generation == authority.DataSessionGeneration &&
+                   authority.DataSessionProviderGeneration > 0 &&
+                   session.Generation == authority.DataSessionProviderGeneration &&
                    string.Equals(
                        session.SessionId,
                        authority.SessionId,
@@ -3001,7 +3002,8 @@ public sealed partial class NknSignalingTransport
                     command.Authority.TransferId,
                     out session) ||
                 session.IsDisposed ||
-                session.Generation != command.Authority.DataSessionGeneration ||
+                command.Authority.DataSessionProviderGeneration <= 0 ||
+                session.Generation != command.Authority.DataSessionProviderGeneration ||
                 !string.Equals(
                     session.SessionId,
                     command.Authority.SessionId,

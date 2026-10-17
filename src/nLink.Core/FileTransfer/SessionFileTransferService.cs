@@ -7710,7 +7710,11 @@ public sealed partial class SessionFileTransferService :
                 context.TransferId,
                 context.DataSession,
                 context.DataSessionGeneration),
-            context.DataSessionGeneration);
+            context.DataSessionGeneration)
+        {
+            CurrentDataSessionProviderGeneration =
+                (context.DataSession as IFileTransferDataSessionGenerationProvider)?.Generation ?? 0,
+        };
     }
 
     private static void ApplyCoordinatorDecisionToContextLocked(
@@ -10085,7 +10089,11 @@ public sealed partial class SessionFileTransferService :
                     context.DataSession,
                     context.DataSessionGeneration),
             CurrentDataSessionGeneration:
-                context.DataSessionGeneration);
+                context.DataSessionGeneration)
+        {
+            CurrentDataSessionProviderGeneration =
+                (context.DataSession as IFileTransferDataSessionGenerationProvider)?.Generation ?? 0,
+        };
     }
 
     private static bool TryCaptureRuntimeOwnerLocked(

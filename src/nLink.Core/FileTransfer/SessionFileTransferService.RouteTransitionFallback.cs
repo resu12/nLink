@@ -5035,7 +5035,11 @@ public sealed partial class SessionFileTransferService
             Math.Max(0, context.ChunkCount),
             checked((int)Math.Min(
                 int.MaxValue,
-                Math.Max(1, context.DataSessionGeneration))));
+                Math.Max(1, context.DataSessionGeneration))))
+        {
+            DataSessionProviderGeneration =
+                (context.DataSession as IFileTransferDataSessionGenerationProvider)?.Generation ?? 0,
+        };
 
     private static FileTransferRouteTransitionDurableCheckpoint
         CreateInboundFileTransferRouteTransitionCheckpoint(
@@ -5065,7 +5069,11 @@ public sealed partial class SessionFileTransferService
             Math.Max(0, context.ChunkCount),
             checked((int)Math.Min(
                 int.MaxValue,
-                Math.Max(1, context.DataSessionGeneration))));
+                Math.Max(1, context.DataSessionGeneration))))
+        {
+            DataSessionProviderGeneration =
+                (context.DataSession as IFileTransferDataSessionGenerationProvider)?.Generation ?? 0,
+        };
 
     private static FileTransferTransportKind
         ResolveFileTransferRouteSourceTransport(FileTransferRoute route)

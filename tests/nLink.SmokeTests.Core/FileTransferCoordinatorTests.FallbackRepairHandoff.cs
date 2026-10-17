@@ -123,6 +123,63 @@ public sealed partial class FileTransferCoordinatorTests
     public void FallbackRepairHandoff_ExactTunaCommitAdoptsTheRetainedGapMap()
         => AssertRepairHandoffTunaCommit(CreateReadyRepairHandoffTransition());
 
+    [Theory]
+    [InlineData(2L, false)] [InlineData(3L, false)]
+    [InlineData(2L, true)] [InlineData(3L, true)]
+    [Trait("FileTransferCoordinatorSuite", "FallbackRepairHandoff")]
+    public void FallbackRepairHandoff_ProviderGenerationBindsHeldTunaReactivation(long providerGeneration, bool replaced)
+    {
+        var fixture = CreateReadyRepairHandoffTransition(providerGeneration: providerGeneration);
+        var checkpoint = fixture.State.PersistentState.FallbackTailYield.RepairHandoff!.DrainReceipt!.Checkpoint;
+        Assert.Equal(1, checkpoint.DataSessionGeneration);
+        Assert.Equal(providerGeneration, checkpoint.DataSessionProviderGeneration);
+        Assert.Equal(checkpoint, fixture.Request.DurableCheckpoint);
+        if (!replaced)
+        {
+            AssertRepairHandoffTunaCommit(fixture);
+            return;
+        }
+
+        var stale = fixture.State with { CurrentDataSessionProviderGeneration = providerGeneration + 1 };
+        Assert.False(FileTransferCoordinator.HasDrainedInboundFallbackRepairHandoff(stale));
+        var rejected = FileTransferCoordinator.PrepareFileTransferRouteTransition(stale, fixture.Request);
+        Assert.Equal(FileTransferRouteTransitionDecisionStatus.Rejected, rejected.Status);
+        Assert.Equal(stale.CurrentRuntimeOwner, rejected.State.CurrentRuntimeOwner);
+        Assert.Equal(stale.CurrentRoutePublicationToken, rejected.State.CurrentRoutePublicationToken);
+        Assert.Equal(stale.PersistentState, rejected.State.PersistentState);
+    }
+
+    [Theory]
+    [InlineData(2L)] [InlineData(3L)]
+    [Trait("FileTransferCoordinatorSuite", "FallbackRepairHandoff")]
+    public void FallbackRepairHandoff_ProviderReplacementCannotRecaptureDrainOrRestore(long providerGeneration)
+    {
+        var (source, peer) = CreateInboundRepairHandoffSource();
+        source = source with { CurrentDataSessionProviderGeneration = providerGeneration };
+        var prepared = FileTransferCoordinator.PrepareInboundFallbackRepairHandoff(source, peer);
+        var capture = CreateInboundRepairHandoffCapture(prepared.HoldCommand!, providerGeneration);
+        AssertRejectedRepairHandoff(prepared.State, FileTransferCoordinator.CaptureInboundFallbackRepairHandoff(
+            prepared.State, capture with { Checkpoint = capture.Checkpoint with { DataSessionProviderGeneration = 0 } }));
+        var captured = FileTransferCoordinator.CaptureInboundFallbackRepairHandoff(prepared.State, capture);
+        Assert.True(captured.Accepted, captured.Reason);
+        var receipt = CreateInboundRepairHandoffDrain(capture);
+        var stale = captured.State with { CurrentDataSessionProviderGeneration = providerGeneration + 1 };
+        Assert.False(FileTransferCoordinator.IsInboundFallbackRepairHandoffCurrent(stale, capture.Command));
+        AssertRejectedRepairHandoff(stale, FileTransferCoordinator.CaptureInboundFallbackRepairHandoff(stale,
+            capture with { Checkpoint = capture.Checkpoint with { DataSessionProviderGeneration = providerGeneration + 1 } }));
+        AssertRejectedRepairHandoff(stale, FileTransferCoordinator.DrainInboundFallbackRepairHandoff(stale,
+            receipt with { Checkpoint = receipt.Checkpoint with { DataSessionProviderGeneration = providerGeneration + 1 } }));
+        var drained = FileTransferCoordinator.DrainInboundFallbackRepairHandoff(captured.State, receipt);
+        Assert.True(drained.Accepted, drained.Reason);
+        stale = drained.State with { CurrentDataSessionProviderGeneration = providerGeneration + 1 };
+        Assert.False(FileTransferCoordinator.HasDrainedInboundFallbackRepairHandoff(stale));
+        AssertRejectedRepairHandoff(stale, FileTransferCoordinator.RestoreInboundFallbackRepairHandoff(stale, capture.Command));
+        var restored = FileTransferCoordinator.RestoreInboundFallbackRepairHandoff(drained.State, capture.Command);
+        Assert.True(restored.Accepted, restored.Reason);
+        Assert.Equal(receipt.Checkpoint, restored.RestoreCommand!.Checkpoint);
+        Assert.Equal(receipt.MissingRanges, restored.RestoreCommand.MissingRanges);
+    }
+
     [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
     private static void AssertRepairHandoffTunaCommit((FileTransferCoordinatorState State,
         FileTransferRouteTransitionPrepareRequest Request, RuntimeUnlockRouteCommitProof FinalProof) fixture)
@@ -186,9 +243,11 @@ public sealed partial class FileTransferCoordinatorTests
 
     [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
     private static (FileTransferCoordinatorState State, FileTransferRouteTransitionPrepareRequest Request,
-        RuntimeUnlockRouteCommitProof FinalProof) CreateReadyRepairHandoffTransition(Action<FileTransferCoordinatorTransitionEnvelope>? captureSnapshot = null)
+        RuntimeUnlockRouteCommitProof FinalProof) CreateReadyRepairHandoffTransition(Action<FileTransferCoordinatorTransitionEnvelope>? captureSnapshot = null,
+        long providerGeneration = 0)
     {
         var (source, peer) = CreateInboundRepairHandoffSource(captureSnapshot);
+        source = source with { CurrentDataSessionProviderGeneration = providerGeneration };
         if (captureSnapshot is null)
         {
             source = source with { RuntimeUnlockFallbackSurvivalState = source.RuntimeUnlockFallbackSurvivalState with
@@ -196,7 +255,7 @@ public sealed partial class FileTransferCoordinatorTests
         }
         var prepared = FileTransferCoordinator.PrepareInboundFallbackRepairHandoff(source, peer);
         captureSnapshot?.Invoke(prepared.SnapshotEnvelope!);
-        var capture = CreateInboundRepairHandoffCapture(prepared.HoldCommand!);
+        var capture = CreateInboundRepairHandoffCapture(prepared.HoldCommand!, providerGeneration);
         var captured = FileTransferCoordinator.CaptureInboundFallbackRepairHandoff(prepared.State, capture);
         captureSnapshot?.Invoke(captured.SnapshotEnvelope!);
         var drained = FileTransferCoordinator.DrainInboundFallbackRepairHandoff(captured.State, CreateInboundRepairHandoffDrain(capture));
@@ -555,11 +614,12 @@ public sealed partial class FileTransferCoordinatorTests
     }
 
     private static FileTransferFallbackRepairHandoffCapture CreateInboundRepairHandoffCapture(
-        FileTransferFallbackRepairHandoffCommand command)
+        FileTransferFallbackRepairHandoffCommand command, long providerGeneration = 0)
         => new(command, 1, [11, 12], [21], new(command.Source.RuntimeOwner, command.Source.RoutePublication!.Value,
             command.Source.TerminalGeneration, command.Source.LegGeneration, command.Source.TransportEpoch,
             command.Source.BridgeRecoveryGeneration, command.Source.DataSessionGeneration, 5, 12_106, 12_483,
-            12_484, command.Source.CheckpointGeneration), [new(12_106, 2), new(12_290, 1)]);
+            12_484, command.Source.CheckpointGeneration) { DataSessionProviderGeneration = providerGeneration },
+            [new(12_106, 2), new(12_290, 1)]);
 
     private static FileTransferFallbackRepairHandoffDrainReceipt CreateInboundRepairHandoffDrain(
         FileTransferFallbackRepairHandoffCapture capture)

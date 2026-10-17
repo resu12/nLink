@@ -754,7 +754,10 @@ public sealed partial class FileTransferRouteTransitionInfraTests : IDisposable
             ContiguousCommittedChunkIndex: 0,
             DurableHighestChunkIndex: -1,
             ChunkCount: 12,
-            CheckpointGeneration: 1);
+            CheckpointGeneration: 1)
+        {
+            DataSessionProviderGeneration = dataSessionGeneration,
+        };
         var proofBoundary =
             new FileTransferTunaActivationTransitionProofBoundary(
                 admission,

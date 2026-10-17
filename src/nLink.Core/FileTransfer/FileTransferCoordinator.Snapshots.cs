@@ -27,7 +27,11 @@ internal sealed record FileTransferCoordinatorStateBoundarySnapshot(
     int CheckpointGeneration,
     string CheckpointRequestId,
     string DataSessionIdentity,
-    long DataSessionGeneration);
+    long DataSessionGeneration)
+{
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
+    public long DataSessionProviderGeneration { get; init; }
+}
 
 internal sealed record FileTransferCoordinatorReceiptTransitionSnapshot(
     string Stage,
@@ -3142,7 +3146,10 @@ internal static partial class FileTransferCoordinator
             checkpoint?.CheckpointGeneration ?? 0,
             checkpoint?.CheckpointRequestId ?? "(none)",
             state.CurrentDataSessionIdentity ?? "(none)",
-            state.CurrentDataSessionGeneration);
+            state.CurrentDataSessionGeneration)
+        {
+            DataSessionProviderGeneration = state.CurrentDataSessionProviderGeneration,
+        };
     }
 
     [MethodImpl(MethodImplOptions.NoInlining)]
@@ -6263,7 +6270,10 @@ internal static partial class FileTransferCoordinator
             state.CurrentDataSessionGeneration == authority.DataSessionGeneration
                 ? state.CurrentDataSessionIdentity ?? "(none)"
                 : "(captured-by-generation)",
-            authority.DataSessionGeneration);
+            authority.DataSessionGeneration)
+        {
+            DataSessionProviderGeneration = authority.DataSessionProviderGeneration,
+        };
 
     private static FileTransferCoordinatorStateBoundarySnapshot
         CreateRouteTransitionTargetBoundary(
@@ -6300,7 +6310,10 @@ internal static partial class FileTransferCoordinator
             state.CurrentDataSessionGeneration == authority.Value.DataSessionGeneration
                 ? state.CurrentDataSessionIdentity ?? "(none)"
                 : "(captured-by-generation)",
-            authority.Value.DataSessionGeneration);
+            authority.Value.DataSessionGeneration)
+        {
+            DataSessionProviderGeneration = authority.Value.DataSessionProviderGeneration,
+        };
     }
 
     private static FileTransferCoordinatorStateBoundarySnapshot

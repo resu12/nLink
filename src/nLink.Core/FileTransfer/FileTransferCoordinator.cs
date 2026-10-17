@@ -1127,6 +1127,9 @@ internal readonly record struct FileTransferRouteTransitionDurableCheckpoint(
     int ChunkCount,
     int CheckpointGeneration)
 {
+    // The transport allocates this independently of the service's per-transfer attachment generation.
+    public long DataSessionProviderGeneration { get; init; }
+
     public bool IsDefault =>
         SourceRuntimeOwner.IsDefault ||
         SourceRoutePublication.IsDefault ||
@@ -1188,6 +1191,8 @@ internal readonly record struct FileTransferRouteTransitionAuthority(
     FileTransferAuthorityId? PredecessorTransitionAuthorityId,
     string Reason)
 {
+    public long DataSessionProviderGeneration => DurableCheckpoint.DataSessionProviderGeneration;
+
     public bool IsDefault =>
         string.IsNullOrWhiteSpace(SessionId) ||
         string.IsNullOrWhiteSpace(TransferId) ||
@@ -2999,6 +3004,8 @@ internal sealed record FileTransferCoordinatorState(
     string? CurrentDataSessionIdentity = null,
     long CurrentDataSessionGeneration = 0)
 {
+    public long CurrentDataSessionProviderGeneration { get; init; }
+
     public FileTransferRouteRuntimeDescriptor RouteRuntime => RouteSelection.RuntimeDescriptor;
 
     internal BridgeRecoveryDecision? CurrentBridgeRecoveryDecision =>
@@ -6122,6 +6129,7 @@ internal static partial class FileTransferCoordinator
             leg.ProtocolVersion != authority.TargetProtocolVersion ||
             leg.LiveRouteEpochId != epoch.EpochId ||
             state.CurrentDataSessionGeneration != authority.DataSessionGeneration ||
+            state.CurrentDataSessionProviderGeneration != authority.DataSessionProviderGeneration ||
             !IsRuntimeOwnerCurrent(
                 state,
                 publication.RuntimeOwner,
@@ -29890,7 +29898,8 @@ internal static partial class FileTransferCoordinator
             request.DurableCheckpoint.SourceLegGeneration != leg.Generation ||
             request.DurableCheckpoint.SourceTransportEpoch != leg.TransportEpochId ||
             request.DurableCheckpoint.SourceBridgeRecoveryGeneration !=
-                leg.BridgeRecoveryGeneration)
+                leg.BridgeRecoveryGeneration ||
+            request.DurableCheckpoint.DataSessionProviderGeneration != state.CurrentDataSessionProviderGeneration)
         {
             rejectionReason = "filetransfer_route_transition_checkpoint_or_proof_mismatch";
             return false;
@@ -30834,7 +30843,8 @@ internal static partial class FileTransferCoordinator
             state.CurrentLeg is not { } leg ||
             leg.Generation != authority.SourceLegGeneration ||
             leg.TransportEpochId != authority.SourceTransportEpoch ||
-            leg.BridgeRecoveryGeneration != authority.SourceBridgeRecoveryGeneration)
+            leg.BridgeRecoveryGeneration != authority.SourceBridgeRecoveryGeneration ||
+            state.CurrentDataSessionProviderGeneration != authority.DataSessionProviderGeneration)
         {
             rejectionReason = "filetransfer_route_transition_source_scope_stale";
             return false;
@@ -30958,6 +30968,11 @@ internal static partial class FileTransferCoordinator
         out string rejectionReason)
     {
         rejectionReason = "accepted";
+        if (state.CurrentDataSessionProviderGeneration != authority.DataSessionProviderGeneration)
+        {
+            rejectionReason = "filetransfer_route_transition_data_session_provider_stale";
+            return false;
+        }
         if (authority.TargetRoute == FileTransferRoute.PostTunaFallbackV6)
         {
             if (authority.Kind == FileTransferRouteTransitionKind.TunaV4ToPostTunaFallbackV6 &&

@@ -62,7 +62,11 @@ public sealed partial class SessionFileTransferService
         return new(scope.RuntimeOwner, scope.RoutePublication!.Value, scope.TerminalGeneration, scope.LegGeneration,
             scope.TransportEpoch, scope.BridgeRecoveryGeneration, scope.DataSessionGeneration,
             Math.Max(context.V4StateEpoch, context.V6ReceiverStateEpoch), context.NextChunkIndex, highest,
-            context.ChunkCount, scope.CheckpointGeneration);
+            context.ChunkCount, scope.CheckpointGeneration)
+        {
+            DataSessionProviderGeneration =
+                (context.DataSession as IFileTransferDataSessionGenerationProvider)?.Generation ?? 0,
+        };
     }
 
     private void TryStartInboundFallbackRepairHandoffLocked(InboundTransferContext context)
@@ -153,8 +157,28 @@ public sealed partial class SessionFileTransferService
     private bool TryRestoreInboundFallbackRepairHandoffLocked(InboundTransferContext context,
         FileTransferRouteTransitionDispositionCommand? rollback = null)
     {
-        if (!TryGetDrainedInboundFallbackRepairHandoffLocked(context, out var receipt, requireGaps: false) ||
-            !FileTransferCoordinator.CanRestoreInboundFallbackRepairHandoffAfterRetryInvalidation(
+        if (!TryGetDrainedInboundFallbackRepairHandoffLocked(context, out var receipt, requireGaps: false)) { return false; }
+        if (rollback is null && context.PullTransportGraceDeadlineUtc is { } deadline && DateTimeOffset.UtcNow >= deadline &&
+            context.RuntimeUnlockAdmissionToken is { } admission &&
+            transport is IFileTransferFallbackRepairRetryStopObserver observer)
+        {
+            var state = CreateCoordinatorStateLocked(context);
+            var observation = observer.ObserveStoppedFallbackRepairRetry(receipt!, admission, state.CurrentDataSessionProviderGeneration);
+            if (observation is not null)
+            {
+                if (!ReferenceEquals(transport, observer) ||
+                    !TryGetDrainedInboundFallbackRepairHandoffLocked(context, out var currentReceipt, requireGaps: false) ||
+                    currentReceipt != receipt) { return false; }
+                var closed = FileTransferCoordinator.CloseStoppedInboundFallbackRepairRetry(CreateCoordinatorStateLocked(context), observation);
+                _ = AdoptCoordinatorAuthoredEnvelopeLocked(context.CoordinatorInstanceId, context.SessionId, context.TransferId,
+                    FileTransferDirection.Inbound, closed.State, closed.SnapshotEnvelope, adopted =>
+                    {
+                        context.CoordinatorPersistentState = adopted.PersistentState;
+                        context.RuntimeUnlockAdmissionToken = adopted.CurrentRuntimeUnlockAdmission;
+                    }, context.CoordinatorSnapshotEmitter);
+            }
+        }
+        if (!FileTransferCoordinator.CanRestoreInboundFallbackRepairHandoffAfterRetryInvalidation(
                 CreateCoordinatorStateLocked(context), receipt!.Capture.Command, rollback) ||
             !TryInvalidateRuntimeUnlockRetryLifecycleForScopeReplacementLocked(context, "fallback_repair_handoff_rollback")) { return false; }
         var restored = FileTransferCoordinator.RestoreInboundFallbackRepairHandoff(CreateCoordinatorStateLocked(context), receipt!.Capture.Command, rollback);

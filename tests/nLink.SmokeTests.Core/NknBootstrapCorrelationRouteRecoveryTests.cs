@@ -34,7 +34,7 @@ public sealed partial class NknAccelerationTransportTests
         => RunJoinedRouteRecoveryAsync(cycle: true, earlyCheckpointProof: true);
 
     private async Task RunJoinedRouteRecoveryAsync(bool cycle, bool earlyCheckpointProof = false,
-        bool holdPhysicalSend = false)
+        bool holdPhysicalSend = false, int priorDataSessions = 0, bool stopReceiver = false)
     {
         var transferId = cycle ? "joined-regular-tuna-cycle" : "joined-initial-tuna-switch-off";
         using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(cycle ? 80 : 40));
@@ -76,6 +76,11 @@ public sealed partial class NknAccelerationTransportTests
             receiver.AttachTransport(helper);
             var sessionId = await ApproveNknSessionAsync(host, helper, timeout.Token,
                 InviteCapabilities.Chat | InviteCapabilities.FileTransfer, suppressAutomaticAccelerationNegotiation: true);
+            for (var index = 0; index < priorDataSessions; index++)
+            {
+                using var priorHost = await host.OpenFileTransferDataSessionAsync(sessionId, $"prior-transfer-{index}", timeout.Token);
+                using var priorHelper = await helper.OpenFileTransferDataSessionAsync(sessionId, $"prior-transfer-{index}", timeout.Token);
+            }
             var sent = new ConcurrentQueue<(bool FromHost, FileTransferDataFrame Frame, bool AfterFallback)>();
             var droppedRegular = new ConcurrentDictionary<byte[], byte>();
             var delayedCheckpoints = new List<NknIncomingMessage>();
@@ -146,6 +151,12 @@ public sealed partial class NknAccelerationTransportTests
                 sent.Any(item => !item.FromHost && item.Frame is FileTransferStateFrameV4 state &&
                     state.MissingRanges.Any(range => range.StartChunkIndex == 0 && range.ChunkCount > 0)));
             AssertJoinedBootstrapAgreement(sender, outbound, receiver, inbound, sessionId, host, helper);
+            Assert.Equal(1L, ContextValue(outbound, "DataSessionGeneration"));
+            Assert.Equal(1L, ContextValue(inbound, "DataSessionGeneration"));
+            Assert.Equal(priorDataSessions + 1L,
+                Assert.IsAssignableFrom<IFileTransferDataSessionGenerationProvider>(ContextValue(outbound, "DataSession")).Generation);
+            Assert.Equal(priorDataSessions + 1L,
+                Assert.IsAssignableFrom<IFileTransferDataSessionGenerationProvider>(ContextValue(inbound, "DataSession")).Generation);
             Assert.Equal(cycle ? FileTransferRouteResolver.RegularNknV4FastToken : FileTransferRouteResolver.FileTunaV4Token,
                 Assert.Single(offers).FileTransferRoute);
             Assert.Equal(4, Assert.Single(offers).PreferredDataProtocolVersion);
@@ -172,8 +183,8 @@ public sealed partial class NknAccelerationTransportTests
             var capture = typeof(NknSignalingTransport).GetMethod("CaptureFallbackBootstrapLocalStopSources",
                 BindingFlags.Instance | BindingFlags.NonPublic)!;
             Assert.NotEmpty((Array)capture.Invoke(host, ["header_switch_off"])!);
-            await host.StopAccelerationAsync("header_switch_off", timeout.Token);
-            Assert.Contains(stopEvaluations, evaluation => evaluation.Direction == FileTransferDirection.Outbound &&
+            await (stopReceiver ? helper : host).StopAccelerationAsync("header_switch_off", timeout.Token);
+            Assert.Contains(stopEvaluations, evaluation => evaluation.Direction == (stopReceiver ? FileTransferDirection.Inbound : FileTransferDirection.Outbound) &&
                 evaluation.InitiationKind == FileTransferBootstrapInitiationKind.LocalRuntimeDisable &&
                 evaluation.LocalStop?.Scope.Publication.TransferId == transferId);
             await WaitFor("correlated fallback publication", () =>

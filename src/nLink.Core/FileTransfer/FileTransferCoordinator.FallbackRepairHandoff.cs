@@ -24,6 +24,21 @@ internal sealed record FileTransferFallbackRepairHandoffRestoreCommand(
     FileTransferFallbackRepairHandoffCommand Hold, FileTransferRouteTransitionDurableCheckpoint Checkpoint,
     ImmutableArray<FileTransferRepairHandoffRange> MissingRanges);
 
+internal enum FileTransferFallbackRepairRetryStopReason { LocalSwitchOff, PeerSwitchOff }
+
+// Transport evidence only. The coordinator must still close the exact admission.
+internal sealed record FileTransferFallbackRepairRetryStopObservation(
+    FileTransferFallbackRepairHandoffDrainReceipt Drain,
+    RuntimeUnlockAdmissionToken Admission, long DataSessionProviderGeneration,
+    FileTransferFallbackRepairRetryStopReason Reason);
+
+internal interface IFileTransferFallbackRepairRetryStopObserver
+{
+    FileTransferFallbackRepairRetryStopObservation? ObserveStoppedFallbackRepairRetry(
+        FileTransferFallbackRepairHandoffDrainReceipt drain,
+        RuntimeUnlockAdmissionToken admission, long dataSessionProviderGeneration);
+}
+
 internal enum FileTransferFallbackRepairHandoffState { Prepared, Captured, Drained, Restored, Adopted }
 
 internal sealed record FileTransferFallbackRepairHandoffOperation(
@@ -33,7 +48,8 @@ internal sealed record FileTransferFallbackRepairHandoffOperation(
     FileTransferFallbackRepairHandoffDrainReceipt? DrainReceipt = null,
     FileTransferFallbackRepairHandoffRestoreCommand? RestoreCommand = null,
     FileTransferRouteTransitionDispositionCommand? TunaDisposition = null,
-    FileTransferRouteTransitionDispositionCommand? RestoreDisposition = null);
+    FileTransferRouteTransitionDispositionCommand? RestoreDisposition = null,
+    FileTransferFallbackRepairRetryStopObservation? RetryClosure = null);
 
 internal sealed record FileTransferFallbackRepairHandoffDecision(
     FileTransferCoordinatorState State, bool Accepted, string Reason,
@@ -108,6 +124,7 @@ internal static partial class FileTransferCoordinator
         FileTransferCoordinatorState state, FileTransferFallbackRepairHandoffCommand command)
         => state.PersistentState.FallbackTailYield.RepairHandoff is { State: FileTransferFallbackRepairHandoffState.Prepared or FileTransferFallbackRepairHandoffState.Captured or FileTransferFallbackRepairHandoffState.Drained } hold &&
             hold.Command == command && state.PersistentState.CoordinatorInstanceId == command.CoordinatorInstanceId &&
+            (hold.Capture is null || hold.Capture.Checkpoint.DataSessionProviderGeneration == state.CurrentDataSessionProviderGeneration) &&
             state.Direction == FileTransferDirection.Inbound &&
             state.RouteSelection.Route == FileTransferRoute.PostTunaFallbackV6 &&
             state.RouteSelection.ProtocolVersion == FileTransferProtocol.ProtocolVersionV6 &&
@@ -160,6 +177,29 @@ internal static partial class FileTransferCoordinator
                 hold with { State = FileTransferFallbackRepairHandoffState.Drained, DrainReceipt = receipt }) : state,
             valid, valid ? "fallback_repair_handoff_drained" : "fallback_repair_handoff_drain_rejected");
         return FinalizeFallbackRepairHandoff(state, result, nameof(DrainInboundFallbackRepairHandoff), receipt);
+    }
+
+    internal static FileTransferFallbackRepairHandoffDecision CloseStoppedInboundFallbackRepairRetry(
+        FileTransferCoordinatorState state, FileTransferFallbackRepairRetryStopObservation observation)
+    {
+        var hold = state.PersistentState.FallbackTailYield.RepairHandoff;
+        var admission = observation.Admission;
+        var valid = !state.IsTerminal && !admission.IsDefault &&
+            observation.Reason is FileTransferFallbackRepairRetryStopReason.LocalSwitchOff or
+                FileTransferFallbackRepairRetryStopReason.PeerSwitchOff &&
+            state.CurrentRuntimeUnlockAdmission == admission && IsRuntimeUnlockAdmissionTokenCurrent(state, admission, out _) &&
+            observation.DataSessionProviderGeneration > 0 &&
+            observation.DataSessionProviderGeneration == state.CurrentDataSessionProviderGeneration &&
+            HasDrainedInboundFallbackRepairHandoff(state) && hold!.Command == observation.Drain.Capture.Command &&
+            SameRepairHandoffEvidence(hold.DrainReceipt!, observation.Drain) &&
+            state.CurrentRuntimeUnlockPendingPreCommitProbe is null &&
+            state.PersistentState.FileTransferRouteTransition.CurrentOperation is null &&
+            !RequiresRuntimeUnlockRetryLifecycleScopeInvalidation(state);
+        var closed = valid ? WithFallbackRepairHandoff(state, hold! with { RetryClosure = observation }) with
+            { CurrentRuntimeUnlockAdmission = null } : state;
+        return FinalizeFallbackRepairHandoff(state, new(closed, valid,
+            valid ? "fallback_repair_retry_stopped_closed" : "fallback_repair_retry_stop_not_current"),
+            nameof(CloseStoppedInboundFallbackRepairRetry), observation);
     }
 
     internal static FileTransferFallbackRepairHandoffDecision RestoreInboundFallbackRepairHandoff(
@@ -242,6 +282,7 @@ internal static partial class FileTransferCoordinator
     private static bool IsRepairHandoffCheckpointCurrent(
         FileTransferCoordinatorState state, FileTransferRouteTransitionDurableCheckpoint checkpoint)
         => !checkpoint.IsDefault && IsBootstrapHoldCheckpointSourceCurrent(state, checkpoint) &&
+            checkpoint.DataSessionProviderGeneration == state.CurrentDataSessionProviderGeneration &&
             checkpoint.CheckpointGeneration == state.CurrentLeg?.CheckpointGeneration;
 
     private static bool IsRepairHandoffGapMapValid(FileTransferRouteTransitionDurableCheckpoint checkpoint,
@@ -311,6 +352,7 @@ internal static partial class FileTransferCoordinator
         AddReceipt("hold", "Prepared", command);
         if (hold.Capture is { } capture) { AddReceipt("capture", "Captured", capture); }
         if (hold.DrainReceipt is { } drain) { AddReceipt("drain", "Drained", drain); }
+        if (hold.RetryClosure is { } closure) { AddReceipt("retry_closure", "Closed", closure); }
         if (hold.RestoreCommand is { } restore) { AddReceipt("restore", "Restored", restore); }
         if (hold.TunaDisposition is { } tuna) { AddReceipt("adopt", "Adopted", tuna); }
         var last = receipts[^1];
