@@ -795,6 +795,8 @@ internal sealed record RuntimeUnlockResponderPeerProbeRouteTransitionObservation
     FileTransferTransportKind TargetTransport,
     RuntimeUnlockPeerPreCommitAnswerAcceptanceScope PeerReceiveScope = default)
 {
+    public RuntimeUnlockRetryDispatchInstallReceipt? ConsumingRetryInstallReceipt { get; init; }
+
     public RuntimeUnlockResponderPeerProbeTransitionMode ResponderTransitionMode =>
         PeerReceiveScope.ResponderTransitionMode;
 
@@ -2192,7 +2194,7 @@ internal sealed record RuntimeUnlockPostFallbackPairedRetryOfferBindingRequest(
 {
     public bool IsDefault =>
         PublicationAuthority is null ||
-        PublicationAuthority.Direction != FileTransferDirection.Inbound ||
+        PublicationAuthority.Direction is not (FileTransferDirection.Inbound or FileTransferDirection.Outbound) ||
         !string.Equals(
             PublicationAuthority.RouteToken,
             FileTransferRouteResolver.PostTunaFallbackV6Token,
@@ -2215,13 +2217,26 @@ internal readonly record struct RuntimeUnlockPostFallbackPairedRetryOfferBinding
     FileTransferFallbackTailPairedReleaseReceipt PairedRelease,
     FileTransferFallbackTailYieldScope PairedScope)
 {
+    // An outbound file sender may be the physical dialer. This binding permits
+    // only that preparation; it is deliberately not an inbound probe admission.
+    public bool IsOutboundPreparation => Request is not null &&
+        Request.PublicationAuthority.Direction == FileTransferDirection.Outbound;
+
     public bool IsDefault =>
         Request is null ||
         Request.IsDefault ||
-        AcceptanceScope.IsDefault ||
         PairedRelease.IsDefault ||
         PairedScope.IsDefault ||
-        PairedScope.Direction != FileTransferDirection.Inbound ||
+        PairedScope.Direction != Request.PublicationAuthority.Direction ||
+        PairedScope.RoutePublication is not { } publication ||
+        !FileTransferCoordinator.MatchesRoutePublicationAuthority(Request.PublicationAuthority, publication) ||
+        PairedScope.TransportEpoch != Request.TransportEpoch ||
+        PairedScope.BridgeRecoveryGeneration != Request.BridgeRecoveryGeneration ||
+        PairedScope.CheckpointRequestIdSnapshot != Request.CheckpointRequestId ||
+        PairedScope.DataSessionIdentity != Request.DataSessionIdentity ||
+        PairedScope.DataSessionGeneration != Request.DataSessionGeneration ||
+        (IsOutboundPreparation ? !AcceptanceScope.IsDefault :
+        AcceptanceScope.IsDefault ||
         PairedScope.RuntimeOwner != AcceptanceScope.RuntimeOwner ||
         PairedScope.RoutePublication != AcceptanceScope.RoutePublication ||
         PairedScope.TransportEpoch != AcceptanceScope.TransportEpoch ||
@@ -2237,7 +2252,7 @@ internal readonly record struct RuntimeUnlockPostFallbackPairedRetryOfferBinding
             AcceptanceScope.DataSessionIdentity,
             StringComparison.Ordinal) ||
         PairedScope.DataSessionGeneration !=
-            AcceptanceScope.DataSessionGeneration;
+            AcceptanceScope.DataSessionGeneration);
 }
 
 internal readonly record struct RuntimeUnlockPostFallbackPairedRetryOfferBindingDecision(

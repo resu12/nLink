@@ -23457,9 +23457,22 @@ public sealed partial class FileTransferCoordinatorTests
             FileTransferCoordinator
                 .HasEffectiveFallbackTailPairedReleaseForRouteTransition(
                     paired.State));
+        return BindResponderHandoffForTest(paired.State, pairedRelease, listenerReceiver);
+    }
+
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private static (RuntimeUnlockResponderPeerProbeRouteTransitionHandoffDecision Bound,
+        FileTransferFallbackTailPairedReleaseReceipt PairedRelease,
+        RuntimeUnlockResponderPeerProbeRouteTransitionObservation Observation,
+        RuntimeUnlockAdmissionToken Admission, RuntimeUnlockPendingPreCommitProbeRequest Pending,
+        RuntimeUnlockPeerPreCommitAnswerAcceptanceScope PeerReceiveScope)
+        BindResponderHandoffForTest(FileTransferCoordinatorState pairedState,
+            FileTransferFallbackTailPairedReleaseReceipt pairedRelease, bool listenerReceiver,
+            RuntimeUnlockRetryDispatchInstallReceipt? consumingReceipt = null)
+    {
         var admitted = RequestRuntimeUnlockAdmission(
-            paired.State,
-            paired.State.CurrentRuntimeOwner);
+            pairedState,
+            pairedState.CurrentRuntimeOwner);
         var admission = Assert.IsType<RuntimeUnlockAdmissionToken>(
             admitted.RuntimeUnlockAdmissionDecision!.Value.AdmissionToken);
         var pendingDecision = listenerReceiver
@@ -23510,7 +23523,10 @@ public sealed partial class FileTransferCoordinatorTests
                 FileTransferProtocol.ProtocolVersionV4,
                 FileTransferTransportHandoffKind.NormalToTunaActivation,
                 FileTransferTransportKind.Tuna,
-                peerReceiveScope);
+                peerReceiveScope)
+            {
+                ConsumingRetryInstallReceipt = consumingReceipt,
+            };
         var bound = FileTransferCoordinator
             .BindRuntimeUnlockResponderPeerProbeRouteTransitionHandoff(
                 pendingDecision.State,
@@ -23918,12 +23934,18 @@ public sealed partial class FileTransferCoordinatorTests
             bound.State,
             request,
             finalProof,
-            invalidateRuntimeUnlockRetryLifecycle: false,
+            invalidateRuntimeUnlockRetryLifecycle: observation.ConsumingRetryInstallReceipt is not null,
             capture: capture);
         Assert.Equal(FileTransferRoute.FileTunaV4, committed.State.RouteSelection.Route);
-        Assert.Null(
-            FileTransferCoordinator.GetFallbackTailYieldSubstate(committed.State)
-                .LastConsumedReservation);
+        var committedTail = FileTransferCoordinator.GetFallbackTailYieldSubstate(committed.State);
+        if (observation.ConsumingRetryInstallReceipt is { } consumedReceipt)
+        {
+            Assert.Equal(consumedReceipt, committedTail.LastConsumingInstallReceipt);
+            Assert.Equal(bound.State.PersistentState.FallbackTailYield.LastConsumedReservation,
+                committedTail.LastConsumedReservation);
+        }
+        else
+            Assert.Null(committedTail.LastConsumedReservation);
         var unavailableAfterCommit = FileTransferCoordinator
             .InvalidateRuntimeUnlockResponderPeerProbeRouteTransitionHandoff(
                 committed.State,
@@ -25316,6 +25338,9 @@ public sealed partial class FileTransferCoordinatorTests
                         out var transitionCommitReason),
                 transitionCommitReason);
         }
+        if (request.ProofBoundary is FileTransferTunaActivationTransitionProofBoundary
+            { ResponderPeerProbeHandoffAuthority: { Observation.ConsumingRetryInstallReceipt: not null } consumedHandoff })
+            AssertConsumedResponderRetirementScope(commitState, consumedHandoff);
         var committed = FileTransferCoordinator.CommitFileTransferRouteTransition(
             commitState,
             authority,

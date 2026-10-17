@@ -2007,28 +2007,12 @@ public sealed partial class SessionFileTransferService
             return false;
         }
 
-        RuntimeUnlockRetryDispatchInstallReceipt? retryReceipt = null;
-        RuntimeUnlockResponderPeerProbeRouteTransitionHandoffAuthority?
-            responderAuthority = null;
-        if (fallbackOperation.Value.PairingState ==
-                FileTransferFallbackTailYieldPairingState.ReleaseConsumed &&
-            FileTransferCoordinator
-                .TryGetCurrentRuntimeUnlockRetryDispatchInstallReceipt(
-                    coordinatorState,
-                    out var currentRetryReceipt))
-        {
-            retryReceipt = currentRetryReceipt;
-        }
-        else if (fallbackOperation.Value.PairingState ==
-                     FileTransferFallbackTailYieldPairingState.Paired &&
-                 coordinatorState.PersistentState
-                         .RuntimeUnlockResponderPeerProbeRouteTransitionHandoff
-                         .CurrentAuthority is
-                     { IsDefault: false } currentResponderAuthority)
-        {
-            responderAuthority = currentResponderAuthority;
-        }
-        else
+        // An inbound consumed retry remains a responder. Its install receipt is
+        // carried by the coordinator handoff, never by the initiator boundary.
+        if (coordinatorState.PersistentState.RuntimeUnlockResponderPeerProbeRouteTransitionHandoff
+                .CurrentAuthority is not { IsDefault: false } responderAuthority ||
+            !FileTransferCoordinator.TryValidateRuntimeUnlockResponderPeerProbeRouteTransitionHandoffAuthorityCurrent(
+                coordinatorState, responderAuthority, out _))
         {
             return false;
         }
@@ -2068,7 +2052,7 @@ public sealed partial class SessionFileTransferService
                 pendingPreCommit,
                 proof,
                 snapshot.LaunchGeneration,
-                retryReceipt,
+                EffectiveRetryInstallReceipt: null,
                 pairedRelease,
                 responderAuthority),
             checkpoint,

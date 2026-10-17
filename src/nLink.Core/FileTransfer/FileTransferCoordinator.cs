@@ -29099,9 +29099,7 @@ internal static partial class FileTransferCoordinator
                 state);
         }
 
-        if (operation.PairingState !=
-                FileTransferFallbackTailYieldPairingState.Paired ||
-            operation.PairedRelease is not { IsDefault: false } pairedRelease)
+        if (operation.PairedRelease is not { IsDefault: false } pairedRelease)
         {
             return Decision(
                 RuntimeUnlockResponderPeerProbeRouteTransitionHandoffStatus.Rejected,
@@ -29615,12 +29613,7 @@ internal static partial class FileTransferCoordinator
         var pairScopeRejectionReason =
             "runtime_unlock_responder_peer_probe_pair_scope_invalid";
         if (fallbackTail.CurrentOperation is not { } current ||
-            current.PairingState !=
-                FileTransferFallbackTailYieldPairingState.Paired ||
-            current.PairedRelease is not { IsDefault: false } ||
-            fallbackTail.CurrentReservation is not null ||
-            fallbackTail.LastConsumedReservation is not null ||
-            fallbackTail.LastConsumingInstallReceipt is not null ||
+            !IsResponderPairedReleaseCurrent(state, observation, current) ||
             !IsFallbackTailYieldScopeCurrent(
                 state,
                 GetEffectiveFallbackTailYieldScope(current),
@@ -29724,8 +29717,6 @@ internal static partial class FileTransferCoordinator
                 authority.PendingPreCommitProbe,
                 out var operation,
                 out rejectionReason) ||
-            operation.PairingState !=
-                FileTransferFallbackTailYieldPairingState.Paired ||
             operation.PairedRelease != authority.PairedRelease ||
             authority.RuntimeOwner != state.CurrentRuntimeOwner ||
             authority.RoutePublication != state.CurrentRoutePublicationToken ||
@@ -29818,6 +29809,11 @@ internal static partial class FileTransferCoordinator
             observation.HandoffKind.ToString(),
             observation.TargetTransport.ToString(),
             generation.ToString(CultureInfo.InvariantCulture));
+        if (observation.ConsumingRetryInstallReceipt is { } receipt)
+        {
+            canonical += "|" + receipt.Authority.AuthorityId + "|" +
+                receipt.InstallGeneration.ToString(CultureInfo.InvariantCulture);
+        }
         var hash = SHA256.HashData(Encoding.UTF8.GetBytes(canonical));
         return new FileTransferAuthorityId(
             $"fta{FileTransferAuthoritySchema.Current}-runtime_unlock_responder_peer_probe_handoff-{Convert.ToHexString(hash.AsSpan(0, 12)).ToLowerInvariant()}");

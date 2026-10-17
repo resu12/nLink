@@ -112,7 +112,7 @@ public sealed partial class NknAccelerationTransportTests
             if (scenario == "dialer_late")
             {
                 await WaitUntilAsync(() => ReadOperationalLogTail(logStart).Contains(
-                    "decision_reason=retry_dispatch_listener_preparation_source_scope_replaced", StringComparison.Ordinal),
+                    "decision_reason=retry_dispatch_physical_preparation_unavailable", StringComparison.Ordinal),
                     TimeSpan.FromSeconds(3));
                 Assert.Empty(requests);
                 Assert.Null(GetLastCommittedRuntimeUnlockRetryDispatchInstallReceipt(host));

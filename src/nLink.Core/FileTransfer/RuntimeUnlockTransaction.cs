@@ -625,11 +625,10 @@ internal static class RuntimeUnlockTransaction
         if (coordinatorState.Direction != FileTransferDirection.Inbound ||
             !coordinatorState.RouteRuntime.UsesPostTunaFallbackV6Runtime ||
             fallbackTail.CurrentReservation is not null ||
-            fallbackTail.LastConsumedReservation is not null ||
-            fallbackTail.LastConsumingInstallReceipt is not null ||
-            retryLifecycle.InstalledAttempt is not null ||
-            pairedRelease.IsDefault ||
             responderAuthority.IsDefault ||
+            (responderAuthority.Observation.ConsumingRetryInstallReceipt is null &&
+             retryLifecycle.InstalledAttempt is not null) ||
+            pairedRelease.IsDefault ||
             responderAuthority.PairedRelease != pairedRelease ||
             !FileTransferCoordinator
                 .TryValidateRuntimeUnlockResponderPeerProbeRouteTransitionHandoffAuthorityCurrent(

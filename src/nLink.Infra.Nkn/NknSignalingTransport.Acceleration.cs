@@ -475,6 +475,7 @@ public sealed partial class NknSignalingTransport
             RuntimeUnlockResponderAnswerAcceptanceSource.SemanticAnswerAck;
         public NknTunaLaneLease? PhysicalDialerLease { get; init; }
         public NknTunaListenerAdoptionSnapshot? PhysicalListener { get; init; }
+        public RuntimeUnlockRetiredAnswerBarrier? ListenerAnswerBarrier { get; init; }
     }
 
     private readonly record struct RuntimeUnlockResponderProbeAckScopeReceipt(
@@ -549,7 +550,10 @@ public sealed partial class NknSignalingTransport
         string ProbeId,
         RuntimeUnlockPathProbeState ProbeState,
         FileTransferTransportKind ProbeTransport,
-        long ProbeAckedUtcMs);
+        long ProbeAckedUtcMs)
+    {
+        public RuntimeUnlockRetryDispatchInstallReceipt? ConsumingRetryInstallReceipt { get; init; }
+    }
 
     private enum RuntimeUnlockInitialActivationReceiveRecoveryHoldAwaitResult
     {
@@ -1445,7 +1449,7 @@ public sealed partial class NknSignalingTransport
     {
         public bool IsDefault =>
             PublicationAuthority is null ||
-            PublicationAuthority.Direction != FileTransferDirection.Inbound ||
+            PublicationAuthority.Direction is not (FileTransferDirection.Inbound or FileTransferDirection.Outbound) ||
             !string.Equals(
                 PublicationAuthority.RouteToken,
                 FileTransferRouteResolver.PostTunaFallbackV6Token,
@@ -4523,7 +4527,10 @@ public sealed partial class NknSignalingTransport
             snapshot.ProtocolVersion,
             snapshot.HandoffKind,
             snapshot.TargetTransport,
-            evidence.PeerReceiveScope);
+            evidence.PeerReceiveScope)
+        {
+            ConsumingRetryInstallReceipt = evidence.ConsumingRetryInstallReceipt,
+        };
 
     private static RuntimeUnlockRouteCommitSnapshot CreateRuntimeUnlockPreCommitProbeLaunchSnapshot(
         RuntimeUnlockTransactionSnapshot snapshot,
@@ -4605,8 +4612,9 @@ public sealed partial class NknSignalingTransport
                         .AwaitingPeerProbe or
                     RuntimeUnlockResponderAnswerProbeConvergenceState
                         .AwaitingProbeAck,
-                AuthorityMode: RuntimeUnlockOfferAuthorityMode.InitialActivation,
             } ||
+            (retained.AuthorityMode != RuntimeUnlockOfferAuthorityMode.InitialActivation &&
+             retained.AcceptanceSource != RuntimeUnlockResponderAnswerAcceptanceSource.AuthenticatedAnswer) ||
             current.IsTerminal ||
             current.RouteCommitted ||
             !current.AnswerReceived ||
@@ -4661,7 +4669,7 @@ public sealed partial class NknSignalingTransport
             string.IsNullOrWhiteSpace(retained.Nonce) ||
             string.IsNullOrWhiteSpace(retained.AnswerMessageId) ||
             retained.AnswerDeadlineUtcMs <= nowUtcMs ||
-            !IsRetainedListenerAnswerPhysicalSourceCurrent(retained) ||
+            !IsRetainedListenerAnswerSourceCurrentUnsafe(retained) ||
             (retained.Lanes & NknAccelerationLaneKind.File) !=
                 NknAccelerationLaneKind.File ||
             (!string.IsNullOrWhiteSpace(runtimeUnlockAnswerAckTimeoutSessionId) &&
@@ -7112,7 +7120,7 @@ public sealed partial class NknSignalingTransport
                         RuntimeUnlockResponderAnswerAcceptanceSource.SemanticAnswerAck,
                     current.TunaPathLeaseListenerRunId) &&
                 (runtimeUnlockResponderAnswerProbeConvergence is not { } physicalHandshake ||
-                 IsRetainedListenerAnswerPhysicalSourceCurrent(physicalHandshake)) &&
+                 IsRetainedListenerAnswerSourceCurrentUnsafe(physicalHandshake, receipt.ReceiveScope)) &&
                 lease.IsCurrent &&
                 lease.LeaseGeneration == current.TunaPathLeaseGeneration &&
                 string.Equals(
@@ -9424,7 +9432,6 @@ public sealed partial class NknSignalingTransport
                 out var authority,
                 out var dataSessionGeneration,
                 out _) ||
-            authority.Direction != FileTransferDirection.Inbound ||
             !string.Equals(
                 authority.RouteToken,
                 FileTransferRouteResolver.PostTunaFallbackV6Token,
@@ -31659,7 +31666,7 @@ public sealed partial class NknSignalingTransport
         }
         try
         {
-            if (dialerLease is null && snapshot is null &&
+            if (dialerLease is null && snapshot is null && tunaSession.CanOfferListener &&
                 await tunaSession
                     .EnsureListenerSidecarConnectedAsync(
                         request,
@@ -31726,7 +31733,9 @@ public sealed partial class NknSignalingTransport
                 intent,
                 slotReceipt,
                 preparationGeneration,
-                sourceCurrent
+                !physicalPreparationCurrent
+                    ? "retry_dispatch_physical_preparation_unavailable"
+                    : sourceCurrent
                     ? "retry_dispatch_listener_preparation_replaced"
                     : "retry_dispatch_listener_preparation_source_scope_replaced");
             return;
@@ -38331,7 +38340,7 @@ public sealed partial class NknSignalingTransport
             !string.Equals(peerReceipt.SessionId, convergence.SessionId, StringComparison.Ordinal) ||
             !string.Equals(peerReceipt.TransferId, transferId, StringComparison.Ordinal) ||
             convergence.AckObservedUtcMs > convergence.AnswerDeadlineUtcMs ||
-            !IsRetainedListenerAnswerPhysicalSourceCurrent(convergence) ||
+            !IsRetainedListenerAnswerSourceCurrentUnsafe(convergence, convergence.CurrentReceiveScope) ||
             nowUtcMs > convergence.AnswerDeadlineUtcMs ||
             (!string.IsNullOrWhiteSpace(runtimeUnlockAnswerAckTimeoutSessionId) &&
              string.Equals(
@@ -38372,7 +38381,11 @@ public sealed partial class NknSignalingTransport
             peerReceipt.ProbeId,
             current.PathProbeState,
             current.PathProbeTransport,
-            current.PathProbeAckedUtcMs);
+            current.PathProbeAckedUtcMs)
+        {
+            ConsumingRetryInstallReceipt = convergence.AuthorityMode == RuntimeUnlockOfferAuthorityMode.InstalledRetry
+                ? convergence.ListenerAnswerBarrier?.Boundary.InstallReceipt : null,
+        };
         if (!IsRuntimeUnlockResponderAnswerAcceptanceEvidenceComplete(
                 handoffEvidence))
         {

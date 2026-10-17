@@ -2239,6 +2239,19 @@ public sealed partial class SessionFileTransferService :
             var bridgeIsCurrentTransport =
                 transport is IRuntimeUnlockRetryDispatchAuthorityBridge currentBridge &&
                 ReferenceEquals(currentBridge, bridge);
+            if (bridgeIsCurrentTransport && request is { IsDefault: false } &&
+                request.PublicationAuthority.Direction == FileTransferDirection.Outbound)
+            {
+                args.Decision = outboundTransfer is { IsTerminal: false } outbound
+                    ? FileTransferCoordinator.BindOutboundFallbackDialerPreparation(
+                        CreateCoordinatorStateLocked(outbound), request,
+                        runtimeUnlockPostFallbackPairedRetryOfferBindingReceipt)
+                    : new(RuntimeUnlockPostFallbackPairedRetryOfferBindingStatus.Stale,
+                        "outbound_dialer_preparation_source_not_current");
+                if (args.Decision.Accepted)
+                    runtimeUnlockPostFallbackPairedRetryOfferBindingReceipt = args.Decision.Receipt;
+                return;
+            }
             if (!bridgeIsCurrentTransport ||
                 request is null ||
                 request.IsDefault ||

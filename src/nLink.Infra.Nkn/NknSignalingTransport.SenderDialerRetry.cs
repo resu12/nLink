@@ -16,10 +16,51 @@ public sealed partial class NknSignalingTransport
                   RuntimeUnlockResponderAnswerAcceptanceSource.PeerPreCommitProbe) &&
               runId.StartsWith("peer-offer-dialer-", StringComparison.OrdinalIgnoreCase);
 
-    private bool IsRetainedListenerAnswerPhysicalSourceCurrent(RuntimeUnlockResponderAnswerProbeConvergenceHold evidence)
-        => evidence.AcceptanceSource != RuntimeUnlockResponderAnswerAcceptanceSource.AuthenticatedAnswer ||
-           evidence.PhysicalListener is { } listener &&
-           (accelerationLane as INknTunaAccelerationSession)?.CaptureCurrentListenerAdoptionSnapshot() == listener;
+    private bool IsRetainedListenerAnswerSourceCurrentUnsafe(
+        RuntimeUnlockResponderAnswerProbeConvergenceHold evidence,
+        RuntimeUnlockPeerPreCommitAnswerAcceptanceScope? receiveScope = null)
+    {
+        if (evidence.AcceptanceSource != RuntimeUnlockResponderAnswerAcceptanceSource.AuthenticatedAnswer)
+            return true;
+        if (evidence.PhysicalListener is not { } listener ||
+            (accelerationLane as INknTunaAccelerationSession)?.CaptureCurrentListenerAdoptionSnapshot() != listener)
+            return false;
+        if (evidence.AuthorityMode == RuntimeUnlockOfferAuthorityMode.InitialActivation)
+            return true;
+
+        // Retaining an Answer does not extend the retry grant. A completed,
+        // observed dispatch may supply handshake evidence, never new dispatch
+        // authority. Its exact install and Core receive scope must still match.
+        if (evidence.AuthorityMode != RuntimeUnlockOfferAuthorityMode.InstalledRetry ||
+            disposed || currentSessionSecurityState.SessionId?.Value != evidence.SessionId ||
+            DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() >= evidence.AnswerDeadlineUtcMs ||
+            evidence.AckObservedUtcMs > evidence.AnswerDeadlineUtcMs ||
+            evidence.ListenerAnswerBarrier is not { InstalledRetrySourceScope: { } sourceScope } barrier ||
+            barrier.Boundary is not { Mode: RuntimeUnlockOfferAuthorityMode.InstalledRetry,
+                InstallReceipt: { } receipt } ||
+            runtimeUnlockRetiredAnswerBarrier != barrier ||
+            runtimeUnlockRecoveryRetryState is not { } state ||
+            runtimeUnlockRetryDispatchInstallShadow.LastCommittedReceipt != receipt ||
+            (runtimeUnlockRetryNegotiationSlotReceipt is { } slot && slot.InstallReceipt != receipt) ||
+            !(TryValidateRuntimeUnlockRetryDispatchInstallReceiptCurrentUnsafe(
+                  state, receipt, out _, allowDispatchObservedSettlement: true) ||
+              state.ContractState == SessionRecoveryContractState.Completed &&
+              state.DispatchContract?.Authority == receipt.Authority &&
+              state.DispatchContract.Lifecycle.SettlementOutcome == RuntimeUnlockRetryDispatchSettlementOutcome.DispatchObserved &&
+              state.DispatchObserved && !state.DispatchAuthorityRejected &&
+              state.DispatchDecisionStatus == RuntimeUnlockRetryDispatchDecisionStatus.Granted))
+            return false;
+
+        return receiveScope is not { } scope ||
+               !scope.IsDefault &&
+               FileTransferCoordinator.MatchesRoutePublicationAuthority(
+                   sourceScope.SourcePublicationAuthority, scope.RoutePublication) &&
+               scope.TransportEpoch == sourceScope.TransportEpoch &&
+               scope.BridgeRecoveryGeneration == sourceScope.BridgeRecoveryGeneration &&
+               string.Equals(scope.CheckpointRequestId, sourceScope.CheckpointRequestId ?? "(none)", StringComparison.Ordinal) &&
+               scope.DataSessionIdentity == sourceScope.DataSessionIdentity &&
+               scope.DataSessionGeneration == sourceScope.DataSessionGeneration;
+    }
 
     private bool TryContinueInstalledRetryOnAuthenticatedDialer(
         INknTunaAccelerationSession session, RuntimeUnlockRetryDispatchInstallReceipt receipt)
@@ -99,11 +140,15 @@ public sealed partial class NknSignalingTransport
         RuntimeUnlockOfferAuthorityBoundary? boundary, long barrierGeneration,
         string answerMessageId, string source, byte[] authenticatedAnswer, NknAccelerationLaneKind lanes)
     {
-        if (boundary is not { Mode: RuntimeUnlockOfferAuthorityMode.InitialActivation,
-                Direction: FileTransferDirection.Inbound } ||
-            boundary.InitialActivationExpectedScope.SourcePublicationAuthority is not
-                ({ RouteToken: FileTransferRouteResolver.RegularNknV4FastToken, ProtocolVersion: 4 } or
-                 { RouteToken: FileTransferRouteResolver.PostTunaFallbackV6Token, ProtocolVersion: 6 }) ||
+        if (boundary is not { Direction: FileTransferDirection.Inbound } ||
+            !(boundary.Mode == RuntimeUnlockOfferAuthorityMode.InitialActivation &&
+              boundary.InitialActivationExpectedScope.SourcePublicationAuthority is
+                  ({ RouteToken: FileTransferRouteResolver.RegularNknV4FastToken, ProtocolVersion: 4 } or
+                   { RouteToken: FileTransferRouteResolver.PostTunaFallbackV6Token, ProtocolVersion: 6 }) ||
+              boundary.Mode == RuntimeUnlockOfferAuthorityMode.InstalledRetry &&
+              boundary.InstallReceipt is { Authority: { Direction: FileTransferDirection.Inbound,
+                  Route: FileTransferRoute.PostTunaFallbackV6, ProtocolVersion: 6,
+                  ReleaseKind: RuntimeUnlockRetryReleaseKind.FallbackPairedTailYield } }) ||
             string.IsNullOrWhiteSpace(boundary.TunaPathLeaseListenerRunId) ||
             !ResponderAcceptanceMatchesPhysicalRole(RuntimeUnlockResponderAnswerAcceptanceSource.AuthenticatedAnswer,
                 boundary.TunaPathLeaseListenerRunId) ||
@@ -146,6 +191,7 @@ public sealed partial class NknSignalingTransport
             {
                 AcceptanceSource = RuntimeUnlockResponderAnswerAcceptanceSource.AuthenticatedAnswer,
                 PhysicalListener = (accelerationLane as INknTunaAccelerationSession)?.CaptureCurrentListenerAdoptionSnapshot(),
+                ListenerAnswerBarrier = boundary.Mode == RuntimeUnlockOfferAuthorityMode.InstalledRetry ? barrier : null,
             };
             runtimeUnlockResponderAnswerProbeConvergence = evidence;
         }
