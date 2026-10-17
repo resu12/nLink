@@ -246,20 +246,34 @@ internal static void ReportHelperRemoteStaleDrop(
             referenceContinuityPreserved);
     }
 
-internal static ScreenSharePressureStateV1 WaitForSinglePressureState(List<ScreenSharePressureStateV1> sentMessages)
+internal static ScreenSharePressureStateV1 WaitForSinglePressureState(
+    List<ScreenSharePressureStateV1> sentMessages,
+    (string SessionId, long SentAtUtcMs)? expectedMessage = null)
     {
+        ScreenSharePressureStateV1[] SnapshotExpectedMessages()
+        {
+            var snapshot = SnapshotList(sentMessages);
+            Assert.All(snapshot, message => Assert.NotNull(message));
+            return expectedMessage is { } expected
+                ? snapshot.Where(message =>
+                    string.Equals(message.SessionId, expected.SessionId, StringComparison.Ordinal) &&
+                    message.SentAtUtcMs == expected.SentAtUtcMs).ToArray()
+                : snapshot;
+        }
+
         var deadline = DateTime.UtcNow.AddSeconds(2);
         while (DateTime.UtcNow < deadline)
         {
-            if (sentMessages.Count == 1)
+            var snapshot = SnapshotExpectedMessages();
+            if (snapshot.Length == 1)
             {
-                return sentMessages[0];
+                return snapshot[0];
             }
 
             Thread.Sleep(25);
         }
 
-        return Assert.Single(sentMessages);
+        return Assert.Single(SnapshotExpectedMessages());
     }
 
 internal static ScreenShareRecoveryReceiptV1 WaitForSingleRecoveryReceipt(List<ScreenShareRecoveryReceiptV1> sentMessages)

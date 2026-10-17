@@ -895,15 +895,15 @@ public sealed class SessionRuntimeScreenSharePressureRecoveryAwareTests : Screen
             SessionRuntime.HelperRemoteScreenSharePressureDiagnosticsSnapshot before = sessionRuntime.GetHelperRemoteScreenSharePressureDiagnosticsSnapshotForTests();
             Assert.True(before.DerivedPostRecoveryHealthyActive);
             Assert.True(before.SteadyVisibleProgressActive);
-            transport.SentPressureStates.Clear();
             ScreenShareTransportBoundaryTestBase.SetPrivateField(sessionRuntime, "lastSentScreenSharePressureMode", ScreenSharePressureMode.Normal);
             ScreenShareTransportBoundaryTestBase.SetPrivateField(sessionRuntime, "lastSentScreenSharePressureReason", "continuity_loss");
             ScreenShareTransportBoundaryTestBase.SetPrivateField(sessionRuntime, "lastSentScreenSharePressureUtc", now);
 
             now = now.AddMilliseconds(50.0);
+            var expectedMessage = (sessionRuntime.SecurityState.SessionId!.Value.Value, now.ToUnixTimeMilliseconds());
             ScreenShareTransportBoundaryTestBase.InvokePrivateMethod(sessionRuntime, "ReportHelperRemoteScreenShareContinuityLost", 1L, "late_gap_tail", true, 5L, 11L, 12L, 12L);
 
-            ScreenSharePressureStateV1 sentPressureState = ScreenShareTransportBoundaryTestBase.WaitForSinglePressureState(transport.SentPressureStates);
+            ScreenSharePressureStateV1 sentPressureState = ScreenShareTransportBoundaryTestBase.WaitForSinglePressureState(transport.SentPressureStates, expectedMessage);
             Assert.Equal(ScreenSharePressureMode.Normal, sentPressureState.Mode);
             Assert.Equal("healthy", sentPressureState.Reason);
             Assert.Equal(12L, sentPressureState.VisibleHeadFrameId);
