@@ -118,7 +118,7 @@ if ($CommittedRetirement) {
     })
     if ($routeCommits.Count -ne 1) { throw 'Missing independent exact route-commit operation' }
     $cases = @('exact', 'exact_duplicate', 'unknown_committed', 'wrong_reason', 'rejected_mutation', 'idempotent_mutation',
-        'generation_gap', 'unchanged_hash', 'unchanged_route', 'wrong_before_scope', 'wrong_data_session', 'wrong_data_generation',
+        'generation_gap', 'unchanged_hash', 'unchanged_route', 'wrong_before_scope', 'wrong_data_session', 'wrong_data_generation', 'wrong_provider_generation',
         'historical_source', 'origin_fingerprint', 'receipt_command_identity_consistent', 'receipt_command_fingerprint_consistent',
         'receipt_identity_consistent', 'missing_origin', 'missing_retirement', 'duplicate_removal', 'competing_removal',
         'missing_route_commit', 'invalid_route_receipt', 'missing_route_effect', 'conflicting_snapshot')
@@ -143,6 +143,7 @@ if ($CommittedRetirement) {
             'wrong_before_scope' { $envelope.aggregate.beforeBoundary.routePublicationGeneration++ }
             'wrong_data_session' { $envelope.aggregate.afterBoundary.dataSessionIdentity = 'fte1-' + ('a' * 24) }
             'wrong_data_generation' { $envelope.aggregate.afterBoundary.dataSessionGeneration++ }
+            'wrong_provider_generation' { $envelope.aggregate.afterBoundary | Add-Member dataSessionProviderGeneration 7 -Force }
             'historical_source' { $payload.sourceScope.scopeFingerprint = 'fte1-' + ('b' * 24) }
             'origin_fingerprint' { $payload.originReceiptFingerprint = 'fte1-' + ('c' * 24) }
             'receipt_command_identity_consistent' { $subject.commandIdentity = 'fte1-' + ('d' * 24); $receipt.commandIdentity = $subject.commandIdentity }

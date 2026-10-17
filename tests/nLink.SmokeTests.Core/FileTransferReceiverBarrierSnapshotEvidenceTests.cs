@@ -163,6 +163,12 @@ public sealed class FileTransferReceiverBarrierSnapshotEvidenceTests : FileTrans
     [InlineData("source_bridge")]
     [InlineData("source_data_identity")]
     [InlineData("source_data_generation")]
+    [InlineData("source_provider_generation")]
+    [InlineData("target_provider_generation")]
+    [InlineData("barrier_provider_generation")]
+    [InlineData("barrier_provider_missing")]
+    [InlineData("barrier_provider_untyped")]
+    [InlineData("barrier_unknown_boundary_field")]
     [InlineData("barrier_admission")]
     [InlineData("barrier_negotiation")]
     [InlineData("barrier_pause")]
@@ -195,6 +201,10 @@ public sealed class FileTransferReceiverBarrierSnapshotEvidenceTests : FileTrans
         . (Join-Path $RepoRoot 'tools/FileTransferOps/CoordinatorSnapshotEvidence.ps1')
         $catalog = Get-FileTransferCoordinatorEvidenceCatalog -ProfileVersion 'snapshot-authority-v1-receiver-barrier-v1'
         $capturedLines = [IO.File]::ReadAllLines($InputPath)
+        $baseline = Get-FileTransferCoordinatorSnapshotEvaluation -Lines $capturedLines
+        if ($baseline.ArtifactEvidenceVerdict -cne 'pass') {
+            throw "Unmodified receiver-barrier evidence must pass before mutation: $($baseline.ArtifactEvidenceFailureReason)"
+        }
         $preparations = @(for ($i = 0; $i -lt $capturedLines.Count; $i++) {
             if ([string]::IsNullOrWhiteSpace($capturedLines[$i])) { continue }
             if ((Get-FileTransferCoordinatorSnapshotEventName $capturedLines[$i]) -cne 'filetransfer_coordinator_transition_snapshot') { continue }
@@ -267,6 +277,12 @@ public sealed class FileTransferReceiverBarrierSnapshotEvidenceTests : FileTrans
             'source_bridge' { $source.bridgeRecoveryGeneration = 1 }
             'source_data_identity' { $source.dataSessionIdentity = 'unrelated-data-session' }
             'source_data_generation' { $source.dataSessionGeneration++ }
+            'source_provider_generation' { $source.dataSessionProviderGeneration++ }
+            'target_provider_generation' { $current.routeTransition.targetBoundary.dataSessionProviderGeneration++ }
+            'barrier_provider_generation' { $terminal.receiverBarrier.effectiveBoundary.dataSessionProviderGeneration++ }
+            'barrier_provider_missing' { $terminal.receiverBarrier.effectiveBoundary.PSObject.Properties.Remove('dataSessionProviderGeneration') }
+            'barrier_provider_untyped' { $terminal.receiverBarrier.effectiveBoundary.dataSessionProviderGeneration = '7' }
+            'barrier_unknown_boundary_field' { $terminal.receiverBarrier.effectiveBoundary | Add-Member unexpectedGeneration 7 }
             'barrier_admission' { $terminal.receiverBarrier.admissionFingerprint = 'a' * 64 }
             'barrier_negotiation' { $terminal.receiverBarrier.negotiationFingerprint = 'a' * 64 }
             'barrier_pause' { $terminal.receiverBarrier.pauseGeneration++ }

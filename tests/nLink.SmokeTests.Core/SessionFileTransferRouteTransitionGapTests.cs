@@ -4524,7 +4524,10 @@ public sealed partial class SessionFileTransferV4SenderTests
                 state.CurrentDataSessionGeneration,
                 admission,
                 RuntimeUnlockResponderPeerProbeTransitionMode
-                    .InitialRegularV4);
+                    .InitialRegularV4)
+            {
+                DataSessionProviderGeneration = state.CurrentDataSessionProviderGeneration,
+            };
         var observation =
             new RuntimeUnlockResponderPeerProbeRouteTransitionObservation(
                 snapshot.SessionId,

@@ -11,6 +11,7 @@ public sealed partial class SessionFileTransferV4SenderTests
     [InlineData("missing_snapshot_observation")]
     [InlineData("wrong_publication")]
     [InlineData("wrong_data_session_generation")]
+    [InlineData("wrong_provider_generation")]
     [InlineData("wrong_transition_mode")]
     [Trait("FileTransferRuntimeSuite", "InboundPublicationTransition")]
     public async Task SecondTunaPublication_ServiceRequiresPairedYieldBeforeResponderCommit(string control)
@@ -247,6 +248,10 @@ public sealed partial class SessionFileTransferV4SenderTests
                     var snapshot = CreateInitialResponderRouteCommitSnapshotForInboundTest(inbound,
                         receiverBridge.RuntimeUnlockRouteCommitSnapshot!);
                     var observation = snapshot.ResponderPeerProbeRouteTransitionObservation!;
+                    Assert.Equal(1, observation.PeerReceiveScope.DataSessionGeneration);
+                    Assert.Equal(receiverData.Generation, observation.PeerReceiveScope.DataSessionProviderGeneration);
+                    Assert.NotEqual(observation.PeerReceiveScope.DataSessionGeneration,
+                        observation.PeerReceiveScope.DataSessionProviderGeneration);
                     var scope = observation.PeerReceiveScope with
                     {
                         ResponderTransitionMode = RuntimeUnlockResponderPeerProbeTransitionMode.PostFallbackV6Paired,
@@ -256,6 +261,7 @@ public sealed partial class SessionFileTransferV4SenderTests
                         "wrong_publication" => scope with { RoutePublication = scope.RoutePublication with
                             { PublicationGeneration = scope.RoutePublication.PublicationGeneration + 1 } },
                         "wrong_data_session_generation" => scope with { DataSessionGeneration = scope.DataSessionGeneration + 1 },
+                        "wrong_provider_generation" => scope with { DataSessionProviderGeneration = scope.DataSessionProviderGeneration + 1 },
                         "wrong_transition_mode" => scope with
                             { ResponderTransitionMode = RuntimeUnlockResponderPeerProbeTransitionMode.InitialRegularV4 },
                         _ => scope,

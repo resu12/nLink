@@ -1150,6 +1150,41 @@ function Test-FileTransferCoordinatorSnapshotBoundaryComplete {
     return $true
 }
 
+function Test-FileTransferCoordinatorSnapshotBoundarySchema {
+    param($Boundary)
+
+    if ($null -eq $Boundary -or -not (Test-FileTransferCoordinatorSnapshotBoundaryComplete $Boundary)) { return $false }
+    $numbers = @('protocolVersion', 'liveRouteEpoch', 'routePublicationGeneration', 'routeCommitGeneration',
+        'runtimeGeneration', 'terminalGeneration', 'legGeneration', 'transportEpoch',
+        'bridgeRecoveryGeneration', 'checkpointGeneration', 'dataSessionGeneration')
+    $strings = @('route', 'checkpointRequestId', 'dataSessionIdentity')
+    # The producer omits a default provider generation. It is independent of the
+    # transfer-local generation; no other boundary extension is admitted.
+    if ($Boundary.PSObject.Properties.Name -ccontains 'dataSessionProviderGeneration') {
+        $numbers += 'dataSessionProviderGeneration'
+    }
+    $fields = $numbers + $strings
+    if (@($Boundary.PSObject.Properties).Count -ne $fields.Count -or
+        @($fields | Where-Object { $Boundary.PSObject.Properties.Name -cnotcontains $_ }).Count -ne 0) { return $false }
+    foreach ($name in $numbers) {
+        if (($Boundary.$name -isnot [int] -and $Boundary.$name -isnot [long]) -or [long]$Boundary.$name -lt 0) { return $false }
+    }
+    foreach ($name in $strings) {
+        if ($Boundary.$name -isnot [string] -or $Boundary.$name -cmatch '\[redacted\]') { return $false }
+    }
+    return $true
+}
+
+function Test-FileTransferCoordinatorSnapshotBoundaryProviderEqual {
+    param($Left, $Right)
+
+    if (-not (Test-FileTransferCoordinatorSnapshotBoundarySchema $Left) -or
+        -not (Test-FileTransferCoordinatorSnapshotBoundarySchema $Right)) { return $false }
+    $leftProvider = Get-FileTransferCoordinatorSnapshotObjectProperty $Left 'dataSessionProviderGeneration' 0
+    $rightProvider = Get-FileTransferCoordinatorSnapshotObjectProperty $Right 'dataSessionProviderGeneration' 0
+    return $leftProvider -eq $rightProvider
+}
+
 function Test-FileTransferCoordinatorSnapshotBoundaryEqual {
     [CmdletBinding()]
     param(
@@ -1210,6 +1245,10 @@ function Test-FileTransferCoordinatorReceiverBarrierSourceProjection {
 
     if (-not (Test-FileTransferCoordinatorSnapshotBoundaryComplete $Source) -or
         -not (Test-FileTransferCoordinatorSnapshotBoundaryComplete $Aggregate)) { return $false }
+    # Historical barrier sources do not capture provider generation. If present,
+    # however, it must agree; it must never be substituted for local generation.
+    if ($Source.PSObject.Properties.Name -ccontains 'dataSessionProviderGeneration' -and
+        -not (Test-FileTransferCoordinatorSnapshotBoundaryProviderEqual $Source $Aggregate)) { return $false }
     if (Test-FileTransferCoordinatorSnapshotBoundaryTupleEqual $Source $Aggregate) { return $true }
     if ($Source.route -cne 'regular_nkn_v4_fast' -or [int]$Source.protocolVersion -ne 4 -or
         [long]$Source.bridgeRecoveryGeneration -ne 0 -or [long]$Aggregate.bridgeRecoveryGeneration -le 0) { return $false }
@@ -1282,12 +1321,7 @@ function Test-FileTransferCoordinatorReceiverBarrierOperation {
             if ($value -isnot [int] -and $value -isnot [long]) { return $false }
         }
         foreach ($scope in @($payload.sourceBoundary, $payload.effectiveBoundary)) {
-            if (@($scope.PSObject.Properties).Count -ne 14) { return $false }
-            foreach ($field in @('protocolVersion','liveRouteEpoch','routePublicationGeneration','routeCommitGeneration',
-                    'runtimeGeneration','terminalGeneration','legGeneration','transportEpoch','bridgeRecoveryGeneration',
-                    'checkpointGeneration','dataSessionGeneration')) {
-                if (($scope.$field -isnot [int] -and $scope.$field -isnot [long]) -or [long]$scope.$field -lt 0) { return $false }
-            }
+            if (-not (Test-FileTransferCoordinatorSnapshotBoundarySchema $scope)) { return $false }
         }
         if ($attempt) {
             if ($Envelope.decisionKind -cnotin $script:FileTransferCoordinatorReceiverBarrierCatalog.decisionKinds -or
@@ -1343,6 +1377,7 @@ function Test-FileTransferCoordinatorReceiverBarrierOperation {
         if (-not $attempt -and $Operation.operationRole -ceq 'receiver_barrier_current' -and $Operation.afterState -cne 'None' -and
             -not (Test-FileTransferCoordinatorReceiverBarrierSourceProjection $payload.sourceBoundary $Envelope.aggregate.afterBoundary -StructureOnly)) { return $false }
         if (-not (Test-FileTransferCoordinatorSnapshotBoundaryTupleEqual $payload.effectiveBoundary $effective) -or
+            -not (Test-FileTransferCoordinatorSnapshotBoundaryProviderEqual $payload.effectiveBoundary $effective) -or
             $receipt.stage -cne $stage -or [string]::IsNullOrWhiteSpace($receipt.receiptReason) -or
             [long]$receipt.commandGeneration -ne [long]$Operation.operationGeneration -or
             [long]$receipt.receiptGeneration -ne [long]$Operation.operationGeneration -or
@@ -1411,6 +1446,8 @@ function Test-FileTransferCoordinatorReceiverBarrierRoutePreparation {
     $projectedCheckpointIdentity = 'fte1-' + (Get-FileTransferCoordinatorSnapshotSha256 `
         -Bytes ([Text.Encoding]::UTF8.GetBytes($checkpointCommandIdentity))).Substring(0, 24)
     return (Test-FileTransferCoordinatorSnapshotRouteTransitionSourceCurrent $captured $Source) -and
+        (Test-FileTransferCoordinatorSnapshotBoundaryProviderEqual $captured $Boundary.beforeBoundary) -and
+        (Test-FileTransferCoordinatorSnapshotBoundaryProviderEqual $captured $transition.targetBoundary) -and
         [long]$captured.transportEpoch -eq 0 -and [long]$captured.bridgeRecoveryGeneration -eq 0 -and
         $checkpoint -gt 0 -and [long]$transition.targetBoundary.checkpointGeneration -eq $checkpoint -and
         $transition.targetBoundary.checkpointRequestId -ceq $checkpointCommandIdentity -and

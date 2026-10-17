@@ -154,22 +154,12 @@ function Test-FileTransferCheckpointRepairContinuityScope {
     param($Scope)
     if (-not (Test-FileTransferCheckpointRepairContinuityFields $Scope `
             $script:FileTransferCoordinatorCheckpointRepairContinuityCatalog.scopeFields) -or
-        -not (Test-FileTransferCoordinatorSnapshotBoundaryComplete $Scope.boundary) -or
-        @($Scope.boundary.PSObject.Properties).Count -ne 14 -or
+        -not (Test-FileTransferCoordinatorSnapshotBoundarySchema $Scope.boundary) -or
         [long]$Scope.bridgeDecisionGeneration -lt 0 -or
         [long]$Scope.aggregateBridgeDecisionGeneration -lt 0 -or
         [long]$Scope.aggregateTransportEpoch -lt 0 -or
         [long]$Scope.retainedLegCheckpointGeneration -lt 0 -or
         [long]$Scope.leaseGeneration -lt 0) { return $false }
-    foreach ($name in @('protocolVersion', 'liveRouteEpoch', 'routePublicationGeneration', 'routeCommitGeneration',
-            'runtimeGeneration', 'terminalGeneration', 'legGeneration', 'transportEpoch',
-            'bridgeRecoveryGeneration', 'checkpointGeneration', 'dataSessionGeneration')) {
-        if (($Scope.boundary.$name -isnot [int] -and $Scope.boundary.$name -isnot [long]) -or
-            [long]$Scope.boundary.$name -lt 0) { return $false }
-    }
-    foreach ($name in @('route', 'checkpointRequestId', 'dataSessionIdentity')) {
-        if ($Scope.boundary.$name -isnot [string] -or $Scope.boundary.$name -cmatch '\[redacted\]') { return $false }
-    }
     foreach ($name in @('runtimeOwnerFingerprint', 'publicationFingerprint', 'scopeFingerprint')) {
         if ($Scope.$name -cnotmatch '^(?:[0-9a-f]{64}|fte1-[0-9a-f]{24})$') { return $false }
     }
@@ -178,7 +168,8 @@ function Test-FileTransferCheckpointRepairContinuityScope {
 
 function Test-FileTransferCheckpointRepairContinuityScopeEqual {
     param($Left, $Right)
-    if (-not (Test-FileTransferCoordinatorSnapshotBoundaryTupleEqual $Left.boundary $Right.boundary)) { return $false }
+    if (-not (Test-FileTransferCoordinatorSnapshotBoundaryTupleEqual $Left.boundary $Right.boundary) -or
+        -not (Test-FileTransferCoordinatorSnapshotBoundaryProviderEqual $Left.boundary $Right.boundary)) { return $false }
     foreach ($name in @('runtimeOwnerFingerprint', 'publicationFingerprint', 'commitFingerprint',
             'bridgeDecisionGeneration', 'aggregateBridgeDecisionGeneration', 'aggregateTransportEpoch', 'retainedLegCheckpointGeneration',
             'retainedLegCheckpointRequestId', 'leaseGeneration', 'scopeFingerprint')) {
@@ -215,7 +206,8 @@ function Test-FileTransferCheckpointRepairContinuityOriginScope {
         $cleared.boundary.checkpointRequestId -cne '(none)' -or
         [long]$cleared.retainedLegCheckpointGeneration -ne [long]$source.retainedLegCheckpointGeneration -or
         $cleared.retainedLegCheckpointRequestId -cne '(none)' -or
-        -not (Test-FileTransferCoordinatorSnapshotBoundaryEqualExceptCheckpoint $source.boundary $cleared.boundary)) { return $false }
+        -not (Test-FileTransferCoordinatorSnapshotBoundaryEqualExceptCheckpoint $source.boundary $cleared.boundary) -or
+        -not (Test-FileTransferCoordinatorSnapshotBoundaryProviderEqual $source.boundary $cleared.boundary)) { return $false }
     foreach ($name in @('runtimeOwnerFingerprint', 'publicationFingerprint', 'commitFingerprint', 'bridgeDecisionGeneration',
             'aggregateBridgeDecisionGeneration', 'aggregateTransportEpoch')) {
         if ([string]$source.$name -cne [string]$cleared.$name) { return $false }
@@ -228,7 +220,8 @@ function Test-FileTransferCheckpointRepairContinuityAggregateScope {
     $projected = $Scope.boundary | Select-Object *
     $projected.bridgeRecoveryGeneration = [long]$Scope.aggregateBridgeDecisionGeneration
     $projected.transportEpoch = [long]$Scope.aggregateTransportEpoch
-    return Test-FileTransferCoordinatorSnapshotBoundaryTupleEqual $projected $Boundary
+    return (Test-FileTransferCoordinatorSnapshotBoundaryTupleEqual $projected $Boundary) -and
+        (Test-FileTransferCoordinatorSnapshotBoundaryProviderEqual $projected $Boundary)
 }
 
 function Test-FileTransferCoordinatorCheckpointRepairContinuityOperation {
@@ -311,6 +304,7 @@ function Test-FileTransferCoordinatorCheckpointRepairContinuityOperation {
                 $after.route -cne 'file_tuna_v4' -or [int]$after.protocolVersion -ne 4 -or
                 $before.dataSessionIdentity -cne $after.dataSessionIdentity -or
                 [long]$before.dataSessionGeneration -ne [long]$after.dataSessionGeneration -or
+                -not (Test-FileTransferCoordinatorSnapshotBoundaryProviderEqual $before $after) -or
                 [long]$before.terminalGeneration -ne [long]$after.terminalGeneration -or
                 -not (Test-FileTransferCheckpointRepairContinuityAggregateScope $payload.clearedScope $before) -or
                 @($Envelope.aggregate.operations | Where-Object {
@@ -341,11 +335,15 @@ function Test-FileTransferCoordinatorCheckpointRepairContinuityOperation {
             return $commit.receiptStatus -ceq 'Committed' -and $terminal.receiptStatus -ceq 'Committed' -and
                 [long]$commit.operationGeneration -eq [long]$after.routeCommitGeneration -and
                 (Test-FileTransferCoordinatorSnapshotBoundaryTupleEqual $commit.routeRuntime.boundary $after) -and
+                (Test-FileTransferCoordinatorSnapshotBoundaryProviderEqual $commit.routeRuntime.boundary $after) -and
                 $current.authorityId -ceq $terminal.authorityId -and
                 [long]$current.operationGeneration -eq [long]$terminal.operationGeneration -and
                 (Test-FileTransferCoordinatorSnapshotBoundaryTupleEqual $current.routeTransition.sourceBoundary $terminal.routeTransition.sourceBoundary) -and
+                (Test-FileTransferCoordinatorSnapshotBoundaryProviderEqual $current.routeTransition.sourceBoundary $terminal.routeTransition.sourceBoundary) -and
                 (Test-FileTransferCoordinatorSnapshotRouteTransitionSourceCurrent $terminal.routeTransition.sourceBoundary $before) -and
-                (Test-FileTransferCoordinatorSnapshotRouteTransitionTargetCurrent $terminal.routeTransition.targetBoundary $after)
+                (Test-FileTransferCoordinatorSnapshotBoundaryProviderEqual $terminal.routeTransition.sourceBoundary $before) -and
+                (Test-FileTransferCoordinatorSnapshotRouteTransitionTargetCurrent $terminal.routeTransition.targetBoundary $after) -and
+                (Test-FileTransferCoordinatorSnapshotBoundaryProviderEqual $terminal.routeTransition.targetBoundary $after)
         }
         $repair = $payload.repair
         if (-not (Test-FileTransferCheckpointRepairContinuityFields $repair `
@@ -359,6 +357,7 @@ function Test-FileTransferCoordinatorCheckpointRepairContinuityOperation {
             [long]$Envelope.aggregate.beforeStateGeneration -ne [long]$Envelope.aggregate.afterStateGeneration -or
             $Envelope.aggregate.beforeStateFingerprint -cne $Envelope.aggregate.afterStateFingerprint -or
             -not (Test-FileTransferCoordinatorSnapshotBoundaryTupleEqual $Envelope.aggregate.beforeBoundary $Envelope.aggregate.afterBoundary) -or
+            -not (Test-FileTransferCoordinatorSnapshotBoundaryProviderEqual $Envelope.aggregate.beforeBoundary $Envelope.aggregate.afterBoundary) -or
             $receipt.stage -cne 'checkpoint_repair_continuity' -or
             $Operation.authorityId -cne $repair.authorityId -or
             $Operation.predecessorAuthorityId -cne $repair.predecessorAuthorityId -or
