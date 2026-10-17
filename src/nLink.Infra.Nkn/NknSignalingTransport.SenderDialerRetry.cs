@@ -58,8 +58,10 @@ public sealed partial class NknSignalingTransport
                scope.TransportEpoch == sourceScope.TransportEpoch &&
                scope.BridgeRecoveryGeneration == sourceScope.BridgeRecoveryGeneration &&
                string.Equals(scope.CheckpointRequestId, sourceScope.CheckpointRequestId ?? "(none)", StringComparison.Ordinal) &&
-               scope.DataSessionIdentity == sourceScope.DataSessionIdentity &&
-               scope.DataSessionGeneration == sourceScope.DataSessionGeneration;
+               scope.DataSessionIdentity == receipt.Authority.DataSessionIdentity &&
+               scope.DataSessionGeneration == receipt.Authority.DataSessionGeneration &&
+               scope.DataSessionProviderGeneration == sourceScope.DataSessionGeneration &&
+               sourceScope.DataSessionIdentity == $"{scope.RuntimeOwner.TransferId}:{scope.DataSessionProviderGeneration.ToString(System.Globalization.CultureInfo.InvariantCulture)}";
     }
 
     private bool TryContinueInstalledRetryOnAuthenticatedDialer(

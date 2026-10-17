@@ -545,7 +545,10 @@ public sealed partial class FileTransferCoordinatorTests
         var leg = state.CurrentLeg!;
         var checkpoint = new FileTransferRouteTransitionDurableCheckpoint(state.CurrentRuntimeOwner!.Value,
             state.CurrentRoutePublicationToken!.Value, state.TerminalGeneration, leg.Generation, leg.TransportEpochId,
-            leg.BridgeRecoveryGeneration, state.CurrentDataSessionGeneration, 3, 4, 6, 128, 2);
+            leg.BridgeRecoveryGeneration, state.CurrentDataSessionGeneration, 3, 4, 6, 128, 2)
+        {
+            DataSessionProviderGeneration = state.CurrentDataSessionProviderGeneration,
+        };
         var observation = new FileTransferFallbackV6ProofBootstrapObservation(state.SessionId, state.TransferId, state.Direction,
             1, 1, "runtime_disabled", "local_runtime_disabled", 10000, checkpoint)
         {

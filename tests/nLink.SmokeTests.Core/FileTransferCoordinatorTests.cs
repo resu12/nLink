@@ -24921,7 +24921,10 @@ public sealed partial class FileTransferCoordinatorTests
             ContiguousCommittedChunkIndex: 6,
             DurableHighestChunkIndex: 7,
             ChunkCount: 128,
-            CheckpointGeneration: 3);
+            CheckpointGeneration: 3)
+        {
+            DataSessionProviderGeneration = state.CurrentDataSessionProviderGeneration,
+        };
         var request = new FileTransferRouteTransitionPrepareRequest(
             FileTransferRouteTransitionKind.PostTunaFallbackV6ToTunaV4,
             owner,
@@ -25027,7 +25030,10 @@ public sealed partial class FileTransferCoordinatorTests
             ContiguousCommittedChunkIndex: 4,
             DurableHighestChunkIndex: 6,
             ChunkCount: 128,
-            CheckpointGeneration: 1);
+            CheckpointGeneration: 1)
+        {
+            DataSessionProviderGeneration = state.CurrentDataSessionProviderGeneration,
+        };
         var request = new FileTransferRouteTransitionPrepareRequest(
             FileTransferRouteTransitionKind.RegularV4ToTunaV4,
             ownerToken,

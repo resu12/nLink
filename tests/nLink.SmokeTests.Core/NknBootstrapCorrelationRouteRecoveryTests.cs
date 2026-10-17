@@ -33,6 +33,54 @@ public sealed partial class NknAccelerationTransportTests
     public Task JoinedBootstrapCorrelation_EarlyCheckpointProofPromotesThroughReactivation()
         => RunJoinedRouteRecoveryAsync(cycle: true, earlyCheckpointProof: true);
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    [Trait("FileTransferRuntimeSuite", "SparseWorkerHandoff")]
+    public void EarlyCheckpointProofPromotion_RequiresExactCoordinatorCustody(bool failedBeforeQuiescence)
+    {
+        var envelopes = FileTransferCoordinatorTests.CreateEarlyCheckpointClearProofSnapshotFixture(
+            FileTransferDirection.Outbound, failedBeforeQuiescence);
+        var lines = FileTransferInitialRegularRouteEvidenceTests.Emit(envelopes, (type, emitter, envelope) =>
+            typeof(SessionFileTransferService).GetMethods(BindingFlags.NonPublic | BindingFlags.Static)
+                .Single(method => method.Name == "EnqueueFallbackTailYieldDecisionAuthorityEffect" &&
+                    method.GetParameters()[0].ParameterType == type)
+                .Invoke(null, [emitter, envelope.CoordinatorInstanceId, envelope.SessionId, envelope.TransferId,
+                    FileTransferDirection.Outbound, envelope.Aggregate.AfterStateGeneration, envelope]));
+        var log = string.Join(Environment.NewLine, lines);
+        AssertEarlyCheckpointProofPromotion(log);
+
+        var quiescent = Assert.Single(lines.Where(line => line.Contains(
+                "event=filetransfer_coordinator_transition_snapshot;", StringComparison.Ordinal))
+            .Select(line =>
+            {
+                var payload = line.Split(';').Select(part => part.Trim())
+                    .Single(part => part.StartsWith("snapshot_payload=", StringComparison.Ordinal))["snapshot_payload=".Length..];
+                var base64 = payload.Replace('-', '+').Replace('_', '/');
+                var json = System.Text.Encoding.UTF8.GetString(Convert.FromBase64String(
+                    base64.PadRight((base64.Length + 3) / 4 * 4, '=')));
+                return (Payload: payload, Json: System.Text.Json.Nodes.JsonNode.Parse(json)!);
+            }), item => item.Json["decisionKind"]!.GetValue<string>() == "FallbackTailQuiescent");
+        static string Encode(string json) => Convert.ToBase64String(System.Text.Encoding.UTF8.GetBytes(json))
+            .TrimEnd('=').Replace('+', '-').Replace('/', '_');
+        foreach (var field in failedBeforeQuiescence
+            ? new[] { "peerProofFingerprint", "failedPredecessorAuthorityId", "failedSupersessionCarriedPeerProof" }
+            : new[] { "peerProofFingerprint" })
+        {
+            var mutated = quiescent.Json.DeepClone();
+            var operation = Assert.Single(mutated["aggregate"]!["operations"]!.AsArray(), item =>
+                item!["operationRole"]!.GetValue<string>() == "yield_current" &&
+                item["operationKind"]!.GetValue<string>() == "Quiescent")!;
+            if (field == "failedSupersessionCarriedPeerProof")
+                operation["fallbackTailYield"]![field] = false;
+            else
+                operation["fallbackTailYield"]![field] = "wrong-proof-or-authority";
+            var invalidLog = log.Replace(quiescent.Payload, Encode(mutated.ToJsonString()), StringComparison.Ordinal);
+            Assert.NotEqual(log, invalidLog);
+            Assert.ThrowsAny<Xunit.Sdk.XunitException>(() => AssertEarlyCheckpointProofPromotion(invalidLog));
+        }
+    }
+
     private async Task RunJoinedRouteRecoveryAsync(bool cycle, bool earlyCheckpointProof = false,
         bool holdPhysicalSend = false, int priorDataSessions = 0, bool stopReceiver = false)
     {
@@ -663,8 +711,10 @@ public sealed partial class NknAccelerationTransportTests
             }).ToArray();
         var retained = Assert.Single(snapshots, entry => Text(entry.Envelope, "decisionReason") ==
             "fallback_tail_checkpoint_pending_peer_proof_retained");
-        var accepted = Assert.Single(snapshots, entry => Text(entry.Envelope, "decisionKind") == "FallbackCheckpointAccepted");
-        var yielded = Assert.Single(snapshots, entry => Text(entry.Envelope, "decisionKind") == "FallbackTailQuiescent");
+        var accepted = Assert.Single(snapshots, entry => Text(entry.Envelope, "decisionKind") == "FallbackCheckpointAccepted" &&
+            Text(entry.Envelope, "decisionStatus") == "Accepted");
+        var yielded = Assert.Single(snapshots, entry => Text(entry.Envelope, "decisionKind") == "FallbackTailQuiescent" &&
+            Text(entry.Envelope, "decisionStatus") == "Accepted");
         Assert.True(retained.Sequence < accepted.Sequence && accepted.Sequence < yielded.Sequence);
         Assert.Equal(Text(retained.Envelope, "coordinatorInstanceId"), Text(accepted.Envelope, "coordinatorInstanceId"));
         Assert.Equal(Text(retained.Envelope, "coordinatorInstanceId"), Text(yielded.Envelope, "coordinatorInstanceId"));
@@ -672,8 +722,42 @@ public sealed partial class NknAccelerationTransportTests
         var held = Operation(retained.Envelope, "peer_proof_awaiting_checkpoint");
         var retired = Operation(accepted.Envelope, "peer_proof_awaiting_checkpoint");
         var promoted = Operation(accepted.Envelope, "peer_proof_pending_initial");
-        var consumed = Operation(yielded.Envelope, "peer_proof_pending_initial");
+        var consumption = Assert.Single(snapshots, entry =>
+            entry.Sequence > accepted.Sequence && entry.Sequence <= yielded.Sequence &&
+            Text(entry.Envelope, "coordinatorInstanceId") == Text(retained.Envelope, "coordinatorInstanceId") &&
+            entry.Envelope.GetProperty("aggregate").GetProperty("operations").EnumerateArray().Any(operation =>
+                Text(operation, "operationRole") == "peer_proof_pending_initial" &&
+                Text(operation, "receiptIdentity") == Text(held, "receiptIdentity") &&
+                Text(operation, "afterState") == "None"));
+        var consumed = Operation(consumption.Envelope, "peer_proof_pending_initial");
         var current = Operation(yielded.Envelope, "yield_current", "Quiescent");
+        if (consumption.Sequence != yielded.Sequence)
+        {
+            // A failed yield may consume the proof before an exact coordinator-issued
+            // quiescent successor carries it forward. Validate that complete handoff.
+            Assert.Equal("FallbackTailFailed", Text(consumption.Envelope, "decisionKind"));
+            var failed = Operation(consumption.Envelope, "yield_current", "Failed");
+            var removed = Operation(yielded.Envelope, "yield_current", "Failed");
+            var terminal = Operation(yielded.Envelope, "yield_terminal", "Failed");
+            Assert.Equal("PeerProofObserved", Text(failed, "afterState"));
+            Assert.Equal("PeerProofObserved", Text(removed, "beforeState"));
+            Assert.Equal("None", Text(removed, "afterState"));
+            Assert.Equal("Invalidated", Text(terminal, "afterState"));
+            Assert.Equal(Text(failed, "authorityId"), Text(removed, "authorityId"));
+            Assert.Equal(Text(failed, "authorityId"), Text(terminal, "authorityId"));
+            Assert.Equal(Text(failed, "authorityId"), Text(current.GetProperty("fallbackTailYield"), "failedPredecessorAuthorityId"));
+            Assert.True(current.GetProperty("fallbackTailYield").GetProperty("failedSupersessionCarriedPeerProof").GetBoolean());
+            Assert.Equal("failed_fallback_tail_yield_superseded_by_quiescence",
+                Text(terminal.GetProperty("fallbackTailYield"), "invalidationReason"));
+            foreach (var operation in new[] { failed, removed, terminal })
+                foreach (var field in new[] { "peerProofIdentity", "peerProofFingerprint", "sourceBoundary", "effectiveBoundary" })
+                    Assert.Equal(current.GetProperty("fallbackTailYield").GetProperty(field).GetRawText(),
+                        operation.GetProperty("fallbackTailYield").GetProperty(field).GetRawText());
+            var supersession = Assert.Single(current.GetProperty("fallbackTailYield").GetProperty("receipts").EnumerateArray(),
+                receipt => Text(receipt, "stage") == "failed_supersession");
+            Assert.Equal("Superseded", Text(supersession, "receiptStatus"));
+            Assert.True(supersession.GetProperty("receiptValidated").GetBoolean());
+        }
         Assert.Equal("None", Text(held, "beforeState"));
         Assert.Equal("Pending", Text(held, "afterState"));
         Assert.Equal("None", Text(retired, "afterState"));

@@ -16,6 +16,9 @@ public sealed partial class NknAccelerationTransportTests
     [InlineData("terminal")]
     [InlineData("publication_replaced")]
     [InlineData("data_session_replaced")]
+    [InlineData("provider_session_replaced")]
+    [InlineData("second_transfer_data_session_replaced")]
+    [InlineData("second_transfer_provider_session_replaced")]
     [InlineData("repair_generation_replaced")]
     [InlineData("dispatch_rejected")]
     [InlineData("after_probe_receipt_replaced")]
@@ -24,7 +27,9 @@ public sealed partial class NknAccelerationTransportTests
     [Trait("FileTransferInfraSuite", "SenderDialerRetry")]
     public Task JoinedFallbackRetry_InstalledListenerAnswerRejectsStaleEvidence(string control)
         => RunJoinedSenderDialerRetryAsync(helperOnlyCold: true,
-            verifyInstalledListenerAnswer: true, listenerAnswerControl: control);
+            verifyInstalledListenerAnswer: true,
+            listenerAnswerControl: control.Replace("second_transfer_", "", StringComparison.Ordinal),
+            secondTransfer: control.StartsWith("second_transfer_", StringComparison.Ordinal));
 
     private static async Task VerifyInstalledListenerAnswerRejectionAsync(
         NknSignalingTransport transport, SessionFileTransferService service, object context,
@@ -117,6 +122,9 @@ public sealed partial class NknAccelerationTransportTests
                 case "data_session_replaced":
                     scope = scope with { DataSessionGeneration = scope.DataSessionGeneration + 1,
                         DataSessionIdentity = scope.DataSessionIdentity + "-replacement" };
+                    break;
+                case "provider_session_replaced":
+                    scope = scope with { DataSessionProviderGeneration = scope.DataSessionProviderGeneration + 1 };
                     break;
                 case "repair_generation_replaced":
                     scope = scope with { BridgeRecoveryGeneration = scope.BridgeRecoveryGeneration + 1 };

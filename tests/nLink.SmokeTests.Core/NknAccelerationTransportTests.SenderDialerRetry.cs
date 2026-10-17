@@ -31,6 +31,12 @@ public sealed partial class NknAccelerationTransportTests
 
     [Fact]
     [Trait("FileTransferInfraSuite", "SenderDialerRetry")]
+    public Task JoinedFallbackRetry_SecondTransferKeepsProviderAndLocalGenerationsDistinct()
+        => RunJoinedSenderDialerRetryAsync(helperOnlyCold: true, verifyInstalledListenerAnswer: true,
+            completeConsumedResponderHandoff: true, secondTransfer: true);
+
+    [Fact]
+    [Trait("FileTransferInfraSuite", "SenderDialerRetry")]
     public Task JoinedFallbackRetry_InstalledListenerAnswerConvergesWithPeerProbe()
         => RunJoinedSenderDialerRetryAsync(helperOnlyCold: true, verifyInstalledListenerAnswer: true);
 
@@ -49,7 +55,7 @@ public sealed partial class NknAccelerationTransportTests
 
     private async Task RunJoinedSenderDialerRetryAsync(string? control = null, bool senderCanListen = false,
         bool helperOnlyCold = false, bool verifyInstalledListenerAnswer = false, string? listenerAnswerControl = null,
-        bool completeConsumedResponderHandoff = false)
+        bool completeConsumedResponderHandoff = false, bool secondTransfer = false)
     {
         // Only the already-open fallback baseline is seeded. The new payer's
         // handshake, paired yield, retry install, probe and payload are real
@@ -93,6 +99,13 @@ public sealed partial class NknAccelerationTransportTests
         {
             var sessionId = await ApproveNknSessionAsync(host, helper, timeout.Token,
                 InviteCapabilities.Chat | InviteCapabilities.FileTransfer, suppressAutomaticAccelerationNegotiation: true);
+            if (secondTransfer)
+            {
+                // A preceding transfer advances the transport-wide provider counter,
+                // not the new transfer's service-local lifetime.
+                (await host.OpenFileTransferDataSessionAsync(sessionId, "previous-transfer", timeout.Token)).Dispose();
+                (await helper.OpenFileTransferDataSessionAsync(sessionId, "previous-transfer", timeout.Token)).Dispose();
+            }
             const string transferId = "transfer_sender_dialer_retry";
             var offered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
             var accepted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -126,6 +139,15 @@ public sealed partial class NknAccelerationTransportTests
                 sender, senderData, sessionId, transferId, FileTransferDirection.Outbound, withoutFrontierGap: true);
             inbound = await SessionFileTransferV4SenderTests.CreateJoinedNknFallbackContextForTestAsync(
                 receiver, receiverData, sessionId, transferId, FileTransferDirection.Inbound, withoutFrontierGap: true);
+            if (secondTransfer)
+            {
+                foreach (var side in new[] { (sender, outbound), (receiver, inbound) })
+                {
+                    var state = SessionFileTransferV4SenderTests.CaptureJoinedNknStateForTest(side.Item1, side.Item2);
+                    Assert.Equal(1, state.CurrentDataSessionGeneration);
+                    Assert.Equal(2, state.CurrentDataSessionProviderGeneration);
+                }
+            }
 
             if (!helperOnlyCold)
             {
@@ -168,6 +190,14 @@ public sealed partial class NknAccelerationTransportTests
                         SessionFileTransferV4SenderTests.CaptureJoinedNknStateForTest(side.Item1, side.Item2)
                             .PersistentState.FallbackTailYield.CurrentOperation?.PairedRelease is not null),
                         TimeSpan.FromSeconds(3));
+                    // Pairing publication precedes the queued coordinator retry request.
+                    // Finish that phase before asking the listener to negotiate.
+                    await WaitUntilAsync(() =>
+                        GetPrivateField(receiverTransport, "pendingRuntimeUnlockRetryNegotiationIntent") is not null ||
+                        GetLastCommittedRuntimeUnlockRetryDispatchInstallReceipt(receiverTransport).HasValue,
+                        TimeSpan.FromSeconds(3));
+                    await receiverTransport.DrainCoordinatorQueuedRuntimeUnlockRetryDispatchAuthorityRequestsForTestsAsync()
+                        .WaitAsync(timeout.Token);
                 }
                 await receiverTransport.RequestAccelerationNegotiationAsync("runtime_unlock", timeout.Token);
                 if (control is not null)
@@ -194,8 +224,10 @@ public sealed partial class NknAccelerationTransportTests
                 await WaitUntilAsync(() => GetPrivateField(senderTransport, "runtimeUnlockResponderAnswerProbeConvergence") is not null,
                     TimeSpan.FromSeconds(8));
             }
-            await WaitUntilAsync(() => GetLastCommittedRuntimeUnlockRetryDispatchInstallReceipt(senderTransport).HasValue,
-                TimeSpan.FromSeconds(3));
+            // Installation includes the existing retry queue/backoff. Bound it by the
+            // fixture's overall deadline instead of a competing three-second poll.
+            while (!GetLastCommittedRuntimeUnlockRetryDispatchInstallReceipt(senderTransport).HasValue)
+                await Task.Delay(10, timeout.Token);
             if (helperOnlyCold)
             {
                 var installed = GetLastCommittedRuntimeUnlockRetryDispatchInstallReceipt(senderTransport)!.Value;

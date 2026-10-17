@@ -2505,6 +2505,9 @@ internal sealed record
                 RuntimeUnlockInitialActivationReceiveRecoveryHoldInvalidationKind
                     .Unspecified)
 {
+    public RuntimeUnlockInitialActivationReceiveRecoveryDataSessionBinding?
+        DataSessionBinding { get; init; }
+
     public bool IsDefault =>
         Request.IsDefault ||
         ReceiveRecoveryAuthority.IsDefault ||
@@ -18621,7 +18624,10 @@ internal static partial class FileTransferCoordinator
                         NormalizeReason(reason),
                         holdGeneration,
                         operation,
-                        previousAuthority))
+                        previousAuthority)
+                    {
+                        DataSessionBinding = CreateInitialActivationHoldDataSessionBinding(request, status, operation),
+                    })
                 {
                     State = nextState ?? state,
                 };
@@ -18756,6 +18762,7 @@ internal static partial class FileTransferCoordinator
         }
 
         if (!ReceiveRecoveryOperationMatchesInitialActivationRequest(
+                state,
                 currentOperation.Value,
                 request,
                 matchExecutionCommand: !capturedPredecessorRebind) ||
@@ -18810,7 +18817,11 @@ internal static partial class FileTransferCoordinator
             RuntimeUnlockInitialActivationReceiveRecoveryHoldStatus.Held,
             capturedPredecessorRebind
                 ? "runtime_unlock_initial_activation_receive_recovery_hold_rebound"
-                : "runtime_unlock_initial_activation_receive_recovery_operation_current");
+                : "runtime_unlock_initial_activation_receive_recovery_operation_current")
+        {
+            DataSessionBinding = CreateInitialActivationHoldDataSessionBinding(
+                request, RuntimeUnlockInitialActivationReceiveRecoveryHoldStatus.Held, currentOperation),
+        };
         var heldState = ApplyReceiveRecoverySubstate(
             state,
             recoveryState with
@@ -18851,7 +18862,10 @@ internal static partial class FileTransferCoordinator
                         status,
                         NormalizeReason(reason),
                         holdGeneration,
-                        operation))
+                        operation)
+                    {
+                        DataSessionBinding = CreateInitialActivationHoldDataSessionBinding(request.HoldRequest, status, operation),
+                    })
                 {
                     State = nextState ?? state,
                 };
@@ -18993,12 +19007,8 @@ internal static partial class FileTransferCoordinator
             expected.TransportEpoch != leg.TransportEpochId ||
             expected.BridgeRecoveryGeneration !=
                 leg.BridgeRecoveryGeneration ||
-            !string.Equals(
-                expected.DataSessionIdentity,
-                state.CurrentDataSessionIdentity,
-                StringComparison.Ordinal) ||
-            expected.DataSessionGeneration !=
-                state.CurrentDataSessionGeneration)
+            !RuntimeUnlockDataSessionScopeMatches(state, expected.DataSessionIdentity,
+                expected.DataSessionGeneration, expected.DataSessionGenerationKind))
         {
             return false;
         }
@@ -19042,6 +19052,7 @@ internal static partial class FileTransferCoordinator
             }
 
             return ReceiveRecoveryOperationMatchesExpectedScope(
+                       state,
                        current,
                        expected,
                        matchExecutionCommand: commandMatches) &&
@@ -19059,6 +19070,7 @@ internal static partial class FileTransferCoordinator
         return recoveryState.LastTerminalOperation is { } terminal &&
                terminal.Authority.ExecutionCommand == terminalCommand &&
                ReceiveRecoveryOperationMatchesExpectedScope(
+                   state,
                    terminal,
                    expected) &&
                RuntimeUnlockInitialActivationCheckpointMatchesState(
@@ -19182,9 +19194,11 @@ internal static partial class FileTransferCoordinator
                 exactPredecessor.Authority.Observation,
                 exactSuccessor.Authority.Observation) ||
             !ReceiveRecoveryOperationMatchesInitialActivationRequest(
+                state,
                 exactPredecessor,
                 request) ||
             !ReceiveRecoveryOperationMatchesInitialActivationRequest(
+                state,
                 exactSuccessor,
                 request,
                 matchExecutionCommand: false) ||
@@ -19232,6 +19246,7 @@ internal static partial class FileTransferCoordinator
 
     private static bool
         ReceiveRecoveryOperationMatchesInitialActivationRequest(
+            FileTransferCoordinatorState state,
             FileTransferReceiveRecoveryOperation operation,
             RuntimeUnlockInitialActivationReceiveRecoveryHoldRequest request,
             bool matchExecutionCommand = true)
@@ -19247,12 +19262,14 @@ internal static partial class FileTransferCoordinator
                    StringComparison.Ordinal) &&
                request.Direction == observation.Direction &&
                ReceiveRecoveryOperationMatchesExpectedScope(
+                   state,
                    operation,
                    request.ExpectedScope,
                    matchExecutionCommand);
     }
 
     private static bool ReceiveRecoveryOperationMatchesExpectedScope(
+        FileTransferCoordinatorState state,
         FileTransferReceiveRecoveryOperation operation,
         RuntimeUnlockInitialActivationReceiveRecoveryExpectedScope expected,
         bool matchExecutionCommand = true)
@@ -19269,12 +19286,10 @@ internal static partial class FileTransferCoordinator
                    expected.CheckpointRequestId,
                    observation.CheckpointRequestId,
                    StringComparison.Ordinal) &&
-               string.Equals(
-                   expected.DataSessionIdentity,
-                   observation.DataSessionIdentity,
-                   StringComparison.Ordinal) &&
-               expected.DataSessionGeneration ==
-                   observation.DataSessionGeneration &&
+               RuntimeUnlockDataSessionScopeMatches(state, expected.DataSessionIdentity,
+                   expected.DataSessionGeneration, expected.DataSessionGenerationKind) &&
+               state.CurrentDataSessionIdentity == observation.DataSessionIdentity &&
+               state.CurrentDataSessionGeneration == observation.DataSessionGeneration &&
                (!matchExecutionCommand ||
                 expected.ExpectedExecutionCommand is null ||
                 expected.ExpectedExecutionCommand ==
@@ -19383,78 +19398,114 @@ internal static partial class FileTransferCoordinator
             FileTransferReceiveRecoveryOperationAuthority? previousAuthority,
             string reason)
     {
-        var normalizedReason = NormalizeReason(reason);
         if (recoveryState.CurrentOperation is { } current &&
             current.Authority == activeHold.ReceiveRecoveryAuthority)
-        {
-            var status =
-                TryValidateReceiveRecoveryObservationCurrent(
-                    state,
-                    current.Authority.Observation,
-                    current.Authority.ExecutionCommand.CheckpointRequestId,
-                    out _)
-                    ? GetRuntimeUnlockInitialActivationReceiveRecoveryHoldStatus(
-                        current)
-                    : RuntimeUnlockInitialActivationReceiveRecoveryHoldStatus
-                        .Invalidated;
-            if (status ==
-                RuntimeUnlockInitialActivationReceiveRecoveryHoldStatus.Held)
-            {
-                return (
-                    state,
-                    new RuntimeUnlockInitialActivationReceiveRecoveryHoldDecision(
-                        activeHold.Request,
-                        status,
-                        activeHold.Reason,
-                        activeHold.HoldGeneration,
-                        current));
-            }
+            return ReconcileMatchingRuntimeUnlockInitialActivationHold(
+                state, recoveryState, activeHold, in current, reason);
 
-            var currentTerminalReason = status ==
-                RuntimeUnlockInitialActivationReceiveRecoveryHoldStatus.Released
-                    ? "runtime_unlock_initial_activation_receive_recovery_proof_current"
-                    : normalizedReason;
-            var terminalHold = activeHold with
-            {
-                Status = status,
-                Reason = currentTerminalReason,
-            };
-            var nextRecoveryState = recoveryState with
-            {
-                CurrentInitialActivationHold = null,
-                LastInitialActivationHold = terminalHold,
-            };
-            var nextState = ApplyReceiveRecoverySubstate(
+        return ReconcileSuccessorOrTerminalRuntimeUnlockInitialActivationHold(
+            state, recoveryState, activeHold, in previousAuthority, reason);
+    }
+
+    // The current-operation proof check must not share the stack frame containing
+    // every successor/terminal decision DTO. No authority or scope check is skipped.
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private static (
+        FileTransferCoordinatorState State,
+        RuntimeUnlockInitialActivationReceiveRecoveryHoldDecision? Decision)
+        ReconcileMatchingRuntimeUnlockInitialActivationHold(
+            FileTransferCoordinatorState state,
+            FileTransferReceiveRecoverySubstate recoveryState,
+            RuntimeUnlockInitialActivationReceiveRecoveryHold activeHold,
+            in FileTransferReceiveRecoveryOperation current,
+            string reason)
+    {
+        var normalizedReason = NormalizeReason(reason);
+        var status =
+            RuntimeUnlockInitialActivationHoldRequestMatchesState(state, activeHold.Request) &&
+            TryValidateReceiveRecoveryObservationCurrent(
                 state,
-                nextRecoveryState);
-            RuntimeUnlockInitialActivationOfferEnvelopeRefreshCommand?
-                refreshCommand = null;
-            if (status ==
-                    RuntimeUnlockInitialActivationReceiveRecoveryHoldStatus
-                        .Released &&
-                terminalHold.Request.EnvelopeGeneration > 0 &&
-                !string.IsNullOrWhiteSpace(
-                    terminalHold.Request.SemanticOfferFingerprint))
-            {
-                (nextState, refreshCommand) =
-                    StageRuntimeUnlockInitialActivationOfferEnvelopeRefresh(
-                        nextState,
-                        terminalHold,
-                        current);
-            }
+                current.Authority.Observation,
+                current.Authority.ExecutionCommand.CheckpointRequestId,
+                out _)
+                ? GetRuntimeUnlockInitialActivationReceiveRecoveryHoldStatus(
+                    current)
+                : RuntimeUnlockInitialActivationReceiveRecoveryHoldStatus
+                    .Invalidated;
+        if (status ==
+            RuntimeUnlockInitialActivationReceiveRecoveryHoldStatus.Held)
+        {
             return (
-                nextState,
+                state,
                 new RuntimeUnlockInitialActivationReceiveRecoveryHoldDecision(
                     activeHold.Request,
                     status,
-                    currentTerminalReason,
+                    activeHold.Reason,
                     activeHold.HoldGeneration,
                     current)
                 {
-                    EnvelopeRefreshCommand = refreshCommand,
+                    DataSessionBinding = CreateInitialActivationHoldDataSessionBinding(activeHold.Request, status, current),
                 });
         }
 
+        var currentTerminalReason = status ==
+            RuntimeUnlockInitialActivationReceiveRecoveryHoldStatus.Released
+                ? "runtime_unlock_initial_activation_receive_recovery_proof_current"
+                : normalizedReason;
+        var terminalHold = activeHold with
+        {
+            Status = status,
+            Reason = currentTerminalReason,
+        };
+        var nextRecoveryState = recoveryState with
+        {
+            CurrentInitialActivationHold = null,
+            LastInitialActivationHold = terminalHold,
+        };
+        var nextState = ApplyReceiveRecoverySubstate(
+            state,
+            nextRecoveryState);
+        RuntimeUnlockInitialActivationOfferEnvelopeRefreshCommand?
+            refreshCommand = null;
+        if (status ==
+                RuntimeUnlockInitialActivationReceiveRecoveryHoldStatus
+                    .Released &&
+            terminalHold.Request.EnvelopeGeneration > 0 &&
+            !string.IsNullOrWhiteSpace(
+                terminalHold.Request.SemanticOfferFingerprint))
+        {
+            (nextState, refreshCommand) =
+                StageRuntimeUnlockInitialActivationOfferEnvelopeRefresh(
+                    nextState,
+                    terminalHold,
+                    current);
+        }
+        return (
+            nextState,
+            new RuntimeUnlockInitialActivationReceiveRecoveryHoldDecision(
+                activeHold.Request,
+                status,
+                currentTerminalReason,
+                activeHold.HoldGeneration,
+                current)
+            {
+                EnvelopeRefreshCommand = refreshCommand,
+                DataSessionBinding = CreateInitialActivationHoldDataSessionBinding(activeHold.Request, status, current),
+            });
+    }
+
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private static (
+        FileTransferCoordinatorState State,
+        RuntimeUnlockInitialActivationReceiveRecoveryHoldDecision? Decision)
+        ReconcileSuccessorOrTerminalRuntimeUnlockInitialActivationHold(
+            FileTransferCoordinatorState state,
+            FileTransferReceiveRecoverySubstate recoveryState,
+            RuntimeUnlockInitialActivationReceiveRecoveryHold activeHold,
+            in FileTransferReceiveRecoveryOperationAuthority? previousAuthority,
+            string reason)
+    {
+        var normalizedReason = NormalizeReason(reason);
         if (recoveryState.CurrentOperation is { } successor &&
             previousAuthority is { } predecessor &&
             predecessor == activeHold.ReceiveRecoveryAuthority &&
@@ -19463,6 +19514,7 @@ internal static partial class FileTransferCoordinator
             successor.Authority.PredecessorOperationGeneration ==
                 predecessor.OperationGeneration &&
             ReceiveRecoveryOperationMatchesInitialActivationRequest(
+                state,
                 successor,
                 activeHold.Request,
                 matchExecutionCommand: false))
@@ -19472,6 +19524,8 @@ internal static partial class FileTransferCoordinator
             var rebound = activeHold with
             {
                 ReceiveRecoveryAuthority = successor.Authority,
+                DataSessionBinding = CreateInitialActivationHoldDataSessionBinding(
+                    activeHold.Request, RuntimeUnlockInitialActivationReceiveRecoveryHoldStatus.Held, successor),
                 Status =
                     RuntimeUnlockInitialActivationReceiveRecoveryHoldStatus
                         .Held,
@@ -19492,11 +19546,16 @@ internal static partial class FileTransferCoordinator
                     reboundReason,
                     activeHold.HoldGeneration,
                     successor,
-                    predecessor));
+                    predecessor)
+                {
+                    DataSessionBinding = CreateInitialActivationHoldDataSessionBinding(
+                        activeHold.Request, RuntimeUnlockInitialActivationReceiveRecoveryHoldStatus.Held, successor),
+                });
         }
 
         var retainedTerminal = recoveryState.LastTerminalOperation;
         var terminalStatus =
+            RuntimeUnlockInitialActivationHoldRequestMatchesState(state, activeHold.Request) &&
             retainedTerminal is { } terminal &&
             terminal.Authority == activeHold.ReceiveRecoveryAuthority &&
             GetRuntimeUnlockInitialActivationReceiveRecoveryHoldStatus(
@@ -19550,6 +19609,7 @@ internal static partial class FileTransferCoordinator
                 retainedTerminal)
             {
                 EnvelopeRefreshCommand = retainedRefreshCommand,
+                DataSessionBinding = CreateInitialActivationHoldDataSessionBinding(activeHold.Request, terminalStatus, retainedTerminal),
             });
     }
 

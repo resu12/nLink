@@ -11,16 +11,18 @@ public sealed class
     SessionFileTransferServiceTestBase
 {
     [Theory]
-    [InlineData("reset_session_state")]
-    [InlineData("transport_detached")]
-    [InlineData("transfer_terminal")]
-    [InlineData("service_disposed")]
+    [InlineData("reset_session_state", FileTransferDirection.Outbound)]
+    [InlineData("transport_detached", FileTransferDirection.Outbound)]
+    [InlineData("transfer_terminal", FileTransferDirection.Outbound)]
+    [InlineData("service_disposed", FileTransferDirection.Outbound)]
+    [InlineData("transfer_terminal", FileTransferDirection.Inbound)]
     public async Task
         RuntimeUnlockInitialActivationReceiveRecoveryHold_InvalidationDirectiveReachesCapturedBridgeAfterTeardown(
-            string teardown)
+            string teardown,
+            FileTransferDirection direction)
     {
-        var sessionId = $"session_initial_activation_hold_{teardown}";
-        var transferId = $"transfer_initial_activation_hold_{teardown}";
+        var sessionId = $"session_initial_activation_hold_{teardown}_{direction}";
+        var transferId = $"transfer_initial_activation_hold_{teardown}_{direction}";
         using var bridge =
             new InitialActivationHoldLoopbackTransport(sessionId);
         using var peer = new LoopbackFileTransferTransport(sessionId);
@@ -28,22 +30,13 @@ public sealed class
 
         using var service = new SessionFileTransferService();
         service.AttachTransport(bridge);
-        var started = await service.TryStartSendAsync(
-            new FileTransferSendDescriptor(
-                "initial-activation-hold.bin",
-                FileSizeBytes: 1,
-                transferId,
-                ChunkSizeBytes: 4096),
-            _ => Task.FromResult<Stream>(
-                new MemoryStream([0x2a], writable: false)),
-            CancellationToken.None);
-        Assert.NotNull(started);
-
-        var context = GetOutboundContext(service);
+        var context = await StartHoldTransferAsync(
+            service, peer, sessionId, transferId, direction);
         var operation = await SeedCurrentReceiveRecoveryOperationAsync(
             service,
             bridge,
-            context);
+            context,
+            direction);
         var request = CreateInitialActivationHoldRequest(operation);
         var held = bridge.RaiseHoldRequest(request);
         Assert.Equal(
@@ -52,6 +45,9 @@ public sealed class
         Assert.Equal(request, held.Request);
         Assert.True(held.HoldGeneration > 0);
         Assert.Equal(operation.Authority, held.ReceiveRecoveryOperation?.Authority);
+        Assert.NotNull(held.DataSessionBinding);
+        Assert.Equal(held.DataSessionBinding,
+            GetReceiveRecoverySubstate(context).CurrentInitialActivationHold!.DataSessionBinding);
 
         PauseInitialActivationHoldDirectiveWorker(service);
         switch (teardown)
@@ -87,6 +83,7 @@ public sealed class
         FlushInitialActivationHoldDirectiveWorker(service);
 
         var invalidated = Assert.Single(bridge.ObservedHoldDecisions);
+        Assert.Equal(held.DataSessionBinding, invalidated.DataSessionBinding);
         Assert.Equal(request, invalidated.Request);
         Assert.Equal(held.HoldGeneration, invalidated.HoldGeneration);
         Assert.Equal(
@@ -106,17 +103,20 @@ public sealed class
     }
 
     [Theory]
-    [InlineData(false)]
-    [InlineData(true)]
+    [InlineData(false, FileTransferDirection.Outbound)]
+    [InlineData(true, FileTransferDirection.Outbound)]
+    [InlineData(false, FileTransferDirection.Inbound)]
+    [InlineData(true, FileTransferDirection.Inbound)]
     public async Task
         RuntimeUnlockInitialActivationReceiveRecoveryHold_RejectedOrDroppedReleaseAllowsOneExactTerminalInvalidation(
-            bool rejectReleaseBeforeTerminal)
+            bool rejectReleaseBeforeTerminal,
+            FileTransferDirection direction)
     {
         var suffix = rejectReleaseBeforeTerminal ? "rejected" : "dropped";
         var sessionId =
-            $"session_initial_activation_hold_{suffix}_release";
+            $"session_initial_activation_hold_{suffix}_release_{direction}";
         var transferId =
-            $"transfer_initial_activation_hold_{suffix}_release";
+            $"transfer_initial_activation_hold_{suffix}_release_{direction}";
         using var bridge =
             new InitialActivationHoldLoopbackTransport(sessionId);
         using var peer = new LoopbackFileTransferTransport(sessionId);
@@ -124,22 +124,13 @@ public sealed class
 
         using var service = new SessionFileTransferService();
         service.AttachTransport(bridge);
-        var started = await service.TryStartSendAsync(
-            new FileTransferSendDescriptor(
-                "initial-activation-hold-stale-release.bin",
-                FileSizeBytes: 1,
-                transferId,
-                ChunkSizeBytes: 4096),
-            _ => Task.FromResult<Stream>(
-                new MemoryStream([0x2a], writable: false)),
-            CancellationToken.None);
-        Assert.NotNull(started);
-
-        var context = GetOutboundContext(service);
+        var context = await StartHoldTransferAsync(
+            service, peer, sessionId, transferId, direction);
         var operation = await SeedCurrentReceiveRecoveryOperationAsync(
             service,
             bridge,
-            context);
+            context,
+            direction);
         var request = CreateInitialActivationHoldRequest(operation);
         var held = bridge.RaiseHoldRequest(request);
         Assert.Equal(
@@ -228,6 +219,8 @@ public sealed class
         FlushInitialActivationHoldDirectiveWorker(service);
 
         var invalidated = Assert.Single(bridge.ObservedHoldDecisions);
+        Assert.Equal(held.DataSessionBinding, invalidated.DataSessionBinding);
+        Assert.Equal(operation.Authority, invalidated.ReceiveRecoveryOperation?.Authority);
         Assert.Equal(request, invalidated.Request);
         Assert.Equal(held.HoldGeneration, invalidated.HoldGeneration);
         Assert.Equal(
@@ -696,11 +689,47 @@ public sealed class
             });
     }
 
+    private static async Task<object> StartHoldTransferAsync(
+        SessionFileTransferService service,
+        LoopbackFileTransferTransport peer,
+        string sessionId,
+        string transferId,
+        FileTransferDirection direction)
+    {
+        const string fileName = "initial-activation-hold.bin";
+        if (direction == FileTransferDirection.Outbound)
+        {
+            var started = await service.TryStartSendAsync(
+                new FileTransferSendDescriptor(fileName, FileSizeBytes: 1,
+                    transferId, ChunkSizeBytes: 4096),
+                _ => Task.FromResult<Stream>(new MemoryStream([0x2a], writable: false)),
+                CancellationToken.None);
+            Assert.NotNull(started);
+            return GetOutboundContext(service);
+        }
+
+        await peer.SendFileTransferOfferAsync(new FileTransferOfferV2
+        {
+            SessionId = sessionId,
+            TransferId = transferId,
+            FileName = fileName,
+            FileSizeBytes = 1,
+            PreferredDataProtocolVersion = FileTransferProtocol.ProtocolVersionV4,
+            FileTransferRoute = FileTransferRouteResolver.RegularNknV4FastToken,
+        }, CancellationToken.None);
+        await WaitUntilAsync(() => service.Snapshot.Inbound?.State ==
+            FileTransferTransferState.PendingDecision);
+        var field = Assert.IsAssignableFrom<FieldInfo>(typeof(SessionFileTransferService)
+            .GetField("inboundTransfer", BindingFlags.Instance | BindingFlags.NonPublic));
+        return Assert.IsAssignableFrom<object>(field.GetValue(service));
+    }
+
     private static async Task<FileTransferReceiveRecoveryOperation>
         SeedCurrentReceiveRecoveryOperationAsync(
             SessionFileTransferService service,
             InitialActivationHoldLoopbackTransport bridge,
-            object context)
+            object context,
+            FileTransferDirection direction = FileTransferDirection.Outbound)
     {
         var sessionId = GetRequiredProperty<string>(context, "SessionId");
         var transferId = GetRequiredProperty<string>(context, "TransferId");
@@ -725,7 +754,7 @@ public sealed class
                     new FileTransferReceiveRecoveryRequest(
                         sessionId,
                         transferId,
-                        FileTransferDirection.Outbound,
+                        direction,
                         "test_initial_activation_hold_teardown"),
                 ]));
         Assert.True(requested);

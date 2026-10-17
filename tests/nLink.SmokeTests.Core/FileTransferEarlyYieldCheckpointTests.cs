@@ -12,7 +12,7 @@ public sealed partial class FileTransferCoordinatorTests
         => CreateEarlyCheckpointClearProofSnapshotFixture(direction);
 
     internal static FileTransferCoordinatorTransitionEnvelope[] CreateEarlyCheckpointClearProofSnapshotFixture(
-        FileTransferDirection direction)
+        FileTransferDirection direction, bool failedBeforeQuiescence = false)
     {
         var (source, receipt) = CreateEarlyCheckpointClearProof(direction);
         var lease = source.CurrentFallbackCheckpointLease;
@@ -79,7 +79,16 @@ public sealed partial class FileTransferCoordinatorTests
         Assert.Equal(retiredDescriptor.AuthorityId, promotedDescriptor.AuthorityId);
         Assert.Equal(immutableRetained, retainedEnvelope.ToCanonicalJson());
 
-        var yielded = MarkFallbackTailQuiescent(accepted.State, source.RouteSelection,
+        var yieldSource = accepted.State;
+        FileTransferCoordinatorTransitionEnvelope? failedEnvelope = null;
+        if (failedBeforeQuiescence)
+        {
+            var failed = MarkFallbackTailFailed(yieldSource, source.RouteSelection, source.CurrentLeg.TransportEpochId);
+            Assert.Null(failed.MutationRejectedReason);
+            failedEnvelope = Assert.IsType<FileTransferCoordinatorTransitionEnvelope>(failed.SnapshotEnvelope);
+            yieldSource = failed.State;
+        }
+        var yielded = MarkFallbackTailQuiescent(yieldSource, source.RouteSelection,
             source.CurrentLeg.TransportEpochId, committedChunk: 5, highestObservedChunk: 5);
         var operation = Assert.IsType<FileTransferFallbackTailYieldOperation>(
             FileTransferCoordinator.GetFallbackTailYieldSubstate(yielded.State).CurrentOperation);
@@ -97,6 +106,7 @@ public sealed partial class FileTransferCoordinatorTests
             Assert.IsType<FileTransferCoordinatorTransitionEnvelope>(conflict.SnapshotEnvelope),
             Assert.IsType<FileTransferCoordinatorTransitionEnvelope>(wrongCheckpoint.SnapshotEnvelope),
             acceptedEnvelope,
+            .. failedEnvelope is null ? Array.Empty<FileTransferCoordinatorTransitionEnvelope>() : [failedEnvelope],
             Assert.IsType<FileTransferCoordinatorTransitionEnvelope>(yielded.SnapshotEnvelope),
             Assert.IsType<FileTransferCoordinatorTransitionEnvelope>(paired.SnapshotEnvelope),
         ];

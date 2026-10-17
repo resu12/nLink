@@ -1105,6 +1105,8 @@ internal readonly record struct RuntimeUnlockPeerPreCommitAnswerAcceptanceScope(
     RuntimeUnlockResponderPeerProbeTransitionMode ResponderTransitionMode =
         RuntimeUnlockResponderPeerProbeTransitionMode.PostFallbackV6Paired)
 {
+    public long DataSessionProviderGeneration { get; init; }
+
     public bool IsDefault =>
         RuntimeOwner.IsDefault ||
         RoutePublication.IsDefault ||
@@ -2192,6 +2194,8 @@ internal sealed record RuntimeUnlockPostFallbackPairedRetryOfferBindingRequest(
     string MessageId,
     string SourceFingerprint)
 {
+    public RuntimeUnlockDataSessionGenerationKind DataSessionGenerationKind { get; init; }
+
     public bool IsDefault =>
         PublicationAuthority is null ||
         PublicationAuthority.Direction is not (FileTransferDirection.Inbound or FileTransferDirection.Outbound) ||
@@ -2233,8 +2237,11 @@ internal readonly record struct RuntimeUnlockPostFallbackPairedRetryOfferBinding
         PairedScope.TransportEpoch != Request.TransportEpoch ||
         PairedScope.BridgeRecoveryGeneration != Request.BridgeRecoveryGeneration ||
         PairedScope.CheckpointRequestIdSnapshot != Request.CheckpointRequestId ||
-        PairedScope.DataSessionIdentity != Request.DataSessionIdentity ||
-        PairedScope.DataSessionGeneration != Request.DataSessionGeneration ||
+        (Request.DataSessionGenerationKind == RuntimeUnlockDataSessionGenerationKind.Provider
+            ? Request.DataSessionIdentity != $"{Request.PublicationAuthority.TransferId}:{Request.DataSessionGeneration.ToString(System.Globalization.CultureInfo.InvariantCulture)}"
+            : Request.DataSessionGenerationKind != RuntimeUnlockDataSessionGenerationKind.TransferLocal ||
+              PairedScope.DataSessionIdentity != Request.DataSessionIdentity ||
+              PairedScope.DataSessionGeneration != Request.DataSessionGeneration) ||
         (IsOutboundPreparation ? !AcceptanceScope.IsDefault :
         AcceptanceScope.IsDefault ||
         PairedScope.RuntimeOwner != AcceptanceScope.RuntimeOwner ||
@@ -2506,6 +2513,8 @@ internal readonly record struct
         long DataSessionGeneration,
         FileTransferBridgeRecoveryExecutionCommand? ExpectedExecutionCommand)
 {
+    public RuntimeUnlockDataSessionGenerationKind DataSessionGenerationKind { get; init; }
+
     public bool IsDefault =>
         SourcePublicationAuthority is null ||
         string.IsNullOrWhiteSpace(SourcePublicationAuthority.SessionId) ||
@@ -2642,6 +2651,9 @@ internal readonly record struct
         init;
     }
 
+    public RuntimeUnlockInitialActivationReceiveRecoveryDataSessionBinding?
+        DataSessionBinding { get; init; }
+
     public bool IsDefault =>
         Request.IsDefault ||
         string.IsNullOrWhiteSpace(Reason) ||
@@ -2650,6 +2662,13 @@ internal readonly record struct
         (HoldGeneration <= 0 ||
          ReceiveRecoveryOperation is not { IsDefault: false });
 }
+
+internal sealed record RuntimeUnlockInitialActivationReceiveRecoveryDataSessionBinding(
+    RuntimeUnlockInitialActivationReceiveRecoveryHoldRequest Request,
+    FileTransferAuthorityId ReceiveRecoveryAuthorityId,
+    long ReceiveRecoveryOperationGeneration,
+    string TransferLocalIdentity,
+    long TransferLocalGeneration);
 
 internal sealed record
     RuntimeUnlockInitialActivationOfferEnvelopeRefreshCommand(

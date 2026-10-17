@@ -2574,7 +2574,10 @@ public sealed partial class SessionFileTransferService
             state.CurrentDataSessionIdentity,
             state.CurrentDataSessionGeneration,
             admission,
-            responderTransitionMode);
+            responderTransitionMode)
+        {
+            DataSessionProviderGeneration = state.CurrentDataSessionProviderGeneration,
+        };
         if (scope.IsDefault)
         {
             reason =

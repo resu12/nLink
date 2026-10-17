@@ -12,8 +12,8 @@ internal static partial class FileTransferCoordinator
             state.CurrentRoutePublicationToken is not { } publication ||
             !MatchesRoutePublicationAuthority(request.PublicationAuthority, publication) ||
             !IsRoutePublicationTokenCurrent(state, publication, out _) ||
-            state.CurrentDataSessionIdentity != request.DataSessionIdentity ||
-            state.CurrentDataSessionGeneration != request.DataSessionGeneration ||
+            !RuntimeUnlockDataSessionScopeMatches(state, request.DataSessionIdentity,
+                request.DataSessionGeneration, request.DataSessionGenerationKind) ||
             GetRuntimeUnlockRetryLifecycle(state).PendingScopeInvalidationCommand is not null ||
             tail.CurrentOperation is not { PairedRelease: { } release } operation ||
             !TryGetCurrentFallbackTailYieldOperationScope(state, operation.Decision,
@@ -21,8 +21,8 @@ internal static partial class FileTransferCoordinator
             scope.TransportEpoch != request.TransportEpoch ||
             scope.BridgeRecoveryGeneration != request.BridgeRecoveryGeneration ||
             scope.CheckpointRequestIdSnapshot != request.CheckpointRequestId ||
-            scope.DataSessionIdentity != request.DataSessionIdentity ||
-            scope.DataSessionGeneration != request.DataSessionGeneration)
+            scope.DataSessionIdentity != state.CurrentDataSessionIdentity ||
+            scope.DataSessionGeneration != state.CurrentDataSessionGeneration)
             return new(RuntimeUnlockPostFallbackPairedRetryOfferBindingStatus.Stale,
                 "outbound_dialer_preparation_source_not_current");
 

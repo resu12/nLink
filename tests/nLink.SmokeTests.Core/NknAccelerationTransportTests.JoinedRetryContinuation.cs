@@ -1036,7 +1036,7 @@ public sealed partial class SessionFileTransferV4SenderTests
         SetPrivateProperty(context, "CoordinatorPersistentState", new FileTransferCoordinatorPersistentState { CoordinatorInstanceId = id });
         (GetPrivatePropertyValue(context, "DataSession") as IFileTransferDataSession)?.Dispose();
         SetPrivateProperty(context, "DataSession", data);
-        SetPrivateProperty(context, "DataSessionGeneration", ((IFileTransferDataSessionGenerationProvider)data).Generation);
+        SetPrivateProperty(context, "DataSessionGeneration", 1L);
         SetPrivateProperty(context, "PullPostTunaRecoveryActive", false);
         TrySetPrivateProperty(context, "PullTransportFrontierOnlyRepairActive", false);
         var policy = typeof(SessionFileTransferService).GetNestedType("FileTransferBridgeRecoveryPolicy", BindingFlags.NonPublic)!;

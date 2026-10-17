@@ -188,11 +188,16 @@ public sealed partial class SessionFileTransferService
                 CreateCoordinatorStateLocked(context));
             if (string.IsNullOrWhiteSpace(terminalDecision.MutationRejectedReason))
             {
+                // Adoption replaces persistent state before terminal projection retirement.
+                // Retain the coordinator's prior recovery state for exact hold notification.
+                var previousReceiveRecovery = context.CoordinatorPersistentState.FileTransferReceiveRecovery;
                 terminalDecision = terminalDecision with { State = AdoptCoordinatorStateLocked(context, terminalDecision) };
                 if (terminalDecision.TerminalFallbackProjectionRetirement is { } retirement &&
                     transport is IFileTransferRouteTransitionBridge bridge)
                     bridge.ApplyTerminalFallbackProjectionRetirement(retirement);
-                ApplyCoordinatorDecisionToContextLocked(context, terminalDecision, adoptCoordinatorState: false);
+                ApplyCoordinatorDecisionToContextLocked(context, terminalDecision,
+                    forwardRoutePublication: true, adoptCoordinatorState: false,
+                    previousReceiveRecovery: previousReceiveRecovery);
                 RetireRuntimeOwnedWorkersLocked(context, context.CurrentRuntimeOwner, "transfer_terminal");
             }
             else
@@ -532,11 +537,14 @@ public sealed partial class SessionFileTransferService
                 CreateCoordinatorStateLocked(context));
             if (string.IsNullOrWhiteSpace(terminalDecision.MutationRejectedReason))
             {
+                var previousReceiveRecovery = context.CoordinatorPersistentState.FileTransferReceiveRecovery;
                 terminalDecision = terminalDecision with { State = AdoptCoordinatorStateLocked(context, terminalDecision) };
                 if (terminalDecision.TerminalFallbackProjectionRetirement is { } retirement &&
                     transport is IFileTransferRouteTransitionBridge bridge)
                     bridge.ApplyTerminalFallbackProjectionRetirement(retirement);
-                ApplyCoordinatorDecisionToContextLocked(context, terminalDecision, adoptCoordinatorState: false);
+                ApplyCoordinatorDecisionToContextLocked(context, terminalDecision,
+                    forwardRoutePublication: true, adoptCoordinatorState: false,
+                    previousReceiveRecovery: previousReceiveRecovery);
                 RetireRuntimeOwnedWorkersLocked(context, context.CurrentRuntimeOwner, "transfer_terminal");
             }
             else

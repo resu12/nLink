@@ -8703,7 +8703,9 @@ public sealed partial class NknAccelerationTransportTests : CoreSmokeTestsBase, 
                 InviteCapabilities.Chat | InviteCapabilities.FileTransfer | InviteCapabilities.ScreenShare,
                 suppressAutomaticAccelerationNegotiation: true);
             const string transferId = "transfer_runtime_unlock_dispatch_authority_missing";
-            InstallRuntimeUnlockRetryDispatchCoordinatorForTests(host);
+            var decisions = new List<RuntimeUnlockRetryDispatchDecision>();
+            InstallRuntimeUnlockRetryDispatchCaptureCoordinatorForTests(
+                host, decisions, installLifecycleEvaluationObservers: true);
             _ = await host.OpenFileTransferDataSessionAsync(sessionId, transferId, cts.Token);
             TrackAuthorizedRegularV4RouteForTests(host, transferId);
 
@@ -8716,6 +8718,21 @@ public sealed partial class NknAccelerationTransportTests : CoreSmokeTestsBase, 
                 "runtime_unlock_offer_send_not_observed",
                 "runtime_unlock_offer_send_not_observed",
                 true);
+            await host.DrainRuntimeUnlockRetryDispatchInstallFollowUpsForTestsAsync();
+            // Establish the grant through the coordinator at the staged logical time;
+            // setup/JIT latency must not consume the 250ms deadline under test.
+            var decision = Assert.Single(decisions);
+            var bridge = Assert.IsAssignableFrom<IRuntimeUnlockRetryDispatchAuthorityBridge>(host);
+            var stage = bridge.StageRuntimeUnlockRetryDispatchDecision(decision);
+            Assert.True(stage.Accepted, stage.Reason);
+            var issued = IssueRuntimeUnlockRetryDispatchInstallReceiptForTests(decision, stage);
+            var install = bridge.CommitRuntimeUnlockRetryDispatchInstall(issued.Receipt);
+            Assert.True(install.Accepted, install.Reason);
+            var committed = FileTransferCoordinator.CommitRuntimeUnlockRetryDispatchInstall(
+                issued.State, install, checked(stage.StagedUtcMs + 1));
+            Assert.True(committed.Accepted, committed.Reason);
+            Assert.Equal(250, issued.Receipt.DispatchDeadlineUtcMs - (stage.StagedUtcMs + 1));
+            Assert.True(bridge.ConfirmRuntimeUnlockRetryDispatchInstall(issued.Receipt));
             await host.DrainRuntimeUnlockRetryDispatchInstallFollowUpsForTestsAsync();
             Assert.NotNull(GetLastCommittedRuntimeUnlockRetryDispatchInstallReceipt(host));
 
@@ -16099,7 +16116,7 @@ public sealed partial class NknAccelerationTransportTests : CoreSmokeTestsBase, 
                     FallbackCheckpointBinding = binding,
                 };
             var decision =
-                new RuntimeUnlockInitialActivationReceiveRecoveryHoldDecision(
+                BindInitialActivationHoldDecisionForTests(new RuntimeUnlockInitialActivationReceiveRecoveryHoldDecision(
                     request,
                     RuntimeUnlockInitialActivationReceiveRecoveryHoldStatus
                         .Released,
@@ -16108,14 +16125,14 @@ public sealed partial class NknAccelerationTransportTests : CoreSmokeTestsBase, 
                     operation)
                 {
                     EnvelopeRefreshCommand = command,
-                };
+                });
             var heldProgressDecision =
-                new RuntimeUnlockInitialActivationReceiveRecoveryHoldDecision(
+                BindInitialActivationHoldDecisionForTests(new RuntimeUnlockInitialActivationReceiveRecoveryHoldDecision(
                     request,
                     RuntimeUnlockInitialActivationReceiveRecoveryHoldStatus.Held,
                     "test_checkpoint_parent_held_progress",
                     HoldGeneration: 2,
-                    operation);
+                    operation));
 
             Assert.True(
                 InvokeRuntimeUnlockInitialActivationReceiveRecoveryHoldDecisionMatchesRequestForTests(
@@ -18363,7 +18380,7 @@ public sealed partial class NknAccelerationTransportTests : CoreSmokeTestsBase, 
 
     [Fact]
     [Trait("Category", "Smoke")]
-    public async Task RuntimeUnlockInitialActivationOfferEnvelopeRefresh_PostFallbackPendingBindingRevalidatesHoldBeforeCommit()
+    public async Task RuntimeUnlockInitialActivationOfferEnvelopeRefresh_RegularV4ClosureRevalidatesHoldBeforeCommit()
     {
         FakeNknClient.ResetNetwork();
         var previousHelpeePriorityDelay =
@@ -18379,9 +18396,6 @@ public sealed partial class NknAccelerationTransportTests : CoreSmokeTestsBase, 
                 .RuntimeUnlockOfferPeerResponseTimeoutOverrideForTests;
         var previousOfferAnswerTimeout =
             NknSignalingTransport.AccelerationOfferAnswerTimeoutOverrideForTests;
-        var previousExecutionCommandOverride =
-            NknSignalingTransport
-                .RuntimeUnlockInitialActivationReceiveRecoveryExecutionCommandOverrideForTests;
         NknSignalingTransport.HelperPaidOfferHelpeePriorityDelayOverrideForTests =
             TimeSpan.Zero;
         NknSignalingTransport.AccelerationControlDirectSendWaitOverrideForTests =
@@ -18455,66 +18469,12 @@ public sealed partial class NknAccelerationTransportTests : CoreSmokeTestsBase, 
                 sessionId,
                 transferId,
                 cts.Token);
-            var routeHint = CreateAuthorizedRouteHintNotification(
-                sessionId,
+            // Initial-activation refresh and installed fallback retry are distinct
+            // contracts. Exercise the refresh race on its regular-v4 admission path.
+            TrackAuthorizedRegularV4RouteForTests(
+                host,
                 transferId,
-                FileTransferRouteResolver.PostTunaFallbackV6Token,
-                FileTransferProtocol.ProtocolVersionV6,
-                "test_checkpoint_release_race",
-                publicationGeneration: 3,
-                runtimeGeneration: 3,
-                terminalGeneration: 0,
-                legGeneration: 3,
-                liveRouteEpoch: 2,
-                runtimeUnlockAdmissionGranted: true,
-                runtimeUnlockAdmissionReason: "fallback_tail_quiescent",
-                fallbackLegState: "active",
-                fallbackLegCanSendData: true,
-                fallbackLegGeneration: 3,
-                fallbackCheckpointRequestId: null,
-                fallbackTransportEpoch: 1,
-                fallbackBridgeRecoveryGeneration: 1);
-            Assert.IsAssignableFrom<IFileTransferRouteHintObserver>(host)
-                .ObserveFileTransferRouteHint(routeHint);
-
-            FileTransferReceiveRecoveryOperation? exactOperation = null;
-            NknSignalingTransport
-                    .RuntimeUnlockInitialActivationReceiveRecoveryExecutionCommandOverrideForTests =
-                (transport, expectedScope) =>
-                {
-                    if (!ReferenceEquals(transport, host))
-                    {
-                        return null;
-                    }
-
-                    var publication =
-                        Assert.IsType<FileTransferRoutePublicationAuthority>(
-                            expectedScope.SourcePublicationAuthority);
-                    var commandRequest =
-                        new RuntimeUnlockInitialActivationReceiveRecoveryHoldRequest(
-                            publication.SessionId,
-                            publication.TransferId,
-                            publication.Direction,
-                            "test-checkpoint-release-command",
-                            PayerDecisionId: 1,
-                            OfferGeneration: 1,
-                            TransactionGeneration: 1,
-                            TunaPathLeaseGeneration: 1,
-                            TunaPathLeaseListenerRunId: "test-listener-run",
-                            ControlEnvelopeFingerprint: "test-envelope",
-                            PeerVisibleDispatchObserved: false,
-                            Boundary:
-                                RuntimeUnlockInitialActivationReceiveRecoveryHoldBoundary
-                                    .PayerIntentPreSend)
-                        {
-                            ExpectedScope = expectedScope,
-                        };
-                    exactOperation ??=
-                        CreateInitialActivationReceiveRecoveryHoldOperationForTests(
-                            commandRequest,
-                            operationGeneration: 2);
-                    return exactOperation.Value.Authority.ExecutionCommand;
-                };
+                releaseInitialActivationReceiveRecoveryHold: false);
 
             var bridge =
                 Assert.IsAssignableFrom<
@@ -18529,39 +18489,38 @@ public sealed partial class NknAccelerationTransportTests : CoreSmokeTestsBase, 
             bridge.RuntimeUnlockInitialActivationReceiveRecoveryHoldRequested +=
                 (_, args) =>
                 {
-                    var operation =
-                        Assert.IsType<FileTransferReceiveRecoveryOperation>(
-                            exactOperation);
-                    var status = args.Request.Boundary ==
+                    if (args.Request.Boundary !=
                         RuntimeUnlockInitialActivationReceiveRecoveryHoldBoundary
-                            .UnobservedOfferSendFailure
-                            ? RuntimeUnlockInitialActivationReceiveRecoveryHoldStatus
-                                .Held
-                            : RuntimeUnlockInitialActivationReceiveRecoveryHoldStatus
-                                .Released;
-                    args.Decision =
-                        new RuntimeUnlockInitialActivationReceiveRecoveryHoldDecision(
-                            args.Request,
-                            status,
-                            status ==
-                                RuntimeUnlockInitialActivationReceiveRecoveryHoldStatus
-                                    .Held
-                                ? "test_checkpoint_release_held"
-                                : "test_checkpoint_release_initial_boundary_clear",
-                            HoldGeneration: 2,
-                            operation);
-                    if (status ==
-                        RuntimeUnlockInitialActivationReceiveRecoveryHoldStatus
-                            .Held)
+                            .UnobservedOfferSendFailure)
                     {
-                        held.TrySetResult((args.Request, operation));
+                        args.Decision = new RuntimeUnlockInitialActivationReceiveRecoveryHoldDecision(
+                            args.Request,
+                            RuntimeUnlockInitialActivationReceiveRecoveryHoldStatus.Released,
+                            "test_checkpoint_release_initial_boundary_clear",
+                            HoldGeneration: 0,
+                            ReceiveRecoveryOperation: null);
+                        return;
                     }
+
+                    var operation = CreateInitialActivationReceiveRecoveryHoldOperationForTests(
+                        args.Request,
+                        operationGeneration: 2);
+                    args.Decision =
+                        BindInitialActivationHoldDecisionForTests(new RuntimeUnlockInitialActivationReceiveRecoveryHoldDecision(
+                            args.Request,
+                            RuntimeUnlockInitialActivationReceiveRecoveryHoldStatus.Held,
+                            "test_checkpoint_release_held",
+                            HoldGeneration: 2,
+                            operation));
+                    held.TrySetResult((args.Request, operation));
                 };
 
             var negotiation = ((ITransportAccelerationControl)host)
                 .RequestAccelerationNegotiationAsync("runtime_unlock", cts.Token);
             var captured = await held.Task.WaitAsync(cts.Token);
             Assert.Null(captured.Request.ExpectedScope.CheckpointRequestId);
+            Assert.Equal(FileTransferRouteResolver.RegularNknV4FastToken,
+                captured.Request.ExpectedScope.SourcePublicationAuthority!.RouteToken);
 
             var nowUtcMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
             var proof = new FileTransferReceiveRecoveryProof(
@@ -18574,11 +18533,13 @@ public sealed partial class NknAccelerationTransportTests : CoreSmokeTestsBase, 
                 ExecutionState =
                     FileTransferReceiveRecoveryExecutionState.Completed,
                 ReceiveProof = proof,
+                ClosureState = FileTransferReceiveRecoveryClosureState.Adopted,
+                ClosureGeneration = 1,
             };
             var binding =
                 CreateRuntimeUnlockInitialActivationFallbackCheckpointBindingForTests(
                     completedOperation.Authority,
-                    captured.Request.ExpectedScope,
+                    captured.Request.ExpectedScope with { TransportEpoch = 1 },
                     FileTransferReceiveRecoveryFallbackCheckpointBindingState
                         .Pending);
             var command =
@@ -18586,7 +18547,7 @@ public sealed partial class NknAccelerationTransportTests : CoreSmokeTestsBase, 
                     captured.Request,
                     HoldGeneration: 2,
                     ReceiveRecoveryAuthority: completedOperation.Authority,
-                    ClosureGeneration: 0,
+                    ClosureGeneration: 1,
                     RefreshGeneration: 2,
                     SuccessorEnvelopeGeneration:
                         captured.Request.EnvelopeGeneration + 1,
@@ -18598,12 +18559,11 @@ public sealed partial class NknAccelerationTransportTests : CoreSmokeTestsBase, 
                 {
                     ReleaseProfile =
                         RuntimeUnlockInitialActivationOfferEnvelopeRefreshReleaseProfile
-                            .PostTunaFallbackCheckpointProof,
-                    ReceiveRecoveryProof = proof,
-                    FallbackCheckpointBinding = binding,
+                            .RegularV4Closure,
                 };
+            Assert.False(command.IsDefault);
             var releaseDecision =
-                new RuntimeUnlockInitialActivationReceiveRecoveryHoldDecision(
+                BindInitialActivationHoldDecisionForTests(new RuntimeUnlockInitialActivationReceiveRecoveryHoldDecision(
                     captured.Request,
                     RuntimeUnlockInitialActivationReceiveRecoveryHoldStatus
                         .Released,
@@ -18612,7 +18572,7 @@ public sealed partial class NknAccelerationTransportTests : CoreSmokeTestsBase, 
                     completedOperation)
                 {
                     EnvelopeRefreshCommand = command,
-                };
+                });
 
             var preparedCount = 0;
             var replaceHeldShadowDuringCallback = 1;
@@ -18627,13 +18587,13 @@ public sealed partial class NknAccelerationTransportTests : CoreSmokeTestsBase, 
                         Assert.True(
                             bridge
                                 .ObserveRuntimeUnlockInitialActivationReceiveRecoveryHoldDecision(
-                                    new RuntimeUnlockInitialActivationReceiveRecoveryHoldDecision(
+                                    BindInitialActivationHoldDecisionForTests(new RuntimeUnlockInitialActivationReceiveRecoveryHoldDecision(
                                         captured.Request,
                                         RuntimeUnlockInitialActivationReceiveRecoveryHoldStatus
                                             .Held,
                                         "test_checkpoint_release_shadow_rebound",
                                         HoldGeneration: 2,
-                                        captured.Operation)));
+                                        captured.Operation))));
                     }
 
                     args.Decision =
@@ -18649,6 +18609,7 @@ public sealed partial class NknAccelerationTransportTests : CoreSmokeTestsBase, 
                 EffectiveCheckpointRequestId =
                     "v6-regular-nkn-state-refresh:mismatched",
             };
+            Assert.False(mismatchedSuppliedBinding.IsDefault);
             Assert.False(
                 bridge
                     .ObserveRuntimeUnlockInitialActivationReceiveRecoveryHoldDecision(
@@ -18659,8 +18620,7 @@ public sealed partial class NknAccelerationTransportTests : CoreSmokeTestsBase, 
             Assert.False(
                 bridge
                     .ObserveRuntimeUnlockInitialActivationReceiveRecoveryHoldDecision(
-                        releaseDecision,
-                        binding));
+                        releaseDecision));
             Assert.Equal(1, Volatile.Read(ref preparedCount));
             Assert.Null(
                 GetPrivateField(
@@ -18684,8 +18644,7 @@ public sealed partial class NknAccelerationTransportTests : CoreSmokeTestsBase, 
             Assert.True(
                 bridge
                     .ObserveRuntimeUnlockInitialActivationReceiveRecoveryHoldDecision(
-                        releaseDecision,
-                        binding));
+                        releaseDecision));
             Assert.Equal(2, Volatile.Read(ref preparedCount));
             var committedReceipt = Assert.IsType<
                 RuntimeUnlockInitialActivationOfferEnvelopeRefreshReceipt>(
@@ -18701,8 +18660,7 @@ public sealed partial class NknAccelerationTransportTests : CoreSmokeTestsBase, 
             Assert.True(
                 bridge
                     .ObserveRuntimeUnlockInitialActivationReceiveRecoveryHoldDecision(
-                        releaseDecision,
-                        binding));
+                        releaseDecision));
             Assert.Equal(2, Volatile.Read(ref preparedCount));
 
             var mutatedCommand = command with
@@ -18725,6 +18683,17 @@ public sealed partial class NknAccelerationTransportTests : CoreSmokeTestsBase, 
                     host,
                     "lastRuntimeUnlockInitialActivationEnvelopeRefreshReceipt"));
 
+            var changedRefreshCommand = command with
+            {
+                RefreshGeneration = command.RefreshGeneration + 1,
+            };
+            Assert.False(changedRefreshCommand.IsDefault);
+            Assert.False(bridge.ObserveRuntimeUnlockInitialActivationReceiveRecoveryHoldDecision(
+                releaseDecision with { EnvelopeRefreshCommand = changedRefreshCommand }));
+            Assert.Equal(2, Volatile.Read(ref preparedCount));
+            Assert.Equal(committedReceipt,
+                GetPrivateField(host, "lastRuntimeUnlockInitialActivationEnvelopeRefreshReceipt"));
+
             await negotiation.WaitAsync(TimeSpan.FromSeconds(5));
         }
         finally
@@ -18742,9 +18711,6 @@ public sealed partial class NknAccelerationTransportTests : CoreSmokeTestsBase, 
                 previousOfferPeerResponseTimeout;
             NknSignalingTransport.AccelerationOfferAnswerTimeoutOverrideForTests =
                 previousOfferAnswerTimeout;
-            NknSignalingTransport
-                    .RuntimeUnlockInitialActivationReceiveRecoveryExecutionCommandOverrideForTests =
-                previousExecutionCommandOverride;
             FakeNknClient.ResetNetwork();
         }
     }
@@ -18947,23 +18913,23 @@ public sealed partial class NknAccelerationTransportTests : CoreSmokeTestsBase, 
                     {
                         Interlocked.Increment(ref offerPreSendEvaluationCount);
                         args.Decision =
-                            new RuntimeUnlockInitialActivationReceiveRecoveryHoldDecision(
+                            BindInitialActivationHoldDecisionForTests(new RuntimeUnlockInitialActivationReceiveRecoveryHoldDecision(
                                 args.Request,
                                 RuntimeUnlockInitialActivationReceiveRecoveryHoldStatus
                                 .Released,
                                 "test_receive_recovery_operation_proof_adopted",
                                 HoldGeneration: operationGeneration,
-                                operation);
+                                operation));
                         return;
                     }
                     args.Decision =
-                        new RuntimeUnlockInitialActivationReceiveRecoveryHoldDecision(
+                        BindInitialActivationHoldDecisionForTests(new RuntimeUnlockInitialActivationReceiveRecoveryHoldDecision(
                             args.Request,
                             RuntimeUnlockInitialActivationReceiveRecoveryHoldStatus
                                 .Held,
                             "test_receive_recovery_operation_current",
                             HoldGeneration: operationGeneration,
-                            operation);
+                            operation));
                     holdRequests.Enqueue((args.Request, operation));
                     holdRequestSignal.Release();
                 };
@@ -19031,7 +18997,7 @@ public sealed partial class NknAccelerationTransportTests : CoreSmokeTestsBase, 
                     refreshCommand = null)
             {
                 var decision =
-                    new RuntimeUnlockInitialActivationReceiveRecoveryHoldDecision(
+                    BindInitialActivationHoldDecisionForTests(new RuntimeUnlockInitialActivationReceiveRecoveryHoldDecision(
                         hold.Request,
                         RuntimeUnlockInitialActivationReceiveRecoveryHoldStatus
                             .Released,
@@ -19041,7 +19007,7 @@ public sealed partial class NknAccelerationTransportTests : CoreSmokeTestsBase, 
                         hold.Operation)
                     {
                         EnvelopeRefreshCommand = refreshCommand,
-                    };
+                    });
                 Assert.True(
                     bridge
                         .ObserveRuntimeUnlockInitialActivationReceiveRecoveryHoldDecision(
@@ -19119,7 +19085,7 @@ public sealed partial class NknAccelerationTransportTests : CoreSmokeTestsBase, 
             Assert.True(
                 bridge
                     .ObserveRuntimeUnlockInitialActivationReceiveRecoveryHoldDecision(
-                        new RuntimeUnlockInitialActivationReceiveRecoveryHoldDecision(
+                        BindInitialActivationHoldDecisionForTests(new RuntimeUnlockInitialActivationReceiveRecoveryHoldDecision(
                             failedSendHeld.Request,
                             RuntimeUnlockInitialActivationReceiveRecoveryHoldStatus
                                 .Held,
@@ -19127,14 +19093,14 @@ public sealed partial class NknAccelerationTransportTests : CoreSmokeTestsBase, 
                             HoldGeneration:
                                 failedSendHeld.Operation.Authority
                                     .OperationGeneration,
-                            retainedPredecessor)));
+                            retainedPredecessor))));
             var successor =
                 CreateInitialActivationReceiveRecoveryHoldOperationForTests(
                     failedSendHeld.Request,
                     operationGeneration: 2,
                     predecessorOperation: retainedPredecessor);
             var successorDecision =
-                new RuntimeUnlockInitialActivationReceiveRecoveryHoldDecision(
+                BindInitialActivationHoldDecisionForTests(new RuntimeUnlockInitialActivationReceiveRecoveryHoldDecision(
                     failedSendHeld.Request,
                     RuntimeUnlockInitialActivationReceiveRecoveryHoldStatus
                         .Held,
@@ -19142,7 +19108,7 @@ public sealed partial class NknAccelerationTransportTests : CoreSmokeTestsBase, 
                     HoldGeneration:
                         failedSendHeld.Operation.Authority.OperationGeneration,
                     successor,
-                    retainedPredecessor.Authority);
+                    retainedPredecessor.Authority));
             Assert.True(
                 bridge
                     .ObserveRuntimeUnlockInitialActivationReceiveRecoveryHoldDecision(
@@ -19413,14 +19379,14 @@ public sealed partial class NknAccelerationTransportTests : CoreSmokeTestsBase, 
                         Assert.IsType<FileTransferReceiveRecoveryOperation>(
                             exactOperation);
                     args.Decision =
-                        new RuntimeUnlockInitialActivationReceiveRecoveryHoldDecision(
+                        BindInitialActivationHoldDecisionForTests(new RuntimeUnlockInitialActivationReceiveRecoveryHoldDecision(
                             args.Request,
                             RuntimeUnlockInitialActivationReceiveRecoveryHoldStatus
                                 .Held,
                             "test_receive_recovery_operation_current",
                             HoldGeneration:
                                 operation.Authority.OperationGeneration,
-                            operation);
+                            operation));
                     held.TrySetResult((args.Request, operation));
                 };
 
@@ -19452,14 +19418,14 @@ public sealed partial class NknAccelerationTransportTests : CoreSmokeTestsBase, 
             Assert.Equal(0, Volatile.Read(ref physicalOfferSubmissionCount));
 
             var invalidated =
-                new RuntimeUnlockInitialActivationReceiveRecoveryHoldDecision(
+                BindInitialActivationHoldDecisionForTests(new RuntimeUnlockInitialActivationReceiveRecoveryHoldDecision(
                     captured.Request,
                     RuntimeUnlockInitialActivationReceiveRecoveryHoldStatus
                         .Invalidated,
                     "test_receive_recovery_operation_invalidated",
                     HoldGeneration:
                         captured.Operation.Authority.OperationGeneration,
-                    captured.Operation);
+                    captured.Operation));
             var staleHoldShadow = GetPrivateField(
                 host,
                 "runtimeUnlockInitialActivationReceiveRecoveryHoldShadow");
@@ -19467,14 +19433,14 @@ public sealed partial class NknAccelerationTransportTests : CoreSmokeTestsBase, 
             Assert.True(
                 bridge
                     .ObserveRuntimeUnlockInitialActivationReceiveRecoveryHoldDecision(
-                        new RuntimeUnlockInitialActivationReceiveRecoveryHoldDecision(
+                        BindInitialActivationHoldDecisionForTests(new RuntimeUnlockInitialActivationReceiveRecoveryHoldDecision(
                             captured.Request,
                             RuntimeUnlockInitialActivationReceiveRecoveryHoldStatus
                                 .Held,
                             "test_receive_recovery_operation_same_request_rebound",
                             HoldGeneration:
                                 captured.Operation.Authority.OperationGeneration,
-                            captured.Operation)));
+                            captured.Operation))));
             Assert.NotSame(
                 staleHoldShadow,
                 GetPrivateField(
@@ -19950,13 +19916,13 @@ public sealed partial class NknAccelerationTransportTests : CoreSmokeTestsBase, 
                             args.Request,
                             operationGeneration: 1);
                     args.Decision =
-                        new RuntimeUnlockInitialActivationReceiveRecoveryHoldDecision(
+                        BindInitialActivationHoldDecisionForTests(new RuntimeUnlockInitialActivationReceiveRecoveryHoldDecision(
                             args.Request,
                             RuntimeUnlockInitialActivationReceiveRecoveryHoldStatus
                                 .Held,
                             "test_receive_recovery_operation_current",
                             HoldGeneration: 1,
-                            operation);
+                            operation));
                     timeoutHold.TrySetResult((args.Request, operation));
                 };
 
@@ -20029,7 +19995,7 @@ public sealed partial class NknAccelerationTransportTests : CoreSmokeTestsBase, 
             Assert.True(
                 bridge
                     .ObserveRuntimeUnlockInitialActivationReceiveRecoveryHoldDecision(
-                        new RuntimeUnlockInitialActivationReceiveRecoveryHoldDecision(
+                        BindInitialActivationHoldDecisionForTests(new RuntimeUnlockInitialActivationReceiveRecoveryHoldDecision(
                             held.Request,
                             RuntimeUnlockInitialActivationReceiveRecoveryHoldStatus
                                 .Released,
@@ -20038,7 +20004,7 @@ public sealed partial class NknAccelerationTransportTests : CoreSmokeTestsBase, 
                             held.Operation)
                         {
                             EnvelopeRefreshCommand = refreshCommand,
-                        }));
+                        })));
             await WaitUntilAsync(
                 () => preparedRefreshReceipt is not null,
                 TimeSpan.FromSeconds(2));
@@ -20283,13 +20249,13 @@ public sealed partial class NknAccelerationTransportTests : CoreSmokeTestsBase, 
                                 args.Request,
                                 operationGeneration: 1);
                         args.Decision =
-                            new RuntimeUnlockInitialActivationReceiveRecoveryHoldDecision(
+                            BindInitialActivationHoldDecisionForTests(new RuntimeUnlockInitialActivationReceiveRecoveryHoldDecision(
                                 args.Request,
                                 RuntimeUnlockInitialActivationReceiveRecoveryHoldStatus
                                     .Held,
                                 "test_receive_recovery_operation_current",
                                 HoldGeneration: 1,
-                                operation);
+                                operation));
                         replayHold.TrySetResult((args.Request, operation));
                         return;
                     }
@@ -20371,13 +20337,13 @@ public sealed partial class NknAccelerationTransportTests : CoreSmokeTestsBase, 
                 StringComparison.Ordinal);
 
             var releaseDecision =
-                new RuntimeUnlockInitialActivationReceiveRecoveryHoldDecision(
+                BindInitialActivationHoldDecisionForTests(new RuntimeUnlockInitialActivationReceiveRecoveryHoldDecision(
                     heldReplay.Request,
                     RuntimeUnlockInitialActivationReceiveRecoveryHoldStatus
                         .Released,
                     "test_receive_recovery_completed_after_replay_deadline",
                     HoldGeneration: 1,
-                    heldReplay.Operation);
+                    heldReplay.Operation));
             Assert.True(
                 bridge
                     .ObserveRuntimeUnlockInitialActivationReceiveRecoveryHoldDecision(
@@ -20644,13 +20610,13 @@ public sealed partial class NknAccelerationTransportTests : CoreSmokeTestsBase, 
                             operationGeneration: 1);
                     reboundRequest.TrySetResult(args.Request);
                     args.Decision =
-                        new RuntimeUnlockInitialActivationReceiveRecoveryHoldDecision(
+                        BindInitialActivationHoldDecisionForTests(new RuntimeUnlockInitialActivationReceiveRecoveryHoldDecision(
                             args.Request,
                             RuntimeUnlockInitialActivationReceiveRecoveryHoldStatus
                                 .Released,
                             "test_receive_recovery_command_recaptured",
                             HoldGeneration: 1,
-                            operation);
+                            operation));
                 };
 
             var logStart = GetOperationalLogLength();
@@ -20878,13 +20844,13 @@ public sealed partial class NknAccelerationTransportTests : CoreSmokeTestsBase, 
                             .OfferPreSend)
                     {
                         args.Decision =
-                            new RuntimeUnlockInitialActivationReceiveRecoveryHoldDecision(
+                            BindInitialActivationHoldDecisionForTests(new RuntimeUnlockInitialActivationReceiveRecoveryHoldDecision(
                                 args.Request,
                                 RuntimeUnlockInitialActivationReceiveRecoveryHoldStatus
                                     .Released,
                                 "test_completed_proven_predecessor",
                                 HoldGeneration: 1,
-                                predecessor);
+                                predecessor));
                         return;
                     }
 
@@ -20894,13 +20860,13 @@ public sealed partial class NknAccelerationTransportTests : CoreSmokeTestsBase, 
                     {
                         initialOfferRequest = args.Request;
                         args.Decision =
-                            new RuntimeUnlockInitialActivationReceiveRecoveryHoldDecision(
+                            BindInitialActivationHoldDecisionForTests(new RuntimeUnlockInitialActivationReceiveRecoveryHoldDecision(
                                 args.Request,
                                 RuntimeUnlockInitialActivationReceiveRecoveryHoldStatus
                                     .Released,
                                 "test_completed_proven_predecessor",
                                 HoldGeneration: 1,
-                                predecessor);
+                                predecessor));
                         return;
                     }
 
@@ -20917,14 +20883,14 @@ public sealed partial class NknAccelerationTransportTests : CoreSmokeTestsBase, 
                             ClosureGeneration = 2,
                         };
                     var directSuccessorDecision =
-                        new RuntimeUnlockInitialActivationReceiveRecoveryHoldDecision(
+                        BindInitialActivationHoldDecisionForTests(new RuntimeUnlockInitialActivationReceiveRecoveryHoldDecision(
                             args.Request,
                             RuntimeUnlockInitialActivationReceiveRecoveryHoldStatus
                                 .Released,
                             "test_completed_proven_direct_successor",
                             HoldGeneration: 2,
                             successor,
-                            predecessor.Value.Authority);
+                            predecessor.Value.Authority));
                     args.Decision = directSuccessorDecision;
                     successorRelease.TrySetResult(directSuccessorDecision);
                 };
@@ -21902,13 +21868,13 @@ public sealed partial class NknAccelerationTransportTests : CoreSmokeTestsBase, 
                             args.Request,
                             operationGeneration: 1);
                     args.Decision =
-                        new RuntimeUnlockInitialActivationReceiveRecoveryHoldDecision(
+                        BindInitialActivationHoldDecisionForTests(new RuntimeUnlockInitialActivationReceiveRecoveryHoldDecision(
                             args.Request,
                             RuntimeUnlockInitialActivationReceiveRecoveryHoldStatus
                                 .Held,
                             "test_answer_timeout_recovery_current",
                             HoldGeneration: 1,
-                            operation);
+                            operation));
                     answerTimeoutHold.TrySetResult((args.Request, operation));
                 };
 
@@ -21967,7 +21933,7 @@ public sealed partial class NknAccelerationTransportTests : CoreSmokeTestsBase, 
             Assert.True(
                 bridge
                     .ObserveRuntimeUnlockInitialActivationReceiveRecoveryHoldDecision(
-                        new RuntimeUnlockInitialActivationReceiveRecoveryHoldDecision(
+                        BindInitialActivationHoldDecisionForTests(new RuntimeUnlockInitialActivationReceiveRecoveryHoldDecision(
                             held.Request,
                             RuntimeUnlockInitialActivationReceiveRecoveryHoldStatus
                                 .Released,
@@ -21976,7 +21942,7 @@ public sealed partial class NknAccelerationTransportTests : CoreSmokeTestsBase, 
                             held.Operation)
                         {
                             EnvelopeRefreshCommand = refreshCommand,
-                        }));
+                        })));
             await WaitUntilAsync(
                 () => preparedRefreshReceipt is not null,
                 TimeSpan.FromSeconds(2));
@@ -36385,6 +36351,21 @@ public sealed partial class NknAccelerationTransportTests : CoreSmokeTestsBase, 
             null,
             liveRouteEpoch);
     }
+
+    // These transport-unit fixtures model an already-issued coordinator decision.
+    // Provider-scoped requests must carry the explicit local-operation binding too.
+    private static RuntimeUnlockInitialActivationReceiveRecoveryHoldDecision
+        BindInitialActivationHoldDecisionForTests(
+            RuntimeUnlockInitialActivationReceiveRecoveryHoldDecision decision)
+        => decision.ReceiveRecoveryOperation is { } operation
+            ? decision with
+            {
+                DataSessionBinding = new RuntimeUnlockInitialActivationReceiveRecoveryDataSessionBinding(
+                    decision.Request, operation.Authority.AuthorityId, operation.Authority.OperationGeneration,
+                    operation.Authority.Observation.DataSessionIdentity,
+                    operation.Authority.Observation.DataSessionGeneration),
+            }
+            : decision;
 
     private static FileTransferReceiveRecoveryOperation
         CreateInitialActivationReceiveRecoveryHoldOperationForTests(

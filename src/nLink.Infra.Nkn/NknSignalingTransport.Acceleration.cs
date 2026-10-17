@@ -9480,7 +9480,10 @@ public sealed partial class NknSignalingTransport
                 Convert.ToHexString(
                         SHA256.HashData(
                             Encoding.UTF8.GetBytes(source.Trim())))
-                    .ToLowerInvariant());
+                    .ToLowerInvariant())
+                {
+                    DataSessionGenerationKind = RuntimeUnlockDataSessionGenerationKind.Provider,
+                };
         }
 
         var decision =
@@ -9769,7 +9772,10 @@ public sealed partial class NknSignalingTransport
                     checkpointRequestId,
                     dataSessionIdentity,
                     dataSessionGeneration,
-                    ExpectedExecutionCommand: null)) is
+                    ExpectedExecutionCommand: null)
+                {
+                    DataSessionGenerationKind = RuntimeUnlockDataSessionGenerationKind.Provider,
+                }) is
             { } overriddenCommand)
         {
             if (!RuntimeUnlockInitialActivationExecutionCommandMatchesSource(
@@ -9821,7 +9827,10 @@ public sealed partial class NknSignalingTransport
                 checkpointRequestId,
                 dataSessionIdentity,
                 dataSessionGeneration,
-                expectedExecutionCommand);
+                expectedExecutionCommand)
+            {
+                DataSessionGenerationKind = RuntimeUnlockDataSessionGenerationKind.Provider,
+            };
         rejectionReason = expectedScope.IsDefault
             ? "runtime_unlock_initial_activation_expected_scope_invalid"
             : "accepted";
@@ -9882,7 +9891,8 @@ public sealed partial class NknSignalingTransport
                left.DataSessionIdentity,
                right.DataSessionIdentity,
                StringComparison.Ordinal) &&
-           left.DataSessionGeneration == right.DataSessionGeneration;
+           left.DataSessionGeneration == right.DataSessionGeneration &&
+           left.DataSessionGenerationKind == right.DataSessionGenerationKind;
 
     private (string? TransferId, FileTransferDirection? Direction) ResolveExpectedRuntimeUnlockFileTransferOwner(
         string sessionId)
@@ -18552,8 +18562,9 @@ public sealed partial class NknSignalingTransport
             application.Receipt;
     }
 
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
     private bool ApplyRuntimeUnlockInitialActivationReceiveRecoveryHoldDecision(
-        RuntimeUnlockInitialActivationReceiveRecoveryHoldDecision decision,
+        in RuntimeUnlockInitialActivationReceiveRecoveryHoldDecision decision,
         string source,
         RuntimeUnlockInitialActivationReceiveRecoveryFallbackCheckpointBinding?
             fallbackCheckpointBinding = null)
@@ -18772,6 +18783,26 @@ public sealed partial class NknSignalingTransport
             return false;
         }
 
+        return CompleteRuntimeUnlockInitialActivationReceiveRecoveryHoldApplication(
+            decision, source, successorApplication, completion, previousDecision,
+            pendingInvalidationReason, pendingInvalidationKind, followedHold,
+            exactOfferInvalidated);
+    }
+
+    // Keep callback/logging frames out of the synchronous validation/application
+    // frame. The value parameter is the immutable snapshot used by deferred work.
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private bool CompleteRuntimeUnlockInitialActivationReceiveRecoveryHoldApplication(
+        RuntimeUnlockInitialActivationReceiveRecoveryHoldDecision decision,
+        string source,
+        RuntimeUnlockInitialActivationEnvelopeSuccessorApplication? successorApplication,
+        TaskCompletionSource<RuntimeUnlockInitialActivationReceiveRecoveryHoldAwaitResult>? completion,
+        in RuntimeUnlockInitialActivationReceiveRecoveryHoldDecision? previousDecision,
+        string? pendingInvalidationReason,
+        RuntimeUnlockInitialActivationReceiveRecoveryHoldInvalidationKind pendingInvalidationKind,
+        bool followedHold,
+        bool exactOfferInvalidated)
+    {
         if (successorApplication is { } committedApplication)
         {
             LogRuntimeUnlockInitialActivationEnvelopeSuccessorCommitted(
@@ -18931,20 +18962,31 @@ public sealed partial class NknSignalingTransport
         return true;
     }
 
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
     private bool
         RuntimeUnlockInitialActivationReceiveRecoveryHoldDecisionMatchesRetainedShadowUnsafe(
             RuntimeUnlockInitialActivationReceiveRecoveryHoldShadow current,
-            RuntimeUnlockInitialActivationReceiveRecoveryHoldDecision decision)
+            in RuntimeUnlockInitialActivationReceiveRecoveryHoldDecision decision)
     {
         if (current.Request != decision.Request ||
-            current.Decision is { } retained &&
-            retained.HoldGeneration > 0 &&
+            current.Decision?.HoldGeneration > 0 &&
             decision.HoldGeneration > 0 &&
-            retained.HoldGeneration != decision.HoldGeneration)
+            current.Decision.Value.HoldGeneration != decision.HoldGeneration)
         {
             return false;
         }
 
+        return !RuntimeUnlockInitialActivationHoldRepeatsTerminalUnsafe(in decision) &&
+               RuntimeUnlockInitialActivationHoldMatchesCapturedCommand(current, in decision) &&
+               RuntimeUnlockInitialActivationHoldMatchesRetainedAuthority(current, in decision);
+    }
+
+    // Large value DTOs must not accumulate in a single synchronous stack frame.
+    // Each phase retains the original exact request/command/predecessor checks.
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private bool RuntimeUnlockInitialActivationHoldRepeatsTerminalUnsafe(
+        in RuntimeUnlockInitialActivationReceiveRecoveryHoldDecision decision)
+    {
         if (decision.Status ==
                 RuntimeUnlockInitialActivationReceiveRecoveryHoldStatus.Held &&
             lastRuntimeUnlockInitialActivationReceiveRecoveryHoldDecision is
@@ -18960,9 +19002,17 @@ public sealed partial class NknSignalingTransport
             decision.ReceiveRecoveryOperation?.Authority ==
                 terminalOperation.Authority)
         {
-            return false;
+            return true;
         }
 
+        return false;
+    }
+
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private static bool RuntimeUnlockInitialActivationHoldMatchesCapturedCommand(
+        RuntimeUnlockInitialActivationReceiveRecoveryHoldShadow current,
+        in RuntimeUnlockInitialActivationReceiveRecoveryHoldDecision decision)
+    {
         if (current.Decision is null &&
             decision.Status is
                 RuntimeUnlockInitialActivationReceiveRecoveryHoldStatus.Held or
@@ -18983,6 +19033,14 @@ public sealed partial class NknSignalingTransport
             return false;
         }
 
+        return true;
+    }
+
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private static bool RuntimeUnlockInitialActivationHoldMatchesRetainedAuthority(
+        RuntimeUnlockInitialActivationReceiveRecoveryHoldShadow current,
+        in RuntimeUnlockInitialActivationReceiveRecoveryHoldDecision decision)
+    {
         return current.Decision is not
                    {
                        Status:
@@ -19444,7 +19502,7 @@ public sealed partial class NknSignalingTransport
 
     private bool
         RuntimeUnlockInitialActivationReceiveRecoveryHoldDecisionMatchesRequest(
-            RuntimeUnlockInitialActivationReceiveRecoveryHoldDecision decision,
+            in RuntimeUnlockInitialActivationReceiveRecoveryHoldDecision decision,
             RuntimeUnlockInitialActivationReceiveRecoveryFallbackCheckpointBinding?
                 fallbackCheckpointBinding = null)
     {
@@ -19522,12 +19580,8 @@ public sealed partial class NknSignalingTransport
                    observation.CheckpointRequestId,
                    expected.CheckpointRequestId,
                    StringComparison.Ordinal) &&
-               string.Equals(
-                   observation.DataSessionIdentity,
-                   expected.DataSessionIdentity,
-                   StringComparison.Ordinal) &&
-               observation.DataSessionGeneration ==
-                   expected.DataSessionGeneration;
+               RuntimeUnlockInitialActivationHoldDataSessionMatches(
+                   in decision, in authority, in expected);
         if (!operationMatches ||
             fallbackCheckpointBinding is not { } checkpointBinding)
         {
@@ -19557,6 +19611,26 @@ public sealed partial class NknSignalingTransport
                    StringComparison.Ordinal) &&
                currentExpectedScope.DataSessionGeneration ==
                    expected.DataSessionGeneration;
+    }
+
+    private static bool RuntimeUnlockInitialActivationHoldDataSessionMatches(
+        in RuntimeUnlockInitialActivationReceiveRecoveryHoldDecision decision,
+        in FileTransferReceiveRecoveryOperationAuthority authority,
+        in RuntimeUnlockInitialActivationReceiveRecoveryExpectedScope expected)
+    {
+        if (expected.DataSessionGenerationKind == RuntimeUnlockDataSessionGenerationKind.TransferLocal)
+            return authority.Observation.DataSessionIdentity == expected.DataSessionIdentity &&
+                   authority.Observation.DataSessionGeneration == expected.DataSessionGeneration;
+
+        // This receipt binds namespaces; it does not grant route/runtime authority.
+        // All publication, command, predecessor and retained-shadow checks still apply.
+        return expected.DataSessionGenerationKind == RuntimeUnlockDataSessionGenerationKind.Provider &&
+               decision.DataSessionBinding is { } binding &&
+               binding.Request == decision.Request &&
+               binding.ReceiveRecoveryAuthorityId == authority.AuthorityId &&
+               binding.ReceiveRecoveryOperationGeneration == authority.OperationGeneration &&
+               binding.TransferLocalIdentity == authority.Observation.DataSessionIdentity &&
+               binding.TransferLocalGeneration == authority.Observation.DataSessionGeneration;
     }
 
     private static RuntimeUnlockInitialActivationReceiveRecoveryHoldAwaitResult
