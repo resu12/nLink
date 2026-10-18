@@ -9,6 +9,20 @@ namespace NLink.Tools
     {
         public sealed partial class FrontierWorkerInputs
         {
+            public System.Collections.Generic.Dictionary<string, object> ContentReadFailureForTest()
+            {
+                // Captured fields and the original clock only: no currentness checks.
+                return new System.Collections.Generic.Dictionary<string, object> {
+                    { "FirstRejectedPredicate", PrimarySourceRejectionForTest },
+                    { "RejectionSnapshot", PrimarySourceSnapshotForTest },
+                    { "CloseReason", PrimarySourceCloseForTest },
+                    { "CloseSnapshot", PrimarySourceCloseSnapshotForTest },
+                    { "NativeException", PrimarySourceExceptionForTest },
+                    { "WorkMilliseconds", work.ElapsedMilliseconds }, { "WorkRunning", work.IsRunning },
+                    { "ReadCalls", PrimaryReadCallsForTest }, { "SourceEnded", sourceEnded },
+                    { "ProducerMilliseconds", LocalPublicationInputLimits.ProducerMilliseconds }
+                };
+            }
             internal string ContentReadSnapshotForTest()
             {
                 // Passive fields only. Never evaluate currentness or authority.
