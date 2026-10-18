@@ -103,7 +103,7 @@ if($env:NLINK_PUBLICATION_PEER_LINEAGE_PROTOTYPE -ceq '1') {
 if($env:NLINK_PUBLICATION_SERVICE_YIELD_CONSUMER -ceq '1') {
     $probePath=(Join-Path $PSScriptRoot 'PublicationServiceYieldProbe.ps1').Replace("'","''")
     $matcherPath=(Join-Path $PSScriptRoot 'PublicationServiceYieldMatcher.ps1').Replace("'","''")
-    $probe="& ([scriptblock]::Create([IO.File]::ReadAllText('$probePath'))) -Matcher ([scriptblock]::Create([IO.File]::ReadAllText('$matcherPath'))) -Context `$private:localPrimaryInputs -Custody `$private:localPrimaryCustody -Evaluations `$private:localCompletedEvaluations -Index `$Index -Failure `$firstCompactProofChainFailure -RouteState `$routeConsistencyState -ArtifactDir `$ArtifactDir"
+    $probe="& ([scriptblock]::Create([IO.File]::ReadAllText('$probePath'))) -Matcher ([scriptblock]::Create([IO.File]::ReadAllText('$matcherPath'))) -Context `$private:localPrimaryInputs -Custody `$private:localPrimaryCustody -Evaluations `$private:localCompletedEvaluations -Index `$Index -Failure `$firstCompactProofChainFailure -OriginalMismatchProof `$fileTunaV4DataPathMismatchProof -RouteState `$routeConsistencyState -ArtifactDir `$ArtifactDir"
     if($env:NLINK_PUBLICATION_RECIPROCAL_YIELD_CONSUMER -ceq '1') { $probe+=' -Reciprocal' }
     if($env:NLINK_PUBLICATION_REJECTION_CHAIN_CONSUMER -ceq '1') {
         $rejectionPath=(Join-Path $PSScriptRoot 'PublicationRejectionChainMatcher.ps1').Replace("'","''")
@@ -124,7 +124,7 @@ if($env:NLINK_PUBLICATION_SERVICE_YIELD_CONSUMER -ceq '1') {
     }
     if($env:NLINK_PUBLICATION_ALTERNATIVE_ACCEPTANCE_SHADOW -ceq '1') {
         $shadowPath=(Join-Path $PSScriptRoot 'PublicationAlternativeAcceptanceShadow.ps1').Replace("'","''")
-        $probe+=" -AlternativeShadow ([scriptblock]::Create([IO.File]::ReadAllText('$shadowPath'))) -OriginalMismatchProof `$fileTunaV4DataPathMismatchProof"
+        $probe+=" -AlternativeShadow ([scriptblock]::Create([IO.File]::ReadAllText('$shadowPath')))"
         if($env:NLINK_PUBLICATION_TUNA_PAIR_SHADOW -ceq '1') {
             $pairPath=(Join-Path $PSScriptRoot 'PublicationTunaPairMatcher.ps1').Replace("'","''")
             $probe+=" -TunaPairs ([scriptblock]::Create([IO.File]::ReadAllText('$pairPath')))"

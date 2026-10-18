@@ -5,12 +5,52 @@ param($Context,$Custody,$Evaluations,$Index,$Failure,$RouteState,[string]$Artifa
 $ErrorActionPreference='Stop'; Set-StrictMode -Version Latest
 . $Matcher
 function Get-FileTransferCoordinatorSnapshotEvaluation { throw 'Service yield consumer cannot evaluate authority' }
-function YCheckCustody($C,$F,$K,$Origins) {
+function YCheckPrimaryCustody($C,$F,$K,$Origins) {
     YRequire ($null -ne $C -and -not $C.Disposed -and $null -ne $Custody -and
         $Custody.Owns($Evaluations,$C,$F,$K,$C.FullView,$C.CompactView) -and
-        $null -ne $C.WriterReader -and $C.WriterReader.IsVerified -and $C.NativeOwner.Owns($C.NativeInputs)) 'primary_custody'
+        $C.NativeOwner.Owns($C.NativeInputs)) 'primary_custody'
     YRequire ($C.SourceOwner.ValidateInputReferences($C.SourceReader,$F,$C.FullOriginal,$K,$C.CompactOriginal,$C.Work) -and
         $C.SourceOwner.ValidateFullInputOrigins($C.SourceReader,$C.NativeOwner,$C.NativeInputs,$Index.AllEvents,$F,$C.FullOriginal,$Origins,$C.Work)) 'primary_origins'
+}
+function YCheckCustody($C,$F,$K,$Origins) {
+    YCheckPrimaryCustody $C $F $K $Origins
+    YRequire ($null -ne $yieldWriter -and [object]::ReferenceEquals($yieldWriter,$verifiedYieldWriter) -and
+        $yieldWriter.IsVerified) 'writer_membership'
+}
+function YSelectReceivePosition($Proof,$C,$I) {
+    YRequire ($null -ne $Proof -and @($Proof.CandidateRecords).Count -le 4096) 'diagnostic_candidate'
+    $candidate=YOne @($Proof.CandidateRecords | Where-Object { $_.Event.EventName -ceq 'filetransfer_data_path_receive_result' }) 'diagnostic_candidate'
+    $d=$candidate.RejectionDiagnostic
+    YRequire ($candidate.Recovered -is [bool] -and -not $candidate.Recovered -and $null -ne $d -and
+        $d.Recovered -is [bool] -and -not $d.Recovered -and $d.RejectionChainMatched -is [bool] -and $d.RejectionChainMatched -and
+        $d.Reason -cin @('missing_exact_tuna_receive','missing_tuna_resend')) 'diagnostic_rejection'
+    $event=$candidate.Event
+    YRequire ($event.LineNumber -is [int] -and $event.LineNumber -gt 0 -and $event.LineNumber -le $C.SourceOwner.SourceLines -and
+        $event.Sequence -eq $event.LineNumber -and $event.FilePath -ceq $C.SourceOwner.SourcePath -and
+        $I.AllEvents.Count -eq $C.FullLines.Length) 'diagnostic_origin'
+    $position=[Array]::BinarySearch($C.FullOrigins,$event.LineNumber)
+    YRequire ($position -ge 0 -and [object]::ReferenceEquals($event,$I.AllEvents[$position]) -and
+        [object]::ReferenceEquals($event.RawLine,$C.FullLines[$position]) -and
+        [object]::ReferenceEquals($event.RawLine,$C.FullOriginal[$position])) 'diagnostic_origin'
+    $position
+}
+function YOpenDiagnosticWriter($C,[int]$Position) {
+    $writer=$null; $retained=$false
+    try {
+        $descriptor=$C.SourceOwner.WriterContext.Outputs[1]
+        YRequire ($C.RecordVisitCeiling+$C.FullLines.Length+$C.CompactLines.Length+2L*$descriptor.LineCount -le
+            [NLink.Tools.LocalPublicationInputLimits]::ProducerRecords) 'writer_record_limit'
+        $fields=ConvertFrom-GuiSmokeLogLedgerStructuredFields $C.FullLines[$Position]
+        YRequire (-not $fields.ContainsKey('__nlink_duplicate_structured_field')) 'transport_fields'
+        $writer=$C.SourceOwner.TryOpenWriter()
+        YRequire ($null -ne $writer) 'writer_unavailable'
+        $membership=$writer.TryVerifyMembership($C.FullLines,$C.FullOriginal,[string]$fields.log_writer_id,
+            [long]$fields.log_writer_sequence,$C.NativeOwner.CodeUnitVisits,$C.Work)
+        YRequire ($null -ne $membership -and $writer.IsVerified) 'writer_membership'
+        YRequire ($C.RecordVisitCeiling+$membership.RecordVisits -le [NLink.Tools.LocalPublicationInputLimits]::ProducerRecords) 'writer_record_limit'
+        $retained=$true
+        $writer
+    } finally { if(-not $retained -and $null -ne $writer) { $writer.Dispose() } }
 }
 function YBounds($FullCount,$FullBoundaries,$CompactBoundaries,$WitnessCount) {
     YRequire ($FullCount -le 4096 -and $FullBoundaries -le 256 -and $CompactBoundaries -le 256) 'fixture_limit'
@@ -24,29 +64,40 @@ function DCheckCapture($C,$Pin) {
     YCheckCustody $C $C.FullLines $C.CompactLines $C.FullOrigins
     YRequire ([object]::ReferenceEquals($C.SourceOwner,$Pin.Owner) -and
         [object]::ReferenceEquals($C.SourceReader,$Pin.SourceReader) -and
-        [object]::ReferenceEquals($C.WriterReader,$Pin.WriterReader) -and
+        [object]::ReferenceEquals($yieldWriter,$Pin.WriterReader) -and
         [object]::ReferenceEquals($C.SourceOwner.WriterContext,$Pin.WriterContext) -and
         [object]::ReferenceEquals($Pin.WriterContext.Outputs,$Pin.Outputs) -and
         [object]::ReferenceEquals($Pin.WriterContext.Writers,$Pin.Writers) -and
         [object]::ReferenceEquals($Pin.Outputs[3],$Pin.SourceOutput) -and
         [object]::ReferenceEquals($Pin.Outputs[1],$Pin.WriterOutput) -and
-        $C.SourceOwner.OwnsCompletedSource($C.SourceReader) -and $C.WriterReader.IsVerified -and
+        $C.SourceOwner.OwnsCompletedSource($C.SourceReader) -and $yieldWriter.IsVerified -and
         $C.FullLines.Length -eq $C.SourceOwner.SourceLines) 'dispatch_capture_custody'
     DSourceCoverage $C.FullOrigins $C.SourceOwner $C.SourceReader $Pin.SourceOutput
 }
 $output=[ordered]@{Status='unproven';FirstMissingEdge='primary_custody';ClassifierEnabled=$false;AcceptanceChanged=$false;Live=$false}
 $shadowOutput=[ordered]@{Schema='nlink.alternative-acceptance-shadow/v1';FirstMissingEdge='primary_custody';
     Decision=@{Verdict='unproven'};ClassifierEnabled=$false;AcceptanceChanged=$false;Live=$false}
-$started=$false
+$started=$false; $yieldWriter=$null; $verifiedYieldWriter=$null; $ownsYieldWriter=$false
 try {
     YRequire ($null -ne $Context) 'primary_custody'
     $Context.Work.Start(); $started=$true
-    YCheckCustody $Context $Context.FullLines $Context.CompactLines $Context.FullOrigins
+    YCheckPrimaryCustody $Context $Context.FullLines $Context.CompactLines $Context.FullOrigins
     YBounds $Context.FullLines.Length $Context.FullView.Boundaries.Count $Context.CompactView.Boundaries.Count 0
     YRequire ($RouteState.FullResult.Verdict -ceq 'pass' -and $RouteState.CompactResult.Verdict -ceq 'pass' -and $RouteState.Parity.Verdict -ceq 'pass') 'route_consistency'
     $before=ConvertTo-Json @($Context.FullView,$Context.CompactView) -Depth 64 -Compress
-    $position=[Array]::BinarySearch($Context.FullOrigins,[int]$Failure.Event.LineNumber)
-    YRequire ($position -ge 0 -and [object]::ReferenceEquals($Failure.Event,$Index.AllEvents[$position])) 'failure_origin'
+    # The selected primary failure may be an unproven activation, not this
+    # diagnostic rejection. Never replace it or manufacture its witness.
+    $primaryBefore=ConvertTo-Json $Failure -Depth 32 -Compress
+    $primaryEvent=$Failure.Event; $primaryWriter=$Context.WriterReader
+    $position=YSelectReceivePosition $OriginalMismatchProof $Context $Index
+    $yieldWriter=$primaryWriter
+    if($null -eq $yieldWriter) {
+        $yieldWriter=YOpenDiagnosticWriter $Context $position; $ownsYieldWriter=$true
+    }
+    $verifiedYieldWriter=$yieldWriter
+    YCheckCustody $Context $Context.FullLines $Context.CompactLines $Context.FullOrigins
+    $output.PrimaryFailureClass=$Failure.Class; $output.PrimaryFailureSourceLine=$Failure.Event.LineNumber
+    $output.DiagnosticSourceLine=$Context.FullOrigins[$position]; $output.WriterMembershipVerified=$yieldWriter.IsVerified
     $records=[Collections.Generic.List[object]]::new(); $transport=[Collections.Generic.List[object]]::new()
     $rejectionRows=[Collections.Generic.List[object]]::new(); $rejectionNatives=@{}
     for($i=0;$i -lt $Context.FullLines.Length;$i++) {
@@ -131,12 +182,19 @@ try {
     YExpectedOmission { YBounds 1 257 1 0 } 'fixture_limit'
     YExpectedOmission { YBounds 1 1 257 0 } 'fixture_limit'
     YExpectedOmission { YBounds 1 1 1 65 } 'witness_limit'
+    YExpectedOmission { $yieldWriter=$null; YCheckCustody $Context $Context.FullLines $Context.CompactLines $Context.FullOrigins } 'writer_membership'
+    YExpectedOmission { $yieldWriter=[pscustomobject]@{IsVerified=$true}; YCheckCustody $Context $Context.FullLines $Context.CompactLines $Context.FullOrigins } 'writer_membership'
     YCheckCustody $Context $Context.FullLines $Context.CompactLines $Context.FullOrigins
+    YRequire ([object]::ReferenceEquals($primaryEvent,$Failure.Event) -and
+        [object]::ReferenceEquals($primaryWriter,$Context.WriterReader) -and
+        $primaryBefore -ceq (ConvertTo-Json $Failure -Depth 32 -Compress)) 'primary_failure_changed'
+    $output.PrimaryFailureUnchanged=$true
     YRequire ($before -ceq (ConvertTo-Json @($Context.FullView,$Context.CompactView) -Depth 64 -Compress)) 'views_changed'
     YCheckCustody $Context $Context.FullLines $Context.CompactLines $Context.FullOrigins
     $output.Status='matched_original_yield_receipts'; $output.FirstMissingEdge='(none)'
     $output.Candidate=$normalized.full; $output.FullCompactParity='pass'; $output.InputsUnchanged=$true
     $output.DiagnosticRecords=$records.Count; $output.WitnessOrigins=@($witnesses | Sort-Object); $output.OmissionControls=8
+    $output.WriterOmissionControls=2
     if($Reciprocal) { $output.ReciprocalStatus='matched_original_reciprocal_receipts'; $output.ReciprocalCandidate=$reverseNormalized.full }
     if($RejectionChain) {
         # An optional chain failure must not erase the already matched yield result.
@@ -176,10 +234,10 @@ try {
             . $DispatchMatcher
             $owner=$Context.SourceOwner; $writerContext=$owner.WriterContext
             YRequire ($writerContext.Outputs.Count -eq 4) 'dispatch_capture_outputs'
-            $pin=@{Owner=$owner;SourceReader=$Context.SourceReader;WriterReader=$Context.WriterReader;WriterContext=$writerContext;
+            $pin=@{Owner=$owner;SourceReader=$Context.SourceReader;WriterReader=$yieldWriter;WriterContext=$writerContext;
                 Outputs=$writerContext.Outputs;Writers=$writerContext.Writers;SourceOutput=$writerContext.Outputs[3];WriterOutput=$writerContext.Outputs[1]}
             DCheckCapture $Context $pin
-            $endpoint=DCaptureEnd $pin.Writers $normalized.full.Current.writer $pin.WriterOutput $Context.WriterReader.LinesRead
+            $endpoint=DCaptureEnd $pin.Writers $normalized.full.Current.writer $pin.WriterOutput $yieldWriter.LinesRead
             $output.DispatchWindow=DInterval $normalized.full.Current $chains.full $endpoint
             $dispatchWitnesses=[Collections.Generic.HashSet[int]]::new($chainWitnesses); $windows=@{}
             foreach($prefix in @('full','compact')) {
@@ -202,12 +260,12 @@ try {
                 $output.DispatchStructuralControls=& $DispatchControls -Rows $rejectionRows.ToArray() -Receive $receive -Current $normalized.full.Current `
                     -Chain $chains.full -Endpoint $endpoint -Natives $rejectionNatives -Origins $Context.FullOrigins `
                     -Source $owner -Reader $Context.SourceReader -SourceOutput $pin.SourceOutput -Writers $pin.Writers `
-                    -WriterOutput $pin.WriterOutput -WriterLinesRead $Context.WriterReader.LinesRead
+                    -WriterOutput $pin.WriterOutput -WriterLinesRead $yieldWriter.LinesRead
             }
             $badPin=$pin.Clone(); $badPin.WriterContext=$null
             YExpectedOmission { DCheckCapture $Context $badPin } 'dispatch_capture_custody'
             DCheckCapture $Context $pin
-            YRequire ([object]::ReferenceEquals($endpoint,(DCaptureEnd $pin.Writers $normalized.full.Current.writer $pin.WriterOutput $Context.WriterReader.LinesRead))) 'dispatch_endpoint_changed'
+            YRequire ([object]::ReferenceEquals($endpoint,(DCaptureEnd $pin.Writers $normalized.full.Current.writer $pin.WriterOutput $yieldWriter.LinesRead))) 'dispatch_endpoint_changed'
             YRequire ($Context.Work.ElapsedMilliseconds -le [NLink.Tools.LocalPublicationInputLimits]::ProducerMilliseconds) 'dispatch_work_limit'
             YRequire ($before -ceq (ConvertTo-Json @($Context.FullView,$Context.CompactView) -Depth 64 -Compress)) 'dispatch_views_changed'
             DCheckCapture $Context $pin
@@ -228,7 +286,7 @@ try {
             . $SecurityMatcher
             DCheckCapture $Context $pin
             $endpoints=@(foreach($writer in @($normalized.full.Old.writer,$normalized.full.Current.writer)) {
-                DCaptureEnd $pin.Writers $writer $pin.WriterOutput $Context.WriterReader.LinesRead
+                DCaptureEnd $pin.Writers $writer $pin.WriterOutput $yieldWriter.LinesRead
             })
             $spanWitnesses=[Collections.Generic.HashSet[int]]::new($dispatchWitnesses); $spans=@{}; $selections=@{}
             foreach($prefix in @('full','compact')) {
@@ -249,7 +307,7 @@ try {
             YExpectedOmission { DCheckCapture $Context $badPin } 'dispatch_capture_custody'
             DCheckCapture $Context $pin
             foreach($end in $endpoints) {
-                YRequire ([object]::ReferenceEquals($end,(DCaptureEnd $pin.Writers $end.WriterId $pin.WriterOutput $Context.WriterReader.LinesRead))) 'security_span_endpoint_changed'
+                YRequire ([object]::ReferenceEquals($end,(DCaptureEnd $pin.Writers $end.WriterId $pin.WriterOutput $yieldWriter.LinesRead))) 'security_span_endpoint_changed'
             }
             YRequire ($Context.Work.ElapsedMilliseconds -le [NLink.Tools.LocalPublicationInputLimits]::ProducerMilliseconds) 'security_span_work_limit'
             YRequire ($before -ceq (ConvertTo-Json @($Context.FullView,$Context.CompactView) -Depth 64 -Compress)) 'security_span_views_changed'
@@ -303,7 +361,10 @@ try {
         } catch { $shadowOutput.FirstMissingEdge=$_.Exception.Message }
     }
 } catch { $output.FirstMissingEdge=$_.Exception.Message; $output.FailureLocation=$_.ScriptStackTrace }
-finally { if($started) { $Context.Work.Stop() } }
+finally {
+    if($ownsYieldWriter -and $null -ne $yieldWriter) { $yieldWriter.Dispose() }
+    if($started) { $Context.Work.Stop() }
+}
 [IO.File]::WriteAllText((Join-Path $ArtifactDir 'service-yield-consumer.json'),($output | ConvertTo-Json -Depth 32 -Compress))
 if($null -ne $AlternativeShadow) {
     [IO.File]::WriteAllText((Join-Path $ArtifactDir 'alternative-acceptance-shadow.json'),($shadowOutput | ConvertTo-Json -Depth 16 -Compress))

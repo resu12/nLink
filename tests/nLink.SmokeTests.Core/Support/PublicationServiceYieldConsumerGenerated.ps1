@@ -8,6 +8,8 @@ if(Test-Path -LiteralPath $errorPath) { throw ([IO.File]::ReadAllText($errorPath
 $result=Get-Content -Raw (Join-Path $output 'service-yield-consumer.json') | ConvertFrom-Json
 if($null -ne $result.PSObject.Properties['RejectionChainStatus']) { throw 'Rejection chain consumer was not default-off' }
 if($result.Status -cne 'matched_original_yield_receipts') { throw ($result | ConvertTo-Json -Depth 8 -Compress) }
+if(-not $result.PrimaryFailureUnchanged -or -not $result.WriterMembershipVerified -or $result.WriterOmissionControls -ne 2 -or
+    $result.PrimaryFailureSourceLine -eq $result.DiagnosticSourceLine) { throw 'Diagnostic writer or candidate scope changed' }
 if($result.ClassifierEnabled -or $result.AcceptanceChanged -or $result.Live -or -not $result.InputsUnchanged -or
     $result.FullCompactParity -cne 'pass' -or $result.DiagnosticRecords -ne 14 -or $result.WitnessOrigins.Count -gt 64 -or $result.OmissionControls -ne 8) { throw 'Service yield consumer contract changed' }
 $controls=& (Join-Path $PSScriptRoot 'PublicationServiceYieldMatcherControls.ps1') -OutputDirectory $output -Candidate $result.Candidate

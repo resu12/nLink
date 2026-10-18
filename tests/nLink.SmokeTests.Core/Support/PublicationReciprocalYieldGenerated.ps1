@@ -9,6 +9,15 @@ $errorPath=Join-Path $output 'service-yield-consumer-error.txt'
 if(Test-Path -LiteralPath $errorPath) { throw ([IO.File]::ReadAllText($errorPath)) }
 $result=Get-Content -Raw (Join-Path $output 'service-yield-consumer.json') | ConvertFrom-Json
 if($result.Status -cne 'matched_original_yield_receipts') { throw ($result | ConvertTo-Json -Depth 8 -Compress) }
+$facts=Get-Content -Raw (Join-Path $output 'live-primary-observation.json') | ConvertFrom-Json
+$summary=Get-Content -Raw (Join-Path $output 'filetransfer-retained-compact-summary.json') | ConvertFrom-Json
+if(-not $result.PrimaryFailureUnchanged -or -not $result.WriterMembershipVerified -or $result.WriterOmissionControls -ne 2 -or
+    $result.PrimaryFailureClass -cne $summary.first_proof_chain_failure_class -or
+    $result.PrimaryFailureSourceLine -ne $summary.first_proof_chain_failure_line_number -or
+    $result.DiagnosticSourceLine -ne $facts.IngressCandidates[0].SourceLine -or
+    $result.PrimaryFailureSourceLine -eq $result.DiagnosticSourceLine -or $facts.Witness -or $facts.Completion) {
+    throw 'Diagnostic selection borrowed or replaced the primary failure witness'
+}
 $single=$env:NLINK_PUBLICATION_YIELD_CASE -cin @('control_only','bulk_only')
 $slot=if($env:NLINK_PUBLICATION_YIELD_CASE -cin @('bulk_only','receiver_local_first')) {'bulk'} else {'control'}
 if($result.ReciprocalStatus -cne 'matched_original_reciprocal_receipts' -or $result.ClassifierEnabled -or $result.AcceptanceChanged -or
