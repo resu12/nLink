@@ -5,7 +5,7 @@ namespace NLink.SmokeTests;
 public sealed class NativeContentSourceReadFailureTests : FileTransferOpsScriptsTestBase
 {
     [Fact]
-    public async Task FailureSelectionIsExactAndDoesNotEnableParserSampling()
+    public async Task FailureSelectionIsExactAndNormalLoaderOmitsDiagnostics()
     {
         if (!OperatingSystem.IsWindows()) return;
         const string script = """
@@ -26,12 +26,6 @@ public sealed class NativeContentSourceReadFailureTests : FileTransferOpsScripts
                     if((& $selection) -ne ($workerHost -ceq 'pwsh' -and $Case -ceq 'content-native-scale')) {throw 'Selection widened'}
                 }
             }
-            $source=[IO.File]::ReadAllText($path)
-            foreach($required in @('-ReadProfile:($readProfile -or $sourceReadFailure)',
-                'if($readProfile) {. (Join-Path $RepoRoot ''tests/nLink.SmokeTests.Core/Support/NativeContentReadProfile.ps1'')}',
-                'if($readProfile) {[NLink.Tests.NativeContentReadProfileForTest]::Begin($owned)}')) {
-                if(-not $source.Contains($required)) {throw 'Failure diagnostics changed parser sampling'}
-            }
             if([Diagnostics.Process]::GetCurrentProcess().ProcessName -cne 'pwsh') {throw 'Unexpected fixture host identity'}
             . (Join-Path $RepoRoot 'tests/nLink.SmokeTests.Core/Support/NativeContentAcquisitionLoader.ps1') $RepoRoot
             if($null -ne [NLink.Tools.LocalRetainedSourceRequest+FrontierWorkerInputs].GetMethod('ContentReadFailureForTest')) {
@@ -42,6 +36,83 @@ public sealed class NativeContentSourceReadFailureTests : FileTransferOpsScripts
         var result = await RunPowerShellScriptTextAsync(script, [FindRepoRoot()], "pwsh");
         Assert.True(result.ExitCode == 0, result.Stdout + result.Stderr);
         Assert.Contains("source-read-failure-selection=exact", result.Stdout);
+    }
+
+    [Theory]
+    [InlineData("pwsh", "content-native-scale", false, true)]
+    [InlineData("powershell", "content-native-scale", false, false)]
+    [InlineData("pwsh", "content-native-scale-profile", false, false)]
+    [InlineData("pwsh", "content-native-valid", false, false)]
+    [InlineData("pwsh", "content-native-read-profile-valid", true, false)]
+    [InlineData("powershell", "content-native-read-profile-valid", true, false)]
+    public async Task WorkerLoaderPreservesParserSamplingIntent(string host, string scenario, bool parserProfile, bool failureDiagnostic)
+    {
+        if (!OperatingSystem.IsWindows()) return;
+        const string script = """
+            param([string]$RepoRoot,[string]$Case,[int]$ExpectedParser,[int]$ExpectedFailure)
+            $ErrorActionPreference='Stop';Set-StrictMode -Version Latest
+            $path=Join-Path $RepoRoot 'tests/nLink.SmokeTests.Core/Support/NativeContentAcquisitionWorker.ps1'
+            $tokens=$null;$errors=$null
+            $ast=[Management.Automation.Language.Parser]::ParseFile($path,[ref]$tokens,[ref]$errors)
+            $bodies=@($ast.EndBlock.Statements | Where-Object {$_ -is [Management.Automation.Language.TryStatementAst]})
+            if($errors.Count -or $bodies.Count -ne 1) {throw 'Worker body differs'}
+            # Execute the actual initialization, dot-sourced loader and parser gate together,
+            # stopping before worker attachment, IPC, source acquisition or scale work.
+            $prelude=@($ast.EndBlock.Statements | Where-Object {$_.Extent.EndOffset -le $bodies[0].Extent.StartOffset})
+            . (Join-Path $RepoRoot 'tools/FileTransferSoak/LogParsing.ps1')
+            $originalParser=(Get-Item Function:Read-FileTransferLogEvents).ScriptBlock.ToString()
+            . ([scriptblock]::Create(($prelude.Extent.Text -join [Environment]::NewLine)))
+            if($sourceReadFailure -ne [bool]$ExpectedFailure) {throw 'Failure selection changed after loader'}
+            $actualParser=(Get-Item Function:Read-FileTransferLogEvents).ScriptBlock.ToString()
+            if(($actualParser -cne $originalParser) -ne [bool]$ExpectedParser) {throw 'Loader changed parser sampling intent'}
+            $type=[NLink.Tools.LocalRetainedSourceRequest+FrontierWorkerInputs]
+            $hasSnapshot=$null -ne $type.GetMethod('ContentReadFailureForTest')
+            if($hasSnapshot -ne [bool]($ExpectedParser -or $ExpectedFailure)) {throw 'Diagnostic compilation changed'}
+            $hasFailureWriter=$null -ne (Get-Command Write-NativeContentSourceReadFailure -ErrorAction SilentlyContinue)
+            if($hasFailureWriter -ne [bool]$ExpectedFailure) {throw 'Failure helper selection changed'}
+            $begin=@($ast.FindAll({param($n)
+                $n -is [Management.Automation.Language.IfStatementAst] -and
+                $n.Extent.Text.Contains('[NLink.Tests.NativeContentReadProfileForTest]::Begin($owned)')
+            },$true))
+            $reads=@($ast.FindAll({param($n)
+                $n -is [Management.Automation.Language.TryStatementAst] -and
+                $n.Body.Extent.Text -ceq '{$events=[object[]]@(Read-FileTransferLogEvents -LogFiles @($SourcePath) -OwnedSource $reader)}'
+            },$true))
+            if($begin.Count -ne 1 -or $reads.Count -ne 1) {throw 'Read profiling gates differ'}
+            # Passive dummy state only: the real Begin/finally gates must agree with
+            # the parser gate even when failure diagnostics compiled the profile type.
+            $flags=[Reflection.BindingFlags]'Instance,NonPublic'
+            $owned=[Runtime.Serialization.FormatterServices]::GetUninitializedObject($type)
+            $watch=[Diagnostics.Stopwatch]::new()
+            $type.GetField('work',$flags).SetValue($owned,$watch)
+            if($hasSnapshot) {
+                $type.GetField('sourceLines',$flags).SetValue($owned,[Collections.Generic.List[string]]::new())
+                foreach($field in @('PrimaryCheckCallsForTest','PrimaryCheckTicksForTest')) {
+                    $type.GetField($field,$flags).SetValue($owned,[long[]]::new(12))
+                }
+            }
+            . ([scriptblock]::Create($begin[0].Extent.Text))
+            . ([scriptblock]::Create(($reads[0].Finally.Statements.Extent.Text -join [Environment]::NewLine)))
+            if($watch.IsRunning -or $watch.ElapsedTicks -ne 0 -or $type.GetField('closed',$flags).GetValue($owned)) {
+                throw 'Profiling gates changed clock or custody'
+            }
+            if($hasSnapshot) {
+                $profileType='NLink.Tests.NativeContentReadProfileForTest' -as [type]
+                $inputs=$profileType.GetField('inputs',[Reflection.BindingFlags]'Static,NonPublic').GetValue($null)
+                $probe=$type.GetField('SourceReadProbeForTest',$flags).GetValue($owned)
+                if([object]::ReferenceEquals($inputs,$owned) -ne [bool]$ExpectedParser -or
+                    ($null -ne $probe) -ne [bool]$ExpectedParser) {throw 'Loader enabled unexpected source sampling'}
+            }
+            'source-read-worker-gates=preserved'
+            """;
+        var result = await RunPowerShellScriptTextAsync(script,
+            [FindRepoRoot(), scenario, parserProfile ? "1" : "0", failureDiagnostic ? "1" : "0"], host);
+        Assert.True(result.ExitCode == 0, result.Stdout + result.Stderr);
+        Assert.Contains("source-read-worker-gates=preserved", result.Stdout);
+        var profiles = result.Stdout.Split('\n').Where(row => row.StartsWith("content-native-read-profile=", StringComparison.Ordinal)).ToArray();
+        if (parserProfile) Assert.Contains("phase=source_read_finally;", Assert.Single(profiles));
+        else Assert.Empty(profiles);
+        Assert.DoesNotContain("content-native-source-read-failure=", result.Stdout);
     }
 
     [Fact]
@@ -64,7 +135,7 @@ public sealed class NativeContentSourceReadFailureTests : FileTransferOpsScripts
                     SourceEnded=$false;ProducerMilliseconds=20000L;PrivateContent='must-not-be-retained'}
             }
             $RequestId=[guid]'312e2aca-d904-4d3e-a494-63726b646280'
-            $workerHost='pwsh';$Case='content-native-scale';$sourceReadFailure=$true;$readProfile=$false
+            $workerHost='pwsh';$Case='content-native-scale';$sourceReadFailure=$true;$parserReadProfile=$false
             $SourcePath='unused';$reader=$null
             function Read-FileTransferLogEvents {throw [IO.IOException]::new('original-source-failure')}
             $path=Join-Path $RepoRoot 'tests/nLink.SmokeTests.Core/Support/NativeContentAcquisitionWorker.ps1'

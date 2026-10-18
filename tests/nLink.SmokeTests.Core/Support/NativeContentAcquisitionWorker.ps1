@@ -10,17 +10,17 @@ function Write-ContentNativeStage([string]$Stage) {
     [Console]::Out.Flush()
 }
 Write-ContentNativeStage 'load_started'
-$readProfile=$Case.StartsWith('content-native-read-profile-',[StringComparison]::Ordinal)
+$parserReadProfile=$Case.StartsWith('content-native-read-profile-',[StringComparison]::Ordinal)
 $workerHost=[Diagnostics.Process]::GetCurrentProcess().ProcessName
 $sourceReadFailure=$workerHost -ceq 'pwsh' -and $Case -ceq 'content-native-scale'
 $terminalSelection=$Case.StartsWith('content-native-terminal-',[StringComparison]::Ordinal)
 $selectionComponentProfile=$terminalSelection -or $Case.StartsWith('content-native-selection-component-profile-',[StringComparison]::Ordinal) -or $Case -ceq 'content-native-scale-profile'
 $selectionProfile=$Case.StartsWith('content-native-selection-profile-',[StringComparison]::Ordinal) -or $selectionComponentProfile
-. (Join-Path $RepoRoot 'tests/nLink.SmokeTests.Core/Support/NativeContentAcquisitionLoader.ps1') $RepoRoot -ReadProfile:($readProfile -or $sourceReadFailure) -SelectionProfile:$selectionProfile -SelectionComponentProfile:$selectionComponentProfile -TerminalSelection:$terminalSelection
+. (Join-Path $RepoRoot 'tests/nLink.SmokeTests.Core/Support/NativeContentAcquisitionLoader.ps1') $RepoRoot -ReadProfile:($parserReadProfile -or $sourceReadFailure) -SelectionProfile:$selectionProfile -SelectionComponentProfile:$selectionComponentProfile -TerminalSelection:$terminalSelection
 . (Join-Path $RepoRoot 'tools/FileTransferSoak/LogParsing.ps1')
 . (Join-Path $RepoRoot 'tests/nLink.SmokeTests.Core/Support/NativeContentSelectionOutput.ps1')
 if($sourceReadFailure) {. (Join-Path $RepoRoot 'tests/nLink.SmokeTests.Core/Support/NativeContentSourceReadFailure.ps1')}
-if($readProfile) {. (Join-Path $RepoRoot 'tests/nLink.SmokeTests.Core/Support/NativeContentReadProfile.ps1')}
+if($parserReadProfile) {. (Join-Path $RepoRoot 'tests/nLink.SmokeTests.Core/Support/NativeContentReadProfile.ps1')}
 Write-ContentNativeStage 'load_returned'
 $mode=$Case.Substring('content-native-'.Length);$flags=[Reflection.BindingFlags]'Instance,NonPublic'
 if($mode.StartsWith('read-profile-',[StringComparison]::Ordinal)) {$mode=$mode.Substring('read-profile-'.Length)}
@@ -47,13 +47,13 @@ try {
         throw 'Content native timeout control released'
     }
     Write-ContentNativeStage 'source_read_started'
-    if($readProfile) {[NLink.Tests.NativeContentReadProfileForTest]::Begin($owned)}
+    if($parserReadProfile) {[NLink.Tests.NativeContentReadProfileForTest]::Begin($owned)}
     try {$events=[object[]]@(Read-FileTransferLogEvents -LogFiles @($SourcePath) -OwnedSource $reader)}
     catch {
         if($sourceReadFailure) {Write-NativeContentSourceReadFailure $owned $RequestId $workerHost $Case}
         throw
     }
-    finally {if($readProfile) {[NLink.Tests.NativeContentReadProfileForTest]::Observe('source_read_finally')}}
+    finally {if($parserReadProfile) {[NLink.Tests.NativeContentReadProfileForTest]::Observe('source_read_finally')}}
     Write-ContentNativeStage 'source_read_returned'
     if(-not $reader.InputReadComplete -or $events.Count -lt 3) {throw 'Content native original source incomplete'}
     Write-ContentNativeStage 'materialize_started'
