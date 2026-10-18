@@ -16,7 +16,7 @@ public sealed partial class FileTransferCoordinatorTests
         Action<FileTransferCoordinatorState>? captureFallbackState = null,
         Action<FileTransferCoordinatorState>? captureSecondTunaState = null,
         bool stopBeforeFallbackYield = false, string? coordinatorInstanceId = null,
-        string? dataSessionIdentity = null)
+        string? dataSessionIdentity = null, long dataSessionProviderGeneration = 0)
     {
         var regular = FileTransferRouteResolver.Resolve(FileTransferRoute.RegularNknV4Fast);
         var initialState = EmptyState(regular, direction) with { SessionId = sessionId, TransferId = transferId };
@@ -28,6 +28,7 @@ public sealed partial class FileTransferCoordinatorTests
             {
                 CurrentDataSessionIdentity = dataSessionIdentity ?? "initial-responder-fallback-fixture-data-session",
                 CurrentDataSessionGeneration = 17,
+                CurrentDataSessionProviderGeneration = dataSessionProviderGeneration,
             };
         }
         if (capture is not null)

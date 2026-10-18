@@ -25245,7 +25245,10 @@ public sealed partial class FileTransferCoordinatorTests
             ContiguousCommittedChunkIndex: committedChunk,
             DurableHighestChunkIndex: committedChunk,
             ChunkCount: Math.Max(128, committedChunk + 2),
-            CheckpointGeneration: checked((int)Math.Max(1L, transportEpoch)));
+            CheckpointGeneration: checked((int)Math.Max(1L, transportEpoch)))
+        {
+            DataSessionProviderGeneration = state.CurrentDataSessionProviderGeneration,
+        };
         var request = new FileTransferRouteTransitionPrepareRequest(
             FileTransferRouteTransitionKind.TunaV4ToPostTunaFallbackV6,
             owner,

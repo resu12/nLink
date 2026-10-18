@@ -1492,14 +1492,26 @@ public abstract class FileTransferOpsScriptsTestBase
         var stdout = child.StandardOutput.ReadToEndAsync();
         var stderr = child.StandardError.ReadToEndAsync();
         using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(60));
-        try { await child.WaitForExitAsync(deadline.Token); }
-        catch { if (!child.HasExited) { child.Kill(entireProcessTree: true); } throw; }
-        Assert.True(child.ExitCode == 0, await stdout + Environment.NewLine + await stderr);
-        var records = new[] { "nlink.log", "sender.log" }.SelectMany(name => File.ReadAllLines(Path.Combine(directory, name)));
-        var source = Path.Combine(directory, "two-writer-source.log");
-        await File.WriteAllLinesAsync(source, records.OrderBy(line => long.Parse(Regex.Match(line,
-            @"(?:^|;\s*)log_writer_attempt_utc_ticks=([0-9]+)").Groups[1].Value, CultureInfo.InvariantCulture)));
-        return source;
+        try
+        {
+            try { await child.WaitForExitAsync(deadline.Token); }
+            catch { if (!child.HasExited) { child.Kill(entireProcessTree: true); } throw; }
+            await File.WriteAllTextAsync(Path.Combine(directory, "receiver-test-stdout.log"), await stdout);
+            await File.WriteAllTextAsync(Path.Combine(directory, "receiver-test-stderr.log"), await stderr);
+            Assert.True(child.ExitCode == 0, await stdout + Environment.NewLine + await stderr);
+            var records = new[] { "nlink.log", "sender.log" }.SelectMany(name => File.ReadAllLines(Path.Combine(directory, name)));
+            var source = Path.Combine(directory, "two-writer-source.log");
+            await File.WriteAllLinesAsync(source, records.OrderBy(line => long.Parse(Regex.Match(line,
+                @"(?:^|;\s*)log_writer_attempt_utc_ticks=([0-9]+)").Groups[1].Value, CultureInfo.InvariantCulture)));
+            return source;
+        }
+        catch (Exception error)
+        {
+            await File.WriteAllTextAsync(Path.Combine(directory, "receiver-test-stdout.log"), await stdout);
+            await File.WriteAllTextAsync(Path.Combine(directory, "receiver-test-stderr.log"), await stderr);
+            await File.WriteAllTextAsync(Path.Combine(directory, "two-writer-failure.txt"), error.ToString());
+            throw new InvalidOperationException($"Two-writer fixture failed; original peer evidence retained in {directory}", error);
+        }
     }
 
     protected static void AssertRequiredLiveArtifacts(string artifactDir)
@@ -1795,6 +1807,9 @@ if ($errors -and $errors.Count -gt 0) {
     {
         try
         {
+            // Route-cycle setup can fail before the parent assertion. Keep both
+            // original peer logs instead of erasing the first failure in finally.
+            if (File.Exists(Path.Combine(path, "peers", "two-writer-failure.txt"))) { return; }
             if (Directory.Exists(path))
             {
                 Directory.Delete(path, recursive: true);

@@ -33,6 +33,7 @@ public sealed partial class NknFileTransferTransportTests
             UseShellExecute = false, CreateNoWindow = true, RedirectStandardOutput = true, RedirectStandardError = true,
         } };
         Task<string>? stdout = null, stderr = null;
+        Task? operation = null;
         try
         {
             if (peer is not null)
@@ -46,19 +47,27 @@ public sealed partial class NknFileTransferTransportTests
                 peer.Start();
                 stdout = peer.StandardOutput.ReadToEndAsync();
                 stderr = peer.StandardError.ReadToEndAsync();
-                await ((NamedPipeServerStream)pipe).WaitForConnectionAsync(ct);
             }
-            else { await ((NamedPipeClientStream)pipe).ConnectAsync(ct); }
-
-            await RunTwoWriterIngressPeerAsync(sender, pipe, directory, ct);
-            if (peer is not null)
+            operation = ConnectAndRunAsync();
+            if (peer is null) { await operation; }
+            else
             {
-                await peer.WaitForExitAsync(ct);
-                Assert.True(peer.ExitCode == 0, await stdout! + Environment.NewLine + await stderr!);
+                await SuperviseTwoWriterPeerAsync(operation, peer.WaitForExitAsync(ct), async () =>
+                    Assert.True(peer.ExitCode == 0,
+                        $"Two-writer sender exited with code {peer.ExitCode}.{Environment.NewLine}" +
+                        await stdout! + Environment.NewLine + await stderr!));
             }
         }
         finally
         {
+            deadline.Cancel();
+            // Observe the cancelled local operation before disposing its pipe.
+            // Its original exception is already propagated by the supervisor.
+            if (operation is not null)
+            {
+                try { await operation; }
+                catch { }
+            }
             if (peer is not null && !peer.HasExited) { peer.Kill(entireProcessTree: true); }
             if (stdout is not null && stderr is not null)
             {
@@ -66,6 +75,43 @@ public sealed partial class NknFileTransferTransportTests
                 await File.WriteAllTextAsync(Path.Combine(directory, "sender-test-stderr.log"), await stderr);
             }
         }
+
+        async Task ConnectAndRunAsync()
+        {
+            if (sender) { await ((NamedPipeClientStream)pipe).ConnectAsync(ct); }
+            else { await ((NamedPipeServerStream)pipe).WaitForConnectionAsync(ct); }
+            await RunTwoWriterIngressPeerAsync(sender, pipe, directory, ct);
+        }
+    }
+
+    internal static async Task SuperviseTwoWriterPeerAsync(Task operation, Task peerExit, Func<Task> assertPeerSucceeded)
+    {
+        var first = await Task.WhenAny(operation, peerExit);
+        if (first == peerExit) { await peerExit; await assertPeerSucceeded(); }
+        try { await operation; }
+        catch (EndOfStreamException closure) when (first != peerExit)
+        {
+            // The sender can close its pipe before VSTest prints the original
+            // exception. Drain that same process within the existing deadline.
+            try { await peerExit; }
+            catch (OperationCanceledException)
+            {
+                throw new IOException("Peer diagnostic collection reached the existing fixture deadline", closure);
+            }
+            await assertPeerSucceeded();
+            throw;
+        }
+        if (first != peerExit) { await peerExit; await assertPeerSucceeded(); }
+    }
+
+    internal static async Task<T> AwaitTwoWriterPipeAsync<T>(Task<T> operation, Task pump, string stage, CancellationToken ct)
+    {
+        if (await Task.WhenAny(operation, pump).WaitAsync(ct) == pump && !operation.IsCompleted)
+        {
+            await pump;
+            throw new EndOfStreamException("Two-writer peer pipe closed before " + stage);
+        }
+        return await operation.WaitAsync(ct);
     }
 
     private static async Task RunTwoWriterIngressPeerAsync(bool sender, PipeStream pipe, string directory, CancellationToken ct)
@@ -444,11 +490,11 @@ public sealed partial class NknFileTransferTransportTests
 
         async Task<FileTransferReceivedDataFrame[]> ReceiveYieldCopiesAsync()
         {
-            var first = await dataSession.ReceiveWithMetadataAsync(ct);
+            var first = await link.ReceiveAsync(dataSession, "first authenticated yield");
             Assert.IsType<FileTransferFallbackTailYieldFrameV6>(first.Frame);
             if (yieldCopies == 1) { return [first]; }
             if (yieldCase != "none") { await link.ReleaseSecondYieldCopyAsync(); }
-            var second = await dataSession.ReceiveWithMetadataAsync(ct);
+            var second = await link.ReceiveAsync(dataSession, "second authenticated yield");
             Assert.IsType<FileTransferFallbackTailYieldFrameV6>(second.Frame);
             return [first, second];
         }
@@ -593,16 +639,10 @@ public sealed partial class NknFileTransferTransportTests
                 heldYieldPackets.Clear();
             }
         }
-        internal async Task<string> WaitAsync(string name)
-        {
-            var signal = Signal(name).Task;
-            if (await Task.WhenAny(signal, pump).WaitAsync(ct) == pump)
-            {
-                await pump;
-                throw new InvalidOperationException("Peer pipe closed before " + name);
-            }
-            return await signal.WaitAsync(ct);
-        }
+        internal Task<string> WaitAsync(string name)
+            => AwaitTwoWriterPipeAsync(Signal(name).Task, pump, name, ct);
+        internal Task<FileTransferReceivedDataFrame> ReceiveAsync(IFileTransferDataSession session, string stage)
+            => AwaitTwoWriterPipeAsync(session.ReceiveWithMetadataAsync(ct).AsTask(), pump, stage, ct);
         internal Task SignalAsync(string name, string value = "") => SendAsync(new Packet(name, value, null, null, null, NknBridgeChannel.Control, null));
         internal async Task SendAsync(Packet packet)
         {

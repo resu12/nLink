@@ -16,6 +16,7 @@ public sealed partial class SessionFileTransferV4SenderTests
 
         internal string CoordinatorInstanceId => GetPrivateProperty<string>(context, "CoordinatorInstanceId");
         internal string DataSessionIdentity => CreateCoordinatorStateForTest(context).CurrentDataSessionIdentity!;
+        internal long DataSessionProviderGeneration => State.CurrentDataSessionProviderGeneration;
         internal FileTransferCoordinatorState State => CreateCoordinatorStateForTest(context);
 
         internal ServiceYieldHistory(IFileTransferDataSession data, IFileTransferControlPlaneDeliveryTransport transport,
@@ -43,6 +44,8 @@ public sealed partial class SessionFileTransferV4SenderTests
         {
             Assert.Equal(CoordinatorInstanceId, state.PersistentState.CoordinatorInstanceId);
             Assert.Equal(DataSessionIdentity, state.CurrentDataSessionIdentity);
+            Assert.Equal(DataSessionProviderGeneration, state.CurrentDataSessionProviderGeneration);
+            Assert.Equal(17, state.CurrentDataSessionGeneration);
             Assert.Null(state.PersistentState.FallbackTailYield.CurrentOperation);
             // Copy the already emitted checkpoint through the production context
             // projection, without adopting/emitting a new decision or receipt.
@@ -98,5 +101,40 @@ public sealed partial class SessionFileTransferV4SenderTests
             bridge.Dispose();
             recording.Dispose();
         }
+    }
+
+    [Theory]
+    [InlineData(1L)]
+    [InlineData(7L)]
+    [Trait("FileTransferRuntimeSuite", "InboundPublicationTransition")]
+    public async Task TwoWriterFixture_HistoryHandoffPreservesIndependentProviderGeneration(long providerGeneration)
+    {
+        using var data = new InitialBootstrapRecordingDataSession("two-writer-scope", "two-writer-scope")
+        {
+            Generation = providerGeneration,
+        };
+        using var transport = new InitialBootstrapCheckpointTransport(data);
+        using var history = new FileTransferPublicationIngressHistory(data.SessionId, data.TransferId,
+            FileTransferDirection.Outbound, stopAtFallbackYield: true,
+            serviceYieldData: data, serviceYieldTransport: transport);
+        for (var i = 0; i < history.Tokens.Count; i++) { history.Publish(i); }
+        await history.SendServiceYieldAsync();
+        Assert.Single(transport.Requests, request => request.Kind == FileTransferControlPlaneKind.FallbackTailYield);
+        Assert.Equal(providerGeneration, data.Generation);
+    }
+
+    [Fact]
+    [Trait("FileTransferRuntimeSuite", "InboundPublicationTransition")]
+    public async Task TwoWriterFixture_HistoryHandoffRejectsReplacedProviderBeforeSend()
+    {
+        using var data = new InitialBootstrapRecordingDataSession("two-writer-stale", "two-writer-stale");
+        using var transport = new InitialBootstrapCheckpointTransport(data);
+        using var history = new FileTransferPublicationIngressHistory(data.SessionId, data.TransferId,
+            FileTransferDirection.Outbound, stopAtFallbackYield: true,
+            serviceYieldData: data, serviceYieldTransport: transport);
+        for (var i = 0; i < history.Tokens.Count; i++) { history.Publish(i); }
+        data.Generation++;
+        await Assert.ThrowsAsync<Xunit.Sdk.EqualException>(() => history.SendServiceYieldAsync());
+        Assert.Empty(transport.Requests);
     }
 }

@@ -42,7 +42,8 @@ internal sealed class FileTransferPublicationIngressHistory : IDisposable
             captureFallbackState: stopAtFallbackYield ? state => fallbackState = state : null,
             captureSecondTunaState: state => secondTunaState = state,
             stopBeforeFallbackYield: serviceYield is not null, coordinatorInstanceId: serviceYield?.CoordinatorInstanceId,
-            dataSessionIdentity: serviceYield?.DataSessionIdentity);
+            dataSessionIdentity: serviceYield?.DataSessionIdentity,
+            dataSessionProviderGeneration: serviceYield?.DataSessionProviderGeneration ?? 0);
     }
 
     internal FileTransferRoutePublicationEvidence Publish(int index)
