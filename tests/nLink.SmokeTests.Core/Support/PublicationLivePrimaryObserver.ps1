@@ -96,7 +96,7 @@ if($env:NLINK_PUBLICATION_PEER_LINEAGE_PROTOTYPE -ceq '1') {
     # Test-only, after the original reports. Only detached diagnostics leave
     # the worker; a prototype failure cannot replace the primary result.
     # Keep the original primary's script scope (including its loaded catalogs).
-    $probe="& ([scriptblock]::Create([IO.File]::ReadAllText('"+(Join-Path $PSScriptRoot 'PublicationPeerLineageProbe.ps1').Replace("'","''")+"'))) -Context `$private:localPrimaryInputs -Custody `$private:localPrimaryCustody -Evaluations `$private:localCompletedEvaluations -Index `$Index -Failure `$firstCompactProofChainFailure -RouteState `$routeConsistencyState -ArtifactDir `$ArtifactDir"
+    $probe="& ([scriptblock]::Create([IO.File]::ReadAllText('"+(Join-Path $PSScriptRoot 'PublicationPeerLineageProbe.ps1').Replace("'","''")+"'))) -Context `$private:localPrimaryInputs -Custody `$private:localPrimaryCustody -Evaluations `$private:localCompletedEvaluations -Index `$Index -Failure `$firstCompactProofChainFailure -OriginalMismatchProof `$fileTunaV4DataPathMismatchProof -RouteState `$routeConsistencyState -ArtifactDir `$ArtifactDir -SupportRoot '"+$PSScriptRoot.Replace("'","''")+"'"
     $probe='try { '+$probe+' } catch { [IO.File]::WriteAllText((Join-Path $ArtifactDir ''peer-lineage-prototype-error.txt''),[string]$_ + "`n" + $_.ScriptStackTrace) }'
     $primary=$primary.Replace($needle,$probe+"`n        "+$needle)
 }

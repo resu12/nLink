@@ -1,4 +1,4 @@
-param($Context,$Custody,$Evaluations,$Index,$Failure,$RouteState,[string]$ArtifactDir)
+param($Context,$Custody,$Evaluations,$Index,$Failure,$OriginalMismatchProof,$RouteState,[string]$ArtifactDir,[string]$SupportRoot)
 $ErrorActionPreference='Stop'; Set-StrictMode -Version Latest
 # Bounded fixture-only query over completed primary views. This is neither an
 # authority evaluator nor a stale-safety/delivery classifier. Mutations below
@@ -8,16 +8,22 @@ function One($Items,[string]$Reason) { $a=@($Items); Require ($a.Count -eq 1) $R
 function Clone($Value) { ConvertFrom-Json -InputObject (ConvertTo-Json -InputObject $Value -Depth 64 -Compress) }
 function Json($Value) { ConvertTo-Json -InputObject $Value -Depth 64 -Compress }
 function Get-FileTransferCoordinatorSnapshotEvaluation { throw 'Prototype must not evaluate authority' }
-Require ($null -ne $Context -and $null -ne $Custody -and
-    $Custody.Owns($Evaluations,$Context,$Context.FullLines,$Context.CompactLines,$Context.FullView,$Context.CompactView) -and
-    $null -ne $Context.WriterReader -and $Context.WriterReader.IsVerified) 'Completed primary custody unavailable'
+. (Join-Path $SupportRoot 'PublicationServiceYieldMatcher.ps1')
+. (Join-Path $SupportRoot 'PublicationDiagnosticRejectionInputs.ps1')
+$diagnostic=$null; $started=$false
+try {
+Require ($null -ne $Context) 'Completed primary custody unavailable'
+$Context.Work.Start(); $started=$true
+Require ($Failure.Class -ceq 'filetransfer_tuna_activation_delivery_unproven' -and
+    $Failure.Reason -ceq 'tuna_activation_1_matched_delivery_unproven' -and $null -eq $Context.WriterReader) 'Prototype primary shape'
+$primaryEvent=$Failure.Event; $primaryBefore=Json $Failure
+$diagnostic=Open-PublicationDiagnosticRejection $Context $Custody $Evaluations $Index $OriginalMismatchProof
 Require ($Context.FullLines.Length -le 4096 -and $Context.FullView.Boundaries.Count -le 256) 'Prototype fixture limit'
 Require ($RouteState.FullResult.Verdict -ceq 'pass' -and $RouteState.CompactResult.Verdict -ceq 'pass' -and
     $RouteState.Parity.Verdict -ceq 'pass') 'Original route consistency unavailable'
-$before=Json @($Context.FullView,$Context.CompactView)
+$before=Json @($Context.FullView,$Context.CompactView,$OriginalMismatchProof)
 $originalLines=@($Context.FullLines.Clone(),$Context.CompactLines.Clone())
-$receivePosition=[Array]::BinarySearch($Context.FullOrigins,[int]$Failure.Event.LineNumber)
-Require ($receivePosition -ge 0 -and [object]::ReferenceEquals($Failure.Event,$Index.AllEvents[$receivePosition])) 'Selected failure ownership'
+$receivePosition=$diagnostic.Position
 $records=@(for($i=0;$i -lt $Context.FullLines.Length;$i++) {
     $f=ConvertFrom-GuiSmokeLogLedgerStructuredFields $Context.FullLines[$i]
     if($f.event -cin @('filetransfer_data_path_send_result','filetransfer_data_path_receive_result')) {
@@ -166,13 +172,18 @@ Require (-not $proofJson.Contains($yieldSend.Fields.security_payload_fingerprint
     -not $proofJson.Contains($yieldSend.Fields.security_installation_id) -and
     -not $Context.FullLines[$yieldSend.Position].Contains($results.full.ProofIdentity) -and
     -not $Context.FullLines[$yieldReceive.Position].Contains($results.full.ProofFingerprint)) 'Explicit security/proof binding now exists; revisit prototype boundary'
-Require ($before -ceq (Json @($Context.FullView,$Context.CompactView)) -and
+Assert-PublicationDiagnosticInputs $Context $Custody $Evaluations $Index
+Require ($diagnostic.Writer.IsVerified -and [object]::ReferenceEquals($primaryEvent,$Failure.Event) -and
+    $primaryBefore -ceq (Json $Failure) -and $null -eq $Context.WriterReader) 'Prototype changed primary failure'
+Require ($before -ceq (Json @($Context.FullView,$Context.CompactView,$OriginalMismatchProof)) -and
     ($originalLines[0] -join "`n") -ceq ($Context.FullLines -join "`n") -and
     ($originalLines[1] -join "`n") -ceq ($Context.CompactLines -join "`n")) 'Prototype mutated primary inputs'
 [IO.File]::WriteAllText((Join-Path $ArtifactDir 'peer-lineage-prototype.json'),(Json ([ordered]@{
     Status='candidate_links_only';PeerLineage='unproven';FirstUnprovenEdge='authenticated_yield_to_coordinator_receipt'
     ClassifierEnabled=$false;AcceptanceChanged=$false;InputsUnchanged=$true;FullCompactParity='pass'
+    PrimaryFailureUnchanged=$true;WriterMembershipVerified=$true;AddedAuthorityEvaluations=0
     NegativeControls=$controls.ToArray();Candidate=$results.full
     YieldSendWriterSequence=[long]$yieldSend.Fields.log_writer_sequence;YieldReceiveWriterSequence=[long]$yieldReceive.Fields.log_writer_sequence
     LocalProofPrecedesPhysicalYieldSend=$true;TransportEnvelopeMatched=$true;Live=$false
 })))
+} finally { if($null -ne $diagnostic) {$diagnostic.Writer.Dispose()}; if($started) {$Context.Work.Stop()} }

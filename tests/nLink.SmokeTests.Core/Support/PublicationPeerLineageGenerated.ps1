@@ -7,6 +7,15 @@ $output=Join-Path $Directory ('whole-wrapper-'+$PSVersionTable.PSVersion.Major+'
 $errorPath=Join-Path $output 'peer-lineage-prototype-error.txt'
 if(Test-Path -LiteralPath $errorPath) { throw ([IO.File]::ReadAllText($errorPath)) }
 $result=[IO.File]::ReadAllText((Join-Path $output 'peer-lineage-prototype.json')) | ConvertFrom-Json
+foreach($name in @('Status','PeerLineage','FirstUnprovenEdge','ClassifierEnabled','AcceptanceChanged','InputsUnchanged',
+    'NegativeControls','FullCompactParity','PrimaryFailureUnchanged','WriterMembershipVerified','AddedAuthorityEvaluations','Live')) {
+    if($null -eq $result.PSObject.Properties[$name]) {throw ('Prototype shape: missing '+$name)}
+}
+foreach($name in @('ClassifierEnabled','AcceptanceChanged','InputsUnchanged','PrimaryFailureUnchanged','WriterMembershipVerified','Live')) {
+    if($result.$name -isnot [bool]) {throw ('Prototype shape: boolean '+$name)}
+}
+if($result.NegativeControls -isnot [array] -or -not $result.PrimaryFailureUnchanged -or
+    -not $result.WriterMembershipVerified -or $result.AddedAuthorityEvaluations -ne 0 -or $result.Live) {throw 'Prototype custody shape'}
 if($result.Status -cne 'candidate_links_only' -or $result.PeerLineage -cne 'unproven' -or
     $result.FirstUnprovenEdge -cne 'authenticated_yield_to_coordinator_receipt' -or
     $result.ClassifierEnabled -or $result.AcceptanceChanged -or -not $result.InputsUnchanged -or

@@ -7,6 +7,23 @@ $null=& (Join-Path $PSScriptRoot 'PublicationTunaPayloadIntegrationGenerated.ps1
     -RunId $RunId -ScenarioId $ScenarioId -TunaPayloadMode $TunaPayloadMode
 $output=Join-Path $Directory ('whole-wrapper-'+$PSVersionTable.PSVersion.Major+'-write')
 $result=Get-Content -LiteralPath (Join-Path $output 'content-coverage-shadow.json') -Raw | ConvertFrom-Json
+foreach($name in @('Status','FirstMissingEdge','Coverage','Candidate','WitnessOrigins','AddedAuthorityEvaluations',
+    'AcceptanceChanged','ClassifierEnabled','Live','FullCompactParity','InputsUnchanged','PriorResultsUnchanged',
+    'CustodyControl','CustodyControls','PrimaryFailureUnchanged','WriterMembershipVerified')) {
+    if($null -eq $result.PSObject.Properties[$name]) {throw ('Content shadow shape: missing '+$name+'; '+($result | ConvertTo-Json -Depth 32 -Compress))}
+}
+foreach($name in @('AcceptanceChanged','ClassifierEnabled','Live','InputsUnchanged','PriorResultsUnchanged',
+    'CustodyControl','PrimaryFailureUnchanged','WriterMembershipVerified')) {
+    if($result.$name -isnot [bool]) {throw ('Content shadow shape: boolean '+$name)}
+}
+if($null -eq $result.Candidate) {throw 'Content shadow candidate missing'}
+foreach($name in @('SourceLine','Writer','WriterSequence','SourceSha256','OriginalReason','OriginalRecovered')) {
+    if($null -eq $result.Candidate.PSObject.Properties[$name]) {throw ('Content shadow candidate shape: missing '+$name)}
+}
+if(($result.Candidate.SourceLine -isnot [int] -and $result.Candidate.SourceLine -isnot [long]) -or
+    $result.Candidate.SourceLine -le 0 -or $result.Candidate.SourceSha256 -cnotmatch '\A[0-9a-f]{64}\z' -or
+    $result.Candidate.OriginalRecovered -isnot [bool] -or $result.WitnessOrigins -isnot [array] -or
+    -not $result.PrimaryFailureUnchanged -or -not $result.WriterMembershipVerified) {throw 'Content shadow candidate shape'}
 $expected=if($TunaPayloadMode -ceq 'rebatch_changed') {'unproven'} else {'pass'}
 if($result.Status -cne $expected -or $result.AddedAuthorityEvaluations -ne 0 -or $result.AcceptanceChanged -or
     $result.ClassifierEnabled -or $result.Live -or $result.FullCompactParity -cne 'pass' -or
