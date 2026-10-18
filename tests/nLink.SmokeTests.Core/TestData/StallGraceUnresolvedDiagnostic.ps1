@@ -102,7 +102,15 @@ function SupersessionFixture {
         transport_epoch='transportEpoch';bridge_recovery_generation='bridgeRecoveryGeneration'}
     $sourceBoundary=@{dataSessionIdentity='projected-data';dataSessionGeneration=1;checkpointRequestId='(none)';checkpointGeneration=1}
     $targetBoundary=$sourceBoundary.Clone()
-    foreach($name in $mapping.Keys) { $sourceBoundary[$mapping[$name]]=$scope[$name]; $targetBoundary[$mapping[$name]]=$target[$name] }
+    # Log fields stay textual; synthetic boundary DTOs use the producer's numeric types.
+    foreach($name in $mapping.Keys) {
+        $sourceBoundary[$mapping[$name]]=if($name -ceq 'route'){$scope[$name]}else{[long]$scope[$name]}
+        $targetBoundary[$mapping[$name]]=if($name -ceq 'route'){$target[$name]}else{[long]$target[$name]}
+    }
+    if (-not (Test-FileTransferCoordinatorSnapshotBoundarySchema ([pscustomobject]$sourceBoundary)) -or
+        -not (Test-FileTransferCoordinatorSnapshotBoundarySchema ([pscustomobject]$targetBoundary))) {
+        throw 'Supersession fixture source/target boundaries must match the Coordinator numeric schema'
+    }
     $sha=[Security.Cryptography.SHA256]::Create()
     try { $projected='fte1-'+([BitConverter]::ToString($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($routeAuthority))).Replace('-','').ToLowerInvariant().Substring(0,24)) }
     finally { $sha.Dispose() }
