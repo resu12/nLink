@@ -7,13 +7,24 @@ $env:NLINK_PUBLICATION_DISPATCH_WINDOW_CONSUMER='1'
 $env:NLINK_PUBLICATION_DISPATCH_WINDOW_CONTROLS='0'
 $env:NLINK_PUBLICATION_SECURITY_LIFECYCLE_CONSUMER=if($OmitSecurity) {'0'} else {'1'}
 $env:NLINK_PUBLICATION_ALTERNATIVE_ACCEPTANCE_SHADOW='1'
-$null=& (Join-Path $PSScriptRoot 'PublicationTunaPayloadIntegrationGenerated.ps1') -RepoRoot $RepoRoot -Directory $Directory `
-    -RunId $RunId -ScenarioId $ScenarioId -TunaPayloadMode $TunaPayloadMode -ServiceYieldFixture
+$env:NLINK_PUBLICATION_TUNA_PAYLOAD_OBSERVER='1'
+# Exercise the strict selected-rejection contract, not canonical route-cycle delivery.
+$null=& (Join-Path $PSScriptRoot 'PublicationReceiveIntegrationGenerated.ps1') -RepoRoot $RepoRoot -Directory $Directory `
+    -RunId $RunId -ScenarioId $ScenarioId -TwoWriterFixture -ServiceIngressFixture -TunaPayloadMode $TunaPayloadMode -ServiceYieldFixture
 $output=Join-Path $Directory ('whole-wrapper-'+$PSVersionTable.PSVersion.Major+'-write')
 $errorPath=Join-Path $output 'service-yield-consumer-error.txt'
 if(Test-Path -LiteralPath $errorPath) { throw ([IO.File]::ReadAllText($errorPath)) }
 $r=Get-Content -LiteralPath (Join-Path $output 'alternative-acceptance-shadow.json') -Raw | ConvertFrom-Json
 $prior=Get-Content -LiteralPath (Join-Path $output 'service-yield-consumer.json') -Raw | ConvertFrom-Json
+$facts=Get-Content -LiteralPath (Join-Path $output 'live-primary-observation.json') -Raw | ConvertFrom-Json
+if($prior.PrimaryFailureClass -cne 'file_tuna_data_path_mismatch' -or $prior.PrimaryFailureSourceLine -le 0 -or
+    $prior.PrimaryFailureSourceLine -ne $prior.DiagnosticSourceLine -or
+    -not $prior.PrimaryFailureUnchanged -or -not $prior.WriterMembershipVerified -or
+    $facts.IngressCandidates.Count -ne 1 -or $facts.IngressCandidates[0].SourceLine -ne $prior.PrimaryFailureSourceLine -or
+    $facts.IngressCandidates[0].Reason -cne 'missing_exact_tuna_receive' -or
+    -not $facts.IngressCandidates[0].ChainMatched -or $facts.IngressCandidates[0].Recovered) {
+    throw 'Shadow fixture lost its original selected rejection shape'
+}
 if($r.Schema -cne 'nlink.alternative-acceptance-shadow/v1' -or $r.Decision.Verdict -cne 'unproven' -or
     -not $r.InputsUnchanged -or -not $r.PriorResultsUnchanged -or $r.ClassifierEnabled -or $r.AcceptanceChanged -or $r.Live -or
     $r.OriginalUnresolvedCandidates -ne 1 -or ($r.WitnessOrigins -join ',') -cne ($prior.WitnessOrigins -join ',') -or
@@ -28,6 +39,7 @@ if($OmitSecurity) {
         $r.FirstMissingEdge -cne 'shadow_prerequisite:SecurityLifecycleStatus') { throw 'Omitted security evidence was accepted' }
 } else {
     if($r.Candidate.Status -cne 'recorded_stale_route_rejection' -or $r.Candidate.StrictRecovered -or
+        $r.Candidate.SourceLine -ne $prior.PrimaryFailureSourceLine -or
         $r.Candidate.StrictReason -cne 'missing_exact_tuna_receive' -or $r.EvaluatedCandidates -ne 1 -or
         $r.Gates.recorded_rejections -cne 'pass' -or $r.Gates.candidate_coverage -cne 'pass' -or
         $r.Candidate.SecurityLifetimeProven -or $r.Candidate.RuntimeRetirementProven -or $r.Candidate.GeneralStaleSafetyCertified -or
