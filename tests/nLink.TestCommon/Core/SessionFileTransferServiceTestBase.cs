@@ -1525,9 +1525,11 @@ public abstract class SessionFileTransferServiceTestBase : CoreSmokeTestsBase
 
         protected sealed class LoopbackDataSession :
             IFileTransferDataSession,
+            IFileTransferDataSessionGenerationProvider,
             IFileTransferDataPathAuthoritySession,
             IFileTransferRuntimeUnlockTunaProbeSender
         {
+            private static long nextGeneration;
             private readonly LoopbackFileTransferTransport owner;
             private readonly Channel<FileTransferReceivedDataFrame> frames = Channel.CreateUnbounded<FileTransferReceivedDataFrame>(new UnboundedChannelOptions { SingleReader = true, SingleWriter = false, AllowSynchronousContinuations = false, });
             private int disposed;
@@ -1546,6 +1548,7 @@ public abstract class SessionFileTransferServiceTestBase : CoreSmokeTestsBase
 
             public string SessionId { get; }
             public string TransferId { get; }
+            public long Generation { get; } = Interlocked.Increment(ref nextGeneration);
             public bool IsAvailable => Volatile.Read(ref available) != 0;
             public bool HasActiveReceive => Volatile.Read(ref activeReader) != 0;
             public long ReceiveOrdinal => Volatile.Read(ref receiveOrdinal);

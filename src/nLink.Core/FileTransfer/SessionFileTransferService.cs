@@ -5226,7 +5226,7 @@ public sealed partial class SessionFileTransferService :
             if (ApplyInboundV4PauseControl(inbound, frame))
             {
                 _ = Task.Run(
-                    () => FlushInboundV6PausedProgressAsync(inbound, "peer_resumed"),
+                    () => FlushInboundPausedProgressAsync(inbound, "peer_resumed"),
                     CancellationToken.None);
             }
         }
@@ -22895,6 +22895,9 @@ public sealed partial class SessionFileTransferService :
             return false;
         }
 
+        // Coordinator adoption replaces the leg graph; the prior leg is a snapshot.
+        currentLeg = context.CurrentTransferLeg!;
+
         if (context.V6StartupCheckpointOwner == context.CurrentRuntimeOwner)
         {
             context.V6StartupCheckpointOwner = null;
@@ -26249,6 +26252,8 @@ public sealed partial class SessionFileTransferService :
 
         public SemaphoreSlim ReceiverSparseWriteGate { get; } = new(1, 1);
 
+        public Dictionary<int, InboundV6ContiguousWriteReceipt> V6ContiguousWriteReceipts { get; } = [];
+
         public IncrementalHash? Hash { get; set; }
 
         public SortedDictionary<int, byte[]> PendingChunks { get; } = new();
@@ -26894,6 +26899,10 @@ public sealed partial class SessionFileTransferService :
         public int V6LastReceiverStateCommittedChunkIndex { get; set; } = -1;
 
         public int V6LastReceiverStateHighestReceivedChunkIndex { get; set; } = -1;
+
+        public bool V6LastReceiverStateUserPaused { get; set; }
+
+        public bool V6LastReceiverStatePeerPaused { get; set; }
 
         public FileTransferTransportProfileKind TransportProfileKind { get; set; } = FileTransferTransportProfileKind.Default;
 

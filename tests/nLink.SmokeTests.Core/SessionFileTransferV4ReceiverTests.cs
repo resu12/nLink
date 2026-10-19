@@ -382,8 +382,19 @@ public sealed class SessionFileTransferV4ReceiverTests : SessionFileTransferServ
         Assert.Equal(transferId, pressure.TransferId);
         Assert.Equal("regular_v4_receiver_frontier_repair_due", pressure.Reason);
         Assert.Equal(0, pressure.CreditExhaustedTimeMs);
-        Assert.True(pressure.FrontierLagChunks > 0);
+        // No chunk has arrived: repair demand is not a positive durable frontier lag.
+        Assert.Equal(0, pressure.FrontierLagChunks);
         Assert.True(pressure.PendingRepairCount > 0);
+        var authority = Assert.IsType<FileTransferRegularV4FrontierRepairAuthority>(pressure.RepairAuthority);
+        Assert.Equal(sessionId, authority.SessionId);
+        Assert.Equal(transferId, authority.TransferId);
+        Assert.Equal(FileTransferDirection.Inbound, authority.Direction);
+        Assert.Equal(FileTransferRouteResolver.RegularNknV4FastToken, authority.RouteToken);
+        Assert.Equal(FileTransferProtocol.ProtocolVersionV4, authority.ProtocolVersion);
+        Assert.False(authority.AuthorityId.IsDefault);
+        Assert.Equal(0, authority.FrontierChunkIndex);
+        Assert.Equal(-1, authority.DurableReceivedHighestChunkIndex);
+        Assert.Equal(pressure.PendingRepairCount, authority.PendingRepairCount);
     }
 
     [Fact(Skip = RetiredAuthorityLessStaleBatchSkip)]

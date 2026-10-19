@@ -5,18 +5,20 @@ namespace NLink.Core.FileTransfer;
 public sealed partial class SessionFileTransferService
 {
     private sealed record InboundBootstrapWriteIngress(IFileTransferDataSession Session, long ProviderGeneration, long ServiceGeneration,
-        bool RequiresSourceBinding, FileTransferFallbackTailYieldScope? FallbackRepairSource = null);
+        bool RequiresSourceBinding, FileTransferFallbackTailYieldScope? FallbackRepairSource = null,
+        FileTransferBootstrapLocalStopScope? BootstrapSource = null, CheckpointContinuitySourceStamp? CheckpointSource = null);
 
     // Execution evidence only; neither the source binding nor chunk membership grants hold/route authority.
     private sealed record InboundBootstrapWriteSource(
         InboundTransferContext Context, string CoordinatorInstanceId, FileTransferBootstrapAgreement? Agreement,
         FileTransferBootstrapLocalStopScope? Source, InboundBootstrapWriteIngress Ingress,
-        Stream Stream, BitArray Written, int ChunkSize, int ChunkCount, long FileSize,
+        Stream Stream, BitArray? Written, int ChunkSize, int ChunkCount, long FileSize,
         bool TransportPaused, DateTimeOffset? PausedSinceUtc)
     {
         public InboundBootstrapWriteOperation? Operation { get; set; }
 
         public FileTransferFallbackTailYieldScope? FallbackRepairSource { get; init; }
+        public V6ReceiveDestinationMode DestinationMode { get; init; }
 
         public (int FrontierChunkIndex, DateTimeOffset? Utc)? CommittedProgress { get; init; }
     }
@@ -32,11 +34,38 @@ public sealed partial class SessionFileTransferService
 
     private static InboundBootstrapWriteIngress? CaptureInboundBootstrapWriteIngress(InboundTransferContext context,
         IFileTransferDataSession? session)
-        => ReferenceEquals(context.DataSession, session) && session is IFileTransferDataSessionGenerationProvider { Generation: > 0 } provider
-            ? new(session, provider.Generation, context.DataSessionGeneration,
+    {
+        if (!ReferenceEquals(context.DataSession, session) ||
+            session is not IFileTransferDataSessionGenerationProvider { Generation: > 0 } provider) { return null; }
+        var state = CreateCoordinatorStateLocked(context);
+        return new(session, provider.Generation, context.DataSessionGeneration,
                 context.RouteRuntime.UsesFileTunaV4Runtime &&
                 context.CoordinatorPersistentState.FileTransferRouteTransition.BootstrapAgreement?.Accept?.FallbackBootstrapCorrelationVersion == 1,
-                FileTransferCoordinator.CaptureInboundFallbackRepairWriteScope(CreateCoordinatorStateLocked(context))) : null;
+                FileTransferCoordinator.CaptureInboundFallbackRepairWriteScope(state),
+                FileTransferCoordinator.CaptureFallbackBootstrapSourceScope(state),
+                state.CurrentFallbackCheckpointLease is not null ? FileTransferCoordinator.CreateCheckpointContinuitySourceStamp(state) : null);
+    }
+
+    private InboundBootstrapWriteIngress? AdoptCommittedInboundFallbackReadSourceLocked(InboundTransferContext context,
+        InboundBootstrapWriteIngress? ingress)
+    {
+        if (!ReferenceEquals(inboundTransfer, context) || context.IsTerminal || context.LifetimeCts.IsCancellationRequested ||
+            context.UserPaused || context.PeerPaused ||
+            ingress is null ||
+            !ReferenceEquals(context.DataSession, ingress.Session) || context.DataSessionGeneration != ingress.ServiceGeneration ||
+            ingress.Session is not IFileTransferDataSessionGenerationProvider provider || provider.Generation != ingress.ProviderGeneration)
+        { return ingress; }
+        var state = CreateCoordinatorStateLocked(context);
+        if (ingress.FallbackRepairSource is not null && ingress.CheckpointSource is { } checkpoint &&
+            FileTransferCoordinator.CaptureCheckpointClearedInboundReadSuccessor(state, checkpoint) is { } cleared)
+        { return ingress with { FallbackRepairSource = cleared, CheckpointSource = null }; }
+        if (ingress is not { RequiresSourceBinding: true, FallbackRepairSource: null, BootstrapSource: { } source } ||
+            FileTransferCoordinator.CaptureCommittedInboundFallbackReadSuccessor(state, source) is not { } successor)
+        { return ingress; }
+        // Only an exact coordinator-committed successor can replace a pending Tuna read's source.
+        // In-flight writes retain their original stale-source fences.
+        return ingress with { RequiresSourceBinding = false, FallbackRepairSource = successor, BootstrapSource = null };
+    }
 
     private bool TryCaptureInboundBootstrapWriteSourceLocked(InboundTransferContext context,
         InboundBootstrapWriteIngress? ingress, out InboundBootstrapWriteSource? source)
@@ -68,15 +97,16 @@ public sealed partial class SessionFileTransferService
             context.UserPaused || context.PeerPaused || ingress?.FallbackRepairSource is not { } fallbackSource ||
             !ReferenceEquals(context.DataSession, ingress.Session) || context.DataSessionGeneration != ingress.ServiceGeneration ||
             ingress.Session is not IFileTransferDataSessionGenerationProvider provider || provider.Generation != ingress.ProviderGeneration ||
-            context.WriteStream is not { } stream || context.ReceiverSparseChunksWritten is not { } written ||
+            context.WriteStream is not { } stream ||
+            context.ReceiverSparseChunksWritten is null && context.V6DestinationMode != V6ReceiveDestinationMode.ContiguousOnly ||
             !FileTransferCoordinator.IsInboundFallbackRepairWriteScopeCurrent(state, fallbackSource) ||
             state.PersistentState.FallbackTailYield.RepairHandoff is { State: FileTransferFallbackRepairHandoffState.Prepared or FileTransferFallbackRepairHandoffState.Captured or FileTransferFallbackRepairHandoffState.Drained })
         {
             return false;
         }
-        source = new(context, context.CoordinatorInstanceId, null, null, ingress, stream, written,
+        source = new(context, context.CoordinatorInstanceId, null, null, ingress, stream, context.ReceiverSparseChunksWritten,
             context.ChunkSizeBytes, context.ChunkCount, context.FileSizeBytes, context.PullTransportPaused, context.PullTransportPausedSinceUtc)
-            { FallbackRepairSource = fallbackSource };
+            { FallbackRepairSource = fallbackSource, DestinationMode = context.V6DestinationMode };
         return true;
     }
 
@@ -100,7 +130,8 @@ public sealed partial class SessionFileTransferService
         var state = CreateCoordinatorStateLocked(context);
         if (source.FallbackRepairSource is { } fallbackSource)
         {
-            return FileTransferCoordinator.IsInboundFallbackRepairWriteScopeCurrent(state, fallbackSource);
+            return context.V6DestinationMode == source.DestinationMode &&
+                FileTransferCoordinator.IsInboundFallbackRepairWriteScopeCurrent(state, fallbackSource);
         }
         return state.PersistentState.FileTransferRouteTransition.BootstrapAgreement == source.Agreement &&
             source.Source is { } bootstrapSource && FileTransferCoordinator.IsFallbackBootstrapLocalStopScopeCurrent(state, bootstrapSource);
@@ -125,7 +156,14 @@ public sealed partial class SessionFileTransferService
         FileTransferChunkBatchFrameV4 batch, FileTransferTransportKind receivedTransportKind, InboundBootstrapWriteIngress? ingress)
     {
         InboundBootstrapWriteSource? source;
-        lock (gate) { if (!TryCaptureInboundBootstrapWriteSourceLocked(context, ingress, out source)) { return; } }
+        lock (gate)
+        {
+            if (ingress?.FallbackRepairSource is not null)
+            {
+                if (!TryCaptureInboundFallbackRepairWriteSourceLocked(context, ingress, out source)) { return; }
+            }
+            else if (!TryCaptureInboundBootstrapWriteSourceLocked(context, ingress, out source)) { return; }
+        }
         if (source is not null && batch is FileTransferChunkBatchFrameV6) { return; }
         try { await HandleInboundV4ChunkBatchCoreAsync(context, batch, receivedTransportKind, source).ConfigureAwait(false); }
         finally { await SettleInboundTrackedWriteAsync(context, source).ConfigureAwait(false); }

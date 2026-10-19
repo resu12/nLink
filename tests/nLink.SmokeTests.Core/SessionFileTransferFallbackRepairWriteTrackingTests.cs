@@ -8,6 +8,82 @@ namespace NLink.SmokeTests;
 
 public sealed partial class SessionFileTransferV4SenderTests
 {
+    [Theory]
+    [InlineData(false, "none")] [InlineData(true, "none")]
+    [InlineData(false, "missing_origin")] [InlineData(true, "missing_origin")]
+    [InlineData(false, "source")] [InlineData(true, "source")]
+    [InlineData(false, "provider")] [InlineData(true, "provider")]
+    [Trait("FileTransferRuntimeSuite", "FallbackRepairWriteTracking")]
+    public async Task FallbackRepairWriteTracking_PendingReadFollowsOnlyAcceptedCheckpointClear(bool legacy, string invalidation)
+    {
+        var frames = Channel.CreateUnbounded<FileTransferReceivedDataFrame>();
+        var reads = 0;
+        using var session = new InitialBootstrapRecordingDataSession("session_fallback_repair_write", "fallback_repair_write")
+        {
+            ReceiveWithMetadataForTest = ct => { Interlocked.Increment(ref reads); return frames.Reader.ReadAsync(ct); },
+        };
+        using var fixture = new FallbackRepairWriteFixture(session: session);
+        var leg = GetCurrentContextLeg(fixture.Context);
+        const string requestId = "pending-read-checkpoint";
+        var request = new FileTransferFrontierRequestFrameV6
+        {
+            SessionId = session.SessionId, TransferId = session.TransferId, TransportEpoch = leg.TransportEpochId,
+            RepairRequestId = requestId, Priority = "state_refresh", RecoveryMode = "regular_nkn_state_refresh",
+            MissingRanges = [new() { StartChunkIndex = fixture.Frontier, ChunkCount = 1 }],
+        };
+        lock (GetServiceGate(fixture.Service))
+        {
+            Assert.True((bool)GetFallbackFixtureInstanceMethod("MarkInboundFallbackCheckpointRequestedLocked", typeof(bool), 3)
+                .Invoke(fixture.Service, [fixture.Context, request, "regular_nkn_state_refresh"])!);
+        }
+        Assert.NotNull(CreateCoordinatorStateForTest(fixture.Context).CurrentFallbackCheckpointLease);
+        var loop = fixture.StartReceiveLoop();
+        try
+        {
+            Assert.Equal(1, Volatile.Read(ref reads));
+            lock (GetServiceGate(fixture.Service))
+            {
+                var current = GetCurrentContextLeg(fixture.Context);
+                Assert.True((bool)GetFallbackFixtureInstanceMethod("TryAcceptInboundFallbackCheckpointWithCoordinatorLocked", typeof(bool), 7)
+                    .Invoke(fixture.Service, [fixture.Context, current, current.TransportEpochId,
+                        fixture.Frontier, 255, requestId, "regular_nkn_state_refresh"])!);
+                var state = CreateCoordinatorStateForTest(fixture.Context);
+                var origin = Assert.IsType<CheckpointRepairContinuityOrigin>(state.PersistentState.CheckpointRepairContinuityOrigin);
+                Assert.Null(state.CurrentFallbackCheckpointLease);
+                if (invalidation == "missing_origin")
+                    SetPrivateProperty(fixture.Context, "CoordinatorPersistentState", state.PersistentState with { CheckpointRepairContinuityOrigin = null });
+                if (invalidation == "source")
+                    SetPrivateProperty(fixture.Context, "CoordinatorPersistentState", state.PersistentState with
+                    {
+                        CheckpointRepairContinuityOrigin = origin with { Snapshot = origin.Snapshot with
+                        { SourceScope = origin.Snapshot.SourceScope with { ScopeFingerprint = "unissued" } } },
+                    });
+                if (invalidation == "provider") fixture.Session.Generation++;
+            }
+            var before = CreateCoordinatorStateForTest(fixture.Context);
+            var batch = fixture.Batch();
+            FileTransferDataFrame frame = legacy ? new FileTransferChunkBatchFrameV4
+            {
+                SessionId = batch.SessionId, TransferId = batch.TransferId, StartChunkIndex = batch.StartChunkIndex,
+                ChunkCount = batch.ChunkCount, DataSegments = batch.DataSegments,
+            } : batch;
+            await frames.Writer.WriteAsync(new(frame, FileTransferTransportKind.RegularNkn, "bulk", DateTimeOffset.UtcNow));
+            await WaitUntilAsync(() => Volatile.Read(ref reads) == 2, timeoutMs: 3000);
+            Assert.Equal(invalidation == "none" ? 101 : 100, fixture.Frontier);
+            Assert.Equal(invalidation == "none" ? 1 : 0, fixture.Stream.Writes);
+            Assert.Empty(fixture.Operations());
+            var after = CreateCoordinatorStateForTest(fixture.Context);
+            Assert.Equal(before.CurrentRuntimeOwner, after.CurrentRuntimeOwner);
+            Assert.Equal(before.CurrentRoutePublicationToken, after.CurrentRoutePublicationToken);
+            Assert.Null(after.CurrentFallbackCheckpointLease);
+        }
+        finally
+        {
+            TryCancelContextLifetime(fixture.Context);
+            await loop.WaitAsync(TimeSpan.FromSeconds(3));
+        }
+    }
+
     [Fact]
     [Trait("FileTransferRuntimeSuite", "FallbackRepairWriteTracking")]
     public async Task FallbackRepairWriteTracking_ReceiveLoopAdmitsReplayAfterCheckpointRollover()

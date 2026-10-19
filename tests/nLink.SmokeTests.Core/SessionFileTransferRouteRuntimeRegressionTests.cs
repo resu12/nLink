@@ -114,6 +114,18 @@ public sealed class SessionFileTransferRouteRuntimeRegressionTests : SessionFile
         using var receiverTransport = new LoopbackFileTransferTransport(sessionId);
         ConfigureRouteToken(senderTransport, routeToken);
         ConfigureRouteToken(receiverTransport, routeToken);
+        if (string.Equals(routeToken, FileTransferRouteResolver.FileTunaV4Token, StringComparison.Ordinal))
+        {
+            foreach (var (transport, direction) in new[]
+                     { (senderTransport, FileTransferDirection.Outbound), (receiverTransport, FileTransferDirection.Inbound) })
+            {
+                transport.SeedInitialTunaReadinessEvidenceForTests(transferId, direction);
+                var evidence = Assert.IsType<FileTransferInitialTunaReadinessEvidence>(transport.InitialTunaReadinessEvidence);
+                Assert.Equal(sessionId, evidence.SessionId);
+                Assert.Equal(transferId, evidence.TransferId);
+                Assert.Equal(direction, evidence.Direction);
+            }
+        }
         senderTransport.Connect(receiverTransport);
         using var sender = new SessionFileTransferService();
         using var receiver = new SessionFileTransferService();

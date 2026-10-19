@@ -474,6 +474,11 @@ public sealed partial class SessionFileTransferService
                 return false;
             }
 
+            // Later progress can repeat an accepted checkpoint alias; it is not a repair contract.
+            var checkpointCorrelation = startupCheckpointProof ||
+                (IsPostTunaFallbackCheckpointProofReceiverState(state) &&
+                 IsAcceptedOutboundFallbackCheckpointProofDuplicate(context, context.CurrentTransferLeg, state));
+
             TryResumeOutboundRuntimeUnlockAfterFallbackSurvivalProofLocked(
                 context,
                 "fallback_checkpoint_accepted");
@@ -628,9 +633,9 @@ public sealed partial class SessionFileTransferService
                             $"state:{state.Epoch}",
                             Priority: false,
                             state.TransportEpoch,
-                            startupCheckpointProof ? null : state.RepairRequestId,
+                            checkpointCorrelation ? null : state.RepairRequestId,
                             PriorityName: null,
-                            startupCheckpointProof ? null : state.RecoveryMode,
+                            checkpointCorrelation ? null : state.RecoveryMode,
                             RequiresExplicitFrontierRequest: stateProvesFrontierGap,
                             AllowNormalRefillBypass: !receiverAdvancedFrontier),
                         obsoleteBeforeChunkIndex: context.RemoteNextExpectedChunkIndex);
@@ -5237,7 +5242,7 @@ public sealed partial class SessionFileTransferService
         InboundBootstrapWriteSource? source = null;
         lock (gate)
         {
-            if ((context.RouteRuntime.UsesPostTunaFallbackV6Runtime && context.ReceiverSparseChunksWritten is not null ||
+            if ((context.RouteRuntime.UsesPostTunaFallbackV6Runtime ||
                  ingress?.FallbackRepairSource is not null) &&
                 !TryCaptureInboundFallbackRepairWriteSourceLocked(context, ingress, out source)) { return; }
         }
@@ -5349,7 +5354,7 @@ public sealed partial class SessionFileTransferService
             chunks,
             writeStream!,
             receivedTransportKind,
-            fallbackFrontierContract).ConfigureAwait(false);
+            fallbackFrontierContract, writeSource).ConfigureAwait(false);
     }
 
     private Task HandleInboundV6SparseChunkBatchAsync(InboundTransferContext context, FileTransferChunkBatchFrameV6 batch,
@@ -5761,184 +5766,253 @@ public sealed partial class SessionFileTransferService
             requiredWriteSource: writeSource).ConfigureAwait(false);
     }
 
+    // Bounded by the uncommitted batch, not a route/progress authority. An incomplete
+    // receipt also fences a possibly partial append: retry must fail rather than append.
+    private sealed record InboundV6ContiguousWriteReceipt(Stream Stream, byte[] Bytes)
+    {
+        public bool Completed { get; set; }
+    }
+
     private async Task HandleInboundV6ContiguousChunkBatchAsync(
         InboundTransferContext context,
         FileTransferChunkBatchFrameV6 batch,
         IReadOnlyList<(int ChunkIndex, byte[] ChunkBytes)> chunks,
         Stream writeStream,
         FileTransferTransportKind receivedTransportKind,
-        FallbackFrontierRepairContract? fallbackFrontierContract)
+        FallbackFrontierRepairContract? fallbackFrontierContract,
+        InboundBootstrapWriteSource? writeSource)
     {
-        var acceptedChunks = new List<(int ChunkIndex, byte[] ChunkBytes)>(chunks.Count);
-        lock (gate)
-        {
-            if (!ReferenceEquals(inboundTransfer, context) ||
-                context.IsTerminal ||
-                context.Hash is null)
-            {
-                return;
-            }
-
-            var expectedChunkIndex = context.NextChunkIndex;
-            foreach (var (chunkIndex, chunkBytes) in chunks.OrderBy(static item => item.ChunkIndex))
-            {
-                if (chunkIndex < expectedChunkIndex)
-                {
-                    continue;
-                }
-
-                if (chunkIndex != expectedChunkIndex)
-                {
-                    LocalOperationalLog.Info(
-                        "FileTransferService",
-                        $"event=filetransfer_v6_unsolicited_chunk_ignored; transfer_id={context.TransferId}; session_id={context.SessionId}; mode=contiguous_only; chunk_index={chunkIndex}; expected_chunk_index={expectedChunkIndex}");
-                    continue;
-                }
-
-                acceptedChunks.Add((chunkIndex, chunkBytes));
-                expectedChunkIndex++;
-            }
-        }
-
-        if (acceptedChunks.Count == 0)
-        {
-            await MaybeSendInboundV6RetryStateAsync(context).ConfigureAwait(false);
-            return;
-        }
-
-        var writeStopwatch = Stopwatch.StartNew();
-        long writtenBytes = 0;
+        await context.ReceiverSparseWriteGate.WaitAsync(context.LifetimeCts.Token).ConfigureAwait(false);
+        var writeGateHeld = true;
         try
         {
-            foreach (var (_, chunkBytes) in acceptedChunks)
+            var acceptedChunks = new List<(int ChunkIndex, byte[] ChunkBytes)>(chunks.Count);
+            lock (gate)
             {
-                await writeStream.WriteAsync(chunkBytes, context.LifetimeCts.Token).ConfigureAwait(false);
-                writtenBytes += chunkBytes.Length;
-            }
-        }
-        catch (Exception ex) when (ex is not OperationCanceledException)
-        {
-            await FailInboundV4Async(
-                context,
-                StreamWriteFailedErrorCode,
-                ex.Message,
-                "Could not write a V6 contiguous receiver chunk.").ConfigureAwait(false);
-            return;
-        }
+                if (writeSource is not null && !IsInboundBootstrapWriteSourceCurrentLocked(context, writeSource)) { return; }
+                if (!ReferenceEquals(inboundTransfer, context) ||
+                    context.IsTerminal ||
+                    context.UserPaused || context.PeerPaused ||
+                    !ReferenceEquals(context.WriteStream, writeStream) ||
+                    context.Hash is null)
+                {
+                    return;
+                }
 
-        writeStopwatch.Stop();
-        bool completed;
-        SessionFileTransferSnapshot? snapshot = null;
-        int nextChunkIndexAfterCommit;
-        int previousCommittedChunkIndex;
-        InboundFallbackFrontierProgressReceipt? fallbackFrontierProgressReceipt = null;
-        lock (gate)
-        {
-            if (!ReferenceEquals(inboundTransfer, context) ||
-                context.IsTerminal ||
-                context.Hash is null)
+                // An old destination's append cannot qualify or poison its replacement.
+                if (context.V6ContiguousWriteReceipts.Values.Any(receipt => !ReferenceEquals(receipt.Stream, writeStream)))
+                {
+                    context.V6ContiguousWriteReceipts.Clear();
+                }
+
+                var expectedChunkIndex = context.NextChunkIndex;
+                foreach (var (chunkIndex, chunkBytes) in chunks.OrderBy(static item => item.ChunkIndex))
+                {
+                    if (chunkIndex < expectedChunkIndex)
+                    {
+                        continue;
+                    }
+
+                    if (chunkIndex != expectedChunkIndex)
+                    {
+                        LocalOperationalLog.Info(
+                            "FileTransferService",
+                            $"event=filetransfer_v6_unsolicited_chunk_ignored; transfer_id={context.TransferId}; session_id={context.SessionId}; mode=contiguous_only; chunk_index={chunkIndex}; expected_chunk_index={expectedChunkIndex}");
+                        continue;
+                    }
+
+                    acceptedChunks.Add((chunkIndex, chunkBytes));
+                    expectedChunkIndex++;
+                }
+                if (writeSource is not null && acceptedChunks.Count != 0) { RegisterInboundBootstrapWriteLocked(context, writeSource, acceptedChunks); }
+            }
+
+            if (acceptedChunks.Count == 0)
             {
+                await MaybeSendInboundV6RetryStateAsync(context, writeSource).ConfigureAwait(false);
                 return;
             }
 
-            previousCommittedChunkIndex = context.NextChunkIndex;
-            foreach (var (chunkIndex, chunkBytes) in acceptedChunks)
+            var writeStopwatch = Stopwatch.StartNew();
+            long writtenBytes = 0;
+            try
             {
-                if (chunkIndex != context.NextChunkIndex)
+                foreach (var (chunkIndex, chunkBytes) in acceptedChunks)
                 {
-                    continue;
+                    InboundV6ContiguousWriteReceipt receipt;
+                    ValueTask physicalWrite;
+                    lock (gate)
+                    {
+                        if (writeSource is not null && !IsInboundBootstrapWriteSourceCurrentLocked(context, writeSource)) { return; }
+                        if (!ReferenceEquals(inboundTransfer, context) || context.IsTerminal ||
+                            context.UserPaused || context.PeerPaused || !ReferenceEquals(context.WriteStream, writeStream)) { return; }
+                        if (context.V6ContiguousWriteReceipts.TryGetValue(chunkIndex, out var appended))
+                        {
+                            // Physical I/O evidence only. The current batch still needs all normal
+                            // source/ownership checks before it may commit these bytes or emit proof.
+                            if (!ReferenceEquals(appended.Stream, writeStream) || !appended.Completed ||
+                                !appended.Bytes.AsSpan().SequenceEqual(chunkBytes))
+                            {
+                                throw new IOException("A non-seekable V6 write cannot be safely replayed.");
+                            }
+                            continue;
+                        }
+                        receipt = new(writeStream, chunkBytes.ToArray());
+                        context.V6ContiguousWriteReceipts.Add(chunkIndex, receipt);
+                        physicalWrite = writeStream.WriteAsync(chunkBytes, context.LifetimeCts.Token);
+                    }
+                    await physicalWrite.ConfigureAwait(false);
+                    lock (gate) { receipt.Completed = true; }
+                    writtenBytes += chunkBytes.Length;
+                }
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                await FailInboundV4Async(
+                    context,
+                    StreamWriteFailedErrorCode,
+                    ex.Message,
+                    "Could not write a V6 contiguous receiver chunk.", writeSource).ConfigureAwait(false);
+                return;
+            }
+
+            writeStopwatch.Stop();
+            if (writeSource is not null && BootstrapWriteBeforeCommitForTests is { } writeCommitBarrier)
+            {
+                await writeCommitBarrier(context.TransferId).ConfigureAwait(false);
+            }
+            bool completed;
+            SessionFileTransferSnapshot? snapshot = null;
+            int nextChunkIndexAfterCommit;
+            int previousCommittedChunkIndex;
+            InboundFallbackFrontierProgressReceipt? fallbackFrontierProgressReceipt = null;
+            lock (gate)
+            {
+                if (writeSource is not null && !IsInboundBootstrapWriteSourceCurrentLocked(context, writeSource)) { return; }
+                if (!ReferenceEquals(inboundTransfer, context) ||
+                    context.IsTerminal ||
+                    context.Hash is null)
+                {
+                    return;
                 }
 
-                context.Hash.AppendData(chunkBytes);
-                context.NextChunkIndex++;
-                context.ChunksTransferred++;
-                context.BytesTransferred = Math.Min(context.FileSizeBytes, context.BytesTransferred + chunkBytes.Length);
-                context.PullHighestReceivedChunkIndex = Math.Max(context.PullHighestReceivedChunkIndex, chunkIndex);
-                context.HighestBufferedChunkIndex = Math.Max(context.HighestBufferedChunkIndex, chunkIndex);
-                context.PullUsefulPayloadBytesRecent += chunkBytes.Length;
-                context.PullReceiverRawBytesRecent += chunkBytes.Length;
-                context.PullReceiverContiguousBytesCommittedRecent += chunkBytes.Length;
+                if (writeSource is not null && !OwnsInboundBootstrapWriteChunks(context, writeSource.Operation!)) { return; }
+                previousCommittedChunkIndex = context.NextChunkIndex;
+                foreach (var (chunkIndex, chunkBytes) in acceptedChunks)
+                {
+                    if (chunkIndex != context.NextChunkIndex)
+                    {
+                        continue;
+                    }
+
+                    context.Hash.AppendData(chunkBytes);
+                    context.V6ContiguousWriteReceipts.Remove(chunkIndex);
+                    context.NextChunkIndex++;
+                    context.ChunksTransferred++;
+                    context.BytesTransferred = Math.Min(context.FileSizeBytes, context.BytesTransferred + chunkBytes.Length);
+                    context.PullHighestReceivedChunkIndex = Math.Max(context.PullHighestReceivedChunkIndex, chunkIndex);
+                    context.HighestBufferedChunkIndex = Math.Max(context.HighestBufferedChunkIndex, chunkIndex);
+                    context.PullUsefulPayloadBytesRecent += chunkBytes.Length;
+                    context.PullReceiverRawBytesRecent += chunkBytes.Length;
+                    context.PullReceiverContiguousBytesCommittedRecent += chunkBytes.Length;
+                }
+
+                context.BufferedBytes = 0;
+                context.PullLateArrivalDistance = 0;
+                var progressUtc = DateTimeOffset.UtcNow;
+                context.PullLastProgressUtc = progressUtc;
+                if (context.NextChunkIndex > previousCommittedChunkIndex)
+                {
+                    context.PullLastCommittedProgressUtc = progressUtc;
+                    fallbackFrontierProgressReceipt = TrySettleInboundFallbackFrontierProgressLocked(
+                        context,
+                        fallbackFrontierContract,
+                        batch.RepairRequestId,
+                        batch.TransportEpoch,
+                        receivedTransportKind,
+                        previousCommittedChunkIndex,
+                        context.NextChunkIndex,
+                        "contiguous_chunk_batch_committed");
+                    ResetInboundV6PostTunaFallbackFrontierRescueLocked(context);
+                    ClearInboundV6ReceiverStateDeferredDiagnosticLocked(context);
+                }
+
+                context.PullReceiverWriteBatchCountRecent++;
+                context.PullReceiverWriteBatchBytesRecent += writtenBytes;
+                context.PullReceiverWriteDurationMsRecent += writeStopwatch.ElapsedMilliseconds;
+                completed = context.NextChunkIndex >= context.ChunkCount && context.ChunkCount > 0;
+                nextChunkIndexAfterCommit = context.NextChunkIndex;
+                if (nextChunkIndexAfterCommit > previousCommittedChunkIndex)
+                {
+                    var tailTransportEpoch = batch.TransportEpoch > 0
+                        ? batch.TransportEpoch
+                        : context.CurrentTransferLeg?.TransportEpochId ?? 0;
+                    TryMarkInboundFallbackTailQuiescentLocked(
+                        context,
+                        tailTransportEpoch,
+                        "chunk_batch_committed");
+                }
+
+                snapshot = CreateSnapshotLocked();
             }
 
-            context.BufferedBytes = 0;
-            context.PullLateArrivalDistance = 0;
-            var progressUtc = DateTimeOffset.UtcNow;
-            context.PullLastProgressUtc = progressUtc;
-            if (context.NextChunkIndex > previousCommittedChunkIndex)
+            context.ReceiverSparseWriteGate.Release();
+            writeGateHeld = false;
+
+            LocalOperationalLog.Info(
+                "FileTransferService",
+                $"event=filetransfer_v6_chunk_batch_received; transfer_id={context.TransferId}; session_id={context.SessionId}; mode=contiguous_only; start_chunk_index={batch.StartChunkIndex}; batch_chunk_count={batch.ChunkCount}; accepted_chunk_count={acceptedChunks.Count}; raw_bytes={chunks.Sum(static item => item.ChunkBytes.Length)}");
+            LocalOperationalLog.Info(
+                "FileTransferService",
+                $"event=filetransfer_v6_contiguous_write_committed; transfer_id={context.TransferId}; session_id={context.SessionId}; written_chunk_count={acceptedChunks.Count}; written_bytes={writtenBytes}; write_duration_ms={writeStopwatch.ElapsedMilliseconds}; next_chunk_index={nextChunkIndexAfterCommit}");
+
+            if (snapshot is not null)
             {
-                context.PullLastCommittedProgressUtc = progressUtc;
-                fallbackFrontierProgressReceipt = TrySettleInboundFallbackFrontierProgressLocked(
-                    context,
-                    fallbackFrontierContract,
-                    batch.RepairRequestId,
-                    batch.TransportEpoch,
-                    receivedTransportKind,
-                    previousCommittedChunkIndex,
-                    context.NextChunkIndex,
-                    "contiguous_chunk_batch_committed");
-                ResetInboundV6PostTunaFallbackFrontierRescueLocked(context);
-                ClearInboundV6ReceiverStateDeferredDiagnosticLocked(context);
+                lock (gate)
+                {
+                    if (writeSource is not null && !IsInboundBootstrapWriteSourceCurrentLocked(context, writeSource)) { return; }
+                    RaiseTransferChanged(snapshot);
+                    MaybeLogProgressMilestone(context, FileTransferDirection.Inbound);
+                }
             }
 
-            context.PullReceiverWriteBatchCountRecent++;
-            context.PullReceiverWriteBatchBytesRecent += writtenBytes;
-            context.PullReceiverWriteDurationMsRecent += writeStopwatch.ElapsedMilliseconds;
-            completed = context.NextChunkIndex >= context.ChunkCount && context.ChunkCount > 0;
-            nextChunkIndexAfterCommit = context.NextChunkIndex;
             if (nextChunkIndexAfterCommit > previousCommittedChunkIndex)
             {
-                var tailTransportEpoch = batch.TransportEpoch > 0
-                    ? batch.TransportEpoch
-                    : context.CurrentTransferLeg?.TransportEpochId ?? 0;
-                TryMarkInboundFallbackTailQuiescentLocked(
+                await MaybeSendInboundV6RepairProofAsync(
                     context,
-                    tailTransportEpoch,
-                    "chunk_batch_committed");
+                    batch,
+                    fallbackFrontierContract,
+                    receivedTransportKind,
+                    acceptedChunks.Count,
+                    nextChunkIndexAfterCommit,
+                    previousCommittedChunkIndex, writeSource).ConfigureAwait(false);
             }
 
-            snapshot = CreateSnapshotLocked();
+            if (completed)
+            {
+                lock (gate)
+                {
+                    if (writeSource?.FallbackRepairSource is not null && HasInboundFallbackRepairHandoffLocked(context)) { return; }
+                }
+                await FinalizeInboundTransferWithWriteBindingAsync(context, context.LifetimeCts.Token, writeSource).ConfigureAwait(false);
+                return;
+            }
+
+            var forceState = fallbackFrontierProgressReceipt is not null ||
+                             ShouldForceInboundV6ReceiverStateAfterProgress(context, previousCommittedChunkIndex);
+            await SendInboundV6ReceiverStateWithWriteBindingAsync(
+                    context,
+                    "chunk_batch_committed",
+                    forceSend: forceState,
+                    fallbackFrontierProgressReceipt: fallbackFrontierProgressReceipt, requiredWriteSource: writeSource)
+                .ConfigureAwait(false);
+            await SendInboundV6FrontierRequestWithWriteBindingAsync(context, "chunk_batch_committed", forceSend: false,
+                requiredWriteSource: writeSource).ConfigureAwait(false);
         }
-
-        LocalOperationalLog.Info(
-            "FileTransferService",
-            $"event=filetransfer_v6_chunk_batch_received; transfer_id={context.TransferId}; session_id={context.SessionId}; mode=contiguous_only; start_chunk_index={batch.StartChunkIndex}; batch_chunk_count={batch.ChunkCount}; accepted_chunk_count={acceptedChunks.Count}; raw_bytes={chunks.Sum(static item => item.ChunkBytes.Length)}");
-        LocalOperationalLog.Info(
-            "FileTransferService",
-            $"event=filetransfer_v6_contiguous_write_committed; transfer_id={context.TransferId}; session_id={context.SessionId}; written_chunk_count={acceptedChunks.Count}; written_bytes={writtenBytes}; write_duration_ms={writeStopwatch.ElapsedMilliseconds}; next_chunk_index={nextChunkIndexAfterCommit}");
-
-        if (snapshot is not null)
+        finally
         {
-            RaiseTransferChanged(snapshot);
-            MaybeLogProgressMilestone(context, FileTransferDirection.Inbound);
+            if (writeGateHeld) { context.ReceiverSparseWriteGate.Release(); }
         }
-
-        if (nextChunkIndexAfterCommit > previousCommittedChunkIndex)
-        {
-            await MaybeSendInboundV6RepairProofAsync(
-                context,
-                batch,
-                fallbackFrontierContract,
-                receivedTransportKind,
-                acceptedChunks.Count,
-                nextChunkIndexAfterCommit,
-                previousCommittedChunkIndex).ConfigureAwait(false);
-        }
-
-        if (completed)
-        {
-            await FinalizeInboundTransferAsync(context, context.LifetimeCts.Token).ConfigureAwait(false);
-            return;
-        }
-
-        var forceState = fallbackFrontierProgressReceipt is not null ||
-                         ShouldForceInboundV6ReceiverStateAfterProgress(context, previousCommittedChunkIndex);
-        await SendInboundV6ReceiverStateAsync(
-                context,
-                "chunk_batch_committed",
-                forceSend: forceState,
-                fallbackFrontierProgressReceipt: fallbackFrontierProgressReceipt)
-            .ConfigureAwait(false);
-        await SendInboundV6FrontierRequestAsync(context, "chunk_batch_committed", forceSend: false).ConfigureAwait(false);
     }
 
     private async Task MaybeSendInboundV6RetryStateAsync(InboundTransferContext context,
@@ -6143,6 +6217,8 @@ public sealed partial class SessionFileTransferService
             context.V6LastReceiverStateSentUtc = now;
             context.V6LastReceiverStateCommittedChunkIndex = context.NextChunkIndex;
             context.V6LastReceiverStateHighestReceivedChunkIndex = context.PullHighestReceivedChunkIndex;
+            context.V6LastReceiverStateUserPaused = context.UserPaused;
+            context.V6LastReceiverStatePeerPaused = context.PeerPaused;
             dataSession = context.DataSession;
             context.FrontierPublicationObservation?.Capture(CreateCoordinatorStateLocked(context), dataSession, state);
             context.FrontierBoundaryObservation?.Frame(context, state);
@@ -6949,6 +7025,13 @@ public sealed partial class SessionFileTransferService
         string frameKind,
         string reason)
     {
+        if (string.Equals(frameKind, "receiver_state", StringComparison.Ordinal) &&
+            (context.V6LastReceiverStateUserPaused != context.UserPaused ||
+             context.V6LastReceiverStatePeerPaused != context.PeerPaused))
+        {
+            return false;
+        }
+
         if (string.Equals(reason, "regular_nkn_legacy_v4_chunk_probe", StringComparison.Ordinal) ||
             string.Equals(reason, "regular_nkn_legacy_v4_state_proof", StringComparison.Ordinal) ||
             string.Equals(reason, V6RegularNknStateRefreshRecoveryMode, StringComparison.Ordinal))

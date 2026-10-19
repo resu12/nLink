@@ -78,6 +78,43 @@ internal static partial class FileTransferCoordinator
             scope.ProtocolVersion == FileTransferProtocol.ProtocolVersionV6 &&
             IsCurrentPostTunaFallbackLeg(state.CurrentLeg) && IsFallbackTailYieldScopeCurrent(state, scope, out _);
 
+    internal static FileTransferFallbackTailYieldScope? CaptureCommittedInboundFallbackReadSuccessor(
+        FileTransferCoordinatorState state, FileTransferBootstrapLocalStopScope source)
+    {
+        var transition = state.PersistentState.FileTransferRouteTransition;
+        if (state.Direction != FileTransferDirection.Inbound || state.IsTerminal || transition.CurrentOperation is not null ||
+            state.PersistentState.BootstrapSourceCallbackLineage is not { } lineage ||
+            !IsBootstrapSourceCallbackLineageCurrent(state, lineage) || lineage.Capture.Command.Source != source ||
+            lineage.Publication != lineage.Successor ||
+            lineage.Capture.Command.DataSessionIdentity != state.CurrentDataSessionIdentity ||
+            lineage.Capture.Command.DataSessionGeneration != state.CurrentDataSessionGeneration ||
+            transition.LastTerminalOperation is not
+                { Authority.Kind: FileTransferRouteTransitionKind.TunaV4ToPostTunaFallbackV6,
+                  DispositionReceipt.Status: FileTransferRouteTransitionDispositionApplyStatus.Applied or FileTransferRouteTransitionDispositionApplyStatus.Idempotent,
+                  RetainedFrameApplyReceipt.Status: FileTransferRouteTransitionRetainedFrameApplyStatus.Applied or FileTransferRouteTransitionRetainedFrameApplyStatus.Idempotent } committed ||
+            committed.RoutePublicationToken != lineage.Successor ||
+            CreateRoutePublicationAuthority(committed.Authority.SourceRoutePublication) != source.Publication ||
+            !IsCommittedFileTransferRouteTransitionTerminalEvidenceValid(committed) ||
+            !IsFileTransferRouteTransitionTargetScopeCurrent(state, committed, out _))
+        { return null; }
+        return CaptureInboundFallbackRepairWriteScope(state);
+    }
+
+    internal static FileTransferFallbackTailYieldScope? CaptureCheckpointClearedInboundReadSuccessor(
+        FileTransferCoordinatorState state, CheckpointContinuitySourceStamp source)
+    {
+        // The retained accepted receipt proves only this checkpoint clear. Current coordinator
+        // ownership still governs admission; the receipt cannot grant route or repair authority.
+        if (state.PersistentState.CheckpointRepairContinuityOrigin is not { } origin ||
+            source.CoordinatorInstanceId != state.PersistentState.CoordinatorInstanceId ||
+            source.SourceScopeFingerprint != origin.Snapshot.SourceScope.ScopeFingerprint ||
+            !IsCheckpointRepairContinuityOriginCurrent(state, origin) ||
+            !IsOnlyCheckpointScopeCleared(origin.Snapshot.SourceScope, origin.Snapshot.ClearedScope) ||
+            CaptureInboundFallbackRepairWriteScope(state) is not { } successor ||
+            !IsInboundFallbackRepairWriteScopeCurrent(state, successor)) { return null; }
+        return successor;
+    }
+
     // Holding a source is not a release, runtime-unlock admission, or route commit.
     internal static FileTransferFallbackRepairHandoffDecision PrepareInboundFallbackRepairHandoff(
         FileTransferCoordinatorState state, FileTransferFallbackTailPeerProofReceipt peerProof)

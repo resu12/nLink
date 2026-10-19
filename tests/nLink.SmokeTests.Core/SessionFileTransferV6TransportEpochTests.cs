@@ -44,6 +44,7 @@ public sealed class SessionFileTransferV6TransportEpochTests : SessionFileTransf
         sender.AttachTransport(senderTransport);
 
         var receiverSession = await StartManualOutboundV6SenderAsync(sender, senderTransport, receiverTransport, transferId);
+        await CompleteOutboundFallbackCheckpointAsync(sender, senderTransport, receiverSession);
         senderTransport.RequestAllDataSessionHandoffs(
             "receive_stall_recovery",
             FileTransferTransportHandoffKind.RegularNknRecovery,
@@ -197,7 +198,7 @@ public sealed class SessionFileTransferV6TransportEpochTests : SessionFileTransf
     }
 
     [Fact]
-    public async Task V6Epoch_TunaFallbackRegularNknChunkProbeRecoversInboundEpochWithoutFrontierProgress()
+    public async Task V6Epoch_CoordinatorCommittedFallbackDuplicateV6DoesNotRepublishOrAdvanceFrontier()
     {
         const string transferId = "transfer_v6_epoch_tuna_fallback_stale_chunk_probe";
         const string sessionId = "session_v6_epoch_tuna_fallback_stale_chunk_probe";
@@ -208,18 +209,19 @@ public sealed class SessionFileTransferV6TransportEpochTests : SessionFileTransf
         using var destination = new NonDisposingMemoryStream();
         using var senderTransport = new LoopbackFileTransferTransport(sessionId)
         {
-            IsPostTunaFileFallbackActiveForRouteSelection = true,
+            IsFileTunaActiveForRouteSelection = true,
         };
-        using var receiverTransport = new LoopbackFileTransferTransport(sessionId)
+        using var receiverTransport = new EpochBootstrapTransport(sessionId)
         {
-            IsPostTunaFileFallbackActiveForRouteSelection = true,
+            IsFileTunaActiveForRouteSelection = true,
         };
         senderTransport.Connect(receiverTransport);
         using var receiver = new SessionFileTransferService();
         receiver.AttachTransport(receiverTransport);
 
-        var senderSession = await StartManualInboundPostTunaFallbackV6ReceiverAsync(
+        var senderSession = await StartManualInboundFileTunaV4ReceiverAsync(
             senderTransport,
+            receiverTransport,
             receiver,
             transferId,
             sessionId,
@@ -229,12 +231,12 @@ public sealed class SessionFileTransferV6TransportEpochTests : SessionFileTransf
             (_, _) => Task.FromResult<Stream>(destination));
 
         await senderSession.SendAsync(
-            CreateManifest(sessionId, transferId, "post-fallback-stale-probe.bin", payload.Length, chunkSize, sha256),
+            CreateV4Manifest(sessionId, transferId, "post-fallback-stale-probe.bin", payload.Length, chunkSize, sha256),
             CancellationToken.None);
-        await WaitUntilAsync(() => receiverTransport.SentDataFrames.OfType<FileTransferReceiverStateFrameV6>().Any(), timeoutMs: 5000);
+        await WaitUntilAsync(() => receiverTransport.SentDataFrames.OfType<FileTransferStateFrameV4>().Any(), timeoutMs: 5000);
 
         await senderSession.SendAsync(
-            new FileTransferChunkBatchFrameV6
+            new FileTransferChunkBatchFrameV4
             {
                 SessionId = sessionId,
                 TransferId = transferId,
@@ -244,13 +246,21 @@ public sealed class SessionFileTransferV6TransportEpochTests : SessionFileTransf
             },
             CancellationToken.None);
         await WaitUntilAsync(
-            () => receiverTransport.SentDataFrames.OfType<FileTransferReceiverStateFrameV6>().Any(static frame => frame.ContiguousCommittedChunkIndex >= 1),
+            () => receiverTransport.SentDataFrames.OfType<FileTransferStateFrameV4>().Any(static frame => frame.ContiguousCommittedChunkIndex >= 1),
             timeoutMs: 5000);
 
-        receiverTransport.RequestAllDataSessionHandoffs(
-            "tuna_to_normal_fallback",
-            FileTransferTransportHandoffKind.TunaToNormalFallback,
-            FileTransferTransportKind.RegularNkn);
+        await senderTransport.SendFileTransferTransportEpochAsync(new FileTransferTransportEpochV6
+        {
+            SessionId = sessionId,
+            TransferId = transferId,
+            TransportEpoch = 1,
+            State = "target_proof_pending",
+            HandoffKind = "tuna_to_normal_fallback",
+            SourceTransport = "tuna",
+            TargetTransport = "regular_nkn",
+            Reason = "tuna_to_normal_fallback",
+        }, CancellationToken.None);
+        await CommitInboundFallbackForEpochTestAsync(receiver, receiverTransport, senderSession);
         await WaitUntilAsync(
             () => receiverTransport.SentDataFrames.OfType<FileTransferFrontierRequestFrameV6>().Any(frame => frame.TransportEpoch > 0),
             timeoutMs: 5000);
@@ -258,6 +268,16 @@ public sealed class SessionFileTransferV6TransportEpochTests : SessionFileTransf
             .OfType<FileTransferFrontierRequestFrameV6>()
             .Last(frame => frame.TransportEpoch > 0);
 
+        Assert.Equal((sessionId, transferId), (frontierRequest.SessionId, frontierRequest.TransferId));
+        Assert.NotEmpty(frontierRequest.MissingRanges);
+        Assert.All(frontierRequest.MissingRanges, range => Assert.True(range.StartChunkIndex >= 1));
+        var context = typeof(SessionFileTransferService)
+            .GetField("inboundTransfer", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!
+            .GetValue(receiver)!;
+        var owner = GetPrivatePropertyValue(context, "CurrentRuntimeOwner");
+        var publication = GetPrivatePropertyValue(context, "CurrentRoutePublicationToken");
+        var duplicateLogStart = GetOperationalLogLength();
+        // This is an ordinary duplicate probe, not data authorized by the frontier repair.
         receiverTransport.NextDataFrameTransportKind = FileTransferTransportKind.RegularNkn;
         await senderSession.SendAsync(
             new FileTransferChunkBatchFrameV6
@@ -265,24 +285,31 @@ public sealed class SessionFileTransferV6TransportEpochTests : SessionFileTransf
                 SessionId = sessionId,
                 TransferId = transferId,
                 TransportEpoch = frontierRequest.TransportEpoch,
-                RepairRequestId = frontierRequest.RepairRequestId,
                 StartChunkIndex = 0,
                 ChunkCount = 1,
                 DataSegments = [payload.Take(chunkSize).ToArray()],
-                Priority = "frontier",
-                RecoveryMode = "frontier_repair_only",
             },
             CancellationToken.None);
 
         await WaitUntilAsync(
-            () => ReadOperationalLogTail(logStart).Contains("reason=regular_nkn_chunk_probe", StringComparison.Ordinal),
+            () => ReadOperationalLogTail(duplicateLogStart).Contains("reason=behind_committed_frontier", StringComparison.Ordinal),
             timeoutMs: 5000);
 
         var logTail = ReadOperationalLogTail(logStart);
-        Assert.Contains("event=filetransfer_v6_regular_nkn_chunk_probe_accepted; direction=inbound", logTail, StringComparison.Ordinal);
-        Assert.Contains("event=filetransfer_v6_epoch_recovered; direction=inbound", logTail, StringComparison.Ordinal);
+        Assert.Contains("event=filetransfer_route_transition_committed;", logTail, StringComparison.Ordinal);
+        Assert.Contains("event=filetransfer_live_route_epoch_recovered; direction=inbound", logTail, StringComparison.Ordinal);
         Assert.Contains("handoff_kind=tuna_to_normal_fallback", logTail, StringComparison.Ordinal);
         Assert.Contains("target_transport=regular_nkn", logTail, StringComparison.Ordinal);
+        var duplicateLog = ReadOperationalLogTail(duplicateLogStart);
+        Assert.Contains("event=filetransfer_v6_unsolicited_chunk_ignored;", duplicateLog, StringComparison.Ordinal);
+        Assert.DoesNotContain("event=filetransfer_v6_epoch_recovered;", duplicateLog, StringComparison.Ordinal);
+        Assert.DoesNotContain("event=filetransfer_live_route_epoch_recovered;", duplicateLog, StringComparison.Ordinal);
+        Assert.DoesNotContain("event=filetransfer_route_transition_committed;", duplicateLog, StringComparison.Ordinal);
+        Assert.Equal(owner, GetPrivatePropertyValue(context, "CurrentRuntimeOwner"));
+        Assert.Equal(publication, GetPrivatePropertyValue(context, "CurrentRoutePublicationToken"));
+        Assert.Equal(payload.Take(chunkSize).ToArray(), destination.ToArray());
+        Assert.Equal(1, receiverTransport.SentDataFrames.OfType<FileTransferReceiverStateFrameV6>()
+            .Max(frame => frame.ContiguousCommittedChunkIndex));
         Assert.NotEqual(FileTransferTransferState.Failed, receiver.Snapshot.Inbound?.State);
     }
 
@@ -374,7 +401,7 @@ public sealed class SessionFileTransferV6TransportEpochTests : SessionFileTransf
         {
             IsFileTunaActiveForRouteSelection = true,
         };
-        using var receiverTransport = new LoopbackFileTransferTransport(sessionId)
+        using var receiverTransport = new EpochBootstrapTransport(sessionId)
         {
             IsFileTunaActiveForRouteSelection = true,
         };
@@ -415,9 +442,7 @@ public sealed class SessionFileTransferV6TransportEpochTests : SessionFileTransf
                 Reason = "tuna_to_normal_fallback",
             },
             CancellationToken.None);
-        await WaitUntilAsync(
-            () => ReadOperationalLogTail(logStart).Contains("event=filetransfer_v6_peer_epoch_promoted_live_route; direction=inbound", StringComparison.Ordinal),
-            timeoutMs: 5000);
+        await CommitInboundFallbackForEpochTestAsync(receiver, receiverTransport, senderSession);
         string? routeSelectedLog = null;
         await WaitUntilAsync(
             () =>
@@ -469,7 +494,7 @@ public sealed class SessionFileTransferV6TransportEpochTests : SessionFileTransf
             route: FileTransferRouteResolver.PostTunaFallbackV6Token,
             protocolVersion: FileTransferProtocol.ProtocolVersionV6,
             targetTransport: "regular_nkn");
-        Assert.Contains("event=filetransfer_v6_peer_epoch_promoted_live_route; direction=inbound", logTail, StringComparison.Ordinal);
+        Assert.Contains("event=filetransfer_route_transition_committed", logTail, StringComparison.Ordinal);
         Assert.Contains("event=filetransfer_v6_chunk_batch_received", logTail, StringComparison.Ordinal);
         Assert.DoesNotContain(
             $"event=filetransfer_data_frame_ignored; transfer_id={transferId}; session_id={sessionId}; frame_type=filetransfer.chunk_batch.v6; reason=protocol_not_v4",
@@ -492,7 +517,7 @@ public sealed class SessionFileTransferV6TransportEpochTests : SessionFileTransf
         {
             IsFileTunaActiveForRouteSelection = true,
         };
-        using var receiverTransport = new LoopbackFileTransferTransport(sessionId)
+        using var receiverTransport = new EpochBootstrapTransport(sessionId)
         {
             IsFileTunaActiveForRouteSelection = true,
         };
@@ -520,23 +545,7 @@ public sealed class SessionFileTransferV6TransportEpochTests : SessionFileTransf
                 frame.MissingRanges.Count > 0),
             timeoutMs: 5000);
 
-        var inboundContext = typeof(SessionFileTransferService)
-            .GetField("inboundTransfer", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!
-            .GetValue(receiver)!;
-        var postTunaFallbackRoute = FileTransferRouteResolver.Resolve(FileTransferRoute.PostTunaFallbackV6);
-        var liveRouteEpoch = typeof(SessionFileTransferService)
-            .GetMethod("StartLiveRouteEpoch", System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.NonPublic)!
-            .Invoke(
-                null,
-                [
-                    0,
-                    postTunaFallbackRoute,
-                    FileTransferTransportHandoffKind.TunaToNormalFallback,
-                    FileTransferTransportKind.RegularNkn,
-                    "remote_header_switch_off",
-                ]);
-        SetPrivateProperty(inboundContext, "LastLiveRouteEpochId", 1);
-        SetPrivateProperty(inboundContext, "CurrentLiveRouteEpoch", liveRouteEpoch);
+        await CommitInboundFallbackForEpochTestAsync(receiver, receiverTransport, senderSession);
 
         senderTransport.NextDataFrameTransportKind = FileTransferTransportKind.RegularNkn;
         await senderSession.SendAsync(
@@ -556,8 +565,7 @@ public sealed class SessionFileTransferV6TransportEpochTests : SessionFileTransf
             timeoutMs: 5000);
 
         var logTail = ReadOperationalLogTail(logStart);
-        Assert.Contains("event=filetransfer_peer_post_tuna_fallback_v6_proof_promoted_route; direction=inbound", logTail, StringComparison.Ordinal);
-        Assert.Contains("reason=current_post_tuna_fallback_live_route_frame", logTail, StringComparison.Ordinal);
+        Assert.Contains("event=filetransfer_route_transition_committed", logTail, StringComparison.Ordinal);
         Assert.Contains("route=post_tuna_fallback_v6; protocol_version=6", logTail, StringComparison.Ordinal);
         Assert.DoesNotContain(
             $"event=filetransfer_data_frame_ignored; transfer_id={transferId}; session_id={sessionId}; frame_type=filetransfer.chunk_batch.v6; reason=protocol_not_v4",
@@ -580,7 +588,7 @@ public sealed class SessionFileTransferV6TransportEpochTests : SessionFileTransf
         {
             IsFileTunaActiveForRouteSelection = true,
         };
-        using var receiverTransport = new LoopbackFileTransferTransport(sessionId)
+        using var receiverTransport = new EpochBootstrapTransport(sessionId)
         {
             IsFileTunaActiveForRouteSelection = true,
         };
@@ -621,9 +629,7 @@ public sealed class SessionFileTransferV6TransportEpochTests : SessionFileTransf
                 Reason = "tuna_to_normal_fallback",
             },
             CancellationToken.None);
-        await WaitUntilAsync(
-            () => ReadOperationalLogTail(logStart).Contains("event=filetransfer_v6_peer_epoch_promoted_live_route; direction=inbound", StringComparison.Ordinal),
-            timeoutMs: 5000);
+        await CommitInboundFallbackForEpochTestAsync(receiver, receiverTransport, senderSession);
         await WaitUntilAsync(
             () => receiverTransport.SentDataFrames.OfType<FileTransferFrontierRequestFrameV6>().Any(frame =>
                 frame.TransferId == transferId &&
@@ -774,6 +780,7 @@ public sealed class SessionFileTransferV6TransportEpochTests : SessionFileTransf
         sender.AttachTransport(senderTransport);
 
         var receiverSession = await StartManualOutboundV6SenderAsync(sender, senderTransport, receiverTransport, transferId, payloadSize: 1_000_000);
+        await CompleteOutboundFallbackCheckpointAsync(sender, senderTransport, receiverSession);
         Assert.NotNull(await sender.PauseTransferAsync(transferId, "queue_recovered_requests", CancellationToken.None));
 
         senderTransport.RequestAllDataSessionHandoffs(
@@ -858,6 +865,7 @@ public sealed class SessionFileTransferV6TransportEpochTests : SessionFileTransf
         sender.AttachTransport(senderTransport);
 
         var receiverSession = await StartManualOutboundV6SenderAsync(sender, senderTransport, receiverTransport, transferId, payloadSize: 1_000_000);
+        await CompleteOutboundFallbackCheckpointAsync(sender, senderTransport, receiverSession);
         receiverTransport.NextDataFrameTransportKind = FileTransferTransportKind.RegularNkn;
         senderTransport.RequestAllDataSessionHandoffs(
             "tuna_to_normal_fallback",
@@ -927,6 +935,7 @@ public sealed class SessionFileTransferV6TransportEpochTests : SessionFileTransf
         sender.AttachTransport(senderTransport);
 
         var receiverSession = await StartManualOutboundV6SenderAsync(sender, senderTransport, receiverTransport, transferId, payloadSize: 1_000_000);
+        await CompleteOutboundFallbackCheckpointAsync(sender, senderTransport, receiverSession);
         receiverTransport.NextDataFrameTransportKind = FileTransferTransportKind.RegularNkn;
         senderTransport.RequestAllDataSessionHandoffs(
             "receive_stall_recovery",
@@ -993,6 +1002,7 @@ public sealed class SessionFileTransferV6TransportEpochTests : SessionFileTransf
         using var sender = new SessionFileTransferService();
         sender.AttachTransport(senderTransport);
         var receiverSession = await StartManualOutboundV6SenderAsync(sender, senderTransport, receiverTransport, transferId);
+        await CompleteOutboundFallbackCheckpointAsync(sender, senderTransport, receiverSession);
         receiverTransport.NextDataFrameTransportKind = FileTransferTransportKind.RegularNkn;
         senderTransport.RequestAllDataSessionHandoffs(
             "tuna_to_normal_fallback",
@@ -1080,6 +1090,7 @@ public sealed class SessionFileTransferV6TransportEpochTests : SessionFileTransf
         using var sender = new SessionFileTransferService();
         sender.AttachTransport(senderTransport);
         var receiverSession = await StartManualOutboundV6SenderAsync(sender, senderTransport, receiverTransport, transferId);
+        await CompleteOutboundFallbackCheckpointAsync(sender, senderTransport, receiverSession);
         receiverTransport.NextDataFrameTransportKind = FileTransferTransportKind.RegularNkn;
         senderTransport.RequestAllDataSessionHandoffs(
             "receive_stall_recovery",
@@ -1163,6 +1174,7 @@ public sealed class SessionFileTransferV6TransportEpochTests : SessionFileTransf
             sender.AttachTransport(senderTransport);
 
             var receiverSession = await StartManualOutboundV6SenderAsync(sender, senderTransport, receiverTransport, transferId);
+            await CompleteOutboundFallbackCheckpointAsync(sender, senderTransport, receiverSession);
             receiverTransport.NextDataFrameTransportKind = FileTransferTransportKind.RegularNkn;
             senderTransport.RequestAllDataSessionHandoffs(
                 "tuna_to_normal_fallback",
@@ -1241,6 +1253,7 @@ public sealed class SessionFileTransferV6TransportEpochTests : SessionFileTransf
                     TransferId = transferId,
                     TransportEpoch = probeFrame.TransportEpoch,
                     RepairRequestId = $"repair:{probeFrame.TransportEpoch}:0",
+                    RequestCorrelationId = $"frontier:{probeFrame.TransportEpoch}:0",
                     MissingRanges = [new FileTransferRangeV4 { StartChunkIndex = 0, ChunkCount = 1 }],
                     Priority = "frontier",
                     RecoveryMode = "frontier_repair_only",
@@ -1250,6 +1263,9 @@ public sealed class SessionFileTransferV6TransportEpochTests : SessionFileTransf
             await WaitUntilAsync(
                 () => senderTransport.SentDataFrames.OfType<FileTransferChunkBatchFrameV6>().Any(batch =>
                     batch.TransportEpoch == probeFrame.TransportEpoch &&
+                    batch.RepairRequestId == $"repair:{probeFrame.TransportEpoch}:0" &&
+                    batch.SessionId == probeFrame.SessionId &&
+                    batch.TransferId == transferId &&
                     batch.StartChunkIndex == 0 &&
                     string.Equals(batch.Priority, "frontier", StringComparison.OrdinalIgnoreCase) &&
                     batch.ForceRegularNknBulk &&
@@ -1294,6 +1310,7 @@ public sealed class SessionFileTransferV6TransportEpochTests : SessionFileTransf
                 receiverTransport,
                 transferId,
                 payloadSize: 2_000_000);
+            await CompleteOutboundFallbackCheckpointAsync(sender, senderTransport, receiverSession);
 
             await receiverSession.SendAsync(
                 new FileTransferReceiverStateFrameV6
@@ -1483,6 +1500,7 @@ public sealed class SessionFileTransferV6TransportEpochTests : SessionFileTransf
             receiverTransport,
             transferId,
             payloadSize: 2_000_000);
+        await CompleteOutboundFallbackCheckpointAsync(sender, senderTransport, receiverSession);
 
         await receiverSession.SendAsync(
             new FileTransferReceiverStateFrameV6
@@ -1557,6 +1575,7 @@ public sealed class SessionFileTransferV6TransportEpochTests : SessionFileTransf
         using var sender = new SessionFileTransferService();
         sender.AttachTransport(senderTransport);
         var receiverSession = await StartManualOutboundV6SenderAsync(sender, senderTransport, receiverTransport, transferId);
+        await CompleteOutboundFallbackCheckpointAsync(sender, senderTransport, receiverSession);
         var chunkBatchesBeforePause = senderTransport.SentDataFrames.OfType<FileTransferChunkBatchFrameV6>().Count();
 
         senderTransport.SetLocalDataSessionsUnavailableForTests("receive_stall_recovery");
@@ -1593,6 +1612,7 @@ public sealed class SessionFileTransferV6TransportEpochTests : SessionFileTransf
         using var sender = new SessionFileTransferService();
         sender.AttachTransport(senderTransport);
         var receiverSession = await StartManualOutboundV6SenderAsync(sender, senderTransport, receiverTransport, transferId);
+        await CompleteOutboundFallbackCheckpointAsync(sender, senderTransport, receiverSession);
 
         senderTransport.SetLocalDataSessionsUnavailableForTests("receive_stall_recovery");
         senderTransport.RequestAllDataSessionHandoffs(
@@ -2346,9 +2366,16 @@ public sealed class SessionFileTransferV6TransportEpochTests : SessionFileTransf
             "LogFileTransferControlPlaneDeliveryResult",
             System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.NonPublic);
         Assert.NotNull(method);
+        var parameters = method!.GetParameters();
+        Assert.Equal(4, parameters.Length);
+        Assert.Equal(typeof(FileTransferControlPlaneDeliveryRequest), parameters[0].ParameterType);
+        Assert.Equal(typeof(FileTransferControlPlaneDeliveryResult), parameters[1].ParameterType);
+        Assert.Equal(typeof(bool), parameters[2].ParameterType);
+        Assert.Equal("NLink.Core.FileTransfer.CheckpointRepairContinuityStamp", parameters[3].ParameterType.FullName);
+        Assert.True(parameters[3].IsOptional);
 
         var logStart = GetOperationalLogLength();
-        var exception = Record.Exception(() => method!.Invoke(null, [request, result, false]));
+        var exception = Record.Exception(() => method.Invoke(null, [request, result, false, null]));
 
         Assert.Null(exception);
         var logTail = ReadOperationalLogTail(logStart);
@@ -2958,6 +2985,7 @@ public sealed class SessionFileTransferV6TransportEpochTests : SessionFileTransf
             receiverTransport,
             transferId,
             payloadSize: 2_000_000);
+        await CompleteOutboundFallbackCheckpointAsync(sender, senderTransport, receiverSession);
 
         await receiverSession.SendAsync(
             new FileTransferReceiverStateFrameV6
@@ -3041,6 +3069,7 @@ public sealed class SessionFileTransferV6TransportEpochTests : SessionFileTransf
         using var sender = new SessionFileTransferService();
         sender.AttachTransport(senderTransport);
         var receiverSession = await StartManualOutboundV6SenderAsync(sender, senderTransport, receiverTransport, transferId);
+        await CompleteOutboundFallbackCheckpointAsync(sender, senderTransport, receiverSession);
         senderTransport.RequestAllDataSessionHandoffs(
             "receive_stall_recovery",
             FileTransferTransportHandoffKind.RegularNknRecovery,
@@ -3203,6 +3232,7 @@ public sealed class SessionFileTransferV6TransportEpochTests : SessionFileTransf
             await WaitUntilAsync(
                 () => ReadOperationalLogTail(logStart).Contains("event=filetransfer_v6_epoch_waiting", StringComparison.Ordinal),
                 timeoutMs: 5000);
+            RequestCoordinatorRecoveryForEpochLivenessTest(sender, senderTransport);
             await WaitUntilAsync(
                 () => ReadOperationalLogTail(logStart).Contains("event=filetransfer_v6_heartbeat_timeout_deferred_for_epoch_waiting; direction=outbound", StringComparison.Ordinal),
                 timeoutMs: 5000);
@@ -3352,6 +3382,7 @@ public sealed class SessionFileTransferV6TransportEpochTests : SessionFileTransf
             sender.AttachTransport(senderTransport);
 
             var receiverSession = await StartManualOutboundV6SenderAsync(sender, senderTransport, receiverTransport, transferId);
+            await CompleteOutboundFallbackCheckpointAsync(sender, senderTransport, receiverSession);
             var offer = senderTransport.SentOffers.Single();
             await receiverSession.SendAsync(
                 new FileTransferReceiverStateFrameV6
@@ -3374,7 +3405,9 @@ public sealed class SessionFileTransferV6TransportEpochTests : SessionFileTransf
                 () => senderTransport.ReceiveRecoveryRequests.Any(request =>
                     request.Direction == FileTransferDirection.Outbound &&
                     request.TransferId == transferId &&
-                    request.Reason == "sender_request_feedback_stalled"),
+                    request.Reason == "sender_request_feedback_stalled") &&
+                    ReadOperationalLogTail(logStart).Contains(
+                        "event=filetransfer_v6_transport_receive_recovery_request_dispatched; direction=outbound", StringComparison.Ordinal),
                 timeoutMs: 5000);
 
             var logTail = ReadOperationalLogTail(logStart);
@@ -3527,6 +3560,9 @@ public sealed class SessionFileTransferV6TransportEpochTests : SessionFileTransf
                 () => senderTransport.SentDataFrames.OfType<FileTransferChunkBatchFrameV6>().Any(static batch => batch.StartChunkIndex == 0),
                 timeoutMs: 5000);
 
+            RequestCoordinatorRecoveryForEpochLivenessTest(sender, senderTransport);
+            // The scenario must not dispatch another recovery after its coordinator-issued setup.
+            logStart = GetOperationalLogLength();
             const string deferredMarker = "event=filetransfer_v6_heartbeat_timeout_deferred_for_regular_nkn_feedback_repair; direction=outbound";
             await WaitUntilAsync(
                 () => CountOccurrences(ReadOperationalLogTail(logStart), deferredMarker) >= 4,
@@ -3596,6 +3632,57 @@ public sealed class SessionFileTransferV6TransportEpochTests : SessionFileTransf
         }
     }
 
+    private static void RequestCoordinatorRecoveryForEpochLivenessTest(
+        SessionFileTransferService service, LoopbackFileTransferTransport transport)
+    {
+        const System.Reflection.BindingFlags instanceFlags =
+            System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic;
+        const System.Reflection.BindingFlags staticFlags =
+            System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.NonPublic;
+        var type = typeof(SessionFileTransferService);
+        var offer = Assert.Single(transport.SentOffers);
+        var context = type.GetField("outboundTransfer", instanceFlags)!.GetValue(service)!;
+        var dataSession = GetPrivatePropertyValue(context, "DataSession");
+        var dataSessionGeneration = GetPrivateProperty<long>(context, "DataSessionGeneration");
+        var request = type.GetMethod("TryRequestFileTransferReceiveRecovery", instanceFlags)!;
+        Assert.True((bool)request.Invoke(service,
+            [new FileTransferReceiveRecoveryRequest(offer.SessionId, offer.TransferId,
+                FileTransferDirection.Outbound, "session_liveness_timeout_pending")])!);
+        var dispatched = Assert.Single(transport.ReceiveRecoveryRequests);
+        var command = Assert.IsType<FileTransferBridgeRecoveryExecutionCommand>(dispatched.BridgeRecoveryExecutionCommand);
+        Assert.False(command.IsDefault);
+        var createState = type.GetMethods(staticFlags).Single(method =>
+            method.Name == "CreateCoordinatorStateLocked" && method.GetParameters().Length == 1 &&
+            method.GetParameters()[0].ParameterType == context.GetType());
+        lock (type.GetField("gate", instanceFlags)!.GetValue(service)!)
+        {
+            var state = Assert.IsType<FileTransferCoordinatorState>(createState.Invoke(null, [context]));
+            var operation = Assert.IsType<FileTransferReceiveRecoveryOperation>(
+                state.PersistentState.FileTransferReceiveRecovery.CurrentOperation);
+            Assert.Equal(command, operation.Authority.ExecutionCommand);
+            Assert.False(operation.Authority.AuthorityId.IsDefault);
+            var observation = operation.Authority.Observation;
+            Assert.Equal((offer.SessionId, offer.TransferId, FileTransferDirection.Outbound),
+                (observation.SessionId, observation.TransferId, observation.Direction));
+            Assert.Equal(state.CurrentRuntimeOwner, observation.RuntimeOwner);
+            Assert.Equal(state.CurrentRoutePublicationToken, observation.RoutePublication);
+            Assert.Equal(state.RouteSelection.Route, observation.Route);
+            Assert.Equal(state.CurrentLeg!.Generation, observation.LegGeneration);
+            Assert.Equal(state.CurrentLeg.TransportEpochId, observation.TransportEpoch);
+            Assert.Equal(state.CurrentLeg.BridgeRecoveryGeneration, observation.BridgeRecoveryGeneration);
+            Assert.Equal(state.CurrentDataSessionIdentity, observation.DataSessionIdentity);
+            Assert.Equal(dataSessionGeneration, observation.DataSessionGeneration);
+            Assert.Same(dataSession, GetPrivatePropertyValue(context, "DataSession"));
+        }
+        Assert.True(service.TryGetActiveFileTransferRecoveryLivenessSnapshot(
+            offer.SessionId, offer.TransferId, FileTransferDirection.Outbound, out var snapshot));
+        Assert.True(service.TryAuthorizeRecoveryLivenessDeferral(snapshot, "fixture_exact_recovery_operation",
+            snapshot.LivenessDeferralDeadlineUtc, out var grant));
+        Assert.NotNull(grant);
+        Assert.False(service.TryGetActiveFileTransferRecoveryLivenessSnapshot(
+            offer.SessionId, offer.TransferId + "_stale", FileTransferDirection.Outbound, out _));
+    }
+
     private static async Task<IFileTransferDataSession> StartManualOutboundV6SenderAsync(
         SessionFileTransferService sender,
         LoopbackFileTransferTransport senderTransport,
@@ -3622,39 +3709,69 @@ public sealed class SessionFileTransferV6TransportEpochTests : SessionFileTransf
             CancellationToken.None);
         await WaitUntilAsync(() => senderTransport.SentDataFrames.OfType<FileTransferManifestFrameV6>().Any(), timeoutMs: 5000);
         var receiverSession = await receiverTransport.OpenFileTransferDataSessionAsync(offer.SessionId, transferId, CancellationToken.None);
-        var initialCheckpoint = senderTransport.SentDataFrames
-            .OfType<FileTransferFrontierRequestFrameV6>()
-            .LastOrDefault(frame =>
-                frame.TransferId == transferId &&
-                string.Equals(frame.RecoveryMode, "regular_nkn_state_refresh", StringComparison.Ordinal));
-        if (string.Equals(offer.FileTransferRoute, FileTransferRouteResolver.PostTunaFallbackV6Token, StringComparison.Ordinal) &&
-            initialCheckpoint is not null)
-        {
-            await receiverSession.SendAsync(
-                new FileTransferReceiverStateFrameV6
-                {
-                    SessionId = offer.SessionId,
-                    TransferId = transferId,
-                    Epoch = 1,
-                    ContiguousCommittedChunkIndex = 0,
-                    DurableReceivedHighestChunkIndex = -1,
-                    CreditUntilChunkIndexExclusive = 0,
-                    MissingRanges = [],
-                    BytesCommitted = 0,
-                    TransportEpoch = initialCheckpoint.TransportEpoch,
-                    RepairRequestId = initialCheckpoint.RepairRequestId,
-                    Priority = initialCheckpoint.Priority,
-                    RecoveryMode = initialCheckpoint.RecoveryMode,
-                },
-                CancellationToken.None);
-            await WaitUntilAsync(
-                () => ReadOperationalLogTail(0).Contains(
-                    "event=filetransfer_fallback_checkpoint_accepted; direction=outbound",
-                    StringComparison.Ordinal),
-                timeoutMs: 5000);
-        }
-
         return receiverSession;
+    }
+
+    private static async Task CompleteOutboundFallbackCheckpointAsync(
+        SessionFileTransferService sender,
+        LoopbackFileTransferTransport senderTransport,
+        IFileTransferDataSession receiverSession)
+    {
+        var manifest = Assert.Single(senderTransport.SentDataFrames.OfType<FileTransferManifestFrameV6>());
+        var context = GetPrivateField(sender, "outboundTransfer")!;
+        var owner = GetPrivatePropertyValue(context, "CurrentRuntimeOwner");
+        var publication = GetPrivatePropertyValue(context, "CurrentRoutePublicationToken");
+        var leg = Assert.IsType<FileTransferLeg>(GetPrivatePropertyValue(context, "CurrentTransferLeg"));
+        var transportEpoch = leg.TransportEpochId;
+        Assert.True(transportEpoch > 0);
+        Assert.False(leg.CanSendData);
+        Assert.Empty(senderTransport.SentDataFrames.OfType<FileTransferChunkBatchFrameV6>());
+
+        await receiverSession.SendAsync(new FileTransferReceiverStateFrameV6
+        {
+            SessionId = manifest.SessionId,
+            TransferId = manifest.TransferId,
+            TransportEpoch = transportEpoch,
+            Epoch = 0,
+            ContiguousCommittedChunkIndex = 0,
+            DurableReceivedHighestChunkIndex = -1,
+            CreditUntilChunkIndexExclusive = 0,
+            MissingRanges = [],
+        }, CancellationToken.None);
+        await WaitUntilAsync(() => senderTransport.SentDataFrames.OfType<FileTransferFrontierRequestFrameV6>()
+            .Any(frame => frame.TransportEpoch == transportEpoch && frame.Priority == "state_refresh"), timeoutMs: 5000);
+        var checkpoint = Assert.Single(senderTransport.SentDataFrames.OfType<FileTransferFrontierRequestFrameV6>()
+            .Where(frame => frame.TransportEpoch == transportEpoch && frame.Priority == "state_refresh"));
+        leg = Assert.IsType<FileTransferLeg>(GetPrivatePropertyValue(context, "CurrentTransferLeg"));
+        Assert.Equal(manifest.SessionId, checkpoint.SessionId);
+        Assert.Equal(manifest.TransferId, checkpoint.TransferId);
+        Assert.Equal(leg.TransportEpochId, checkpoint.TransportEpoch);
+        Assert.Equal(leg.CheckpointRequestId, checkpoint.RepairRequestId);
+        Assert.False(string.IsNullOrWhiteSpace(checkpoint.RepairRequestId));
+        Assert.Equal("regular_nkn_state_refresh", checkpoint.RecoveryMode);
+        Assert.False(leg.CanSendData);
+        Assert.Empty(senderTransport.SentDataFrames.OfType<FileTransferChunkBatchFrameV6>());
+
+        await receiverSession.SendAsync(new FileTransferReceiverStateFrameV6
+        {
+            SessionId = checkpoint.SessionId,
+            TransferId = checkpoint.TransferId,
+            TransportEpoch = checkpoint.TransportEpoch,
+            Epoch = 0,
+            ContiguousCommittedChunkIndex = 0,
+            DurableReceivedHighestChunkIndex = -1,
+            CreditUntilChunkIndexExclusive = 0,
+            MissingRanges = [],
+            RepairRequestId = checkpoint.RepairRequestId,
+            Priority = checkpoint.Priority,
+            RecoveryMode = checkpoint.RecoveryMode,
+        }, CancellationToken.None);
+        await WaitUntilAsync(() => Assert.IsType<FileTransferLeg>(
+            GetPrivatePropertyValue(context, "CurrentTransferLeg")).CanSendData, timeoutMs: 5000);
+        Assert.Null(GetPrivatePropertyValue(context, "V6StartupCheckpointOwner"));
+        Assert.Equal(owner, GetPrivatePropertyValue(context, "CurrentRuntimeOwner"));
+        Assert.Equal(publication, GetPrivatePropertyValue(context, "CurrentRoutePublicationToken"));
+        Assert.Empty(senderTransport.SentDataFrames.OfType<FileTransferChunkBatchFrameV6>());
     }
 
     private static async Task<IFileTransferDataSession> StartManualInboundPostTunaFallbackV6ReceiverAsync(
@@ -3712,6 +3829,8 @@ public sealed class SessionFileTransferV6TransportEpochTests : SessionFileTransf
         FileTransferWriteStreamFactory openWriteStreamAsync)
     {
         const string routeToken = FileTransferRouteResolver.FileTunaV4Token;
+        var issuer = FileTransferBootstrapCorrelation.CreateIssuer(
+            "epoch_fixture_peer", sessionId, transferId, FileTransferDirection.Outbound);
         receiverTransport.SeedInitialTunaReadinessEvidenceForTests(transferId, FileTransferDirection.Inbound);
         await senderTransport.SendFileTransferOfferAsync(
             new FileTransferOfferV2
@@ -3722,6 +3841,8 @@ public sealed class SessionFileTransferV6TransportEpochTests : SessionFileTransf
                 FileSizeBytes = fileSizeBytes,
                 PreferredDataProtocolVersion = FileTransferProtocol.ProtocolVersionV4,
                 FileTransferRoute = routeToken,
+                FallbackBootstrapCorrelationVersion = 1,
+                FallbackBootstrapIssuerId = issuer,
             },
             CancellationToken.None);
         await WaitUntilAsync(() => receiver.Snapshot.Inbound?.State == FileTransferTransferState.PendingDecision, timeoutMs: 5000);
@@ -3737,12 +3858,311 @@ public sealed class SessionFileTransferV6TransportEpochTests : SessionFileTransf
                 SessionRole = FileTransferProtocol.SessionRoleSender,
                 ChunkSizeBytes = 4,
                 InitialPipelineDepth = 1,
+                FallbackBootstrapCorrelationVersion = 1,
+                FallbackBootstrapIssuerId = issuer,
             },
             CancellationToken.None);
         await WaitUntilAsync(
             () => receiver.Snapshot.Inbound?.State is FileTransferTransferState.AwaitingMetadata or FileTransferTransferState.Receiving,
             timeoutMs: 5000);
         return await senderTransport.OpenFileTransferDataSessionAsync(sessionId, transferId, CancellationToken.None);
+    }
+
+    [Theory]
+    [InlineData("none")] [InlineData("session")] [InlineData("provider")] [InlineData("service")]
+    [InlineData("source")] [InlineData("missing_lineage")] [InlineData("unissued_lineage")]
+    [InlineData("disposition")] [InlineData("retained_frame")]
+    public async Task V6Epoch_PendingTunaReadAdoptsOnlyExactCommittedFallbackSource(string invalidation)
+    {
+        const string sessionId = "session_epoch_pending_read";
+        const string transferId = "transfer_epoch_pending_read";
+        var payload = Enumerable.Range(0, 16).Select(index => (byte)index).ToArray();
+        var sha256 = Convert.ToBase64String(SHA256.HashData(payload));
+        using var destination = new NonDisposingMemoryStream();
+        using var senderTransport = new LoopbackFileTransferTransport(sessionId) { IsFileTunaActiveForRouteSelection = true };
+        using var receiverTransport = new EpochBootstrapTransport(sessionId) { IsFileTunaActiveForRouteSelection = true };
+        senderTransport.Connect(receiverTransport);
+        using var receiver = new SessionFileTransferService();
+        receiver.AttachTransport(receiverTransport);
+        var senderSession = await StartManualInboundFileTunaV4ReceiverAsync(senderTransport, receiverTransport, receiver,
+            transferId, sessionId, "pending-read.bin", payload.Length, sha256, (_, _) => Task.FromResult<Stream>(destination));
+        await senderSession.SendAsync(CreateV4Manifest(sessionId, transferId, "pending-read.bin", payload.Length, 4, sha256), CancellationToken.None);
+        await WaitUntilAsync(() => receiverTransport.SentDataFrames.OfType<FileTransferStateFrameV4>()
+            .Any(frame => frame.TransferId == transferId && frame.MissingRanges.Count > 0), timeoutMs: 5000);
+
+        const System.Reflection.BindingFlags flags = System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic;
+        var type = typeof(SessionFileTransferService);
+        var context = type.GetField("inboundTransfer", flags)!.GetValue(receiver)!;
+        var gate = type.GetField("gate", flags)!.GetValue(receiver)!;
+        var session = Assert.IsAssignableFrom<IFileTransferDataSession>(GetPrivatePropertyValue(context, "DataSession"));
+        object ingress;
+        lock (gate)
+        {
+            ingress = type.GetMethod("CaptureInboundBootstrapWriteIngress", System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.NonPublic)!
+                .Invoke(null, [context, session])!;
+            Assert.True(GetPrivateProperty<bool>(ingress, "RequiresSourceBinding"));
+            Assert.Null(GetPrivatePropertyValue(ingress, "FallbackRepairSource"));
+            Assert.NotNull(GetPrivatePropertyValue(ingress, "BootstrapSource"));
+        }
+        await CommitInboundFallbackForEpochTestAsync(receiver, receiverTransport, senderSession);
+        lock (gate)
+        {
+            void Set(object target, string name, object? value) => target.GetType().GetProperty(name)!.SetValue(target, value);
+            var persistent = GetPrivateProperty<FileTransferCoordinatorPersistentState>(context, "CoordinatorPersistentState");
+            switch (invalidation)
+            {
+                case "none": break;
+                case "session": Set(ingress, "Session", senderSession); break;
+                case "provider": Set(ingress, "ProviderGeneration", GetPrivateProperty<long>(ingress, "ProviderGeneration") + 1); break;
+                case "service": Set(ingress, "ServiceGeneration", GetPrivateProperty<long>(ingress, "ServiceGeneration") + 1); break;
+                case "source":
+                    var source = GetPrivateProperty<FileTransferBootstrapLocalStopScope>(ingress, "BootstrapSource");
+                    Set(ingress, "BootstrapSource", source with { LocalIssuer = "unissued" }); break;
+                case "missing_lineage": persistent = persistent with { BootstrapSourceCallbackLineage = null }; break;
+                case "unissued_lineage": persistent = persistent with { BootstrapSourceCallbackLineage = persistent.BootstrapSourceCallbackLineage! with { Identity = "unissued" } }; break;
+                case "disposition":
+                case "retained_frame":
+                    var transition = persistent.FileTransferRouteTransition;
+                    var committed = transition.LastTerminalOperation!.Value;
+                    persistent = persistent with { FileTransferRouteTransition = transition with
+                    {
+                        LastTerminalOperation = invalidation == "disposition"
+                            ? committed with { DispositionReceipt = null }
+                            : committed with { RetainedFrameApplyReceipt = null },
+                    } };
+                    break;
+                default: throw new ArgumentOutOfRangeException(nameof(invalidation));
+            }
+            Set(context, "CoordinatorPersistentState", persistent);
+            var owner = GetPrivatePropertyValue(context, "CurrentRuntimeOwner");
+            var publication = GetPrivatePropertyValue(context, "CurrentRoutePublicationToken");
+            var adopted = type.GetMethod("AdoptCommittedInboundFallbackReadSourceLocked", flags)!.Invoke(receiver, [context, ingress]);
+            if (invalidation == "none")
+            {
+                Assert.NotSame(ingress, adopted);
+                Assert.False(GetPrivateProperty<bool>(adopted!, "RequiresSourceBinding"));
+                Assert.NotNull(GetPrivatePropertyValue(adopted!, "FallbackRepairSource"));
+            }
+            else { Assert.Same(ingress, adopted); }
+            var arguments = new object?[] { context, adopted, null };
+            Assert.Equal(invalidation == "none", (bool)type.GetMethod("TryCaptureInboundFallbackRepairWriteSourceLocked", flags)!.Invoke(receiver, arguments)!);
+            Assert.Equal(persistent, GetPrivateProperty<FileTransferCoordinatorPersistentState>(context, "CoordinatorPersistentState"));
+            Assert.Equal(owner, GetPrivatePropertyValue(context, "CurrentRuntimeOwner"));
+            Assert.Equal(publication, GetPrivatePropertyValue(context, "CurrentRoutePublicationToken"));
+            Assert.Equal(0L, GetPrivateProperty<long>(context, "BytesTransferred"));
+            Assert.Equal(0, destination.Length);
+        }
+    }
+
+    private static async Task CommitInboundFallbackForEpochTestAsync(
+        SessionFileTransferService receiver,
+        LoopbackFileTransferTransport receiverTransport,
+        IFileTransferDataSession senderSession)
+    {
+        const System.Reflection.BindingFlags instanceFlags =
+            System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic;
+        const System.Reflection.BindingFlags staticFlags =
+            System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.NonPublic;
+        var serviceType = typeof(SessionFileTransferService);
+        var context = serviceType.GetField("inboundTransfer", instanceFlags)!.GetValue(receiver)!;
+        var gate = serviceType.GetField("gate", instanceFlags)!.GetValue(receiver)!;
+        var createState = serviceType.GetMethods(staticFlags).Single(method =>
+            method.Name == "CreateCoordinatorStateLocked" &&
+            method.GetParameters()[0].ParameterType == context.GetType());
+        FileTransferCoordinatorState CurrentState() =>
+            Assert.IsType<FileTransferCoordinatorState>(createState.Invoke(null, [context]));
+        Assert.IsType<EpochBootstrapTransport>(receiverTransport).CaptureWriteScope = () =>
+        {
+            lock (gate) { return FileTransferCoordinator.CaptureInboundFallbackRepairWriteScope(CurrentState()); }
+        };
+        FileTransferCoordinatorState source;
+        lock (gate)
+        {
+            source = CurrentState();
+            // A peer epoch or cached live-route observation must not promote this source.
+            Assert.Equal(FileTransferRoute.FileTunaV4, source.RouteSelection.Route);
+            Assert.Equal(FileTransferProtocol.ProtocolVersionV4, source.RouteSelection.ProtocolVersion);
+            Assert.Null(source.PersistentState.FileTransferRouteTransition.CurrentOperation);
+            Assert.True(source.PersistentState.FileTransferRouteTransition.BootstrapAgreement!.IsEnabled);
+        }
+        var issuer = source.PersistentState.FileTransferRouteTransition.BootstrapAgreement!.Offer.FallbackBootstrapIssuerId;
+        var solicit = new FileTransferFallbackBootstrapRequestFrameV6
+        {
+            SessionId = senderSession.SessionId,
+            TransferId = senderSession.TransferId,
+            TransportEpoch = source.CurrentLeg!.TransportEpochId + 1,
+            SenderRequestId = $"fbc1:{issuer}:1:{FileTransferBootstrapCorrelation.HashFields(senderSession.SessionId, senderSession.TransferId)}",
+        };
+        await senderSession.SendAsync(solicit, CancellationToken.None);
+        await WaitUntilAsync(() => receiverTransport.SentDataFrames
+            .OfType<FileTransferFallbackBootstrapStateFrameV6>()
+            .Any(frame => frame.SenderRequestId == solicit.SenderRequestId &&
+                !string.IsNullOrWhiteSpace(frame.ReceiverChallengeId)), timeoutMs: 5000);
+        var response = receiverTransport.SentDataFrames.OfType<FileTransferFallbackBootstrapStateFrameV6>()
+            .Last(frame => frame.SenderRequestId == solicit.SenderRequestId);
+        Assert.Equal(solicit.SessionId, response.SessionId);
+        Assert.Equal(solicit.TransferId, response.TransferId);
+        Assert.Equal(solicit.TransportEpoch, response.TransportEpoch);
+        lock (gate)
+        {
+            Assert.Equal(source.CurrentRuntimeOwner, CurrentState().CurrentRuntimeOwner);
+            Assert.Equal(source.CurrentRoutePublicationToken, CurrentState().CurrentRoutePublicationToken);
+        }
+        await senderSession.SendAsync(solicit with { ReceiverChallengeId = response.ReceiverChallengeId }, CancellationToken.None);
+        await WaitUntilAsync(() =>
+        {
+            lock (gate)
+            {
+                return CurrentState().PersistentState.FileTransferRouteTransition.LastTerminalOperation is
+                    { State: FileTransferRouteTransitionState.Committed,
+                      DispositionReceipt.Status: FileTransferRouteTransitionDispositionApplyStatus.Applied };
+            }
+        }, timeoutMs: 5000);
+        lock (gate)
+        {
+            var state = CurrentState();
+            var committed = state.PersistentState.FileTransferRouteTransition.LastTerminalOperation!.Value;
+            var exchange = state.PersistentState.FileTransferRouteTransition.BootstrapExchange!;
+            Assert.True(exchange.Completed);
+            Assert.Equal(solicit.SenderRequestId, exchange.RetainedPeerFrame!.SenderRequestId);
+            Assert.Equal(response.ReceiverChallengeId, exchange.RetainedPeerFrame.ReceiverChallengeId);
+            Assert.NotNull(committed.DrainReceipt);
+            Assert.Equal(committed.RoutePublicationToken, state.CurrentRoutePublicationToken);
+            Assert.Equal(committed.RouteCommitToken, state.CurrentRouteCommit);
+            Assert.Equal(source.CurrentDataSessionIdentity, state.CurrentDataSessionIdentity);
+            Assert.Equal(source.CurrentDataSessionGeneration, state.CurrentDataSessionGeneration);
+            Assert.Equal(FileTransferRoute.PostTunaFallbackV6, state.RouteSelection.Route);
+            Assert.Equal(FileTransferProtocol.ProtocolVersionV6, state.RouteSelection.ProtocolVersion);
+            Assert.Equal(solicit.TransportEpoch, state.CurrentLeg!.TransportEpochId);
+            Assert.NotNull(FileTransferCoordinator.CaptureInboundFallbackRepairWriteScope(state));
+        }
+    }
+
+    private sealed class EpochBootstrapTransport(string sessionId) :
+        LoopbackFileTransferTransport(sessionId), IFileTransferSignalingTransport, IFileTransferRouteTransitionBridge,
+        IFileTransferControlPlaneDeliveryTransport, IFileTransferControlPlanePhysicalSendSubmissionTransport
+    {
+        private readonly Dictionary<IFileTransferDataSession, EpochDataSession> sessions = [];
+        public Func<FileTransferFallbackTailYieldScope?>? CaptureWriteScope { get; set; }
+        bool IFileTransferRouteTransitionBridge.SupportsFallbackBootstrapCorrelation => true;
+
+        async Task<IFileTransferDataSession> IFileTransferSignalingTransport.OpenFileTransferDataSessionAsync(
+            string sessionId, string transferId, CancellationToken ct)
+        {
+            var inner = await base.OpenFileTransferDataSessionAsync(sessionId, transferId, ct);
+            lock (sessions)
+            {
+                if (!sessions.TryGetValue(inner, out var session))
+                {
+                    session = new EpochDataSession(inner, () => CaptureWriteScope?.Invoke());
+                    sessions.Add(inner, session);
+                }
+                return session;
+            }
+        }
+
+        FileTransferBootstrapPhaseExecution IFileTransferRouteTransitionBridge.ExecuteFallbackBootstrapPhase(
+            FileTransferBootstrapPhaseCommand command, IFileTransferDataSession dataSession,
+            Func<bool> current, CancellationToken ct)
+        {
+            async Task<FileTransferBootstrapPhaseReceipt> SendAsync()
+            {
+                var copies = System.Collections.Immutable.ImmutableArray.CreateBuilder<FileTransferBootstrapPhysicalCopy>();
+                foreach (var frame in new FileTransferDataFrame?[] { command.EpochFrame, command.Frame }.OfType<FileTransferDataFrame>())
+                {
+                    Assert.True(current());
+                    await dataSession.SendAsync(frame, ct);
+                    var identity = ReferenceEquals(frame, command.EpochFrame)
+                        ? Assert.IsType<PostTunaFallbackPeerProofFrameIdentity>(command.EpochFrameIdentity)
+                        : PostTunaFallbackPeerProofFrameIdentity.Create(frame);
+                    copies.Add(new("bulk", identity,
+                        FileTransferBootstrapCopyOutcome.Succeeded));
+                }
+                return new(command, FileTransferBootstrapPhaseReceiptStatus.Delivered, true, copies.ToImmutable(),
+                    "epoch_fixture_completed_loopback_sends");
+            }
+            async Task<FileTransferBootstrapPhaseReceipt> SettleAsync(Task<FileTransferBootstrapPhaseReceipt> delivery) =>
+                (await delivery) with { Status = FileTransferBootstrapPhaseReceiptStatus.Settled };
+            var sending = SendAsync();
+            return new(sending, SettleAsync(sending));
+        }
+
+        public FileTransferControlPlanePhysicalSendSubmission SubmitFileTransferControlPlanePhysicalSend(
+            FileTransferControlPlaneDeliveryRequest request, CancellationToken ct)
+        {
+            var sending = SendFileTransferControlPlaneFrameAsync(request, ct);
+            return new(sending, sending);
+        }
+
+        public async Task<FileTransferControlPlaneDeliveryResult> SendFileTransferControlPlaneFrameAsync(
+            FileTransferControlPlaneDeliveryRequest request, CancellationToken ct)
+        {
+            var dataSession = await OpenFileTransferDataSessionAsync(request.Frame.SessionId, request.Frame.TransferId, ct);
+            var accepted = request.PreTransportDeliveryValidator?.Invoke() == true;
+            if (accepted)
+            {
+                NextDataFrameTransportKind = FileTransferTransportKind.RegularNkn;
+                await dataSession.SendAsync(request.Frame, ct);
+            }
+            return new(request.Kind, request.Frame.TransferId, request.Frame.SessionId,
+                "epoch_fixture_completed_loopback_send", ControlQueue: false, ControlAck: false,
+                ControlCopy: false, BulkCopy: accepted, PeerVisibleAny: accepted, AcceptedAny: accepted,
+                ControlQueueErrorName: string.Empty, ControlAckErrorName: string.Empty,
+                ControlCopyErrorName: string.Empty, BulkCopyErrorName: string.Empty);
+        }
+    }
+
+    private sealed class EpochDataSession : IFileTransferDataSession, IFileTransferDataSessionGenerationProvider,
+        IFileTransferDataPathAuthoritySession, IFileTransferPhysicalSendSubmissionSession
+    {
+        private readonly IFileTransferDataSession inner;
+        private readonly Func<FileTransferFallbackTailYieldScope?> captureWriteScope;
+        private int observedFirstBatch;
+        public EpochDataSession(IFileTransferDataSession inner, Func<FileTransferFallbackTailYieldScope?> captureWriteScope)
+        {
+            this.inner = inner;
+            this.captureWriteScope = captureWriteScope;
+            inner.AvailabilityChanged += OnAvailabilityChanged;
+        }
+        public string SessionId => inner.SessionId;
+        public string TransferId => inner.TransferId;
+        public bool IsAvailable => inner.IsAvailable;
+        public long Generation => ((IFileTransferDataSessionGenerationProvider)inner).Generation;
+        public event EventHandler<FileTransferDataSessionAvailabilityChangedEventArgs>? AvailabilityChanged;
+        private void OnAvailabilityChanged(object? sender, FileTransferDataSessionAvailabilityChangedEventArgs args) =>
+            AvailabilityChanged?.Invoke(this, args);
+        public ValueTask<FileTransferDataFrame> ReceiveAsync(CancellationToken ct) => inner.ReceiveAsync(ct);
+        public async ValueTask<FileTransferReceivedDataFrame> ReceiveWithMetadataAsync(CancellationToken ct)
+        {
+            var readSource = captureWriteScope();
+            var received = await inner.ReceiveWithMetadataAsync(ct);
+            if (received.Frame is FileTransferChunkBatchFrameV4 && Interlocked.Increment(ref observedFirstBatch) == 1)
+            {
+                var deliveredSource = captureWriteScope();
+                var changedFields = string.Join(",", typeof(FileTransferFallbackTailYieldScope).GetProperties()
+                    .Where(property => readSource is { } before && deliveredSource is { } after &&
+                        !Equals(property.GetValue(before), property.GetValue(after)))
+                    .Select(property => property.Name));
+                LocalOperationalLog.Info("EpochFixture",
+                    $"event=epoch_fixture_first_batch_source; transfer_id={TransferId}; session_id={SessionId}; provider_generation={Generation}; read_source_present={readSource is not null}; delivered_source_present={deliveredSource is not null}; source_unchanged={readSource == deliveredSource}; changed_fields={changedFields}; read_epoch={readSource?.TransportEpoch}; delivered_epoch={deliveredSource?.TransportEpoch}; read_leg={readSource?.LegGeneration}; delivered_leg={deliveredSource?.LegGeneration}");
+            }
+            return received;
+        }
+        public Task SendAsync(FileTransferDataFrame frame, CancellationToken ct) => inner.SendAsync(frame, ct);
+        public Task SendAsync(FileTransferDataFrame frame, FileTransferDataPathSendAuthority authority, CancellationToken ct) =>
+            ((IFileTransferDataPathAuthoritySession)inner).SendAsync(frame, authority, ct);
+        public FileTransferPhysicalSendSubmission SubmitPhysicalSend(
+            FileTransferDataFrame frame, FileTransferDataPathSendAuthority? authority, CancellationToken ct)
+        {
+            // Loopback has one physical send, so delivery and settlement are the same task.
+            var sending = authority is { } current ? SendAsync(frame, current, ct) : SendAsync(frame, ct);
+            return new(sending, sending);
+        }
+        public void Dispose()
+        {
+            inner.AvailabilityChanged -= OnAvailabilityChanged;
+            inner.Dispose();
+        }
     }
 
     private static FileTransferManifestFrameV4 CreateV4Manifest(
@@ -3880,10 +4300,7 @@ public sealed class SessionFileTransferV6TransportEpochTests : SessionFileTransf
                 FallbackTailYieldKind: FallbackTailYieldKind.Quiescent));
         Assert.True(decision.Accepted, decision.RejectionReason);
         Assert.NotNull(decision.FallbackTailYieldDecision);
-        SetPrivateProperty(
-            context,
-            "CoordinatorPersistentState",
-            decision.State.PersistentState);
+        AdoptFallbackTailDecisionForTest(context, decision);
 
         var tailYield = decision.FallbackTailYieldDecision.Value;
         var state = Assert.IsType<FileTransferCoordinatorState>(
@@ -3902,6 +4319,7 @@ public sealed class SessionFileTransferV6TransportEpochTests : SessionFileTransf
                 state,
                 localReceipt);
         Assert.True(localApplied.Accepted, localApplied.Reason);
+        AdoptFallbackTailDecisionForTest(context, localApplied);
 
         var scope = operation.Scope;
         var peerOwnerKey =
@@ -3945,10 +4363,20 @@ public sealed class SessionFileTransferV6TransportEpochTests : SessionFileTransf
                 peerReceipt);
         Assert.True(paired.Accepted, paired.Reason);
         Assert.NotNull(paired.PairedRelease);
-        SetPrivateProperty(
-            context,
-            "CoordinatorPersistentState",
-            paired.State.PersistentState);
+        AdoptFallbackTailDecisionForTest(context, paired);
+    }
+
+    private static void AdoptFallbackTailDecisionForTest(object context, object decision)
+    {
+        Assert.NotNull(GetPrivatePropertyValue(decision, "SnapshotEnvelope"));
+        var method = typeof(SessionFileTransferService)
+            .GetMethods(System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.NonPublic)
+            .Single(candidate => candidate.Name == "AdoptCoordinatorStateLocked" &&
+                candidate.GetParameters().Length == 2 &&
+                candidate.GetParameters()[0].ParameterType == context.GetType() &&
+                candidate.GetParameters()[1].ParameterType == decision.GetType());
+        var adopted = Assert.IsType<FileTransferCoordinatorState>(method.Invoke(null, [context, decision]));
+        Assert.Equal(adopted.PersistentState, GetPrivatePropertyValue(context, "CoordinatorPersistentState"));
     }
 
     private static void SetV6DestinationMode(object context, string modeName)

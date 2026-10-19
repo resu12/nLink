@@ -17793,7 +17793,12 @@ public sealed partial class SessionFileTransferService
                     sendException = ex;
                 }
 
-                await pendingSend.PhysicalSendObservationTask.ConfigureAwait(false);
+                // The observer awaits the same physical send. A timed-out send
+                // must reach cancellation without waiting for that observer.
+                if (!timedOutForBoundTransport)
+                {
+                    await pendingSend.PhysicalSendObservationTask.ConfigureAwait(false);
+                }
 
                 var sentUtc = DateTimeOffset.UtcNow;
                 var pumpCompletionCurrent = false;
@@ -22846,6 +22851,11 @@ public sealed partial class SessionFileTransferService
                 }
 
                 if (TryHandleBootstrapCorrelationFrame(FileTransferDirection.Inbound, dataSession, received)) { continue; }
+
+                if (frame is FileTransferChunkBatchFrameV4 && received.TransportKind == FileTransferTransportKind.RegularNkn)
+                {
+                    lock (gate) { writeIngress = AdoptCommittedInboundFallbackReadSourceLocked(context, writeIngress); }
+                }
 
                 var fallbackProofHandled = false;
                 if (!ShouldAcceptSparseCreditRuntimeDataFrame(context, frame))
