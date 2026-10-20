@@ -75,6 +75,7 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
     private readonly IInviteTokenFactory inviteTokenFactory;
     private readonly IQrCodeService qrCodeService;
     private readonly SessionUiStateStore? uiStateStore;
+    private readonly bool persistCaptureTargetToUserEnvironment;
     private bool hasIncomingRequest;
     private bool isRequestAllowed;
     private bool showChatNotice;
@@ -244,13 +245,15 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
         Func<byte[], Bitmap>? decodeFrame,
         IInviteShareService? inviteShareService = null,
         IQrCodeService? qrCodeService = null,
-        TimeSpan? inviteBootstrapTimeout = null)
+        TimeSpan? inviteBootstrapTimeout = null,
+        bool persistCaptureTargetToUserEnvironment = true)
     {
         this.cancelAction = cancelAction;
         this.backAction = backAction ?? cancelAction;
         this.openDiagnosticsAction = openDiagnosticsAction;
         this.transportConfig = transportConfig;
         this.sessionRuntime = sessionRuntime;
+        this.persistCaptureTargetToUserEnvironment = persistCaptureTargetToUserEnvironment;
         this.statusPresenter = statusPresenter ?? new StatusPresenter(sessionRuntime);
         ownsStatusPresenter = statusPresenter is null;
         this.clipboardService = clipboardService;
@@ -1477,7 +1480,7 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
     {
         RefreshCaptureDisplayOptions();
         var selection = BuildSelectedCaptureTargetSelection();
-        ScreenCaptureTargetStore.Save(selection);
+        ScreenCaptureTargetStore.Save(selection, persistCaptureTargetToUserEnvironment);
     }
 
     private ScreenCaptureTargetSelection BuildSelectedCaptureTargetSelection()
@@ -2416,7 +2419,8 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
             if (!HasIncomingRequest && !IsRequestAllowed)
             {
                 var bridgeReadiness = sessionRuntime.BridgeBootstrapReadiness;
-                if (!bridgeReadiness.ReadyEmitted &&
+                if (!IsProtectedSeedStorageReadFailure(sessionRuntime.StatusText) &&
+                    !bridgeReadiness.ReadyEmitted &&
                     (bridgeReadiness.TerminalFailure ||
                      ex.Message.Contains("nkn_bridge_bootstrap_not_ready", StringComparison.OrdinalIgnoreCase)))
                 {
