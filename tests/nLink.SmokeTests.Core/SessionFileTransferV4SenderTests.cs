@@ -11458,10 +11458,26 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
         const string sessionId = "session_v6_post_fallback_inbound_tuna_activation_pause";
         var logStart = GetOperationalLogLength();
         var payload = Enumerable.Range(0, 2_500_000).Select(static index => (byte)(index % 251)).ToArray();
+        var payloadBatchCount = 0;
+        var payloadBlocked = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releasePayload = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         using var senderTransport = new LoopbackFileTransferTransport(sessionId);
         using var receiverTransport = new LoopbackFileTransferTransport(sessionId);
         ConfigurePostTunaFallbackV6RouteForTest(senderTransport, receiverTransport);
         senderTransport.Connect(receiverTransport);
+        senderTransport.OutboundDataFrameDeliveryOverrideAsync = async (_, frame, ct) =>
+        {
+            if (frame is FileTransferChunkBatchFrameV6 &&
+                string.Equals(frame.SessionId, sessionId, StringComparison.Ordinal) &&
+                string.Equals(frame.TransferId, transferId, StringComparison.Ordinal) &&
+                Interlocked.Increment(ref payloadBatchCount) > 1)
+            {
+                payloadBlocked.TrySetResult();
+                await releasePayload.Task.WaitAsync(ct);
+            }
+
+            return false;
+        };
 
         using var sender = new SessionFileTransferService();
         using var receiver = new SessionFileTransferService();
@@ -11475,23 +11491,48 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
             CancellationToken.None);
         await WaitUntilAsync(() => receiver.Snapshot.Inbound?.State == FileTransferTransferState.PendingDecision);
         await receiver.AcceptIncomingTransferAsync(transferId, (_, _) => Task.FromResult<Stream>(destination), CancellationToken.None);
-        await WaitUntilAsync(
-            () => receiver.Snapshot.Inbound is { BytesTransferred: > 0 },
-            timeoutMs: 5000);
+        try
+        {
+            await WaitUntilAsync(
+                () => receiver.Snapshot.Inbound is { BytesTransferred: > 0 } &&
+                      payloadBlocked.Task.IsCompletedSuccessfully,
+                timeoutMs: 5000);
+            Assert.Equal(0, senderTransport.SentDataFrames.OfType<FileTransferChunkBatchFrameV6>().First().StartChunkIndex);
+            var bytesBeforePause = receiver.Snapshot.Inbound!.BytesTransferred;
 
-        receiverTransport.SetConnectedDataSessionsUnavailableForTests("tuna_activation_negotiating");
-        await WaitUntilAsync(
-            () => ReadV4SenderLogSnapshot(logStart).Contains("event=filetransfer_post_tuna_fallback_tuna_activation_pause_suppressed; direction=inbound", StringComparison.Ordinal),
-            timeoutMs: 5000);
+            // Keep the sender available so every subsequent batch reaches the delivery barrier.
+            receiverTransport.SetLocalDataSessionsUnavailableForTests("tuna_activation_negotiating");
+            await WaitUntilAsync(
+                () => ReadV4SenderLogSnapshot(logStart).Contains(
+                    "event=filetransfer_post_tuna_fallback_tuna_activation_pause_suppressed; direction=inbound; transfer_id=[redacted]; session_id=[redacted]; reason=tuna_activation_negotiating; route=post_tuna_fallback_v6; protocol_version=6;",
+                    StringComparison.Ordinal),
+                timeoutMs: 5000);
+            Assert.Equal(bytesBeforePause, receiver.Snapshot.Inbound!.BytesTransferred);
+            Assert.False(sender.Snapshot.Outbound!.IsPeerPaused);
+            Assert.DoesNotContain(
+                receiverTransport.SentPauseControls,
+                pause => string.Equals(pause.Reason, "tuna_activation_negotiating", StringComparison.Ordinal));
+        }
+        finally
+        {
+            receiverTransport.SetLocalDataSessionsAvailableForTests("tuna_activation_failed_regular_v4_resumed");
+            releasePayload.TrySetResult();
+        }
 
-        receiverTransport.SetConnectedDataSessionsAvailableForTests("tuna_activation_failed_regular_v4_resumed");
         await WaitUntilAsync(
             () => sender.Snapshot.Outbound?.State == FileTransferTransferState.Completed &&
                   receiver.Snapshot.Inbound?.State == FileTransferTransferState.Completed,
             timeoutMs: 20000);
 
+        Assert.Equal(FileTransferProtocol.ProtocolVersionV6, Assert.Single(senderTransport.SentSessionOpens).ProtocolVersion);
+        Assert.Equal(FileTransferRouteResolver.PostTunaFallbackV6Token, Assert.Single(senderTransport.SentOffers).FileTransferRoute);
         Assert.Equal(payload, destination.ToArray()[..payload.Length]);
         Assert.False(sender.Snapshot.Outbound!.IsPeerPaused);
+        Assert.All(senderTransport.SentDataFrames.OfType<FileTransferChunkBatchFrameV6>(), frame =>
+        {
+            Assert.Equal(sessionId, frame.SessionId);
+            Assert.Equal(transferId, frame.TransferId);
+        });
         Assert.DoesNotContain(
             receiverTransport.SentPauseControls,
             pause => string.Equals(pause.Reason, "tuna_activation_negotiating", StringComparison.Ordinal));
