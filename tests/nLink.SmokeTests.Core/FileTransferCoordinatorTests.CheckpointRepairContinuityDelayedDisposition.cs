@@ -36,7 +36,10 @@ public sealed partial class FileTransferCoordinatorTests
             new FileTransferRouteTransitionDurableCheckpoint(owner, publication, state.TerminalGeneration,
                 leg.Generation, leg.TransportEpochId, leg.BridgeRecoveryGeneration, state.CurrentDataSessionGeneration,
                 StateEpoch: 3, ContiguousCommittedChunkIndex: 100, DurableHighestChunkIndex: 255,
-                ChunkCount: 256, CheckpointGeneration: 1),
+                ChunkCount: 256, CheckpointGeneration: 1)
+            {
+                DataSessionProviderGeneration = state.CurrentDataSessionProviderGeneration,
+            },
             FileTransferRoute.PostTunaFallbackV6, FileTransferProtocol.ProtocolVersionV6,
             FileTransferTransportKind.RegularNkn, FileTransferTransportHandoffKind.TunaToNormalFallback,
             PredecessorTransitionAuthorityId: null, "tuna_disabled");
@@ -44,6 +47,8 @@ public sealed partial class FileTransferCoordinatorTests
         Assert.True(prepared.Status == FileTransferRouteTransitionDecisionStatus.Prepared, prepared.Reason);
         capture(prepared.SnapshotEnvelope!);
         var authority = prepared.Authority!.Value;
+        Assert.Equal(state.CurrentDataSessionGeneration, authority.DataSessionGeneration);
+        Assert.Equal(state.CurrentDataSessionProviderGeneration, authority.DataSessionProviderGeneration);
         var draining = FileTransferCoordinator.BeginFileTransferRouteTransitionPhysicalDrain(prepared.State, authority,
             new(prepared.PauseBindCommand!.Value, FileTransferRouteTransitionPauseBindStatus.Installed,
                 "filetransfer_route_transition_pause_bound"), 0, [],

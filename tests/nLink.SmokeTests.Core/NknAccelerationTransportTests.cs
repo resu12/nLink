@@ -2234,7 +2234,9 @@ public sealed partial class NknAccelerationTransportTests : CoreSmokeTestsBase, 
             const string transferId = "transfer_recovery_frontier_pressure_authority";
             _ = await host.OpenFileTransferDataSessionAsync(sessionId, transferId, cts.Token);
             TrackAuthorizedRegularV4RouteForTests(host, transferId);
-            InvokePrivateMethod(host, "MarkFileTransferTunaActivationBridgeRecoveryStarted", "runtime_unlock_offer_send_not_observed");
+            // Pressure is evidence only; this fixture does not authorize bridge recovery.
+            Assert.Equal(0, Assert.IsType<int>(GetPrivateField(host, "fileTransferTunaActivationBridgeRecoveryActive")));
+            Assert.Null(GetLastCommittedRuntimeUnlockRetryDispatchInstallReceipt(host));
             InvokePrivateMethod(
                 host,
                 "ArmRuntimeUnlockRetryAfterRecovery",
@@ -2242,6 +2244,13 @@ public sealed partial class NknAccelerationTransportTests : CoreSmokeTestsBase, 
                 sessionId,
                 "runtime_unlock_offer_send_not_observed",
                 "tuna_activation_offer_send_timeout");
+            var retryState = GetPrivateField(host, "runtimeUnlockRecoveryRetryState");
+            Assert.NotNull(retryState);
+            Assert.Equal(sessionId, GetPrivatePropertyValue<string>(retryState, "SessionId"));
+            Assert.Equal(transferId, GetPrivatePropertyValue<string>(retryState, "TransferId"));
+            Assert.Equal(13L, GetPrivatePropertyValue<long>(retryState, "RetiredOfferGeneration"));
+            Assert.False(GetPrivatePropertyValue<bool>(retryState, "RetryAuthorityGranted"));
+            Assert.Null(GetLastCommittedRuntimeUnlockRetryDispatchInstallReceipt(host));
             var logStart = GetOperationalLogLength();
             var method = typeof(NknSignalingTransport).GetMethod(
                 "TryDeferRuntimeUnlockOfferDispatchForRegularV4FrontierRepair",
@@ -2270,6 +2279,9 @@ public sealed partial class NknAccelerationTransportTests : CoreSmokeTestsBase, 
             Assert.DoesNotContain("event=session_recovery_contract_failed;", logTail, StringComparison.Ordinal);
             Assert.DoesNotContain("event=runtime_unlock_transaction_offer_generation_created;", logTail, StringComparison.Ordinal);
 
+            Assert.Same(retryState, GetPrivateField(host, "runtimeUnlockRecoveryRetryState"));
+            Assert.False(GetPrivatePropertyValue<bool>(retryState, "RetryAuthorityGranted"));
+            Assert.Null(GetLastCommittedRuntimeUnlockRetryDispatchInstallReceipt(host));
             InstallRuntimeUnlockRetryDispatchCoordinatorForTests(host);
             var grantedLogStart = GetOperationalLogLength();
             InvokePrivateMethod(host, "RequestRuntimeUnlockRetryDispatchAuthority", sessionId, "test_frontier_release");
@@ -2280,6 +2292,19 @@ public sealed partial class NknAccelerationTransportTests : CoreSmokeTestsBase, 
                 TimeSpan.FromSeconds(3));
             var installReceipt = Assert.IsType<RuntimeUnlockRetryDispatchInstallReceipt>(
                 GetLastCommittedRuntimeUnlockRetryDispatchInstallReceipt(host));
+            Assert.False(installReceipt.IsDefault);
+            Assert.Equal(sessionId, installReceipt.Authority.SessionId);
+            Assert.Equal(transferId, installReceipt.Authority.TransferId);
+            Assert.Equal(FileTransferDirection.Outbound, installReceipt.Authority.Direction);
+            Assert.Equal(13L, installReceipt.Authority.RetiredOfferGeneration);
+            Assert.Equal(
+                GetPrivatePropertyValue<long>(retryState, "ContractGeneration"),
+                installReceipt.Authority.RecoveryContractGeneration);
+            Assert.Equal(FileTransferRouteResolver.RegularNknV4FastToken, installReceipt.Authority.RouteToken);
+            Assert.Equal(FileTransferProtocol.ProtocolVersionV4, installReceipt.Authority.ProtocolVersion);
+            Assert.Equal(sessionId, installReceipt.Request.SessionId);
+            Assert.Equal(transferId, installReceipt.Request.TransferId);
+            Assert.Equal(13L, installReceipt.Request.RetiredOfferGeneration);
             var grantedArgs = new object?[]
             {
                 sessionId,
@@ -2294,6 +2319,9 @@ public sealed partial class NknAccelerationTransportTests : CoreSmokeTestsBase, 
 
             var grantedTail = ReadOperationalLogTail(grantedLogStart);
             Assert.False(deferredAfterGrant);
+            Assert.Equal("regular_v4_activation_send_pressure", Assert.IsType<string>(grantedArgs[5]));
+            Assert.Equal(27_000L, Assert.IsType<long>(grantedArgs[6]));
+            Assert.Equal(installReceipt, GetLastCommittedRuntimeUnlockRetryDispatchInstallReceipt(host));
             Assert.Contains("event=runtime_unlock_retry_dispatch_authority_granted;", grantedTail, StringComparison.Ordinal);
             Assert.Contains(
                 "event=runtime_unlock_retry_dispatch_evidence_ignored_after_authority_granted;",
@@ -6541,9 +6569,27 @@ public sealed partial class NknAccelerationTransportTests : CoreSmokeTestsBase, 
                 FileTransferProtocol.ProtocolVersionV4,
                 "bridge_recovery_shadow_cleanup",
                 transportEpoch: 2);
-        var settled =
-            new TaskCompletionSource<bool>(
-                TaskCreationOptions.RunContinuationsAsynchronously);
+        var settlementType = typeof(NknSignalingTransport).GetNestedType(
+            "RuntimeUnlockInstalledRetryAnswerDeliveryRecoverySettlement",
+            BindingFlags.NonPublic);
+        Assert.NotNull(settlementType);
+        var settledSourceType = typeof(TaskCompletionSource<>).MakeGenericType(
+            settlementType!);
+        var settledField = typeof(NknSignalingTransport).GetField(
+            "fileTransferTunaActivationBridgeRecoverySettledTcs",
+            BindingFlags.Instance | BindingFlags.NonPublic);
+        Assert.NotNull(settledField);
+        Assert.Equal(settledSourceType, settledField!.FieldType);
+        var settled = Activator.CreateInstance(
+            settledSourceType,
+            TaskCreationOptions.RunContinuationsAsynchronously)!;
+        var settledTask = Assert.IsAssignableFrom<Task>(
+            settledSourceType.GetProperty("Task")!.GetValue(settled));
+        var recoveryGeneration = command.Decision.BridgeRecoveryGeneration;
+        SetPrivateField(
+            host,
+            "fileTransferTunaActivationBridgeRecoveryGeneration",
+            recoveryGeneration);
         SetPrivateField(
             host,
             "fileTransferTunaActivationBridgeRecoveryActive",
@@ -6582,7 +6628,15 @@ public sealed partial class NknAccelerationTransportTests : CoreSmokeTestsBase, 
             Assert.IsType<int>(GetPrivateField(
                 host,
                 "fileTransferTunaActivationBridgeRecoveryActive")));
-        Assert.False(settled.Task.IsCompleted);
+        Assert.False(settledTask.IsCompleted);
+        Assert.Same(
+            settled,
+            GetPrivateField(host, "fileTransferTunaActivationBridgeRecoverySettledTcs"));
+        Assert.Equal(
+            recoveryGeneration,
+            Assert.IsType<long>(GetPrivateField(
+                host,
+                "fileTransferTunaActivationBridgeRecoveryGeneration")));
 
         bridge.ObserveBridgeRecoveryExecutionReceiptDecision(
             new FileTransferBridgeRecoveryExecutionReceipt(
@@ -6607,7 +6661,20 @@ public sealed partial class NknAccelerationTransportTests : CoreSmokeTestsBase, 
         Assert.Null(GetPrivateField(
             host,
             "fileTransferTunaActivationBridgeRecoverySettledTcs"));
-        Assert.True(settled.Task.IsCompletedSuccessfully);
+        Assert.True(settledTask.IsCompletedSuccessfully);
+        var settlement = settledTask.GetType().GetProperty("Result")!
+            .GetValue(settledTask)!;
+        Assert.Equal(settlementType, settlement.GetType());
+        Assert.Equal(
+            recoveryGeneration,
+            GetPrivatePropertyValue<long>(settlement, "Generation"));
+        // Completion records the execution outcome, not coordinator acceptance.
+        Assert.True(GetPrivatePropertyValue<bool>(settlement, "Completed"));
+        Assert.Equal(
+            0L,
+            Assert.IsType<long>(GetPrivateField(
+                host,
+                "fileTransferTunaActivationBridgeRecoveryGeneration")));
         Assert.Same(
             retryStateBefore,
             GetPrivateField(host, "runtimeUnlockRecoveryRetryState"));
@@ -6618,9 +6685,16 @@ public sealed partial class NknAccelerationTransportTests : CoreSmokeTestsBase, 
                     host,
                     "accelerationNegotiationRetryAttempts")));
 
-        var invalidationSettled =
-            new TaskCompletionSource<bool>(
-                TaskCreationOptions.RunContinuationsAsynchronously);
+        var invalidationSettled = Activator.CreateInstance(
+            settledSourceType,
+            TaskCreationOptions.RunContinuationsAsynchronously)!;
+        var invalidationSettledTask = Assert.IsAssignableFrom<Task>(
+            settledSourceType.GetProperty("Task")!.GetValue(invalidationSettled));
+        var invalidationGeneration = checked(recoveryGeneration + 1);
+        SetPrivateField(
+            host,
+            "fileTransferTunaActivationBridgeRecoveryGeneration",
+            invalidationGeneration);
         SetPrivateField(
             host,
             "fileTransferTunaActivationBridgeRecoveryActive",
@@ -6646,7 +6720,30 @@ public sealed partial class NknAccelerationTransportTests : CoreSmokeTestsBase, 
             Assert.IsType<int>(GetPrivateField(
                 host,
                 "fileTransferTunaActivationBridgeRecoveryActive")));
-        Assert.True(invalidationSettled.Task.IsCompletedSuccessfully);
+        Assert.True(invalidationSettledTask.IsCompletedSuccessfully);
+        var invalidationSettlement = invalidationSettledTask.GetType()
+            .GetProperty("Result")!.GetValue(invalidationSettledTask)!;
+        Assert.Equal(settlementType, invalidationSettlement.GetType());
+        Assert.Equal(
+            invalidationGeneration,
+            GetPrivatePropertyValue<long>(invalidationSettlement, "Generation"));
+        Assert.False(GetPrivatePropertyValue<bool>(invalidationSettlement, "Completed"));
+        Assert.Null(GetPrivateField(
+            host,
+            "fileTransferTunaActivationBridgeRecoverySettledTcs"));
+        Assert.Equal(
+            0L,
+            Assert.IsType<long>(GetPrivateField(
+                host,
+                "fileTransferTunaActivationBridgeRecoveryGeneration")));
+        Assert.Same(
+            retryStateBefore,
+            GetPrivateField(host, "runtimeUnlockRecoveryRetryState"));
+        Assert.Equal(
+            retryAttemptsBefore,
+            Assert.IsType<int>(GetPrivateField(
+                host,
+                "accelerationNegotiationRetryAttempts")));
     }
 
     [Fact]
@@ -7241,7 +7338,8 @@ public sealed partial class NknAccelerationTransportTests : CoreSmokeTestsBase, 
                 host,
                 helper,
                 cts.Token,
-                InviteCapabilities.Chat | InviteCapabilities.FileTransfer);
+                InviteCapabilities.Chat | InviteCapabilities.FileTransfer,
+                suppressAutomaticAccelerationNegotiation: true);
             const string transferId = "transfer_tuna_activation_observed_replay";
             InstallRuntimeUnlockRetryDispatchCoordinatorForTests(host);
             InvokePrivateMethod(
@@ -7252,14 +7350,6 @@ public sealed partial class NknAccelerationTransportTests : CoreSmokeTestsBase, 
                 FileTransferProtocol.ProtocolVersionV4,
                 "test_regular_route");
             _ = await host.OpenFileTransferDataSessionAsync(sessionId, transferId, cts.Token);
-            host.SeedRuntimeUnlockOfferCriticalSectionForTests(
-                sessionId,
-                "nonce_observed_replay",
-                payerDecisionId: 31,
-                generation: 7,
-                observedSend: true,
-                observedLane: "control_priority",
-                answerTimeoutScheduled: true);
             InvokePrivateMethod(
                 host,
                 "ArmRuntimeUnlockRetryAfterRecovery",
@@ -7268,6 +7358,37 @@ public sealed partial class NknAccelerationTransportTests : CoreSmokeTestsBase, 
                 "runtime_unlock_offer_send_not_observed",
                 "regular_v4_unproven_recovery_escalation",
                 true);
+            await host.DrainRuntimeUnlockRetryDispatchInstallFollowUpsForTestsAsync();
+            var receipt = GetCurrentRuntimeUnlockRetryDispatchInstallReceiptForTests(host);
+            Assert.False(receipt.IsDefault);
+            Assert.Equal(sessionId, receipt.Authority.SessionId);
+            Assert.Equal(transferId, receipt.Authority.TransferId);
+            Assert.Equal(FileTransferDirection.Outbound, receipt.Authority.Direction);
+            Assert.Equal(FileTransferRoute.RegularNknV4Fast, receipt.Authority.Route);
+            Assert.Equal(FileTransferProtocol.ProtocolVersionV4, receipt.Authority.ProtocolVersion);
+            Assert.Equal(6L, receipt.Authority.RetiredOfferGeneration);
+            Assert.Equal(
+                RuntimeUnlockRetryDispatchListenerRearmRequirement.Required,
+                receipt.Authority.ListenerRearmRequirement);
+            host.SeedRuntimeUnlockOfferCriticalSectionForTests(
+                sessionId,
+                "nonce_observed_replay",
+                payerDecisionId: 31,
+                generation: 7,
+                observedSend: true,
+                observedLane: "control_priority",
+                answerTimeoutScheduled: true,
+                preserveRecoveryState: true);
+            var offerBoundary = GetPrivateField(host, "outboundRuntimeUnlockOfferAuthorityBoundary");
+            Assert.NotNull(offerBoundary);
+            Assert.Equal("InitialActivation", offerBoundary.GetType().GetProperty("Mode")!.GetValue(offerBoundary)?.ToString());
+            Assert.Equal(sessionId, GetPrivatePropertyValue<string>(offerBoundary, "SessionId"));
+            Assert.Equal(transferId, GetPrivatePropertyValue<string>(offerBoundary, "TransferId"));
+            Assert.Equal("nonce_observed_replay", GetPrivatePropertyValue<string>(offerBoundary, "Nonce"));
+            Assert.Equal(7L, GetPrivatePropertyValue<long>(offerBoundary, "OfferGeneration"));
+            Assert.Equal(31L, GetPrivatePropertyValue<long>(offerBoundary, "PayerDecisionId"));
+            Assert.Null(GetPrivateField(host, "outboundAccelerationOfferInstallReceipt"));
+            Assert.Equal(receipt, GetCurrentRuntimeUnlockRetryDispatchInstallReceiptForTests(host));
             InvokePrivateMethod(host, "MarkRuntimeUnlockRecoveryContractRetryDispatched", "runtime_unlock");
             Assert.True(BindRuntimeUnlockRetryDispatchOfferAliasAndObserveForTests(
                 host,
@@ -7323,7 +7444,7 @@ public sealed partial class NknAccelerationTransportTests : CoreSmokeTestsBase, 
             var options = NknTransportOptions.Load();
             var hostClient = new FakeNknClient("host.tuna.file.activation.post-fallback-observed-replay.address");
             var helperClient = new FakeNknClient("helper.tuna.file.activation.post-fallback-observed-replay.address");
-            var hostLane = new RetryableTunaAccelerationSession(canListen: false, failedDialAttemptsBeforeSuccess: 0);
+            var hostLane = new RetryableTunaAccelerationSession(canListen: true, failedDialAttemptsBeforeSuccess: 0);
             using var host = new NknSignalingTransport(
                 hostClient,
                 options,
@@ -7339,18 +7460,11 @@ public sealed partial class NknAccelerationTransportTests : CoreSmokeTestsBase, 
                 host,
                 helper,
                 cts.Token,
-                InviteCapabilities.Chat | InviteCapabilities.FileTransfer);
+                InviteCapabilities.Chat | InviteCapabilities.FileTransfer,
+                suppressAutomaticAccelerationNegotiation: true);
             const string transferId = "transfer_tuna_activation_post_fallback_observed_replay";
             _ = await host.OpenFileTransferDataSessionAsync(sessionId, transferId, cts.Token);
-            host.SeedRuntimeUnlockOfferCriticalSectionForTests(
-                sessionId,
-                "nonce_post_fallback_observed_replay",
-                payerDecisionId: 43,
-                generation: 11,
-                observedSend: true,
-                observedLane: "control_to_bulk_endpoint",
-                answerTimeoutScheduled: true);
-            _ = QueueExactFallbackPairedTailYieldRuntimeUnlockRetryForTests(
+            var request = QueueExactFallbackPairedTailYieldRuntimeUnlockRetryForTests(
                 host,
                 sessionId,
                 transferId,
@@ -7359,7 +7473,24 @@ public sealed partial class NknAccelerationTransportTests : CoreSmokeTestsBase, 
             await WaitUntilAsync(
                 () => GetLastCommittedRuntimeUnlockRetryDispatchInstallReceipt(host) is not null,
                 TimeSpan.FromSeconds(3));
-            Assert.NotNull(GetLastCommittedRuntimeUnlockRetryDispatchInstallReceipt(host));
+            var receipt = GetCurrentRuntimeUnlockRetryDispatchInstallReceiptForTests(host);
+            Assert.Equal(request, receipt.Request);
+            Assert.Equal(sessionId, receipt.Authority.SessionId);
+            Assert.Equal(transferId, receipt.Authority.TransferId);
+            Assert.Equal(FileTransferDirection.Outbound, receipt.Authority.Direction);
+            Assert.Equal(FileTransferRoute.PostTunaFallbackV6, receipt.Authority.Route);
+            Assert.Equal(FileTransferProtocol.ProtocolVersionV6, receipt.Authority.ProtocolVersion);
+            Assert.Equal(RuntimeUnlockRetryReleaseKind.FallbackPairedTailYield, receipt.Authority.ReleaseKind);
+            host.SeedRuntimeUnlockOfferCriticalSectionForTests(
+                sessionId,
+                "nonce_post_fallback_observed_replay",
+                payerDecisionId: 43,
+                generation: 11,
+                observedSend: true,
+                observedLane: "control_to_bulk_endpoint",
+                answerTimeoutScheduled: true,
+                preserveRecoveryState: true,
+                installReceipt: receipt);
             InvokePrivateMethod(host, "MarkRuntimeUnlockRecoveryContractRetryDispatched", "runtime_unlock");
             Assert.True(BindRuntimeUnlockRetryDispatchOfferAliasAndObserveForTests(
                 host,
@@ -7372,6 +7503,15 @@ public sealed partial class NknAccelerationTransportTests : CoreSmokeTestsBase, 
                 sessionId,
                 11L,
                 "control_to_bulk_endpoint")));
+            var retryState = GetPrivateField(host, "runtimeUnlockRecoveryRetryState");
+            Assert.NotNull(retryState);
+            var contract = GetPrivatePropertyValue<RuntimeUnlockRetryDispatchContract>(retryState, "DispatchContract");
+            Assert.Equal(receipt.Authority, contract.Authority);
+            Assert.Equal(11L, contract.OfferGeneration);
+            Assert.Equal("nonce_post_fallback_observed_replay", contract.OfferNonce);
+            Assert.True(contract.Lifecycle.IsSettled);
+            Assert.Equal(RuntimeUnlockRetryDispatchSettlementOutcome.DispatchObserved, contract.Lifecycle.SettlementOutcome);
+            Assert.Equal(receipt, GetCurrentRuntimeUnlockRetryDispatchInstallReceiptForTests(host));
 
             var logStart = GetOperationalLogLength();
             var replayBypass = Assert.IsType<bool>(InvokePrivateMethod(
@@ -7907,7 +8047,7 @@ public sealed partial class NknAccelerationTransportTests : CoreSmokeTestsBase, 
             var tunaSidecarPath = Path.Combine(Path.GetTempPath(), "nlink-initial-fallback-direct-success-runtime-unlock.exe");
             var hostClient = new FakeNknClient("host.tuna.file.activation.initial-fallback-direct.aaaaaaaaaaaaaaaa");
             var helperClient = new FakeNknClient("helper.tuna.file.activation.initial-fallback-direct.bbbbbbbbbbbbbbbb");
-            var hostLane = new RetryableTunaAccelerationSession(canListen: false, failedDialAttemptsBeforeSuccess: 0);
+            var hostLane = new RetryableTunaAccelerationSession(canListen: true, failedDialAttemptsBeforeSuccess: 0);
             var helperLane = new RetryableTunaAccelerationSession(canListen: false, failedDialAttemptsBeforeSuccess: 0);
             using var host = new NknSignalingTransport(
                 hostClient,
@@ -7926,19 +8066,12 @@ public sealed partial class NknAccelerationTransportTests : CoreSmokeTestsBase, 
                 host,
                 helper,
                 cts.Token,
-                InviteCapabilities.Chat | InviteCapabilities.FileTransfer);
+                InviteCapabilities.Chat | InviteCapabilities.FileTransfer,
+                suppressAutomaticAccelerationNegotiation: true);
             const string transferId = "transfer_tuna_activation_initial_fallback_direct_success";
             _ = await host.OpenFileTransferDataSessionAsync(sessionId, transferId, cts.Token);
             SetPrivateField(host, "remoteBulkEndpoint", helperClient.ConnectedBulkAddress);
-            host.SeedRuntimeUnlockOfferCriticalSectionForTests(
-                sessionId,
-                "nonce_post_fallback_installed_receipt",
-                payerDecisionId: 71,
-                generation: 13,
-                observedSend: false,
-                observedLane: null,
-                answerTimeoutScheduled: true);
-            _ = QueueExactFallbackPairedTailYieldRuntimeUnlockRetryForTests(
+            var request = QueueExactFallbackPairedTailYieldRuntimeUnlockRetryForTests(
                 host,
                 sessionId,
                 transferId,
@@ -7947,7 +8080,29 @@ public sealed partial class NknAccelerationTransportTests : CoreSmokeTestsBase, 
             await WaitUntilAsync(
                 () => GetLastCommittedRuntimeUnlockRetryDispatchInstallReceipt(host) is not null,
                 TimeSpan.FromSeconds(3));
-            Assert.NotNull(GetLastCommittedRuntimeUnlockRetryDispatchInstallReceipt(host));
+            var receipt = GetCurrentRuntimeUnlockRetryDispatchInstallReceiptForTests(host);
+            Assert.Equal(request, receipt.Request);
+            Assert.Equal(sessionId, receipt.Authority.SessionId);
+            Assert.Equal(transferId, receipt.Authority.TransferId);
+            Assert.Equal(FileTransferDirection.Outbound, receipt.Authority.Direction);
+            Assert.Equal(FileTransferRoute.PostTunaFallbackV6, receipt.Authority.Route);
+            Assert.Equal(FileTransferProtocol.ProtocolVersionV6, receipt.Authority.ProtocolVersion);
+            Assert.Equal(RuntimeUnlockRetryReleaseKind.FallbackPairedTailYield, receipt.Authority.ReleaseKind);
+            host.SeedRuntimeUnlockOfferCriticalSectionForTests(
+                sessionId,
+                "nonce_post_fallback_installed_receipt",
+                payerDecisionId: 71,
+                generation: 13,
+                observedSend: false,
+                observedLane: null,
+                answerTimeoutScheduled: true,
+                preserveRecoveryState: true,
+                installReceipt: receipt);
+            var retryState = GetPrivateField(host, "runtimeUnlockRecoveryRetryState");
+            Assert.NotNull(retryState);
+            var contract = GetPrivatePropertyValue<RuntimeUnlockRetryDispatchContract>(retryState, "DispatchContract");
+            Assert.Equal(receipt.Authority, contract.Authority);
+            Assert.False(contract.Lifecycle.IsSettled);
             var requiresBulkDuplicate = Assert.IsType<bool>(InvokePrivateMethod(
                 host,
                 "ShouldRequireRuntimeUnlockBulkQueueDuplicateForPostTunaFallback",
@@ -21565,7 +21720,8 @@ public sealed partial class NknAccelerationTransportTests : CoreSmokeTestsBase, 
                 host,
                 helper,
                 cts.Token,
-                InviteCapabilities.Chat | InviteCapabilities.FileTransfer);
+                InviteCapabilities.Chat | InviteCapabilities.FileTransfer,
+                suppressAutomaticAccelerationNegotiation: true);
             _ = await host.OpenFileTransferDataSessionAsync(
                 sessionId,
                 "transfer_tuna_activation_ack_replay_gate_host",
@@ -21587,6 +21743,12 @@ public sealed partial class NknAccelerationTransportTests : CoreSmokeTestsBase, 
                           "event=runtime_unlock_answer_ack_probe_barrier_held;",
                           StringComparison.Ordinal),
                 TimeSpan.FromSeconds(6));
+            var replyShadow = GetPrivateField(host, "pendingAccelerationAnswerAckReplyShadow");
+            Assert.NotNull(replyShadow);
+            Assert.Equal(sessionId, GetPrivatePropertyValue<string>(replyShadow, "SessionId"));
+            Assert.Equal("InitialActivation", replyShadow.GetType().GetProperty("AuthorityMode")!.GetValue(replyShadow)?.ToString());
+            var firstSubmission = GetPrivatePropertyValue<TaskCompletionSource<bool>>(replyShadow, "FirstSubmissionAccepted");
+            Assert.False(firstSubmission.Task.IsCompleted);
             Assert.DoesNotContain(
                 "event=filetransfer_runtime_unlock_handoff_pending_route_commit;",
                 ReadOperationalLogTail(logStart),
@@ -21606,6 +21768,8 @@ public sealed partial class NknAccelerationTransportTests : CoreSmokeTestsBase, 
                                StringComparison.Ordinal);
                 },
                 TimeSpan.FromSeconds(8));
+            Assert.True(firstSubmission.Task.IsCompletedSuccessfully);
+            Assert.True(await firstSubmission.Task);
 
             var logTail = ReadOperationalLogTail(logStart);
             Assert.Contains(
@@ -25094,9 +25258,26 @@ public sealed partial class NknAccelerationTransportTests : CoreSmokeTestsBase, 
                 InviteCapabilities.Chat | InviteCapabilities.FileTransfer);
 
             helper.SetAccelerationAcceptedForTests(NknAccelerationLaneKind.File, sessionId);
+            var pendingHandoffs = Assert.IsAssignableFrom<System.Collections.IDictionary>(
+                GetPrivateField(helper, "pendingFileTransferV6HandoffsBySession"));
+            Assert.Single(pendingHandoffs);
+            var setupIntent = pendingHandoffs[sessionId];
+            Assert.NotNull(setupIntent);
+            Assert.Equal(sessionId, GetPrivatePropertyValue<string>(setupIntent, "SessionId"));
+            Assert.Equal(
+                FileTransferTransportHandoffKind.NormalToTunaActivation,
+                GetPrivatePropertyValue<FileTransferTransportHandoffKind>(setupIntent, "HandoffKind"));
+            Assert.Equal(
+                FileTransferTransportKind.Tuna,
+                GetPrivatePropertyValue<FileTransferTransportKind>(setupIntent, "TargetTransport"));
+            // Remove the setup activation intent before observing the authority-free fallback.
+            InvokePrivateMethod(helper, "ClearPendingFileTransferV6Handoffs", "test_setup_activation_complete", sessionId);
+            Assert.Empty(pendingHandoffs);
+
             var logStart = GetOperationalLogLength();
             fakeLane.SetAvailable(false, "remote_closed");
             await Task.Delay(150, cts.Token);
+            Assert.Empty(pendingHandoffs);
             Assert.DoesNotContain(
                 "event=filetransfer_v6_pending_handoff_recorded;",
                 ReadOperationalLogTail(logStart),
@@ -25110,6 +25291,7 @@ public sealed partial class NknAccelerationTransportTests : CoreSmokeTestsBase, 
             await Task.Delay(150, cts.Token);
 
             var replayTail = ReadOperationalLogTail(logStart);
+            Assert.Empty(pendingHandoffs);
             Assert.DoesNotContain("event=filetransfer_v6_pending_handoff_replayed;", replayTail, StringComparison.Ordinal);
             Assert.DoesNotContain(
                 availabilityEvents,
@@ -25203,6 +25385,22 @@ public sealed partial class NknAccelerationTransportTests : CoreSmokeTestsBase, 
 
             helper.SetAccelerationAcceptedForTests(NknAccelerationLaneKind.File, sessionId);
 
+            var pendingHandoffs = Assert.IsAssignableFrom<System.Collections.IDictionary>(
+                GetPrivateField(helper, "pendingFileTransferV6HandoffsBySession"));
+            Assert.Single(pendingHandoffs);
+            var setupIntent = pendingHandoffs[sessionId];
+            Assert.NotNull(setupIntent);
+            Assert.Equal(sessionId, GetPrivatePropertyValue<string>(setupIntent, "SessionId"));
+            Assert.Equal(
+                FileTransferTransportHandoffKind.NormalToTunaActivation,
+                GetPrivatePropertyValue<FileTransferTransportHandoffKind>(setupIntent, "HandoffKind"));
+            Assert.Equal(
+                FileTransferTransportKind.Tuna,
+                GetPrivatePropertyValue<FileTransferTransportKind>(setupIntent, "TargetTransport"));
+            // The accepted-lane setup creates an activation intent, not the stale fallback under test.
+            InvokePrivateMethod(helper, "ClearPendingFileTransferV6Handoffs", "test_setup_activation_complete", sessionId);
+            Assert.Empty(pendingHandoffs);
+
             var logStart = GetOperationalLogLength();
             const string transferId = "transfer_tuna_v4_suppresses_stale_pending_regular";
             InvokePrivateMethod(
@@ -25213,7 +25411,10 @@ public sealed partial class NknAccelerationTransportTests : CoreSmokeTestsBase, 
                 FileTransferProtocol.ProtocolVersionV4,
                 "test_file_tuna_v4_new_transfer");
 
-            Assert.True(Assert.IsType<bool>(InvokePrivateMethod(
+            Assert.Equal(
+                FileTransferRouteResolver.FileTunaV4Token,
+                GetFileTransferRouteHintTokenForTests(helper, transferId, sessionId, FileTransferDirection.Outbound));
+            Assert.False(Assert.IsType<bool>(InvokePrivateMethod(
                 helper,
                 "TryRecordPendingFileTransferV6Handoff",
                 sessionId,
@@ -25221,6 +25422,7 @@ public sealed partial class NknAccelerationTransportTests : CoreSmokeTestsBase, 
                 FileTransferTransportHandoffKind.TunaToNormalFallback,
                 FileTransferTransportKind.RegularNkn,
                 "test_stale_after_completed_transfer")));
+            Assert.Empty(pendingHandoffs);
 
             var dataSession = await helper.OpenFileTransferDataSessionAsync(sessionId, transferId, cts.Token);
             var availabilityEvents = new ConcurrentQueue<FileTransferDataSessionAvailabilityChangedEventArgs>();
@@ -25228,6 +25430,10 @@ public sealed partial class NknAccelerationTransportTests : CoreSmokeTestsBase, 
 
             await Task.Delay(150, cts.Token);
 
+            Assert.Empty(pendingHandoffs);
+            Assert.Equal(
+                FileTransferRouteResolver.FileTunaV4Token,
+                GetFileTransferRouteHintTokenForTests(helper, transferId, sessionId, FileTransferDirection.Outbound));
             Assert.DoesNotContain(
                 availabilityEvents,
                 e => !e.IsAvailable &&
@@ -30891,25 +31097,61 @@ public sealed partial class NknAccelerationTransportTests : CoreSmokeTestsBase, 
             dataSession.AvailabilityChanged += (_, e) => availabilityEvents.Enqueue(e);
 
             helper.SetAccelerationAcceptedForTests(NknAccelerationLaneKind.File, sessionId);
-            TrackPostTunaFallbackRuntimeUnlockAdmissionDenied(helper, transferId, "test_post_tuna_fallback_runtime_unlock_uncommitted");
-            InvokePrivateMethod(
-                helper,
-                "RecordTunaFallbackFileTransferDataFrameReceived",
-                new FileTransferReceiverStateFrameV6
-                {
-                    SessionId = sessionId,
-                    TransferId = transferId,
-                    TransportEpoch = 7,
-                    Epoch = 3,
-                    ContiguousCommittedChunkIndex = 16,
-                    DurableReceivedHighestChunkIndex = 18,
-                    CreditUntilChunkIndexExclusive = 32,
-                    BytesCommitted = 16 * 64 * 1024L,
-                    RecoveryMode = "post_tuna_fallback_survival",
-                },
-                NknBridgeChannel.Bulk,
-                256,
-                sessionId);
+            var command = CreateFallbackPrerequisiteDisposition(dataSession, FileTransferDirection.Outbound);
+            var boundary = Assert.IsType<FileTransferFallbackTransitionProofBoundary>(command.Authority.ProofBoundary);
+            Assert.Equal(sessionId, command.Authority.SessionId);
+            Assert.Equal(transferId, command.Authority.TransferId);
+            Assert.Equal(FileTransferDirection.Outbound, command.Authority.Direction);
+            Assert.Equal(FileTransferRouteTransitionDispositionKind.Committed, command.Kind);
+            Assert.Equal(FileTransferRoute.PostTunaFallbackV6, command.Authority.TargetRoute);
+            Assert.Equal(FileTransferProtocol.ProtocolVersionV6, command.Authority.TargetProtocolVersion);
+            var recovered = new FileTransferV6TransportEpochSnapshot(
+                sessionId,
+                transferId,
+                command.Authority.Direction,
+                boundary.TargetTransportEpoch,
+                FileTransferTransportHandoffKind.TunaToNormalFallback,
+                FileTransferTransportKind.Tuna,
+                FileTransferTransportKind.RegularNkn,
+                V6TransportEpochState.Recovered,
+                "test_committed_fallback_before_sidecar_close",
+                IsUnresolved: false);
+            var observer = Assert.IsAssignableFrom<IFileTransferV6TransportEpochObserver>(helper);
+
+            // The first recovered boundary follows the coordinator commit; the uncommitted case has its own fixture.
+            Assert.Null(GetPrivateField(helper, "tunaFallbackProofState"));
+            await ApplyFallbackPrerequisiteDispositionAsync(helper, command);
+            var publication = command.RoutePublicationToken!.Value;
+            ((IFileTransferRouteHintObserver)helper).ObserveFileTransferRouteHint(new(
+                sessionId, transferId, publication.RouteToken, publication.ProtocolVersion,
+                "test_committed_fallback_before_sidecar_close", PublicationAuthority:
+                    FileTransferCoordinator.CreateRoutePublicationAuthority(publication)));
+            observer.ObserveFileTransferV6TransportEpoch(recovered);
+
+            var fallbackState = GetPrivateField(helper, "tunaFallbackProofState");
+            Assert.NotNull(fallbackState);
+            Assert.Equal(sessionId, GetPrivatePropertyValue<string>(fallbackState, "SessionId"));
+            Assert.Equal("Recovered", fallbackState.GetType().GetProperty("FileState")!.GetValue(fallbackState)?.ToString());
+            Assert.Equal(boundary.TargetTransportEpoch, GetPrivatePropertyValue<long>(fallbackState, "FileV6TransportEpoch"));
+            Assert.Equal(FileTransferRouteResolver.PostTunaFallbackV6Token,
+                GetFileTransferRouteHintTokenForTests(helper, transferId));
+            Assert.True(dataSession.IsAvailable);
+            availabilityEvents.Clear();
+
+            // Replaying the same boundary is diagnostic-only and cannot mutate the committed fallback.
+            var duplicateLogStart = GetOperationalLogLength();
+            observer.ObserveFileTransferV6TransportEpoch(recovered);
+            var duplicateLogTail = ReadOperationalLogTail(duplicateLogStart);
+            Assert.Contains(
+                SensitiveDataRedactor.Redact($"event=filetransfer_v6_epoch_observation_ignored_stale_recovered; session_id={sessionId}; transfer_id={transferId}; direction=outbound; transport_epoch={boundary.TargetTransportEpoch};"),
+                duplicateLogTail,
+                StringComparison.Ordinal);
+            Assert.Contains("reason=duplicate_recovery_boundary_generation", duplicateLogTail, StringComparison.Ordinal);
+            Assert.Same(fallbackState, GetPrivateField(helper, "tunaFallbackProofState"));
+            Assert.Equal("Recovered", fallbackState.GetType().GetProperty("FileState")!.GetValue(fallbackState)?.ToString());
+            Assert.Equal(boundary.TargetTransportEpoch, GetPrivatePropertyValue<long>(fallbackState, "FileV6TransportEpoch"));
+            Assert.Empty(availabilityEvents);
+            Assert.True(dataSession.IsAvailable);
 
             var logStart = GetOperationalLogLength();
             fakeLane.SetAvailable(false, "remote_closed");
@@ -30922,6 +31164,9 @@ public sealed partial class NknAccelerationTransportTests : CoreSmokeTestsBase, 
 
             var logTail = ReadOperationalLogTail(logStart);
             Assert.Contains("event=filetransfer_v6_fallback_start_suppressed_final;", logTail, StringComparison.Ordinal);
+            Assert.Same(fallbackState, GetPrivateField(helper, "tunaFallbackProofState"));
+            Assert.Equal("Recovered", fallbackState.GetType().GetProperty("FileState")!.GetValue(fallbackState)?.ToString());
+            Assert.Equal(boundary.TargetTransportEpoch, GetPrivatePropertyValue<long>(fallbackState, "FileV6TransportEpoch"));
             Assert.DoesNotContain("event=runtime_unlock_uncommitted_file_fallback_suppressed;", logTail, StringComparison.Ordinal);
             Assert.DoesNotContain(
                 "event=filetransfer_data_session_availability_broadcast;",
