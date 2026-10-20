@@ -38,12 +38,23 @@ public sealed class ScreenSharePreviewIntegrationTests : CoreSmokeTestsBase
             var transportConfig = CreateDevLocalTestConfig();
             var fakeSource = new FakeScreenCaptureSource();
             using var transport = new DevLocalTransport();
-            using var runtime = new SessionRuntime(() => transport);
+            using var runtime = new SessionRuntime(
+                () => transport, SessionRuntimeWatchdogOptions.Default,
+                transportScreenCaptureSourceFactory: () => new FakeScreenCaptureSource());
             using var helpee = new HelpeePageViewModel(
                 cancelAction: static () => { },
                 transportConfig,
                 runtime,
-                screenCaptureSourceFactory: new FixedCaptureSourceFactory(fakeSource));
+                openDiagnosticsAction: null,
+                clipboardService: null,
+                shareMessageConfig: null,
+                statusPresenter: null,
+                incomingRequestTimeout: null,
+                uiStateStore: null,
+                backAction: null,
+                screenCaptureSourceFactory: new FixedCaptureSourceFactory(fakeSource),
+                decodeFrame: null,
+                persistCaptureTargetToUserEnvironment: false);
             await GrantScreenShareAsync(runtime, transport, helpee);
 
             try
@@ -120,7 +131,9 @@ public sealed class ScreenSharePreviewIntegrationTests : CoreSmokeTestsBase
             var transportConfig = CreateDevLocalTestConfig();
             var fakeSource = new FakeScreenCaptureSource();
             using var transport = new DevLocalTransport();
-            using var runtime = new SessionRuntime(() => transport);
+            using var runtime = new SessionRuntime(
+                () => transport, SessionRuntimeWatchdogOptions.Default,
+                transportScreenCaptureSourceFactory: () => new FakeScreenCaptureSource());
             using var decodeGate = new SemaphoreSlim(0, 50);
             var appliedFrames = 0;
 
@@ -142,7 +155,8 @@ public sealed class ScreenSharePreviewIntegrationTests : CoreSmokeTestsBase
                         decodeGate.Wait(TimeSpan.FromSeconds(2)),
                         "Timed out waiting to release preview decode.");
                     return CreateBitmap(bytes[0], 1);
-                });
+                },
+                persistCaptureTargetToUserEnvironment: false);
             await GrantScreenShareAsync(runtime, transport, helpee);
 
             helpee.PropertyChanged += (_, e) =>
@@ -222,7 +236,9 @@ public sealed class ScreenSharePreviewIntegrationTests : CoreSmokeTestsBase
             var transportConfig = CreateDevLocalTestConfig();
             var fakeSource = new FakeScreenCaptureSource();
             using var transport = new DevLocalTransport();
-            using var runtime = new SessionRuntime(() => transport);
+            using var runtime = new SessionRuntime(
+                () => transport, SessionRuntimeWatchdogOptions.Default,
+                transportScreenCaptureSourceFactory: () => new FakeScreenCaptureSource());
             using var decodeGate = new SemaphoreSlim(0, 2);
             var firstDecodeStarted = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
             var decodeCalls = 0;
@@ -253,7 +269,8 @@ public sealed class ScreenSharePreviewIntegrationTests : CoreSmokeTestsBase
                         decodeGate.Wait(TimeSpan.FromSeconds(2)),
                         $"Timed out waiting to release preview decode {call}.");
                     return CreateBitmap(bytes[0], 1);
-                });
+                },
+                persistCaptureTargetToUserEnvironment: false);
             await GrantScreenShareAsync(runtime, transport, helpee);
 
             var startedSignal = CreateConditionSignal(
@@ -307,7 +324,9 @@ public sealed class ScreenSharePreviewIntegrationTests : CoreSmokeTestsBase
             var transportConfig = CreateDevLocalTestConfig();
             var fakeSource = new FakeScreenCaptureSource();
             using var transport = new DevLocalTransport();
-            using var runtime = new SessionRuntime(() => transport);
+            using var runtime = new SessionRuntime(
+                () => transport, SessionRuntimeWatchdogOptions.Default,
+                transportScreenCaptureSourceFactory: () => new FakeScreenCaptureSource());
             var applyCount = 0;
             var firstApplyObserved = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
             var postStopApplyObserved = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -325,7 +344,8 @@ public sealed class ScreenSharePreviewIntegrationTests : CoreSmokeTestsBase
                 uiStateStore: null,
                 backAction: null,
                 screenCaptureSourceFactory: new FixedCaptureSourceFactory(fakeSource),
-                decodeFrame: bytes => CreateBitmap(bytes[0], 1));
+                decodeFrame: bytes => CreateBitmap(bytes[0], 1),
+                persistCaptureTargetToUserEnvironment: false);
             await GrantScreenShareAsync(runtime, transport, helpee);
 
             helpee.PropertyChanged += (_, e) =>
@@ -409,12 +429,18 @@ public sealed class ScreenSharePreviewIntegrationTests : CoreSmokeTestsBase
         await PreviewDispatchGate.WaitAsync();
         try
         {
+            const string captureTargetVariable = "NLINK_FEATURE_SCREENCAP_TARGET";
+            using var processTarget = new EnvironmentOverride(captureTargetVariable, null);
+            var userTarget = Environment.GetEnvironmentVariable(captureTargetVariable, EnvironmentVariableTarget.User);
             using var session = HeadlessUnitTestSession.StartNew(typeof(AvaloniaHeadlessUiAppBootstrap));
             await session.Dispatch(async () =>
             {
                 await action();
                 return true;
             }, default);
+            Assert.True(string.Equals(userTarget,
+                Environment.GetEnvironmentVariable(captureTargetVariable, EnvironmentVariableTarget.User),
+                StringComparison.Ordinal), "Preview fixture changed the saved user capture target.");
         }
         finally
         {
