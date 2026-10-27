@@ -32,12 +32,16 @@ public sealed class AttemptCanonicalPrefixBarrierTests : IDisposable
         read.Seek(0, SeekOrigin.Current);
         Assert.Equal(0, await read.ReadAsync(Memory<byte>.Empty));
         Assert.Equal(0, source.Reads);
+        Assert.Equal(1, source.ReadAttempts);
         Assert.Throws<IOException>(profile.RequirePrefixConsumed);
         var pending = read.ReadAsync(new byte[8]).AsTask();
         Assert.False(pending.IsCompleted); Assert.Equal(0, source.Reads);
+        Assert.Equal(1, source.ReadAttempts);
         handoff.SetResult();
         Assert.Equal(3, await pending.WaitAsync(TimeSpan.FromSeconds(5)));
+        Assert.Equal(2, source.ReadAttempts);
         Assert.Equal(3, await read.ReadAsync(new byte[8]));
+        Assert.Equal(3, source.ReadAttempts);
         Assert.Equal(Boundary + 6, read.Position); Assert.Equal(1, checks);
         profile.RequirePrefixConsumed();
         Assert.Throws<IOException>(() => profile.BindPrefix(Task.CompletedTask, () => { }));
@@ -64,9 +68,28 @@ public sealed class AttemptCanonicalPrefixBarrierTests : IDisposable
         if (fault == "source_retired") source.Retired = true;
         if (fault == "seek_during_wait") read.Position++;
         handoff.TrySetResult();
-        await Assert.ThrowsAnyAsync<Exception>(() => pending.WaitAsync(TimeSpan.FromSeconds(5)));
+        if (fault is "cancel" or "dispose")
+        {
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(() => pending.WaitAsync(TimeSpan.FromSeconds(5)));
+            Assert.True(pending.IsCanceled);
+        }
+        else
+        {
+            var error = await Assert.ThrowsAsync<IOException>(() => pending.WaitAsync(TimeSpan.FromSeconds(5)));
+            Assert.Equal(fault switch
+            {
+                "crossing" => "canonical_prefix_read_crossing",
+                "source_retired" => "attempt_runtime_source_retired",
+                "scope_retired" => "retired",
+                "seek_during_wait" => "canonical_prefix_source_position_changed",
+                _ => "canonical_prefix_read_entry_invalid"
+            }, error.Message);
+            Assert.True(pending.IsFaulted);
+        }
+        Assert.Equal(0, source.ReadAttempts);
         Assert.Equal(0, source.Reads);
-        Assert.ThrowsAny<Exception>(profile.RequirePrefixConsumed);
+        if (fault == "dispose") Assert.Throws<ObjectDisposedException>(profile.RequirePrefixConsumed);
+        else Assert.Throws<IOException>(profile.RequirePrefixConsumed);
     }
 
     [Theory]
@@ -246,10 +269,28 @@ public sealed class AttemptCanonicalPrefixBarrierTests : IDisposable
         if (fault == "valid")
         {
             await consumer.Received;
-            await Assert.ThrowsAsync<IOException>(producer.PublishAsync);
+            Assert.True(consumer.Received.IsCompletedSuccessfully);
+            var error = await Assert.ThrowsAsync<IOException>(producer.PublishAsync);
+            Assert.Equal("canonical_prefix_duplicate_publish", error.Message);
             consumer.Check();
         }
-        else await Assert.ThrowsAnyAsync<Exception>(() => consumer.Received.WaitAsync(TimeSpan.FromSeconds(5)));
+        else if (fault == "cancel")
+        {
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(() => consumer.Received.WaitAsync(TimeSpan.FromSeconds(5)));
+            Assert.True(consumer.Received.IsCanceled);
+        }
+        else if (fault == "dispose")
+        {
+            var error = await Record.ExceptionAsync(() => consumer.Received.WaitAsync(TimeSpan.FromSeconds(5)));
+            Assert.True(error is OperationCanceledException or ObjectDisposedException or IOException);
+            Assert.True(consumer.Received.IsCanceled || consumer.Received.IsFaulted);
+        }
+        else
+        {
+            var error = await Assert.ThrowsAsync<IOException>(() => consumer.Received.WaitAsync(TimeSpan.FromSeconds(5)));
+            Assert.Equal("retained_peer_unavailable", error.Message);
+            Assert.True(consumer.Received.IsFaulted);
+        }
     }
 
     [Theory]
@@ -280,6 +321,7 @@ public sealed class AttemptCanonicalPrefixBarrierTests : IDisposable
     private sealed class PositionedStream(long position, int maxRead = int.MaxValue) : Stream
     {
         internal bool Retired;
+        internal int ReadAttempts;
         internal int Reads;
         public override long Position { get; set; } = position;
         public override long Length => AttemptCanonicalTailProfile.FileBytes;
@@ -288,6 +330,7 @@ public sealed class AttemptCanonicalPrefixBarrierTests : IDisposable
         public override bool CanWrite => false;
         public override ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken ct = default)
         {
+            ReadAttempts++;
             ct.ThrowIfCancellationRequested();
             if (Retired) throw new IOException("retired");
             var count = Math.Min(buffer.Length, maxRead);
