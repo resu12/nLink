@@ -95,7 +95,8 @@ try {
             @($script:primaryPayloadHandles | Where-Object {-not $_.IsClosed}).Count) {throw 'Primary payload assertion or parent-side cleanup missing'}
         Write-Host ('attempt-payload-primary-analysis='+$env:NLINK_TEST_PAYLOAD_PRIMARY_CASE)
         if($env:NLINK_TEST_PAYLOAD_PRIMARY_CASE -ceq 'canonical-tail-late-publication') {
-            if($output -notmatch 'attempt-canonical-tail-same-pair-primary-checked') {throw 'Canonical same-pair primary marker missing'}
+            $canonicalMarker=if($env:NLINK_TEST_FRONTIER_ROUTE_CYCLE -ceq 'canonical-ineligible-v1') {'attempt-canonical-tail-ineligible-primary-checked'} else {'attempt-canonical-tail-same-pair-primary-checked'}
+            if($output -notmatch $canonicalMarker) {throw 'Canonical primary marker missing'}
             . (Join-Path $RepoRoot 'tests/nLink.SmokeTests.Core/Support/FrontierCanonicalTailProof.ps1') -Directory $Directory -Receipt $receipt -AnalysisFailure $analysisFailure -RouteCycleProfile $env:NLINK_TEST_FRONTIER_ROUTE_CYCLE -WorkerConfiguration $env:NLINK_TEST_FRONTIER_WORKER_CONFIGURATION
             Write-Host 'attempt-canonical-tail-stopped-before-route-acceptance'
             throw 'Offline canonical-tail verification stopped before route-cycle acceptance'

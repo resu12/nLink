@@ -3,6 +3,10 @@ $lateFlags=[Reflection.BindingFlags]'Instance,NonPublic'
 $ineligibleControl=$env:NLINK_TEST_FRONTIER_ROUTE_CYCLE -ceq 'late-ineligible-v1'
 if($ineligibleControl -and ($CanonicalTail -or $env:NLINK_TEST_DIAGNOSTIC_CUSTODY -cne 'frontier-late-publication' -or
     $env:NLINK_TEST_FRONTIER_WORKER_CONFIGURATION -cne 'Debug')) {throw 'Ineligibility control profile mismatch'}
+$canonicalIneligibleControl=$env:NLINK_TEST_FRONTIER_ROUTE_CYCLE -ceq 'canonical-ineligible-v1'
+if($canonicalIneligibleControl -and (-not $CanonicalTail -or $env:NLINK_TEST_PAYLOAD_PRIMARY_CASE -cne 'canonical-tail-late-publication' -or
+    $env:NLINK_TEST_DIAGNOSTIC_CUSTODY -or $env:NLINK_TEST_FRONTIER_WORKER_CONFIGURATION -cne 'Debug')) {throw 'Canonical ineligibility control profile mismatch'}
+$ineligibleControl=$ineligibleControl -or $canonicalIneligibleControl
 function Read-LatePublicationField($Value,[string]$Name) {return $Value.GetType().GetField($Name,$lateFlags).GetValue($Value)}
 function Get-LatePublicationHash([byte[]]$Bytes) {
     $sha=[Security.Cryptography.SHA256]::Create()

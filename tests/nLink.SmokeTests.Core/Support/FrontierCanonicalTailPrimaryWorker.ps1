@@ -26,6 +26,7 @@ function Clear-CanonicalTailPrimaryReferencesForTest {
     }
 }
 $script:canonicalTailReceipt=$null; $script:canonicalTailJoined=$false
+$script:canonicalTailIneligibleChecked=$false
 $script:latePublicationProbeError=$null; $script:latePublicationChecked=$false; $script:latePublicationResolverCalls=0
 $script:latePublicationResolved=$false; $script:latePublicationOutput=$false; $script:latePublicationOmissionReason=$null
 $script:latePublicationReportsBefore=$null; $script:latePublicationReportsAfter=$null; $script:latePublicationWitnesses=@()
@@ -34,8 +35,10 @@ try {
     $text=Get-CanonicalTailPrimaryWorkerForTest $RepoRoot
     & ([scriptblock]::Create($text)) -Mode $Mode -LogPath $LogPath -ArtifactDir $ArtifactDir -TailMinutes $TailMinutes -LiveRouteProofMode $LiveRouteProofMode
     if($null -ne $script:latePublicationProbeError) {throw $script:latePublicationProbeError}
-    if(-not $script:canonicalTailJoined -or -not $script:latePublicationChecked -or -not $script:primaryPayloadChecked) {
+    $canonicalComplete=if($env:NLINK_TEST_FRONTIER_ROUTE_CYCLE -ceq 'canonical-ineligible-v1') {$script:canonicalTailIneligibleChecked} else {$script:canonicalTailJoined}
+    if(-not $canonicalComplete -or -not $script:latePublicationChecked -or -not $script:primaryPayloadChecked) {
         throw 'Canonical tail primary did not complete its original same-pair witness and cleanup'
     }
-    Write-Host 'attempt-canonical-tail-same-pair-primary-checked'
+    if($env:NLINK_TEST_FRONTIER_ROUTE_CYCLE -ceq 'canonical-ineligible-v1') {Write-Host 'attempt-canonical-tail-ineligible-primary-checked'}
+    else {Write-Host 'attempt-canonical-tail-same-pair-primary-checked'}
 } finally {Clear-CanonicalTailPrimaryReferencesForTest}

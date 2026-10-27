@@ -87,7 +87,12 @@ if($Stage -ceq 'Bind') {
     $script:primaryPayloadBound=$true
     return
 }
-if(-not $script:primaryPayloadBound) {
+$private:canonicalIneligible=$primaryFault -ceq 'canonical-tail-late-publication' -and
+    $env:NLINK_TEST_FRONTIER_ROUTE_CYCLE -ceq 'canonical-ineligible-v1' -and
+    $env:NLINK_TEST_FRONTIER_WORKER_CONFIGURATION -ceq 'Debug' -and -not $env:NLINK_TEST_DIAGNOSTIC_CUSTODY
+if($canonicalIneligible -and (-not $script:canonicalTailIneligibleChecked -or $script:primaryPayloadBound -or
+    $null -ne $script:transferEvaluation -or $script:workerPayloadHandles.Count -ne 2)) {throw 'Canonical ineligible payload validation did not complete'}
+if(-not $script:primaryPayloadBound -and -not $canonicalIneligible) {
     $private:cleanupDiagnostic='attempt-payload-primary-cleanup; bind_complete=False; open_handles=not_checked; evaluation_current=not_checked'
     [Console]::Error.WriteLine($cleanupDiagnostic)
     if($primaryFault -ceq 'canonical-fallback') {Write-FrontierPrimaryCheckpoint 'cleanup' $cleanupDiagnostic}
@@ -105,10 +110,15 @@ if($null -ne $script:transferEvaluation) {
     $private:evaluationCurrent=$script:transferEvaluation.IsCurrent
     $private:evaluationState=[string]$evaluationCurrent
 }
-$private:cleanupDiagnostic='attempt-payload-primary-cleanup; bind_complete=True; open_handles=0; evaluation_current='+$evaluationState
+$private:cleanupDiagnostic='attempt-payload-primary-cleanup; bind_complete='+$script:primaryPayloadBound+'; open_handles=0; evaluation_current='+$evaluationState
 [Console]::Error.WriteLine($cleanupDiagnostic)
 if($primaryFault -ceq 'canonical-fallback') {Write-FrontierPrimaryCheckpoint 'cleanup' $cleanupDiagnostic}
 if($evaluationCurrent) {throw 'Original evaluation remained current after retirement'}
+if($canonicalIneligible) {
+    [IO.File]::WriteAllText((Join-Path $ArtifactDir 'canonical-tail-ineligible-cleanup.json'),
+        ([ordered]@{Profile='canonical-ineligible-v1';HandleCount=$script:workerPayloadHandles.Count;OpenHandles=$openHandles;
+            EvaluationCurrent=$evaluationCurrent;TransferBound=$script:primaryPayloadBound} | ConvertTo-Json -Compress))
+}
 if($primaryFault -ceq 'canonical-source') {
     $private:selected=if($null -eq $firstCompactProofChainFailure) {'(none)'} else {$firstCompactProofChainFailure.Class}
     if($selected -ceq 'filetransfer_fallback_frontier_recent_progress_grace_recheck_missing') {throw 'Regular-only source unexpectedly selected a fallback witness'}

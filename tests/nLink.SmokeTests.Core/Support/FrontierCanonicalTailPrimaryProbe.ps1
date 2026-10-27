@@ -1,10 +1,13 @@
-param([ValidateSet('Capture','BeforeResolve','AfterResolve','AfterOptional','Closed')][string]$Stage)
+param([ValidateSet('Capture','BeforeOptional','BeforeResolve','AfterResolve','AfterOptional','Closed')][string]$Stage)
 if($env:NLINK_TEST_PAYLOAD_PRIMARY_CASE -cne 'canonical-tail-late-publication' -or $env:NLINK_TEST_DIAGNOSTIC_CUSTODY) {
     throw 'Canonical tail probe requires its separate actual-pair profile'
 }
 if($Stage -ceq 'Closed' -and $null -ne $script:latePublicationObservation) {
     $script:latePublicationObservation.CanonicalTailProfile='canonical-tail-late-publication'
     $script:latePublicationObservation.SamePairJoined=$script:canonicalTailJoined
+    if($env:NLINK_TEST_FRONTIER_ROUTE_CYCLE -ceq 'canonical-ineligible-v1') {
+        $script:latePublicationObservation.CanonicalTailIneligibleChecked=$script:canonicalTailIneligibleChecked
+    }
 }
 try {
     if($Stage -ceq 'BeforeResolve') {
@@ -40,6 +43,15 @@ try {
         $script:canonicalTailJoined=$true
         Write-Host 'canonical-production-pair-check-observed'
     } elseif($Stage -ceq 'AfterOptional') {
+        if($env:NLINK_TEST_FRONTIER_ROUTE_CYCLE -ceq 'canonical-ineligible-v1') {
+            $attempted=Read-LatePublicationField $nativePrimaryCustody 'transferBindingAttempted'
+            if($script:canonicalTailJoined -or $script:primaryPayloadBound -or $null -ne $nativePrimaryTransfer -or
+                $null -ne $script:transferEvaluation -or $attempted -or
+                $verdict -cne 'INCONCLUSIVE' -or $gateStatus -cne 'fail') {throw 'Ineligible canonical tail acquired a transfer join or changed its verdict'}
+            $script:latePublicationObservation.TransferBindingAttempted=$attempted
+            $script:canonicalTailIneligibleChecked=$true
+            return
+        }
         if(-not $script:canonicalTailJoined -or $verdict -cne 'FAIL_PROTOCOL_OR_INTEGRITY' -or $gateStatus -cne 'fail') {
             throw 'Canonical tail witness changed the original failed route verdict or missed its join'
         }

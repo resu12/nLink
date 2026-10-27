@@ -1,6 +1,6 @@
 param([string]$RepoRoot,[string]$Directory,[string]$Case,[string]$PayloadWrapperCase='',[string]$ParentPayloadCase='',[string]$PrimaryPayloadCase='',
     [ValidateSet('','frontier-schedule','frontier-late-publication')][string]$DiagnosticCustodyCase='',[string]$WorkerConfiguration=$env:NLINK_TEST_FRONTIER_WORKER_CONFIGURATION,
-    [ValidateSet('','canonical-cycle-v1','late-ineligible-v1')][string]$RouteCycleProfile='')
+    [ValidateSet('','canonical-cycle-v1','late-ineligible-v1','canonical-ineligible-v1')][string]$RouteCycleProfile='')
 $ErrorActionPreference='Stop'; Set-StrictMode -Version Latest
 if($WorkerConfiguration -cnotin @('Debug','Release')) {throw 'Unsupported frontier worker configuration'}
 if($env:NLINK_TEST_FRONTIER_WORKER_CONFIGURATION -and $WorkerConfiguration -cne $env:NLINK_TEST_FRONTIER_WORKER_CONFIGURATION) {
@@ -11,6 +11,7 @@ $env:NLINK_TEST_FRONTIER_WORKER_CONFIGURATION=$WorkerConfiguration
 $canonicalTailProfile=$Case -ceq 'writer-source-read-cross-process-carrier-full-canonical-tail-late-publication'
 if($RouteCycleProfile -and $WorkerConfiguration -cne 'Debug') {throw 'Route-cycle fixture requires Debug'}
 if($RouteCycleProfile -ceq 'canonical-cycle-v1' -and -not $canonicalTailProfile) {throw 'Route-cycle fixture requires the canonical tail'}
+if($RouteCycleProfile -ceq 'canonical-ineligible-v1' -and -not $canonicalTailProfile) {throw 'Canonical ineligibility control requires the full canonical tail'}
 if($RouteCycleProfile -ceq 'late-ineligible-v1' -and
     ($Case -cne 'writer-source-read-cross-process-carrier-frontier-late-publication' -or $DiagnosticCustodyCase -cne 'frontier-late-publication')) {
     throw 'Ineligibility control requires the original small late fixture'

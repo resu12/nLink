@@ -1,6 +1,7 @@
 function Add-FrontierLatePublicationProbeGuards([string]$Definition,[switch]$CanonicalTail) {
     $stages=@('Capture','BeforeResolve','AfterResolve','AfterOptional','Closed')
-    if($env:NLINK_TEST_FRONTIER_ROUTE_CYCLE -ceq 'late-ineligible-v1') {$stages=@('Capture','BeforeOptional','BeforeResolve','AfterResolve','AfterOptional','Closed')}
+    if($env:NLINK_TEST_FRONTIER_ROUTE_CYCLE -ceq 'late-ineligible-v1' -or
+        ($CanonicalTail -and $env:NLINK_TEST_FRONTIER_ROUTE_CYCLE -ceq 'canonical-ineligible-v1')) {$stages=@('Capture','BeforeOptional','BeforeResolve','AfterResolve','AfterOptional','Closed')}
     foreach($stage in $stages) {
         $anchor=switch($stage) {
             'Capture' {'# Only an admitted bounded private context retains these array references.'}

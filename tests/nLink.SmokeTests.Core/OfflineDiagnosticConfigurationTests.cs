@@ -58,7 +58,7 @@ public sealed class OfflineDiagnosticConfigurationTests : FileTransferOpsScripts
             nameof(FrontierAttemptNknCarrierTests.OriginalApps_CharacterizeSingleSegmentFrontierSchedule),
             nameof(FrontierAttemptNknCarrierTests.OriginalApps_CarrySmallFrontierReceiptIntoPrimary),
             nameof(FrontierAttemptNknCarrierTests.OriginalApps_PreserveIneligibleLateFrontierReceiptInPrimary),
-            nameof(FrontierCanonicalTailNativeTests.OriginalApps_CarryCanonicalTailIntoSamePairPrimary)
+            nameof(FrontierCanonicalTailNativeTests.OriginalApps_PreserveIneligibleCanonicalTailInPrimary)
         ];
         Assert.Equal(debugOnly.OrderBy(name => name, StringComparer.Ordinal),
             methods.Where(method => RequiredConfiguration(method) == "Debug").Select(method => method.Name).OrderBy(name => name, StringComparer.Ordinal));
