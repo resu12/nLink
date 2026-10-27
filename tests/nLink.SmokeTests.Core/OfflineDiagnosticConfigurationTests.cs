@@ -46,7 +46,7 @@ public sealed class OfflineDiagnosticConfigurationTests : FileTransferOpsScripts
 #endif
 
     [Fact]
-    public void PositiveFrontierFixtures_RequireDebugWithoutExcludingReleaseControls()
+    public void DiagnosticFrontierFixtures_RequireDebugWithoutExcludingReleaseControls()
     {
         Type[] fixtures = [typeof(FrontierAttemptNknCarrierTests), typeof(FrontierCanonicalTailNativeTests)];
         Assert.All(fixtures, fixture => Assert.Null(RequiredConfiguration(fixture)));
@@ -57,7 +57,7 @@ public sealed class OfflineDiagnosticConfigurationTests : FileTransferOpsScripts
         [
             nameof(FrontierAttemptNknCarrierTests.OriginalApps_CharacterizeSingleSegmentFrontierSchedule),
             nameof(FrontierAttemptNknCarrierTests.OriginalApps_CarrySmallFrontierReceiptIntoPrimary),
-            nameof(FrontierAttemptNknCarrierTests.OriginalApps_CarryLateFrontierReceiptIntoPrimary),
+            nameof(FrontierAttemptNknCarrierTests.OriginalApps_PreserveIneligibleLateFrontierReceiptInPrimary),
             nameof(FrontierCanonicalTailNativeTests.OriginalApps_CarryCanonicalTailIntoSamePairPrimary)
         ];
         Assert.Equal(debugOnly.OrderBy(name => name, StringComparer.Ordinal),

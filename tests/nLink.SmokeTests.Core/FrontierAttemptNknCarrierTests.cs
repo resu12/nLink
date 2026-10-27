@@ -2,6 +2,7 @@ using System.IO.Pipes;
 using System.Reflection;
 using System.Security.Cryptography;
 using System.Text;
+using System.Text.Json;
 using NLink.App.Services;
 using NLink.Core.FileTransfer;
 using NLink.Core.Logging;
@@ -50,7 +51,7 @@ public sealed class FrontierAttemptNknCarrierTests : FileTransferOpsScriptsTestB
 
     [Fact]
     [Trait("RequiredConfiguration", "Debug")]
-    public async Task OriginalApps_CarryLateFrontierReceiptIntoPrimary()
+    public async Task OriginalApps_PreserveIneligibleLateFrontierReceiptInPrimary()
         => await RunCarrierCaseAsync("pwsh", "frontier-late-publication", fullSize: false, diagnosticCustody: true);
 
     [Fact]
@@ -91,7 +92,9 @@ public sealed class FrontierAttemptNknCarrierTests : FileTransferOpsScriptsTestB
         var configuration = typeof(FrontierAttemptNknCarrierTests).Assembly
             .GetCustomAttribute<AssemblyConfigurationAttribute>()!.Configuration;
         Assert.Contains(configuration, new[] { "Debug", "Release" });
+        var ineligibleLate = diagnosticCustody && fault == "frontier-late-publication";
         var arguments = new[] { root, directory, scenario, "", "", "", diagnosticCustody ? fault : "", configuration };
+        if (ineligibleLate) arguments = [.. arguments, AttemptRouteCycleProfile.Ineligible];
         var result = await RunPowerShellScriptTextAsync(script, arguments, host);
         await File.WriteAllTextAsync(Path.Combine(directory, "result.txt"), result.Stdout + Environment.NewLine + result.Stderr);
         Assert.True(result.ExitCode == 0, result.Stdout + result.Stderr);
@@ -117,6 +120,26 @@ public sealed class FrontierAttemptNknCarrierTests : FileTransferOpsScriptsTestB
             var analysis = await File.ReadAllTextAsync(Path.Combine(directory, "filetransfer-retained-analysis.stdout.txt"));
             Assert.Contains(fault == "frontier-late-publication" ? "attempt-late-publication-primary-checked" : "attempt-diagnostic-primary-checked", analysis);
             Assert.Contains("original parent analyzer evaluations=3 nativeReads=1", analysis);
+            if (ineligibleLate)
+            {
+                Assert.Contains("attempt-late-publication-ineligible-checked", analysis);
+                using var json = JsonDocument.Parse(await File.ReadAllTextAsync(Path.Combine(directory, "late-publication-primary-observation.json")));
+                var observation = json.RootElement;
+                Assert.Equal("PublishedWithinObservationBound", observation.GetProperty("Outcome").GetString());
+                Assert.Equal("filetransfer_tuna_activation_delivery_unproven", observation.GetProperty("SelectedFailure").GetString());
+                Assert.Equal("INCONCLUSIVE", observation.GetProperty("PrimaryVerdict").GetString());
+                Assert.Equal("fail", observation.GetProperty("GateStatus").GetString());
+                Assert.Equal(0, observation.GetProperty("ResolverCalls").GetInt32());
+                Assert.Equal(0, observation.GetProperty("WitnessCount").GetInt32());
+                Assert.False(observation.GetProperty("OriginalOutputCommitted").GetBoolean());
+                Assert.Equal(0, observation.GetProperty("OpenPinsAfterCleanup").GetInt32());
+                Assert.True(observation.GetProperty("TextCleared").GetBoolean());
+                foreach (var flag in new[] { "LiveProofEligible", "NativeWriterCustodyEstablished", "PublicationCompletionIssued" })
+                    Assert.False(observation.GetProperty(flag).GetBoolean());
+                var reportsBefore = observation.GetProperty("ReportsBefore").GetString();
+                Assert.False(string.IsNullOrWhiteSpace(reportsBefore));
+                Assert.Equal(reportsBefore, observation.GetProperty("ReportsAfter").GetString());
+            }
             var received = Assert.Single(Directory.GetFiles(Path.Combine(directory, "native-carrier-received"), "*.bin", SearchOption.AllDirectories));
             using var released = File.Open(received, FileMode.Open, FileAccess.ReadWrite, FileShare.None);
             Assert.Equal(193536, released.Length);
