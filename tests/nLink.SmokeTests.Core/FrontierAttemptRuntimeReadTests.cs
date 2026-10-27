@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Reflection;
 using NLink.Core.FileTransfer;
 using NLink.Tests;
@@ -35,6 +36,38 @@ public sealed class FrontierAttemptRuntimeReadTests : FileTransferOpsScriptsTest
 
 public sealed partial class NknAccelerationTransportTests
 {
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task RetainedRuntimeReadGate_OptionalTimingPreservesBytesAndCancellation(bool measure)
+    {
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var measurements = new List<(long Ticks, int Count)>();
+        using var source = new MemoryStream([1, 2, 3, 4, 5]);
+        using var gate = new RetainedRuntimeReadGate(source, release.Task,
+            (offset, bytes) => { Assert.Equal(0, offset); Assert.Equal(new byte[] { 1, 2, 3, 4 }, bytes); },
+            measureRead: measure ? (ticks, count) => measurements.Add((ticks, count)) : null);
+        var buffer = new byte[4];
+        var pending = gate.ReadAsync(buffer.AsMemory()).AsTask();
+        Assert.False(pending.IsCompleted);
+        Assert.Empty(measurements);
+        release.SetResult();
+        Assert.Equal(4, await pending);
+        Assert.Equal(new byte[] { 1, 2, 3, 4 }, buffer);
+        Assert.Equal(4, source.Position);
+        if (measure)
+        {
+            var sample = Assert.Single(measurements);
+            Assert.Equal(4, sample.Count);
+            Assert.True(sample.Ticks >= 0);
+        }
+        using var cancelled = new CancellationTokenSource();
+        cancelled.Cancel();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => gate.ReadAsync(buffer.AsMemory(), cancelled.Token).AsTask());
+        Assert.Equal(measure ? 1 : 0, measurements.Count);
+        Assert.Equal(4, source.Position);
+    }
+
     internal static async Task RunNativeRuntimeReadsAsync(SessionFileTransferService.NativeSenderSelection native, string scenario)
     {
         using var suite = new NknAccelerationTransportTests();
@@ -54,13 +87,21 @@ public sealed partial class NknAccelerationTransportTests
     }
 
     private sealed class RetainedRuntimeReadProbe(AttemptSenderSourceChannel source, LocalFrontierAppRequest.AppLease lease, string scenario,
-        SessionFileTransferService.NativeSenderSelection? native = null)
+        SessionFileTransferService.NativeSenderSelection? native = null, bool measureReads = false, bool routeCycle = false)
     {
         private static readonly MethodInfo Clone = typeof(object).GetMethod("MemberwiseClone", BindingFlags.Instance | BindingFlags.NonPublic)!;
         private AttemptSenderSourceChannel.RuntimeReads factory = null!;
         private readonly List<Stream> reads = [];
         private byte[]? firstBytes;
         private int opens;
+        private long measuredReadTicks, measuredReadCalls, measuredReadBytes;
+        internal void ReportReadTiming()
+        {
+            if (!measureReads) return;
+            Console.WriteLine($"carrier-source-read-timing=cumulative; calls={Interlocked.Read(ref measuredReadCalls)}; " +
+                $"bytes={Interlocked.Read(ref measuredReadBytes)}; ticks={Interlocked.Read(ref measuredReadTicks)}; " +
+                $"frequency={Stopwatch.Frequency}; opens={opens}; scope=completed-runtime-read-gates-at-fixture-exit");
+        }
         internal FileTransferSendDescriptor? NativeDescriptor => native?.Descriptor;
         private LocalCanonicalSenderSource NativeSource => (LocalCanonicalSenderSource)native!.GetType()
             .GetField("source", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(native)!;
@@ -95,7 +136,7 @@ public sealed partial class NknAccelerationTransportTests
             var copy = (AttemptSenderSourceChannel)Clone.Invoke(source, null)!;
             Assert.Null(copy.BindRuntimeReads(lease, service));
             copy.Dispose();
-            factory = Assert.IsType<AttemptSenderSourceChannel.RuntimeReads>(source.BindRuntimeReads(lease, service));
+            factory = Assert.IsType<AttemptSenderSourceChannel.RuntimeReads>(source.BindRuntimeReads(lease, service, routeCycle));
             Assert.Null(source.BindRuntimeReads(lease, service));
             Assert.Null(factory.OpenRead()); // Not the metadata execution boundary yet.
             Assert.Null(source.TakeRead(lease));
@@ -109,7 +150,7 @@ public sealed partial class NknAccelerationTransportTests
         internal async Task<Stream> OpenAsync(Task release, AttemptCanonicalTailProfile? canonicalTail = null)
         {
             opens++;
-            Assert.InRange(opens, 1, 4);
+            Assert.InRange(opens, 1, routeCycle ? 6 : 4);
             foreach (var retired in reads)
             {
                 Assert.False(retired.CanRead);
@@ -146,7 +187,12 @@ public sealed partial class NknAccelerationTransportTests
                 Assert.Equal(0, offset);
                 firstBytes = bytes;
                 ReadObserved.TrySetResult();
-            }, opens == 4 ? canonicalTail : null);
+            }, opens == (routeCycle ? 6 : 4) ? canonicalTail : null, measureReads ? (ticks, count) =>
+            {
+                Interlocked.Add(ref measuredReadTicks, ticks);
+                Interlocked.Increment(ref measuredReadCalls);
+                Interlocked.Add(ref measuredReadBytes, count);
+            } : null, routeCycle && opens < 6 ? opens : 0);
         }
 
         internal void VerifyBeforeRetirement(FileTransferTransferSnapshot sender, FileTransferTransferSnapshot receiver, MemoryStream destination)
@@ -165,7 +211,7 @@ public sealed partial class NknAccelerationTransportTests
 
         internal void VerifyRetired()
         {
-            Assert.Equal(4, opens);
+            Assert.Equal(routeCycle ? 6 : 4, opens);
             Assert.Null(OpenSourceAsync().GetAwaiter().GetResult());
             foreach (var read in reads) Assert.False(read.CanRead);
             if (!ExpectRejection) Assert.True(native is null ? source.IsCurrent : NativeSource.IsCurrent); // Runtime retirement did not close the anchor.
@@ -173,11 +219,17 @@ public sealed partial class NknAccelerationTransportTests
     }
 
     internal sealed class RetainedRuntimeReadGate(Stream read, Task release, Action<long, byte[]> observed,
-        AttemptCanonicalTailProfile? canonicalTail = null) : Stream
+        AttemptCanonicalTailProfile? canonicalTail = null, Action<long, int>? measureRead = null, int cycleOpen = 0) : Stream
     {
         public override async ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken ct = default)
         {
-            await release.WaitAsync(ct);
+            if (cycleOpen == 0) await release.WaitAsync(ct);
+            else
+            {
+                await AttemptRouteCycleProfile.BeforeReadAsync(cycleOpen, read.Position, buffer.Length, ct);
+                if (cycleOpen is 3 or 5) await release.WaitAsync(ct);
+            }
+            var readStarted = measureRead is null ? 0 : Stopwatch.GetTimestamp();
             var offset = read.Position;
             if (buffer.Length > 0 && canonicalTail is not null)
             {
@@ -194,6 +246,7 @@ public sealed partial class NknAccelerationTransportTests
                 if (read.Position != offset) throw new IOException("canonical_prefix_source_position_changed");
             }
             var count = await read.ReadAsync(buffer, ct);
+            measureRead?.Invoke(Stopwatch.GetTimestamp() - readStarted, count);
             if (count > 0) observed(offset, buffer.Span[..Math.Min(count, 64)].ToArray());
             return count;
         }

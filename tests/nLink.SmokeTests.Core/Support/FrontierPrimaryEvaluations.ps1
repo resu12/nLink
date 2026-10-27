@@ -49,17 +49,22 @@ try {
         'origin-order' {$fullOrdinals[2]=1}
         'record-cap' {$full=[string[]]::new(262145); $fullOrdinals=[int[]]::new(262145)}
         'null-context' {$context=$null}
-        'producer-budget' {Set-EvaluationWork 21000}
+        'producer-budget' {Set-EvaluationWork 61000}
+        'capture-registration' {Set-EvaluationWork 59000}
     }
     $initialReject=$mode -cin @('pre-eof','wrong-ordinal','equal-line','compact-not-full','origin-order','record-cap','null-context','producer-budget')
     $custody=$worker.TryBeginFrontierPrimary($reader,$context,$full,$fullOrdinals,$compact,$compactOrdinals)
     if(($null -eq $custody) -ne $initialReject) {throw ('Evaluation admission mismatch: '+$mode)}
     if($mode -ceq 'producer-budget' -and $null -ne $owned.GetType().GetField('evaluation',$flags).GetValue($owned)) {throw 'Expired producer acquired evaluation time'}
     if($null -ne $custody) {
+        if($mode -ceq 'capture-registration') {
+            $watch=$owned.GetType().GetField('work',$flags).GetValue($owned)
+            if($watch.ElapsedMilliseconds -lt 59000 -or $watch.ElapsedMilliseconds -ge 60000 -or $watch.IsRunning) {throw 'Registration reset capture work or failed to bound it'}
+        }
         if($mode -cin @('evaluation-extended','evaluation-replay')) {Set-EvaluationWork 70000}
         # Caller-owned ordinal arrays are not retained as authority.
         $fullOrdinals[0]=999; if($compactOrdinals.Length) {$compactOrdinals[0]=999}
-        if($mode -cin @('valid','evaluation-extended')) {
+        if($mode -cin @('valid','evaluation-extended','capture-registration')) {
             $visitsBefore=$owned.GetType().GetField('evaluationVisits',$flags).GetValue($owned)
             $copiedWorker=$clone.Invoke($worker,$null); $copiedReader=$clone.Invoke($reader,$null)
             if($null -ne $copiedWorker.TryBeginFrontierPrimary($reader,$context,$full,$fullOrdinals,$compact,$compactOrdinals) -or
@@ -146,11 +151,12 @@ try {
     }
     [void]$signals.attached.Set()
     if(-not $signals.release.WaitOne(30000)) {throw 'Evaluation review deadline'}
-    $positive=$mode -cin @('valid','actual-evaluations','evaluation-extended','evaluation-source-origin','evaluation-source-complete')
+    $positive=$mode -cin @('valid','actual-evaluations','evaluation-extended','evaluation-source-origin','evaluation-source-complete','capture-registration')
     if($null -ne $custody -and $custody.Owns($pair,$context,$full,$compact,$fullView,$compactView) -ne $positive) {throw 'Final pair ownership mismatch'}
     if($mode -like 'evaluation-*' -or $mode -ceq 'producer-budget') {
         $watch=$owned.GetType().GetField('work',$flags).GetValue($owned)
-        if($watch.ElapsedMilliseconds -lt 21000 -or $watch.IsRunning) {throw 'Phase/rejection reset the original clock'}
+        $minimum=if($mode -ceq 'producer-budget') {61000} else {21000}
+        if($watch.ElapsedMilliseconds -lt $minimum -or $watch.IsRunning) {throw 'Phase/rejection reset the original clock'}
     }
     if($mode -ceq 'evaluation-extended') {
         Set-EvaluationWork 181000

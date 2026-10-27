@@ -1,5 +1,17 @@
 # Runs after the original shutdown/adoption and report drain, before the
 # scenario's owner disposal. No path-based reopen or copied log is consumed.
+if($attemptCase -ceq 'writer-source-read-cross-process-carrier-frontier-hold' -or
+    $attemptCase -ceq 'writer-source-read-cross-process-carrier-full-frontier-hold') {
+    # Characterize the rejected legacy one-shot hold, not positive custody.
+    # Original worker assertions require both ordinary completion and the
+    # exact catalog rejection; the outer fixture still checks report EOF/exit.
+    if($FrontierOwner.AllFileHandoffsAcknowledged -or $FrontierOwner.AllAppRequestsCompletedSuccessfully -or
+        $null -ne $FrontierOwner.TrySealFiles() -or $null -ne $attemptTicket.TryBindRoleWriters($null,$null)) {
+        throw 'Incomplete frontier observation promoted to writer custody'
+    }
+    'attempt-frontier-custody-unavailable-ok'
+    return
+}
 if(-not $FrontierOwner.IsCurrent -or -not $FrontierOwner.AllFileHandoffsAcknowledged -or
     -not $FrontierOwner.AllAppRequestsCompletedSuccessfully -or -not $FrontierOwner.AllAppOutputsDrainedSuccessfully) {throw 'Original Core writer shutdown incomplete'}
 $private:clone=[object].GetMethod('MemberwiseClone',$flags)

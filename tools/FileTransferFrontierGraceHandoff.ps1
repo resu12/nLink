@@ -2568,6 +2568,7 @@ function Get-FileTransferFrontierGraceTunaHandoffClosure {
             $grant = $successor
         }
         if (-not $chainComplete) { continue }
+        $delayedWake = $null
         if ($publishedAdmission) {
             $wakeFields = $scope + @('checkpoint_generation', 'data_session_identity', 'data_session_generation',
                 'wake_generation', 'stall_started_utc', 'wake_deadline_utc', 'frontier_chunk_index', 'highest_received_chunk_index')
@@ -2579,8 +2580,8 @@ function Get-FileTransferFrontierGraceTunaHandoffClosure {
                 (Field $wakes[0] 'decision_status') -cne 'dispatched' -or
                 (Field $wakes[0] 'decision_reason') -cne 'exact_receiver_request_dispatched' -or
                 [long]$wakes[0].Sequence -le [long]$sends[0].Sequence -or
-                [long]$wakes[0].Sequence -ge [long]$retirement.Sequence -or
                 (Number $wakes[0] 'log_writer_attempt_utc_ticks') -lt (UtcTicks $stall 'wake_deadline_utc')) { continue }
+            if ([long]$wakes[0].Sequence -ge [long]$retirement.Sequence) { $delayedWake = $wakes[0] }
         }
 
         $commits = @(Named 'filetransfer_route_transition_committed' | Where-Object {
@@ -2638,6 +2639,39 @@ function Get-FileTransferFrontierGraceTunaHandoffClosure {
         })
         if ($publications.Count -ne 1) { continue }
         $publication = $publications[0]
+        if ($null -ne $delayedWake) {
+            # The post-await diagnostic may trail retirement. It supplies no
+            # authority: the exact issued repair and completed target handoff
+            # above must already exist, with no intervening old-source effect.
+            if ([long]$delayedWake.Sequence -le [long]$publication.Sequence) { continue }
+            $priorTicks = UtcTicks $stall 'wake_deadline_utc'
+            $clockValid = $true
+            foreach ($entry in @($grant, $deliveries[0], $dispatches[0], $sends[0], $retirement,
+                    $commit, $disposition, $publication, $delayedWake)) {
+                $ticks = Number $entry 'log_writer_attempt_utc_ticks'
+                if ($ticks -lt $priorTicks) { $clockValid = $false; break }
+                $priorTicks = $ticks
+            }
+            if (-not $clockValid) { continue }
+            $intervening = @($scopedEvents | Where-Object {
+                if ([long]$_.Sequence -le [long]$retirement.Sequence -or
+                    [long]$_.Sequence -gt [long]$delayedWake.Sequence) { return $false }
+                $name = Field $_ 'event'
+                if ($name -in @('filetransfer_fallback_frontier_repair_authority_granted',
+                        'filetransfer_fallback_frontier_repair_dispatched', 'filetransfer_v6_frontier_request_sent',
+                        'filetransfer_fallback_frontier_repair_contract_settled', 'filetransfer_fallback_frontier_repair_progress_observed',
+                        'filetransfer_v6_fallback_frontier_repair_progress_state_forced',
+                        'filetransfer_control_plane_delivery_observed')) { return $true }
+                return [long]$_.Sequence -gt [long]$publication.Sequence -and
+                    ($name -in @('file_transfer_inbound_terminal', 'filetransfer_live_route_epoch_terminal',
+                        'filetransfer_terminalized_by_session_end', 'filetransfer_data_session_removed', 'filetransfer_data_session_recreated',
+                        'filetransfer_route_selected', 'filetransfer_live_route_epoch_recovered',
+                        'filetransfer_route_hint_authorized_publication_accepted', 'filetransfer_route_transition_committed',
+                        'filetransfer_route_transition_disposition_applied') -or
+                    ($name -ceq 'filetransfer_v6_receiver_state_sent' -and (Field $_ 'transfer_paused') -ceq '1'))
+            })
+            if ($intervening.Count) { continue }
+        }
         $poisoned = $false
         foreach ($event in $scopedEvents) {
             if ([long]$event.Sequence -le [long]$Episode.Event.Sequence -or [long]$event.Sequence -ge [long]$publication.Sequence -or

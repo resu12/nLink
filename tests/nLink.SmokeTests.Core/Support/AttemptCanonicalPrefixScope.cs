@@ -20,14 +20,17 @@ internal sealed class AttemptCanonicalPrefixScope
     private readonly CancellationTokenSource contextLifetime;
     private readonly Action checkPeer;
     private readonly bool sender;
+    private readonly AttemptPrefixTiming? timing;
     internal string Session { get; }
     internal string Transfer { get; }
     internal CancellationToken ContextToken => contextLifetime.Token;
 
-    internal AttemptCanonicalPrefixScope(SessionFileTransferService service, object context, bool sender, Action checkPeer)
+    internal AttemptCanonicalPrefixScope(SessionFileTransferService service, object context, bool sender, Action checkPeer,
+        AttemptPrefixTiming? timing = null)
     {
         this.service = service; this.context = context;
         this.sender = sender;
+        this.timing = timing;
         this.checkPeer = checkPeer;
         gate = Field(service, "gate")!; field = sender ? "outboundTransfer" : "inboundTransfer";
         lock (gate)
@@ -50,10 +53,17 @@ internal sealed class AttemptCanonicalPrefixScope
 
     private void Check(bool allowSenderPeerPause)
     {
+        var started = timing?.Start() ?? 0;
         lock (gate)
         {
+            timing?.Record(AttemptPrefixTiming.Stage.ScopeGateWait, started);
+            started = timing?.Start() ?? 0;
             checkPeer();
+            timing?.Record(AttemptPrefixTiming.Stage.PeerCheck, started);
+            started = timing?.Start() ?? 0;
             var state = SessionFileTransferV4SenderTests.CaptureJoinedNknStateForTest(service, context);
+            timing?.Record(AttemptPrefixTiming.Stage.StateCapture, started);
+            started = timing?.Start() ?? 0;
             if (!ReferenceEquals(Field(service, field), context) ||
                 !ReferenceEquals(Property<object?>(context, "DataSession"), dataSession) ||
                 Property<long>(context, "DataSessionGeneration") != generation || generation <= 0 ||
@@ -70,15 +80,21 @@ internal sealed class AttemptCanonicalPrefixScope
                 throw new IOException("canonical_prefix_scope_paused");
             AttemptCanonicalTailProfile.RequireGeometry(Property<long>(context, "FileSizeBytes"),
                 Property<int>(context, "ChunkSizeBytes"), Property<int>(context, "ChunkCount"));
+            timing?.Record(AttemptPrefixTiming.Stage.ScopeValidation, started);
         }
     }
 
     internal bool Ready()
     {
+        var started = timing?.Start() ?? 0;
         lock (gate)
         {
+            timing?.Record(AttemptPrefixTiming.Stage.ReadyGateWait, started);
             Check();
-            return ReadReady(context, Session, Transfer);
+            started = timing?.Start() ?? 0;
+            var ready = ReadReady(context, Session, Transfer);
+            timing?.Record(AttemptPrefixTiming.Stage.ReadyShape, started);
+            return ready;
         }
     }
 

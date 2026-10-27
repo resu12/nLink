@@ -35,6 +35,61 @@ public sealed partial class FileTransferBootstrapCorrelationEvidenceTests
 
 public sealed partial class FileTransferCoordinatorTests
 {
+    [Theory]
+    [InlineData("current")]
+    [InlineData("held")]
+    [InlineData("replacement")]
+    public void BootstrapSourceCallback_SnapshotPreservesCapturedProviderWhenCurrentHeldOrReplaced(string lifetime)
+    {
+        var state = CreateCorrelatedBootstrapPair(providerGeneration: 7).Sender;
+        var callback = FileTransferCoordinator.IssueFallbackBootstrapSourceCallback(state, 71, 7, false, 0)!;
+        Assert.NotNull(callback);
+        var identity = callback.Identity;
+        var admitted = FileTransferCoordinator.CreateBootstrapSourceCallbackSnapshot(state, callback, "Admitted",
+            FileTransferBootstrapSourceCallbackDisposition.Current, "none");
+        var originalJson = admitted.Envelope.ToCanonicalJson();
+        state = admitted.State;
+        if (lifetime == "held")
+        {
+            var observation = StartCorrelated(state).Command!.Bootstrap.Observation;
+            var prepared = FileTransferCoordinator.PrepareFallbackBootstrapSourceHold(state, observation, null);
+            Assert.True(prepared.Accepted);
+            var capture = new FileTransferBootstrapSourceHoldCapture(prepared.Command!, 99, [], [], []) { OutboundCallbacks = [callback] };
+            var applied = FileTransferCoordinator.ApplyFallbackBootstrapSourceHoldCapture(prepared.State, capture);
+            Assert.True(applied.Accepted);
+            state = applied.State;
+        }
+        else if (lifetime == "replacement")
+        {
+            // Replacement state is evidence only; never patch the issued callback.
+            state = state with { CurrentDataSessionProviderGeneration = 99 };
+        }
+        var disposition = FileTransferCoordinator.ResolveFallbackBootstrapSourceCallback(state, callback,
+            lifetime == "replacement" ? 99 : 7, lifetime == "held", lifetime == "held" ? 99 : 0);
+        Assert.Equal(lifetime == "current" ? FileTransferBootstrapSourceCallbackDisposition.Current
+            : lifetime == "held" ? FileTransferBootstrapSourceCallbackDisposition.Held
+            : FileTransferBootstrapSourceCallbackDisposition.Stale, disposition);
+        var snapshot = lifetime == "current" ? admitted : FileTransferCoordinator.CreateBootstrapSourceCallbackSnapshot(
+            state, callback, "Consumed", disposition, "none");
+        var operation = Assert.Single(snapshot.Envelope.Aggregate.Operations);
+        var route = operation.RouteTransition!;
+        Assert.Equal(7, route.SourceBoundary.DataSessionProviderGeneration);
+        Assert.Equal(route.SourceBoundary, route.TargetBoundary);
+        Assert.Equal(17, route.SourceBoundary.DataSessionGeneration);
+        Assert.Equal(callback.DataSessionIdentity, route.SourceBoundary.DataSessionIdentity);
+        Assert.Equal(lifetime == "replacement" ? 99 : 7, snapshot.Envelope.Aggregate.BeforeBoundary.DataSessionProviderGeneration);
+        Assert.Equal(7, route.BootstrapCallbacks!.ProviderGeneration);
+        Assert.Equal("none", route.BootstrapCallbacks.AllowedEffect);
+        Assert.False(operation.StateApplied);
+        Assert.False(operation.ReceiptValidated);
+        Assert.Equal(identity, callback.Identity);
+        Assert.Equal(originalJson, admitted.Envelope.ToCanonicalJson());
+        Assert.Contains("\"dataSessionProviderGeneration\":7", snapshot.Envelope.ToCanonicalJson(), StringComparison.Ordinal);
+        Assert.Equal(state.SessionId, snapshot.State.SessionId);
+        Assert.Equal(state.TransferId, snapshot.State.TransferId);
+        Assert.Equal(state.CurrentRoutePublicationToken, snapshot.State.CurrentRoutePublicationToken);
+    }
+
     [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
     private static FileTransferCoordinatorState ApplyCallbackBootstrapSourceHoldForTests(FileTransferCoordinatorState state,
         FileTransferFallbackV6ProofBootstrapObservation observation, FileTransferFallbackBootstrapFrameV6? peerWake,

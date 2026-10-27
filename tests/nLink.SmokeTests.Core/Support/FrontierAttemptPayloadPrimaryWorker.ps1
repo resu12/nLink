@@ -4,7 +4,7 @@ $config=Get-Content -LiteralPath (Join-Path $ArtifactDir 'parent-case.json') -Ra
 $RepoRoot=$config.repoRoot
 $script:primaryPayloadChecked=$false; $script:primaryPayloadBound=$false; $script:transferEvaluation=$null; $script:workerPayloadHandles=@()
 $script:primaryPayloadBindError=$null
-if($env:NLINK_TEST_PAYLOAD_PRIMARY_CASE -ceq 'canonical-fallback') {
+if($env:NLINK_TEST_PAYLOAD_PRIMARY_CASE -cin @('canonical-fallback','canonical-tail-late-publication')) {
     . (Join-Path $RepoRoot 'tests/nLink.SmokeTests.Core/Support/FrontierPrimaryCheckpoints.ps1') $ArtifactDir
     Write-FrontierPrimaryCheckpoint 'started' 'primary fixture started'
 }
@@ -25,10 +25,10 @@ if($null -ne $profile) {
 }
 '@
 }
-if($env:NLINK_TEST_PAYLOAD_PRIMARY_CASE -cin @('canonical-source','canonical-fallback')) {
+if($env:NLINK_TEST_PAYLOAD_PRIMARY_CASE -cin @('canonical-source','canonical-fallback','canonical-tail-late-publication')) {
     $text=Replace-AttemptSeam $text '$failure=$_.Exception.Message;' @'
 $failure=$_.Exception.Message;
-if($env:NLINK_TEST_PAYLOAD_PRIMARY_CASE -ceq 'canonical-fallback') {Write-FrontierPrimaryCheckpoint 'worker-error' $failure}
+if($env:NLINK_TEST_PAYLOAD_PRIMARY_CASE -cin @('canonical-fallback','canonical-tail-late-publication')) {Write-FrontierPrimaryCheckpoint 'worker-error' $failure}
 if($null -ne $script:observedSource) {
     $flags=[Reflection.BindingFlags]'Instance,NonPublic'
     $inputs=$script:observedSource.GetType().GetField('frontier',$flags).GetValue($script:observedSource)
@@ -52,8 +52,12 @@ if($null -ne $script:observedSource) {
 $text=Replace-AttemptSeam $text ". (Join-Path `$RepoRoot 'tools/FileTransferOps/AnalyzerOrchestration.ps1')" @'
 . (Join-Path $RepoRoot 'tools/FileTransferOps/AnalyzerOrchestration.ps1')
 . (Join-Path $RepoRoot 'tests/nLink.SmokeTests.Core/Support/FrontierAttemptPayloadPrimaryGuards.ps1')
-$definition=(Get-Command Write-FileTransferCompactRetainedAnalysisArtifacts).ScriptBlock.Ast.Parent.Extent.Text
+$definition=(Get-Command Write-FileTransferCompactRetainedAnalysisArtifacts).ScriptBlock.Ast.Extent.Text
 $definition=$definition.Replace('$PSScriptRoot',("'"+(Join-Path $RepoRoot 'tools/FileTransferOps').Replace("'","''")+"'"))
+if($env:NLINK_TEST_PAYLOAD_PRIMARY_CASE -ceq 'canonical-tail-late-publication') {
+    . (Join-Path $RepoRoot 'tests/nLink.SmokeTests.Core/Support/FrontierPrimaryPhaseCheckpoints.ps1')
+    $definition=Add-FrontierPrimaryPhaseCheckpoints $definition
+}
 $definition=Add-AttemptPayloadPrimaryProbeGuards $definition
 Invoke-Expression $definition
 '@
@@ -62,8 +66,9 @@ try {
     & ([scriptblock]::Create($text)) -Mode $Mode -LogPath $LogPath -ArtifactDir $ArtifactDir -TailMinutes $TailMinutes -LiveRouteProofMode $LiveRouteProofMode
     if(-not $script:primaryPayloadChecked) {throw 'Original primary did not reach payload binding and cleanup'}
 } catch {
-    if($env:NLINK_TEST_PAYLOAD_PRIMARY_CASE -ceq 'canonical-fallback') {Write-FrontierPrimaryCheckpoint 'worker-error' $_.Exception.Message}
+    if($env:NLINK_TEST_PAYLOAD_PRIMARY_CASE -cin @('canonical-fallback','canonical-tail-late-publication')) {Write-FrontierPrimaryCheckpoint 'worker-error' $_.Exception.Message}
     throw
 }
 Write-Host ('attempt-payload-primary-checked='+$env:NLINK_TEST_PAYLOAD_PRIMARY_CASE)
 if($env:NLINK_TEST_PAYLOAD_PRIMARY_CASE -ceq 'canonical-fallback') {Write-FrontierPrimaryCheckpoint 'finished' 'original parent analyzer evaluations=3 nativeReads=1; payload binding and cleanup checked'}
+if($env:NLINK_TEST_PAYLOAD_PRIMARY_CASE -ceq 'canonical-tail-late-publication') {Write-FrontierPrimaryCheckpoint 'finished' 'original payload worker returned; outer same-pair assertions remain required'}

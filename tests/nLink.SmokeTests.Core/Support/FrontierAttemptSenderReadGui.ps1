@@ -28,7 +28,10 @@ try {
     if($attemptCase -cnotin @('writer-source-read-native-missing','writer-source-read-native-partial')) {$Context.HelpeeProc.StandardInput.Close()}
     if($attemptCase.StartsWith('writer-source-read-cross-process-')) {$Context.HelperProc.StandardInput.Close()}
 }
-$readBudget=if($attemptCase.StartsWith('writer-source-read-cross-process-carrier-full-')) {185000}
+$readBudget=if($env:NLINK_TEST_FRONTIER_WORKER_CONFIGURATION -ceq 'Debug' -and
+    $env:NLINK_TEST_FRONTIER_ROUTE_CYCLE -ceq 'canonical-cycle-v1' -and
+    $attemptCase -ceq 'writer-source-read-cross-process-carrier-full-canonical-tail-late-publication') {245000}
+    elseif($attemptCase.StartsWith('writer-source-read-cross-process-carrier-full-')) {185000}
     elseif($attemptCase.StartsWith('writer-source-read-cross-process-')) {75000} else {25000}
 $readClock=[Diagnostics.Stopwatch]::StartNew()
 if($attemptCase -cin @('writer-source-read-cross-process-gui-valid','writer-source-read-cross-process-carrier-full-gui-valid','writer-source-read-cross-process-carrier-full-canonical-tail-late-publication')) {

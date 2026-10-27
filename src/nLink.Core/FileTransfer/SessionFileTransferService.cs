@@ -20380,7 +20380,7 @@ public sealed partial class SessionFileTransferService :
             return false;
         }
 
-        var decision = FileTransferCoordinator.AuthorizeAction(
+        var (decision, applyDecision) = FileTransferCoordinator.AuthorizeAndApplyFallbackControlPlane(
             CreateCoordinatorStateLocked(context),
             new FileTransferCoordinatorActionRequest(
                 FileTransferCoordinatorActionKind.ControlPlaneSend,
@@ -20396,18 +20396,8 @@ public sealed partial class SessionFileTransferService :
                 CheckpointRequestId: request.CheckpointRequestId,
                 ControlPlaneKind: request.Kind,
                 ControlPlanePurpose: request.Reason,
-                CheckpointGeneration: currentLeg?.CheckpointGeneration));
-        if (!decision.Accepted || decision.FallbackControlPlaneToken is not { } authorizedToken)
-        {
-            LogRuntimeOwnerRejectedForFallbackControlPlaneLocked(
-                context,
-                request,
-                decision.Accepted ? "fallback_control_plane_token_missing" : decision.RejectionReason);
-            return false;
-        }
-
-        var applyDecision = FileTransferCoordinator.Apply(
-            new FileTransferCoordinatorEvent(
+                CheckpointGeneration: currentLeg?.CheckpointGeneration),
+            issuedToken => new FileTransferCoordinatorEvent(
                 FileTransferCoordinatorEventKind.FallbackControlPlaneSendAuthorized,
                 context.RouteSelection,
                 FileTransferTransportHandoffKind.None,
@@ -20421,10 +20411,19 @@ public sealed partial class SessionFileTransferService :
                 request.BridgeRecoveryGeneration,
                 CheckpointRequestId: request.CheckpointRequestId,
                 CheckpointGeneration: currentLeg?.CheckpointGeneration ?? 0,
-                FallbackControlPlaneToken: authorizedToken,
+                FallbackControlPlaneToken: issuedToken,
                 ControlPlaneKind: request.Kind,
                 ControlPlanePurpose: request.Reason),
-            CreateCoordinatorStateLocked(context));
+            () => CreateCoordinatorStateLocked(context));
+        if (!decision.Accepted || decision.FallbackControlPlaneToken is not { } authorizedToken || applyDecision is null)
+        {
+            LogRuntimeOwnerRejectedForFallbackControlPlaneLocked(
+                context,
+                request,
+                decision.Accepted ? "fallback_control_plane_token_missing" : decision.RejectionReason);
+            return false;
+        }
+
         if (!string.IsNullOrWhiteSpace(applyDecision.MutationRejectedReason))
         {
             LogFileTransferCoordinatorLegMutationRejected(
@@ -20608,7 +20607,7 @@ public sealed partial class SessionFileTransferService :
             return false;
         }
 
-        var decision = FileTransferCoordinator.AuthorizeAction(
+        var (decision, applyDecision) = FileTransferCoordinator.AuthorizeAndApplyFallbackControlPlane(
             CreateCoordinatorStateLocked(context),
             new FileTransferCoordinatorActionRequest(
                 FileTransferCoordinatorActionKind.ControlPlaneSendCompletion,
@@ -20627,16 +20626,8 @@ public sealed partial class SessionFileTransferService :
                 ControlPlanePurpose: request.Reason,
                 ControlPlanePeerVisible: result.PeerVisibleAny,
                 ControlPlaneAcceptedAny: result.AcceptedAny,
-                CheckpointGeneration: currentLeg?.CheckpointGeneration));
-        if (!decision.Accepted)
-        {
-            LogRuntimeOwnerRejectedForFallbackControlPlaneLocked(context, request, decision.RejectionReason);
-            contract.Lifecycle.TrySettle(FallbackControlPlaneDeliveryOutcome.AuthorityRejected, decision.RejectionReason);
-            return false;
-        }
-
-        var applyDecision = FileTransferCoordinator.Apply(
-            new FileTransferCoordinatorEvent(
+                CheckpointGeneration: currentLeg?.CheckpointGeneration),
+            issuedToken => new FileTransferCoordinatorEvent(
                 FileTransferCoordinatorEventKind.FallbackControlPlaneSendCompleted,
                 context.RouteSelection,
                 FileTransferTransportHandoffKind.None,
@@ -20650,12 +20641,19 @@ public sealed partial class SessionFileTransferService :
                 request.BridgeRecoveryGeneration,
                 CheckpointRequestId: request.CheckpointRequestId,
                 CheckpointGeneration: currentLeg?.CheckpointGeneration ?? 0,
-                FallbackControlPlaneToken: controlPlaneToken,
+                FallbackControlPlaneToken: issuedToken,
                 ControlPlaneKind: request.Kind,
                 ControlPlanePurpose: request.Reason,
                 ControlPlanePeerVisible: result.PeerVisibleAny,
                 ControlPlaneAcceptedAny: result.AcceptedAny),
-            CreateCoordinatorStateLocked(context));
+            () => CreateCoordinatorStateLocked(context));
+        if (!decision.Accepted || applyDecision is null)
+        {
+            LogRuntimeOwnerRejectedForFallbackControlPlaneLocked(context, request, decision.RejectionReason);
+            contract.Lifecycle.TrySettle(FallbackControlPlaneDeliveryOutcome.AuthorityRejected, decision.RejectionReason);
+            return false;
+        }
+
         if (!string.IsNullOrWhiteSpace(applyDecision.MutationRejectedReason))
         {
             LogFileTransferCoordinatorLegMutationRejected(

@@ -10,7 +10,8 @@ public sealed class FrontierPrimaryEvaluationTests : FileTransferOpsScriptsTestB
             "record-cap", "null-context", "mutated-full", "mutated-compact", "wrong-array", "record-order", "repeat-full", "missing-view",
             "budget", "record-budget", "repeat-begin", "early-take", "wrong-context", "wrong-view", "repeat-take", "post-mutation",
             "source-close", "custody-dispose", "post-scope", "post-facts", "parent-cancel",
-            "producer-budget", "evaluation-extended", "evaluation-source-origin", "evaluation-source-complete", "evaluation-replay" }
+            "producer-budget", "evaluation-extended", "evaluation-source-origin", "evaluation-source-complete", "evaluation-replay",
+            "capture-registration" }
         select new object[] { host, scenario };
 
     [Theory]

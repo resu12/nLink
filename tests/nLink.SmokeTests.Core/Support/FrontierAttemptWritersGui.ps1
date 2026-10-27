@@ -83,6 +83,16 @@ $writerScenario=Replace-AttemptSeam $writerScenario 'finally { if ($null -ne $Fr
 finally {
     try {
         if($script:drained) {. (Join-Path $RepoRoot 'tests/nLink.SmokeTests.Core/Support/FrontierAttemptWritersJoin.ps1')}
+    } catch {
+        if($null -ne $scenarioFailure) {
+            try {
+                $message=[string]$_.Exception.Message
+                if($message.Length -gt 512) {$message=$message.Substring(0,512)}
+                [Console]::Error.WriteLine('fixture-writer-secondary-shutdown-error; exception_type='+$_.Exception.GetType().FullName+'; message='+$message)
+            } catch { } # Diagnostic output must not replace the primary rejection.
+            throw $scenarioFailure
+        }
+        throw
     } finally {if($null -ne $FrontierOwner) {$FrontierOwner.Dispose()}}
 }
 '@

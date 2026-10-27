@@ -25,7 +25,10 @@ internal static partial class FileTransferCoordinator
         var boundary = new FileTransferCoordinatorStateBoundarySnapshot(source.RouteToken, source.ProtocolVersion, source.LiveRouteEpoch,
             source.RoutePublicationGeneration, source.RouteCommitGeneration, source.RuntimeGeneration, source.TerminalGeneration,
             checked((int)source.LegGeneration), source.TransportEpoch, source.BridgeRecoveryGeneration, source.CheckpointGeneration,
-            source.CheckpointRequestId, callback.DataSessionIdentity, callback.DataSessionGeneration);
+            source.CheckpointRequestId, callback.DataSessionIdentity, callback.DataSessionGeneration)
+        {
+            DataSessionProviderGeneration = callback.ProviderGeneration,
+        };
         var fingerprint = CalculateSnapshotFingerprint(callback);
         var capture = retainedCapture ?? state.PersistentState.FileTransferRouteTransition.BootstrapSourceHold?.Capture;
         var captured = capture?.OutboundCallbacks.Contains(callback) == true && capture.Command.Source == callback.Source &&

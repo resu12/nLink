@@ -20,7 +20,9 @@ internal static class AttemptOfflineLatePublicationProgress
     private static object? Property(object value, string name) => value.GetType().GetProperty(name)!.GetValue(value);
 
     internal static async Task RunAsync(SessionFileTransferService service, object context, AttemptNknPipeClient client, NknSignalingTransport transport, LocalFrontierAppRequest.AppLease lease, CancellationToken ct,
-        bool canonicalTail = false, AttemptCanonicalPrefixScope? prefixScope = null, AttemptCanonicalPrefixHandoff? prefixHandoff = null)
+        long carrierStarted, TimeSpan carrierBudget,
+        bool canonicalTail = false, AttemptCanonicalPrefixScope? prefixScope = null, AttemptCanonicalPrefixHandoff? prefixHandoff = null,
+        AttemptPrefixTiming? prefixTiming = null)
     {
         if (!OperatingSystem.IsWindows()) throw new PlatformNotSupportedException("late_publication_native_windows_only");
         var gate = Field(service, "gate")!;
@@ -41,13 +43,25 @@ internal static class AttemptOfflineLatePublicationProgress
                 if (prefixScope is null || prefixHandoff is null) throw new IOException("canonical_prefix_binding_missing");
                 stage = "canonical-committed-prefix";
                 Console.WriteLine("carrier-frontier-late-publication-wait=" + stage);
-                await WaitForCommittedPrefixAsync(prefixScope.Ready, () =>
+                var prefixStarted = prefixTiming?.Start() ?? 0;
+                try { await WaitForCommittedPrefixAsync(() =>
                 {
-                    client.CheckReader();
-                    prefixHandoff.Check();
-                    Read(() => true);
-                    if (schedule.AnyOrdinarySeen) throw new IOException("canonical_prefix_early_tail");
-                }, prefixHandoff.PublishAsync, ct);
+                    var started = prefixTiming?.Start() ?? 0;
+                    try { return prefixScope.Ready(); }
+                    finally { prefixTiming?.Record(AttemptPrefixTiming.Stage.Ready, started); }
+                }, () =>
+                {
+                    var started = prefixTiming?.Start() ?? 0;
+                    try
+                    {
+                        client.CheckReader();
+                        prefixHandoff.Check();
+                        Read(() => true);
+                        if (schedule.AnyOrdinarySeen) throw new IOException("canonical_prefix_early_tail");
+                    }
+                    finally { prefixTiming?.Record(AttemptPrefixTiming.Stage.PollCheck, started); }
+                }, prefixHandoff.PublishAsync, ct); }
+                finally { prefixTiming?.Record(AttemptPrefixTiming.Stage.PrefixWait, prefixStarted); }
                 stage = "canonical-prefix-before-first-suffix";
                 Console.WriteLine("carrier-frontier-late-publication-wait=" + stage);
                 await WaitForCanonicalSuffixAsync(schedule, () =>
@@ -81,9 +95,16 @@ internal static class AttemptOfflineLatePublicationProgress
                 return (int)Property(context, "V6LastReceiverStateCommittedChunkIndex")! == first + 1 &&
                     (int)Property(context, "V6LastReceiverStateHighestReceivedChunkIndex")! == first + 7;
             }));
-            deferredTiming?.Capture(TimingBoundary.CursorStart);
-            var cursor = CoreSmokeTestsBase.GetOperationalLogLength();
-            deferredTiming?.Capture(TimingBoundary.CursorEnd);
+            AttemptCanonicalSparseWriteObservation? freshWrite = null;
+            var cursor = 0;
+            if (canonicalTail)
+                freshWrite = Read(() => new AttemptCanonicalSparseWriteObservation(context, Observation()!, DateTimeOffset.UtcNow));
+            else
+            {
+                deferredTiming?.Capture(TimingBoundary.CursorStart);
+                cursor = CoreSmokeTestsBase.GetOperationalLogLength();
+                deferredTiming?.Capture(TimingBoundary.CursorEnd);
+            }
             Read(() =>
             {
                 var recent = Field(Observation()!, "recent")!;
@@ -97,13 +118,18 @@ internal static class AttemptOfflineLatePublicationProgress
             deferredTiming?.Capture(TimingBoundary.ReleaseStart);
             schedule.Release(2);
             deferredTiming?.Capture(TimingBoundary.ReleaseEnd);
-            stage = "fresh-sparse-write-deferred";
-            await Wait(() => ReadDeferredEvent(canonicalTail, () => CoreSmokeTestsBase.ReadOperationalLogTail(cursor), deferredTiming));
+            stage = canonicalTail ? "fresh-sparse-write-observed" : "fresh-sparse-write-deferred";
+            if (freshWrite is not null)
+                await Wait(() => Read(() => freshWrite.Read(context, Observation()!, () => DateTimeOffset.UtcNow)));
+            else
+                await Wait(() => ReadDeferredEvent(canonicalTail, () => CoreSmokeTestsBase.ReadOperationalLogTail(cursor), deferredTiming));
+            // Legacy marker names describe fixture progress, not a runtime request.
+            // The original recent wake schedules/rechecks itself; never invoke it here.
             deferredTiming?.Capture(TimingBoundary.RecheckRequested);
             Read(() =>
             {
                 RequireDeferredWithinRecentGrace(DateTimeOffset.UtcNow,
-                    (DateTimeOffset)Property(Field(Observation()!, "recent")!, "DueUtc")!, deferredTiming);
+                    freshWrite?.DueUtc ?? (DateTimeOffset)Property(Field(Observation()!, "recent")!, "DueUtc")!, deferredTiming);
                 return true;
             }, traceDeferredRecheck: true);
             stage = "original-recent-recheck";
@@ -245,16 +271,54 @@ internal static class AttemptOfflineLatePublicationProgress
         async Task Wait(Func<bool> ready)
         {
             Console.WriteLine("carrier-frontier-late-publication-wait=" + stage);
+            var waitStarted = Stopwatch.GetTimestamp();
             using var edge = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            var carrierStateAtEdgeCancellation = -1;
+            using var registration = edge.Token.Register(() =>
+                Volatile.Write(ref carrierStateAtEdgeCancellation, ct.IsCancellationRequested ? 1 : 0));
             edge.CancelAfter(TimeSpan.FromSeconds(8));
-            while (true)
+            try
             {
-                client.CheckReader();
-                Read(() => true);
-                if (ready()) return;
-                await Task.Delay(1, edge.Token);
+                while (true)
+                {
+                    client.CheckReader();
+                    Read(() => true);
+                    if (ready()) return;
+                    await Task.Delay(1, edge.Token);
+                }
+            }
+            catch (OperationCanceledException)
+            {
+                WriteWaitCancellation(stage, Volatile.Read(ref carrierStateAtEdgeCancellation),
+                    ct.IsCancellationRequested, edge.IsCancellationRequested, carrierStarted, waitStarted,
+                    Stopwatch.GetTimestamp(), carrierBudget, Console.Out);
+                throw;
             }
         }
+    }
+
+    internal static void WriteWaitCancellation(string stage, int carrierStateAtEdgeCancellation,
+        bool carrierCancelled, bool edgeCancelled, long carrierStarted, long waitStarted, long now,
+        TimeSpan carrierBudget, TextWriter output)
+    {
+        try
+        {
+            // Passive scalar evidence only, outside the service gate. A carrier
+            // request seen by the linked callback does not prove timer ordering.
+            output.WriteLine("carrier-frontier-wait-cancellation=" + System.Text.Json.JsonSerializer.Serialize(new
+            {
+                Stage = stage,
+                LinkedCancellation = carrierStateAtEdgeCancellation switch
+                {
+                    0 => "local-edge-only", 1 => "carrier-requested-order-unproven", _ => "callback-not-observed"
+                },
+                CarrierCancelled = carrierCancelled, EdgeCancelled = edgeCancelled,
+                Frequency = Stopwatch.Frequency, CarrierElapsedTicks = now - carrierStarted,
+                EdgeElapsedTicks = now - waitStarted, CarrierBudgetMs = carrierBudget.TotalMilliseconds,
+                EdgeBudgetMs = 8000
+            }));
+        }
+        catch (Exception) { /* One diagnostic attempt must not replace the original cancellation. */ }
     }
 
     // The caller passes the already-running carrier token. There is deliberately

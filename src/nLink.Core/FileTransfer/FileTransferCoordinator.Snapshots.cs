@@ -1,3 +1,4 @@
+using System.Buffers;
 using System.Collections.Immutable;
 using System.Runtime.CompilerServices;
 using System.Security.Cryptography;
@@ -348,17 +349,27 @@ internal sealed record FileTransferCoordinatorTransitionEnvelope(
         => SerializeCanonical(this, SnapshotJsonOptions);
 
     internal string ToBase64UrlPayload()
-        => Convert.ToBase64String(Encoding.UTF8.GetBytes(ToCanonicalJson()))
+        => Convert.ToBase64String(WriteCanonical(this, SnapshotJsonOptions).WrittenSpan)
             .TrimEnd('=')
             .Replace('+', '-')
             .Replace('/', '_');
 
     internal string CalculatePayloadSha256()
-        => Convert.ToHexString(
-                SHA256.HashData(Encoding.UTF8.GetBytes(ToCanonicalJson())))
-            .ToLowerInvariant();
+        => CalculateCanonicalSha256(this, SnapshotJsonOptions);
 
     internal static string SerializeCanonical(
+        object value,
+        JsonSerializerOptions options)
+        => Encoding.UTF8.GetString(WriteCanonical(value, options).WrittenSpan);
+
+    internal static string CalculateCanonicalSha256(
+        object value,
+        JsonSerializerOptions options)
+        => Convert.ToHexString(
+                SHA256.HashData(WriteCanonical(value, options).WrittenSpan))
+            .ToLowerInvariant();
+
+    private static ArrayBufferWriter<byte> WriteCanonical(
         object value,
         JsonSerializerOptions options)
     {
@@ -366,12 +377,12 @@ internal sealed record FileTransferCoordinatorTransitionEnvelope(
             value,
             value.GetType(),
             options);
-        using var stream = new MemoryStream();
-        using (var writer = new Utf8JsonWriter(stream))
+        var buffer = new ArrayBufferWriter<byte>();
+        using (var writer = new Utf8JsonWriter(buffer))
         {
             WriteCanonicalElement(writer, element);
         }
-        return Encoding.UTF8.GetString(stream.ToArray());
+        return buffer;
     }
 
     private static void WriteCanonicalElement(
@@ -2288,6 +2299,8 @@ internal static partial class FileTransferCoordinator
 
         var beforeBoundary = CreateStateBoundarySnapshot(before);
         var afterBoundary = CreateStateBoundarySnapshot(after);
+        ImmutableArray<CoordinatorOperationDescriptor> beforeStateOperations = default;
+        ImmutableArray<CoordinatorOperationDescriptor> afterStateOperations = default;
         var operations = suppliedOperationsAreComplete
             ? (attemptedOperations.IsDefault
                 ? ImmutableArray<
@@ -2296,14 +2309,16 @@ internal static partial class FileTransferCoordinator
             : ReferenceEquals(before, after)
             ? ImmutableArray<
                 FileTransferCoordinatorOperationTransitionSnapshot>.Empty
-            : CreateOperationTransitionSnapshots(before, after);
-        var beforeFingerprint = ResolveTransitionSnapshotBeforeFingerprint(before);
+            : CreateOperationTransitionSnapshots(
+                before, after, out beforeStateOperations, out afterStateOperations);
+        var beforeFingerprint = ResolveTransitionSnapshotBeforeFingerprint(
+            before, beforeStateOperations);
         var stateApplied = operations.Any(operation => operation.StateApplied) ||
             beforeBoundary != afterBoundary ||
             (!ReferenceEquals(before, after) &&
              !string.Equals(
-                 CalculateStateFingerprint(before),
-                 CalculateStateFingerprint(after),
+                 CalculateStateFingerprint(before, beforeStateOperations),
+                 CalculateStateFingerprint(after, afterStateOperations),
                  StringComparison.Ordinal));
         var afterFingerprint = stateApplied
             ? CalculateSnapshotFingerprint(new
@@ -2436,10 +2451,12 @@ internal static partial class FileTransferCoordinator
     }
 
     [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
-    private static string ResolveTransitionSnapshotBeforeFingerprint(FileTransferCoordinatorState before)
+    private static string ResolveTransitionSnapshotBeforeFingerprint(
+        FileTransferCoordinatorState before,
+        ImmutableArray<CoordinatorOperationDescriptor> stateOperations = default)
         => string.IsNullOrWhiteSpace(
             before.PersistentState.SnapshotStateFingerprint)
-            ? CalculateStateFingerprint(before)
+            ? CalculateStateFingerprint(before, stateOperations)
             : before.PersistentState.SnapshotStateFingerprint!;
 
     private static long GetNextSnapshotDecisionUtcMilliseconds()
@@ -3154,11 +3171,15 @@ internal static partial class FileTransferCoordinator
 
     [MethodImpl(MethodImplOptions.NoInlining)]
     private static string CalculateStateFingerprint(
-        FileTransferCoordinatorState state)
+        FileTransferCoordinatorState state,
+        ImmutableArray<CoordinatorOperationDescriptor> operations = default)
     {
-        var operations = CreateOperationDescriptors(
-            state,
-            includeResponderProbeHandoff: false);
+        if (operations.IsDefault)
+        {
+            operations = CreateOperationDescriptors(
+                state,
+                includeResponderProbeHandoff: false);
+        }
         return CalculateStateFingerprintFromDescriptors(state, operations);
     }
 
@@ -3176,8 +3197,8 @@ internal static partial class FileTransferCoordinator
                 ? ImmutableArray<RuntimeUnlockRetryLifecycleAttemptSnapshot>.Empty
                 : retryLifecycle.AttemptHistory,
         };
-        var payload = FileTransferCoordinatorTransitionEnvelope
-            .SerializeCanonical(
+        return FileTransferCoordinatorTransitionEnvelope
+            .CalculateCanonicalSha256(
                 new
                 {
                     Boundary = CreateStateBoundarySnapshot(state),
@@ -3237,19 +3258,40 @@ internal static partial class FileTransferCoordinator
                     Operations = operations,
                 },
                 SnapshotFingerprintJsonOptions);
-        return Convert.ToHexString(
-                SHA256.HashData(Encoding.UTF8.GetBytes(payload)))
-            .ToLowerInvariant();
     }
 
     private static ImmutableArray<FileTransferCoordinatorOperationTransitionSnapshot>
         CreateOperationTransitionSnapshots(
             FileTransferCoordinatorState before,
             FileTransferCoordinatorState after)
+        => CreateOperationTransitionSnapshots(before, after, out _, out _);
+
+    private static ImmutableArray<FileTransferCoordinatorOperationTransitionSnapshot>
+        CreateOperationTransitionSnapshots(
+            FileTransferCoordinatorState before,
+            FileTransferCoordinatorState after,
+            out ImmutableArray<CoordinatorOperationDescriptor> beforeStateOperations,
+            out ImmutableArray<CoordinatorOperationDescriptor> afterStateOperations)
     {
-        var beforeOperations = CreateOperationDescriptors(before)
+        // Reuse only within this transition. Fingerprint descriptors deliberately
+        // exclude responder handoff; transition comparison still includes it.
+        beforeStateOperations = CreateOperationDescriptors(
+            before, includeResponderProbeHandoff: false);
+        // Only reuse completed descriptors within this reconciliation. The
+        // retained transition graph and every state-derived boundary must match.
+        // Never retain these descriptors across calls: nested evidence can change.
+        var retainedRouteTransitions = ReferenceEquals(
+                before.PersistentState.FileTransferRouteTransition,
+                after.PersistentState.FileTransferRouteTransition) &&
+            CreateStateBoundarySnapshot(before) == CreateStateBoundarySnapshot(after)
+            ? beforeStateOperations.Where(operation => operation.Family == "route_transition")
+                .ToImmutableArray()
+            : default;
+        afterStateOperations = CreateOperationDescriptors(
+            after, includeResponderProbeHandoff: false, retainedRouteTransitions);
+        var beforeOperations = WithResponderProbeHandoffDescriptors(before, beforeStateOperations)
             .ToDictionary(GetCoordinatorOperationKey, StringComparer.Ordinal);
-        var afterOperations = CreateOperationDescriptors(after)
+        var afterOperations = WithResponderProbeHandoffDescriptors(after, afterStateOperations)
             .ToDictionary(GetCoordinatorOperationKey, StringComparer.Ordinal);
         var operationKeys = beforeOperations.Keys
             .Concat(afterOperations.Keys)
@@ -3278,10 +3320,27 @@ internal static partial class FileTransferCoordinator
         return builder.ToImmutable();
     }
 
+    private static ImmutableArray<CoordinatorOperationDescriptor>
+        WithResponderProbeHandoffDescriptors(
+            FileTransferCoordinatorState state,
+            ImmutableArray<CoordinatorOperationDescriptor> stateOperations)
+    {
+        var builder = stateOperations.ToBuilder();
+        AddResponderProbeHandoffOperationDescriptors(state, builder);
+        return builder
+            .OrderBy(GetCoordinatorOperationKey, StringComparer.Ordinal)
+            .ToImmutableArray();
+    }
+
     private static bool AreOperationDescriptorsEquivalent(
         CoordinatorOperationDescriptor prior,
         CoordinatorOperationDescriptor current)
     {
+        if (ReferenceEquals(prior, current))
+        {
+            return true;
+        }
+
         if (string.Equals(
                 prior.Family,
                 "route_runtime",
@@ -3376,13 +3435,21 @@ internal static partial class FileTransferCoordinator
     private static ImmutableArray<CoordinatorOperationDescriptor>
         CreateOperationDescriptors(
             FileTransferCoordinatorState state,
-            bool includeResponderProbeHandoff = true)
+            bool includeResponderProbeHandoff = true,
+            ImmutableArray<CoordinatorOperationDescriptor> retainedRouteTransitions = default)
     {
         var builder = ImmutableArray.CreateBuilder<CoordinatorOperationDescriptor>();
 
         AddRouteRuntimeOperationDescriptors(state, builder);
-        AddRouteTransitionOperationDescriptors(state, builder);
-        AddBootstrapCorrelationDescriptors(state, builder);
+        if (retainedRouteTransitions.IsDefault)
+        {
+            AddRouteTransitionOperationDescriptors(state, builder);
+            AddBootstrapCorrelationDescriptors(state, builder);
+        }
+        else
+        {
+            builder.AddRange(retainedRouteTransitions);
+        }
         AddRuntimeUnlockRetryOperationDescriptors(state, builder);
         AddReceiveRecoveryOperationDescriptors(state, builder);
         AddFallbackTailYieldOperationDescriptors(state, builder);
@@ -6653,11 +6720,8 @@ internal static partial class FileTransferCoordinator
             return "(none)";
         }
 
-        var payload = FileTransferCoordinatorTransitionEnvelope
-            .SerializeCanonical(value, SnapshotFingerprintJsonOptions);
-        return Convert.ToHexString(
-                SHA256.HashData(Encoding.UTF8.GetBytes(payload)))
-            .ToLowerInvariant();
+        return FileTransferCoordinatorTransitionEnvelope
+            .CalculateCanonicalSha256(value, SnapshotFingerprintJsonOptions);
     }
 
     private static readonly JsonSerializerOptions SnapshotFingerprintJsonOptions =

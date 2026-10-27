@@ -1,3 +1,4 @@
+using System.Reflection;
 using System.Text.Json;
 using NLink.Core.Configuration;
 using NLink.Tests;
@@ -43,6 +44,47 @@ public sealed class OfflineDiagnosticConfigurationTests : FileTransferOpsScripts
         }
     }
 #endif
+
+    [Fact]
+    public void PositiveFrontierFixtures_RequireDebugWithoutExcludingReleaseControls()
+    {
+        Type[] fixtures = [typeof(FrontierAttemptNknCarrierTests), typeof(FrontierCanonicalTailNativeTests)];
+        Assert.All(fixtures, fixture => Assert.Null(RequiredConfiguration(fixture)));
+        var methods = fixtures.SelectMany(fixture => fixture.GetMethods(BindingFlags.Public | BindingFlags.Instance | BindingFlags.DeclaredOnly))
+            .Where(method => method.IsDefined(typeof(FactAttribute))).ToArray();
+        Assert.All(methods, method => Assert.True(RequiredConfiguration(method) is null or "Debug"));
+        string[] debugOnly =
+        [
+            nameof(FrontierAttemptNknCarrierTests.OriginalApps_CharacterizeSingleSegmentFrontierSchedule),
+            nameof(FrontierAttemptNknCarrierTests.OriginalApps_CarrySmallFrontierReceiptIntoPrimary),
+            nameof(FrontierAttemptNknCarrierTests.OriginalApps_CarryLateFrontierReceiptIntoPrimary),
+            nameof(FrontierCanonicalTailNativeTests.OriginalApps_CarryCanonicalTailIntoSamePairPrimary)
+        ];
+        Assert.Equal(debugOnly.OrderBy(name => name, StringComparer.Ordinal),
+            methods.Where(method => RequiredConfiguration(method) == "Debug").Select(method => method.Name).OrderBy(name => name, StringComparer.Ordinal));
+        string[] releaseEligible =
+        [
+            nameof(FrontierAttemptNknCarrierTests.OriginalApps_UsePeerBoundOfflineNknCarrier),
+            nameof(FrontierAttemptNknCarrierTests.OriginalApps_TransferHeld256MiBAfterFallback),
+            nameof(FrontierAttemptNknCarrierTests.OriginalApps_CharacterizeFrontierHoldOnSmallPair),
+            nameof(FrontierAttemptNknCarrierTests.OriginalApps_CharacterizeFrontierHoldOnHeld256MiBPair),
+            nameof(FrontierAttemptNknCarrierTests.OriginalCarrierWorker_RejectsUnknownConfigurationBeforeLoading)
+        ];
+        Assert.Equal(releaseEligible.OrderBy(name => name, StringComparer.Ordinal),
+            methods.Where(method => RequiredConfiguration(method) is null).Select(method => method.Name).OrderBy(name => name, StringComparer.Ordinal));
+#if !DEBUG
+        Assert.Null(RequiredConfiguration(typeof(OfflineDiagnosticConfigurationTests)));
+        Assert.Null(RequiredConfiguration(typeof(OfflineDiagnosticConfigurationTests)
+            .GetMethod(nameof(ReleaseRejectsDiagnosticProfilesEvenInDeveloperMode))!));
+#endif
+
+        static string? RequiredConfiguration(MemberInfo member)
+        {
+            var traits = member.CustomAttributes.Where(attribute => attribute.AttributeType == typeof(TraitAttribute)
+                && (string?)attribute.ConstructorArguments[0].Value == "RequiredConfiguration").ToArray();
+            return traits.Length == 0 ? null : (string?)Assert.Single(traits).ConstructorArguments[1].Value;
+        }
+    }
 
     [Theory]
     [InlineData("pwsh", "Release", true, 0)] [InlineData("powershell", "Release", true, 0)]

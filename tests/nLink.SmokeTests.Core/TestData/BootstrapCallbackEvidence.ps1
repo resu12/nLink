@@ -29,7 +29,7 @@ function Replace-Envelope([string]$Line, $Envelope) {
 }
 $normalized=[Collections.Generic.List[string]]::new()
 foreach ($case in @('exact','missing_admission','missing_capture','missing_consumption','held_terminal','wrong_callback',
-    'wrong_hold','wrong_provider','duplicate_callback','extra_field','old_profile','identical_duplicate')) {
+    'wrong_hold','wrong_provider','missing_boundary_provider','wrong_boundary_provider','duplicate_callback','extra_field','old_profile','identical_duplicate')) {
     $lines=[string[]]$captured.Clone(); $mutated=$case -ceq 'exact'
     if ($case -ceq 'old_profile') {
         for ($i=0; $i -lt $lines.Count; $i++) { $lines[$i]=Set-Field (Set-Field $lines[$i] 'snapshot_catalog_version' $parent.Version) 'snapshot_catalog_hash' $parent.Hash }
@@ -45,6 +45,13 @@ foreach ($case in @('exact','missing_admission','missing_capture','missing_consu
         foreach ($op in @($envelope.aggregate.operations)) {
             if (-not (Test-FileTransferCoordinatorBootstrapCallbackMarker $op)) { continue }
             $p=$op.routeTransition.bootstrapCallbacks; $changed=$false
+            if($p.stage -ceq 'Admitted' -and $case -cin @('missing_boundary_provider','wrong_boundary_provider')) {
+                foreach($boundary in @($op.routeTransition.sourceBoundary,$op.routeTransition.targetBoundary)) {
+                    if($case -ceq 'missing_boundary_provider') {$boundary.PSObject.Properties.Remove('dataSessionProviderGeneration')}
+                    else {$boundary.dataSessionProviderGeneration++}
+                }
+                $changed=$true
+            }
             if (($case -ceq 'missing_admission' -and $p.stage -ceq 'Admitted') -or
                 ($case -ceq 'missing_consumption' -and $p.stage -ceq 'Consumed')) {
                 $envelope.aggregate.operations=@($envelope.aggregate.operations | Where-Object { $_ -ne $op }); $changed=$true

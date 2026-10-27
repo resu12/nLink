@@ -69,7 +69,7 @@ namespace NLink.Tools
                     bool success = false; work.Start(); SafeFileHandle handle = null; FileStream stream = null;
                     try
                     {
-                        if (!ResourceCurrent || nativeReader != null || facts.SemanticLineCount != owner.SourceLines) return null;
+                        if (!SourceCaptureResourceCurrent || nativeReader != null || facts.SemanticLineCount != owner.SourceLines) return null;
                         if (!DuplicateSourceHandle(GetCurrentProcess(), pins.Handles[4], GetCurrentProcess(), out handle, 0x80000000, false, 0)) return null;
                         stream = new FileStream(handle, FileAccess.Read); handle = null;
                         if (stream.Length != owner.SourceBytes) return null;
@@ -78,7 +78,7 @@ namespace NLink.Tools
                         // append a final separator. Raw ledger framing stays strict.
                         nativeLines = new GuiSmokeLedgerLfRead(nativeStream, CheckSourceFragment, true);
                         nativeReader = new SourceReader(owner, this);
-                        success = ResourceCurrent; return success ? nativeReader : null;
+                        success = SourceCaptureResourceCurrent; return success ? nativeReader : null;
                     }
                     catch { return null; }
 #if NLINK_TEST_ATTEMPT_DISPATCH
@@ -90,18 +90,18 @@ namespace NLink.Tools
             }
             private bool OriginalSource(SourceReader candidate)
             { return Object.ReferenceEquals(owner.frontierWorkerInputs, this) && Object.ReferenceEquals(nativeReader, candidate); }
-            private void CheckSource() { if (!ResourceCurrent) throw new IOException("frontier_source_not_current"); }
+            private void CheckSource() { if (!SourceCaptureResourceCurrent) throw new IOException("frontier_source_not_current"); }
             // Abort-only while a line is private. Full validation gates every publication.
             private void CheckSourceContinuation()
             {
 #if NLINK_TEST_ATTEMPT_DISPATCH
-                if (!PrimarySourceCheckForTest("read:closed", !closed) || !PrimarySourceBudgetForTest("read:budget", work.ElapsedMilliseconds) ||
+                if (!PrimarySourceCheckForTest("read:closed", !closed) || !PrimarySourceBudgetForTest("read:budget", work.ElapsedMilliseconds, SourceCaptureMilliseconds) ||
                     !PrimarySourceCheckForTest("read:base", PrimaryMeasuredCurrentForTest(0)) ||
                     !PrimarySourceCheckForTest("read:scope", PrimaryMeasuredCurrentForTest(1)) ||
                     !PrimarySourceCheckForTest("read:files-cancelled", !files.Cancelled.WaitOne(0)) ||
                     !PrimarySourceCheckForTest("read:facts-cancelled", !files.Facts.Cancelled.WaitOne(0)))
 #else
-                if (closed || work.ElapsedMilliseconds > LocalPublicationInputLimits.ProducerMilliseconds ||
+                if (closed || work.ElapsedMilliseconds > SourceCaptureMilliseconds ||
                     !owner.FrontierBaseCurrent || !scope.IsCurrent || files.Cancelled.WaitOne(0) || files.Facts.Cancelled.WaitOne(0))
 #endif
                     throw new IOException("frontier_source_not_current");
@@ -130,7 +130,7 @@ namespace NLink.Tools
                 lock (sync)
                 {
                     if (!OriginalSource(candidate)) return false;
-                    if (sourceStarted || !ResourceCurrent) { Close(); return false; }
+                    if (sourceStarted || !SourceCaptureResourceCurrent) { Close(); return false; }
                     sourceStarted = true; return true;
                 }
             }
@@ -149,10 +149,10 @@ namespace NLink.Tools
                     {
 #if NLINK_TEST_ATTEMPT_DISPATCH
                         ProbeReadForTest("entry");
-                        if (!PrimarySourceCheckForTest("read:closed", !closed) || !PrimarySourceBudgetForTest("read:budget", work.ElapsedMilliseconds) ||
+                        if (!PrimarySourceCheckForTest("read:closed", !closed) || !PrimarySourceBudgetForTest("read:budget", work.ElapsedMilliseconds, SourceCaptureMilliseconds) ||
                             !PrimarySourceCheckForTest("read:base", PrimaryMeasuredCurrentForTest(0)))
 #else
-                        if (closed || work.ElapsedMilliseconds > LocalPublicationInputLimits.ProducerMilliseconds || !owner.FrontierBaseCurrent)
+                        if (closed || work.ElapsedMilliseconds > SourceCaptureMilliseconds || !owner.FrontierBaseCurrent)
 #endif
                             throw new IOException("frontier_source_not_current");
                         if (!sourceStarted || sourceEnded) throw new IOException("frontier_source_read_order");

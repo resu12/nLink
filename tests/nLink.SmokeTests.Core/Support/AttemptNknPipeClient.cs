@@ -94,6 +94,7 @@ internal sealed class AttemptNknPipeClient : INknClient, IAuthoritativeConnected
         try
         {
             Check(); if (!connected) throw new IOException("attempt_nkn_not_connected");
+            if (OutboundDescriptors?.TryDropFinal(kind, lane, bytes) == true) return;
             var hint = OutboundDescriptors?.Consume(kind, lane, bytes);
             try
             {

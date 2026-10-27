@@ -7,6 +7,18 @@ public sealed class FrontierDiagnosticPreparationTests : FileTransferOpsScriptsT
     [Theory]
     [InlineData("powershell")]
     [InlineData("pwsh")]
+    public async Task DiagnosticState_BindsInputSizedBoundaryStreamsWithoutRelaxingLimits(string host)
+    {
+        var root = FindRepoRoot();
+        var script = await File.ReadAllTextAsync(Path.Combine(root, "tests", "nLink.SmokeTests.Core", "Support", "FrontierDiagnosticBoundaryState.ps1"));
+        var result = await RunPowerShellScriptTextAsync(script, [root], host);
+        Assert.True(result.ExitCode == 0, result.Stdout + Environment.NewLine + result.Stderr);
+        Assert.Contains("frontier-diagnostic-boundary-state=verified", result.Stdout);
+    }
+
+    [Theory]
+    [InlineData("powershell")]
+    [InlineData("pwsh")]
     public async Task DiagnosticState_RejectsExecutableAndOversizedObservations(string host)
     {
         var root = FindRepoRoot();

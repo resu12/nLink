@@ -1,6 +1,39 @@
 param([string]$RepoRoot)
 $ErrorActionPreference='Stop'; Set-StrictMode -Version Latest
 . (Join-Path $RepoRoot 'tools/FileTransferOps/LocalRetainedSourceRequest.ps1')
+Add-Type -TypeDefinition @'
+using System;
+using System.Reflection;
+using System.Threading;
+public sealed class PrimaryScopeCall {
+    private readonly Thread thread;
+    private readonly ManualResetEvent entered = new ManualResetEvent(false);
+    private volatile bool done;
+    private bool result;
+    private Exception error;
+    public PrimaryScopeCall(object scope, bool dispose) {
+        thread = new Thread(() => {
+            try {
+                entered.Set();
+                if (dispose) { ((IDisposable)scope).Dispose(); result = true; }
+                else result = (bool)scope.GetType().GetProperty("IsCurrent", BindingFlags.Instance | BindingFlags.NonPublic).GetValue(scope, null);
+            } catch (Exception e) { error = e; }
+            finally { done = true; }
+        });
+        thread.IsBackground = true; thread.Start();
+    }
+    public void AwaitBlocked() {
+        if (!entered.WaitOne(10000) || !SpinWait.SpinUntil(() => done || (thread.ThreadState & ThreadState.WaitSleepJoin) != 0, 10000) || done)
+            throw new InvalidOperationException("Scope operation did not wait for its comparison/disposal gate");
+    }
+    public bool Finish() {
+        if (!thread.Join(10000)) throw new InvalidOperationException("Scope operation did not finish after gate release");
+        entered.Dispose();
+        if (error != null) throw new InvalidOperationException("Scope operation failed", error);
+        return result;
+    }
+}
+'@
 $flags=[Reflection.BindingFlags]'Instance,NonPublic'
 $assembly=[NLink.Tools.LocalRetainedSourceRequest].Assembly
 # Comparison-only construction: arbitrary transport bytes cannot decode into
@@ -49,6 +82,10 @@ foreach($length in @(1,7,8,9,1025,32767,32768)) {
     $view.WriteArray(0,$header,0,64);$view.WriteArray(64,$body,0,$length)
     $scope=$type.GetConstructors($flags)[0].Invoke([object[]]@($map,$body))
     try {
+        $scratch=$type.GetField('current',$flags).GetValue($scope)
+        if($scratch.Length -ne 64+$length) {throw 'Scope scratch length changed'}
+        [Array]::Clear($scratch,0,$scratch.Length)
+        if(-not $current.GetValue($scope,$null)) {throw 'Scope did not overwrite its full scratch buffer'}
         $offsets=if($length -le 1025) {@(0..(63+$length))} else {@(0..63)+@(64,70,71,72,(64+$length-8),(63+$length))}
         foreach($i in $offsets) {
             $prior=$view.ReadByte($i);$view.Write($i,[byte]($prior -bxor 1))
@@ -63,6 +100,27 @@ foreach($length in @(1,7,8,9,1025,32767,32768)) {
                 if($current.GetValue($scope,$null)) {throw 'Retained scope mutation hidden'}
                 $retained[$i]=$retained[$i] -bxor 1
             }
+        }
+        if(-not [object]::ReferenceEquals($scratch,$type.GetField('current',$flags).GetValue($scope))) {throw 'Scope scratch buffer was replaced'}
+        if($length -eq 32768) {
+            $gate=$type.GetField('sync',$flags).GetValue($scope)
+            [Threading.Monitor]::Enter($gate)
+            try {
+                $first=[PrimaryScopeCall]::new($scope,$false);$second=[PrimaryScopeCall]::new($scope,$false)
+                $first.AwaitBlocked();$second.AwaitBlocked()
+                $view.Write(63+$length,[byte]($body[$length-1] -bxor 1))
+            } finally {[Threading.Monitor]::Exit($gate)}
+            $firstResult=$first.Finish();$secondResult=$second.Finish()
+            if($firstResult -or $secondResult) {throw 'Overlapping scope checks reused a prior successful comparison'}
+            $view.Write(63+$length,$body[$length-1])
+            if(-not $current.GetValue($scope,$null)) {throw 'Restored scope comparison failed after overlap'}
+            [Threading.Monitor]::Enter($gate)
+            try {
+                $retirement=[PrimaryScopeCall]::new($scope,$true);$retirement.AwaitBlocked()
+                if(-not $current.GetValue($scope,$null)) {throw 'Pending disposal bypassed the held comparison gate'}
+            } finally {[Threading.Monitor]::Exit($gate)}
+            if(-not $retirement.Finish() -or $current.GetValue($scope,$null)) {throw 'Serialized disposal left scope current'}
+            'native-primary-scope-overlap-disposal-ok'
         }
     } finally {$scope.Dispose();$view.Dispose();$map.Dispose()}
     if($current.GetValue($scope,$null)) {throw 'Disposed scope current'}

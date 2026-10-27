@@ -75,6 +75,22 @@ if($Mode -ceq 'handoff') {
     $selection=@($a.FindAll({param($n) $n -is [Management.Automation.Language.AssignmentStatementAst] -and $n.Left.Extent.Text -ceq '$worker'},$true))
     $env:NLINK_TEST_PAYLOAD_PRIMARY_CASE='canonical-tail-late-publication';$env:NLINK_TEST_DIAGNOSTIC_CUSTODY=''
     if($selection.Count -ne 1 -or (Invoke-Expression $selection[0].Right.Extent.Text) -cne 'FrontierCanonicalTailPrimaryWorker.ps1') {throw 'Combined worker selection missing'}
+    $proofCalls=@($a.FindAll({param($n) $n -is [Management.Automation.Language.CommandAst] -and
+        $n.Extent.Text.StartsWith(". (Join-Path `$RepoRoot 'tests/nLink.SmokeTests.Core/Support/FrontierCanonicalTailProof.ps1')")},$true))
+    if($proofCalls.Count -ne 1) {throw 'Canonical proof call missing or duplicated'}
+    $forward=$proofCalls[0].Extent.Text.Replace("(Join-Path `$RepoRoot 'tests/nLink.SmokeTests.Core/Support/FrontierCanonicalTailProof.ps1')","'Get-CanonicalProofForwardingForTest'")
+    function Get-CanonicalProofForwardingForTest($Directory,$Receipt,$AnalysisFailure,$RouteCycleProfile,$WorkerConfiguration) {
+        [pscustomobject]@{Directory=$Directory;Receipt=$Receipt;Failure=$AnalysisFailure;Profile=$RouteCycleProfile;Configuration=$WorkerConfiguration}
+    }
+    $receipt=[pscustomobject]@{Original='receipt'};$analysisFailure='original-failure';$forwarded=[Collections.Generic.List[object]]::new()
+    foreach($context in @(@('','Debug'),@('canonical-cycle-v1','Debug'),@('canonical-cycle-v1','Release'),@('late-ineligible-v1','Debug'))) {
+        $env:NLINK_TEST_FRONTIER_ROUTE_CYCLE=$context[0];$env:NLINK_TEST_FRONTIER_WORKER_CONFIGURATION=$context[1]
+        $seen=Invoke-Expression $forward
+        if($seen.Profile -cne $context[0] -or $seen.Configuration -cne $context[1] -or $seen.Directory -cne $Directory -or
+            -not [object]::ReferenceEquals($seen.Receipt,$receipt) -or $seen.Failure -cne $analysisFailure) {throw 'Canonical proof profile/receipt forwarding changed'}
+        $forwarded.Add([ordered]@{profile=$seen.Profile;configuration=$seen.Configuration;originalReceipt=$true;authorityGranted=$false})
+    }
+    [IO.File]::WriteAllText((Join-Path $Directory 'handoff-profile-results.json'),(ConvertTo-Json -InputObject @($forwarded.ToArray()) -Depth 4))
     $a=Read-AttemptAst (Join-Path $RepoRoot 'tests/nLink.SmokeTests.Core/Support/FrontierAttemptWritersJoin.ps1')
     $semantic=@($a.FindAll({param($n) $n -is [Management.Automation.Language.IfStatementAst] -and
         $n.Clauses[0].Item1.Extent.Text.Contains("'canonical-tail-late-publication'")},$true))
@@ -91,9 +107,17 @@ if($Mode -ceq 'handoff') {
 }
 $ast=Read-AttemptAst (Join-Path $RepoRoot 'tools/Run-FileTransferRouteAcceptance.ps1')
 Invoke-Expression (Get-AttemptFunction $ast 'Read-RouteAcceptanceKeyValueArtifact')
-foreach($fault in @('valid-incomplete','valid-completed','status','classification','failure','mode','exit','timeout','input','full','compact','parity',
-    'verdict','gate','route','profile','join','outcome','selected','calls','witness-empty','witness-cap','output','pins','text','authority','reports')) {
-    $target=Join-Path $Directory $fault;[void][IO.Directory]::CreateDirectory($target)
+$faults=@('valid-incomplete','valid-completed','status','classification','failure','mode','exit','timeout','input','full','compact','parity',
+    'verdict','gate','route','profile','join','outcome','selected','calls','witness-empty','witness-cap','output','pins','text','authority','reports')
+$results=[Collections.Generic.List[object]]::new()
+foreach($proofProfile in @('legacy','canonical-cycle-v1')) {
+  $profileFaults=@();if($proofProfile -cne 'legacy') {$profileFaults=@('cycle-delivery','activation-1','activation-2','cycle-parity','release','omitted-cycle-profile','unknown-cycle-profile','case-cycle-profile')}
+  foreach($fault in $faults+$profileFaults) {
+    $target=Join-Path (Join-Path $Directory $proofProfile) $fault;[void][IO.Directory]::CreateDirectory($target)
+    $routeCycleProfile=if($proofProfile -ceq 'legacy') {''} else {'canonical-cycle-v1'}
+    $workerConfiguration='Debug';$routeVerdict=if($proofProfile -ceq 'legacy') {'fail'} else {'pass'}
+    $delivery=[ordered]@{file_tuna_route_cycle_delivery_verdict='pass';file_tuna_activation_1_delivery_verdict='pass';
+        file_tuna_activation_2_delivery_verdict='pass';file_tuna_route_cycle_full_compact_parity_verdict='pass'}
     $failure='FileTransfer-Ops retained analysis exited successfully without complete proof artifacts for '+$target
     $receipt=[pscustomobject]@{status='proof_incomplete';completedProofArtifacts=$false;coordinatorSnapshotMode='SnapshotV1Authoritative';exitCode=0;exitCodeAvailable=$true;timedOut=$false;analyzerInputUnchanged=$true}
     $o=[ordered]@{CanonicalTailProfile='canonical-tail-late-publication';SamePairJoined=$true;Outcome='PublishedWithinObservationBound';
@@ -109,16 +133,29 @@ foreach($fault in @('valid-incomplete','valid-completed','status','classificatio
         'selected' {$o.SelectedFailure='other'} 'calls' {$o.ResolverCalls=2} 'witness-empty' {$o.WitnessCount=0} 'witness-cap' {$o.WitnessCount=65}
         'output' {$o.OriginalOutputCommitted=$false} 'pins' {$o.OpenPinsAfterCleanup=1} 'text' {$o.TextCleared=$false}
         'authority' {$o.PublicationCompletionIssued=$true} 'reports' {$o.ReportsAfter='changed'}
+        'route' {$routeVerdict=if($proofProfile -ceq 'legacy') {'pass'} else {'fail'}}
+        'cycle-delivery' {$delivery.file_tuna_route_cycle_delivery_verdict='fail'}
+        'activation-1' {$delivery.file_tuna_activation_1_delivery_verdict='fail'}
+        'activation-2' {$delivery.file_tuna_activation_2_delivery_verdict='fail'}
+        'cycle-parity' {$delivery.file_tuna_route_cycle_full_compact_parity_verdict='fail'}
+        'release' {$workerConfiguration='Release'} 'omitted-cycle-profile' {$routeCycleProfile=''}
+        'unknown-cycle-profile' {$routeCycleProfile='late-ineligible-v1'} 'case-cycle-profile' {$routeCycleProfile='CANONICAL-CYCLE-V1'}
     }
     foreach($name in @('full','compact')) {
         $view=@{Mode='SnapshotV1Authoritative';StreamComplete=$true;ArtifactEvidenceVerdict=$(if($fault -ceq $name){'fail'}else{'pass'})}
         [IO.File]::WriteAllText((Join-Path $target ('filetransfer-coordinator-snapshot-'+$name+'-summary.json')),($view | ConvertTo-Json -Compress))
     }
     [IO.File]::WriteAllText((Join-Path $target 'filetransfer-coordinator-snapshot-parity-summary.json'),(@{Verdict=$(if($fault -ceq 'parity'){'fail'}else{'pass'})} | ConvertTo-Json -Compress))
-    [IO.File]::WriteAllText((Join-Path $target 'filetransfer-operator-verdict.txt'),('verdict='+$(if($fault -ceq 'verdict'){'INCONCLUSIVE'}else{'FAIL_PROTOCOL_OR_INTEGRITY'})+"`ngate_status="+$(if($fault -ceq 'gate'){'pass'}else{'fail'})))
-    [IO.File]::WriteAllText((Join-Path $target 'filetransfer-route-consistency-summary.txt'),('live_route_epoch_proof_verdict='+$(if($fault -ceq 'route'){'pass'}else{'fail'})))
+    $operator='verdict='+$(if($fault -ceq 'verdict'){'INCONCLUSIVE'}else{'FAIL_PROTOCOL_OR_INTEGRITY'})+"`ngate_status="+$(if($fault -ceq 'gate'){'pass'}else{'fail'})
+    foreach($key in $delivery.Keys) {$operator+="`n"+$key+'='+$delivery[$key]}
+    [IO.File]::WriteAllText((Join-Path $target 'filetransfer-operator-verdict.txt'),$operator)
+    [IO.File]::WriteAllText((Join-Path $target 'filetransfer-route-consistency-summary.txt'),('live_route_epoch_proof_verdict='+$routeVerdict))
     [IO.File]::WriteAllText((Join-Path $target 'late-publication-primary-observation.json'),($o | ConvertTo-Json -Compress))
-    $rejected=$false;try {& (Join-Path $RepoRoot 'tests/nLink.SmokeTests.Core/Support/FrontierCanonicalTailProof.ps1') -Directory $target -Receipt $receipt -AnalysisFailure $failure} catch {$rejected=$true}
-    if($rejected -ne ($fault -cnotin @('valid-incomplete','valid-completed'))) {throw ('Canonical parent proof gate: '+$fault)}
+    $rejected=$false;$reason='';try {& (Join-Path $RepoRoot 'tests/nLink.SmokeTests.Core/Support/FrontierCanonicalTailProof.ps1') -Directory $target -Receipt $receipt -AnalysisFailure $failure -RouteCycleProfile $routeCycleProfile -WorkerConfiguration $workerConfiguration} catch {$rejected=$true;$reason=$_.Exception.Message}
+    $expectedRejected=$fault -cnotin @('valid-incomplete','valid-completed')
+    $results.Add([ordered]@{profile=$proofProfile;fault=$fault;expectedRejected=$expectedRejected;rejected=$rejected;reason=$reason;authorityGranted=$false})
+    [IO.File]::WriteAllText((Join-Path $Directory 'proof-results.json'),(ConvertTo-Json -InputObject @($results.ToArray()) -Depth 4))
+    if($rejected -ne $expectedRejected) {throw ('Canonical parent proof gate: profile='+$proofProfile+'; fault='+$fault+'; reason='+$reason)}
+  }
 }
 'canonical-tail-proof-controls-ok'

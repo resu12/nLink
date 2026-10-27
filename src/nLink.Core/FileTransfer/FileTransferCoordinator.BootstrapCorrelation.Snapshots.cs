@@ -87,7 +87,10 @@ internal static partial class FileTransferCoordinator
             command.SourceLiveRouteEpoch, command.SourceRoutePublication.PublicationGeneration, command.SourceRouteCommit?.CommitGeneration ?? 0,
             command.SourceRuntimeOwner.RuntimeGeneration, command.SourceTerminalGeneration, command.SourceLegGeneration,
             command.SourceTransportEpoch, command.SourceBridgeRecoveryGeneration, exchange.LegCheckpointGeneration,
-            exchange.CheckpointRequestId ?? "(none)", exchange.DataSessionIdentity, command.SourceDataSessionGeneration);
+            exchange.CheckpointRequestId ?? "(none)", exchange.DataSessionIdentity, command.SourceDataSessionGeneration)
+        {
+            DataSessionProviderGeneration = command.Observation.DurableCheckpoint.DataSessionProviderGeneration,
+        };
         builder.Add(CreateBootstrapCorrelationDescriptor(state, "fallback_bootstrap_exchange", "FallbackBootstrapExchange",
             command.AuthorityId.Value, command.BootstrapGeneration,
             exchange.Invalidated ? "Invalidated" : exchange.Completed ? "Completed" : "Pending",
@@ -142,7 +145,10 @@ internal static partial class FileTransferCoordinator
         return new(source.RouteToken, source.ProtocolVersion, source.LiveRouteEpoch,
             source.RoutePublicationGeneration, source.RouteCommitGeneration, source.RuntimeGeneration,
             source.TerminalGeneration, checked((int)source.LegGeneration), source.TransportEpoch, source.BridgeRecoveryGeneration,
-            source.CheckpointGeneration, source.CheckpointRequestId, command.DataSessionIdentity, command.DataSessionGeneration);
+            source.CheckpointGeneration, source.CheckpointRequestId, command.DataSessionIdentity, command.DataSessionGeneration)
+        {
+            DataSessionProviderGeneration = command.Initiation.DurableCheckpoint.DataSessionProviderGeneration,
+        };
     }
 
     private static FileTransferBootstrapInitiationOperationSnapshot CreateBootstrapInitiationEvidence(

@@ -53,10 +53,25 @@ foreach($length in @(1,7,8,9,1025,32767,32768,32769,262143,262144,262145,1048577
         }
         if(-not $check.Invoke($channel,[object[]]@([Action]{},$true))) {throw 'Full restored mapping rejected'}
         if($length -eq 1025) {
+            $scratch=$type.GetField('currentHeader',$flags).GetValue($channel)
+            $header=$type.GetField('header',$flags).GetValue($channel)
+            if($scratch.Length -ne 80 -or [object]::ReferenceEquals($scratch,$header)) {throw 'Header scratch aliases retained snapshot'}
+            for($i=0;$i -lt 80;$i++) {$scratch[$i]=255}
+            if(-not $current.GetValue($channel,$null) -or -not [object]::ReferenceEquals($scratch,$type.GetField('currentHeader',$flags).GetValue($channel))) {
+                throw 'Header scratch not freshly filled/reused'
+            }
+            for($i=0;$i -lt 80;$i++) {if($scratch[$i] -ne $view.ReadByte($i)) {throw 'Header bulk read omitted a byte'}}
+            $map=$type.GetField('map',$flags).GetValue($channel); $shortView=$map.CreateViewAccessor(0,79)
+            try {
+                $viewField.SetValue($channel,$shortView)
+                if($current.GetValue($channel,$null)) {throw 'Short header view accepted'}
+            } finally {$viewField.SetValue($channel,$view);$shortView.Dispose()}
+            if(-not $current.GetValue($channel,$null)) {throw 'Restored full header view rejected'}
             foreach($offset in @(0..79 | Where-Object {$_ -lt 8 -or $_ -ge 12})) {
                 $prior=$view.ReadByte($offset); $view.Write($offset,[byte]($prior -bxor 255))
                 if($current.GetValue($channel,$null)) {throw ('Header mutation accepted: '+$offset)}
                 $view.Write($offset,$prior)
+                if(-not $current.GetValue($channel,$null)) {throw ('Restored header byte rejected: '+$offset)}
             }
             $ready=$type.GetField('ready',$flags).GetValue($channel); $null=$ready.Reset()
             if($current.GetValue($channel,$null)) {throw 'Missing ready signal accepted'}
@@ -81,5 +96,9 @@ foreach($length in @(1,7,8,9,1025,32767,32768,32769,262143,262144,262145,1048577
         if($current.GetValue($channel,$null)) {throw 'Closed facts mapping remained current'}
     } finally {$channel.Dispose()}
     if($current.GetValue($channel,$null)) {throw 'Disposed comparison channel current'}
+    'native-facts-comparison-row='+([pscustomobject]@{length=$length;outcome='Passed';bodyMutationOffsets=@($offsets).Count;
+        immutableHeaderOffsets=$(if($length -eq 1025){76}else{0});scratchRefresh=($length -eq 1025);shortView=($length -eq 1025);
+        readyStateCancel=($length -eq 1025);midBodyBoundary=($length -gt 262144);midBodyDispose=($length -eq 4194304);
+        disposedView=$true;disposedChannel=$true}|ConvertTo-Json -Compress)
 }
 'native-facts-comparison-ok'

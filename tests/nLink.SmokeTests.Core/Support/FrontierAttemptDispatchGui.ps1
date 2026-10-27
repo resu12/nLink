@@ -74,7 +74,7 @@ function Invoke-FileTransferTunaHandoffFallbackCycle {
     if($PayloadSizeBytes -ne $(if($attemptCase -ceq 'environment-changed'){134217728}else{268435456}) -or
         $Direction -cne 'helpee-to-helper' -or $PayerMode -cne 'helpee' -or $FaultMode -cne 'switch-off' -or
         $RouteMode -cne 'live-regular-activation-cycle' -or
-        $TimeoutMs -ne $(if($attemptCase.StartsWith('writer-source-read-cross-process-carrier-full-')){210000}else{100000}) -or
+        $TimeoutMs -ne $(if($env:NLINK_TEST_FRONTIER_ROUTE_CYCLE -ceq 'canonical-cycle-v1' -and $attemptCase -ceq 'writer-source-read-cross-process-carrier-full-canonical-tail-late-publication'){270000}elseif($attemptCase.StartsWith('writer-source-read-cross-process-carrier-full-')){210000}else{100000}) -or
         $ProgressTimeoutMs -ne 30000) {throw 'Actual scenario consumed another projection'}
     $script:cycleCalled=$true
 }

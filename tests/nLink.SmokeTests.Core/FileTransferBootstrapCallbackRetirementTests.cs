@@ -113,11 +113,12 @@ public sealed partial class FileTransferCoordinatorTests
     }
 
     [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
-    private static BootstrapCallbackRetirementHistory CreateBootstrapCallbackRetirementHistory(Action<FileTransferCoordinatorTransitionEnvelope>? captureEnvelope = null)
+    private static BootstrapCallbackRetirementHistory CreateBootstrapCallbackRetirementHistory(Action<FileTransferCoordinatorTransitionEnvelope>? captureEnvelope = null,
+        long providerGeneration = 0)
     {
         void CaptureEnvelope(FileTransferCoordinatorTransitionEnvelope envelope)
         { if (envelope.Direction == "outbound") { captureEnvelope?.Invoke(envelope); } }
-        var pair = CreateCorrelatedBootstrapPair(capture: CaptureEnvelope);
+        var pair = CreateCorrelatedBootstrapPair(capture: CaptureEnvelope, providerGeneration: providerGeneration);
         var initial = pair.Sender;
         var callback = FileTransferCoordinator.IssueFallbackBootstrapSourceCallback(initial, 71, 7, false, 0)!;
         Assert.NotNull(callback);
@@ -142,7 +143,7 @@ public sealed partial class FileTransferCoordinatorTests
     internal static IReadOnlyList<FileTransferCoordinatorTransitionEnvelope> CreateBootstrapCallbackNextCycleEvidence()
     {
         var envelopes = new List<FileTransferCoordinatorTransitionEnvelope>();
-        var history = CreateBootstrapCallbackRetirementHistory(envelopes.Add);
+        var history = CreateBootstrapCallbackRetirementHistory(envelopes.Add, providerGeneration: 7);
         var retirement = FileTransferCoordinator.IssueFallbackBootstrapSourceCallbackRetirement(history.Reactivated, history.Callback, history.Capture);
         Assert.NotNull(retirement);
         var next = StartCorrelated(history.Reactivated, capture: envelopes.Add);

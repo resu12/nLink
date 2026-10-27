@@ -7,6 +7,7 @@ namespace NLink.SmokeTests;
 public sealed class FrontierCanonicalTailNativeTests : FileTransferOpsScriptsTestBase
 {
     [Fact]
+    [Trait("RequiredConfiguration", "Debug")]
     public async Task OriginalApps_CarryCanonicalTailIntoSamePairPrimary()
     {
         if (!OperatingSystem.IsWindows()) return;

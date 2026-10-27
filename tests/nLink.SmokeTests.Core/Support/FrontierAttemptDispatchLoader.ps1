@@ -1,7 +1,15 @@
-param([string]$RepoRoot)
+param([string]$RepoRoot,[string]$PassiveDiagnosticDirectory='')
 if($null -ne ('NLink.Tools.LocalGuiWriterRequest' -as [type])) {throw 'attempt_dispatch_profile_already_loaded'}
 function Add-Type {
     param([string[]]$Path,$CompilerParameters,[string]$CompilerOptions,[string]$ErrorAction)
+    if($PassiveDiagnosticDirectory) {
+        . (Join-Path $RepoRoot 'tests/nLink.SmokeTests.Core/Support/FrontierGuiWorkBudget.ps1')
+        if(Test-AttemptGuiWorkBudgetScope) {
+            $Path=New-AttemptGuiWorkBudgetSources $Path ($PassiveDiagnosticDirectory+'-work-budget')
+        }
+        . (Join-Path $RepoRoot 'tests/nLink.SmokeTests.Core/Support/FrontierPassiveProjection.ps1')
+        $Path=New-AttemptPassiveSources $Path $PassiveDiagnosticDirectory
+    }
     $arguments=@{Path=@($Path)+(Join-Path $RepoRoot 'tests/nLink.SmokeTests.Core/Support/FrontierAttemptDispatch.cs')+
         (Join-Path $RepoRoot 'tests/nLink.SmokeTests.Core/Support/FrontierAttemptRoles.cs')+
         (Join-Path $RepoRoot 'tests/nLink.SmokeTests.Core/Support/FrontierAttemptWriters.cs')+

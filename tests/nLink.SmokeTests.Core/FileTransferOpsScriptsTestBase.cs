@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Globalization;
+using System.Reflection;
 using System.Text;
 using System.Text.RegularExpressions;
 using NLink.App.Views;
@@ -1684,6 +1685,10 @@ public abstract class FileTransferOpsScriptsTestBase
                 // production child launch behavior remains under test inside it.
                 process.StartInfo.Environment.Remove("PSModulePath");
             }
+            // Bind nested frontier fixture workers to this test assembly, not
+            // an inherited shell setting or a dispatcher's default build.
+            process.StartInfo.Environment["NLINK_TEST_FRONTIER_WORKER_CONFIGURATION"] =
+                typeof(FileTransferOpsScriptsTestBase).Assembly.GetCustomAttribute<AssemblyConfigurationAttribute>()!.Configuration;
             process.Start();
             var stdoutTask = process.StandardOutput.ReadToEndAsync();
             var stderrTask = process.StandardError.ReadToEndAsync();

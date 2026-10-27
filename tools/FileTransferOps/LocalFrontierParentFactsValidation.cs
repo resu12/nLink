@@ -16,7 +16,7 @@ namespace NLink.Tools
                 var bytes = (byte[])input.Clone(); var native = LocalFrontierParentFilePacket.Decode(nativePacket); if (native == null) return null;
                 using (var reader = new Reader(bytes))
                 {
-                    var r = reader.Input; check(); Require(r.ReadInt32() == 0x4e504631 && r.ReadInt32() == 1);
+                    var r = reader.Input; check(); Require(r.ReadInt32() == 0x4e504631); int version = r.ReadInt32(); Require(version == 1 || version == 2 || version == 3 || version == 4);
                     Require(Equal(reader.Blob(LocalFrontierParentFilePacket.MaximumBytes), nativePacket));
                     Require(reader.Text(4096) == run && reader.Text(4096) == scenario && Hash(reader.Text(64)));
                     long sourceBytes = reader.Number(1, 268435456); int lines = checked((int)reader.Number(1, MaximumLines));
@@ -35,7 +35,7 @@ namespace NLink.Tools
                     Require(reader.Count(MaximumLines) == lines); long previous = -1; var lineStarts = new long[lines];
                     for (int i = 0; i < lines; i++)
                     {
-                        if (i % 4096 == 0) check(); long offset = reader.Number(0, sourceBytes - 1);
+                        if (i % 4096 == 0) check(); long offset = version == 1 ? reader.Number(0, sourceBytes - 1) : reader.Delta(i == 0 ? 0 : previous, sourceBytes - 1, 4, 8);
                         Require(offset > previous && (i != 0 || offset == 0));
                         if (i == bookmark) Require(offset == initialCommitted); previous = offset; lineStarts[i] = offset;
                     }
@@ -59,7 +59,12 @@ namespace NLink.Tools
                         if (role == 0) Require(count == lines - bookmark);
                         if (role == 2) semanticOrigins = new int[count];
                         for (int i = 0; i < count; i++)
-                        { if (i % 4096 == 0) check(); int line = reader.Count(lines); Require(line > last && (role != 0 || line == bookmark + i + 1)); last = line; if (role == 2) semanticOrigins[i] = line; }
+                        {
+                            if (i % 4096 == 0) check();
+                            int line = (version >= 3 && role == 0) || (version == 4 && role == 1 && count == lines) ? reader.ConsecutiveOrigin(role == 0 ? bookmark : 0, i) :
+                                version == 1 ? reader.Count(lines) : checked((int)reader.Delta(last, lines, 3, 4));
+                            Require(line > last && (role != 0 || line == bookmark + i + 1)); last = line; if (role == 2) semanticOrigins[i] = line;
+                        }
                     }
                     Require(reader.Number(0, MaximumLines) == lines);
                     for (int i = 0; i < 5; i++) Require(r.ReadInt64() == 0);

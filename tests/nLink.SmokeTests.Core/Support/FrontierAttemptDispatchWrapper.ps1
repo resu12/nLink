@@ -22,7 +22,8 @@ foreach($name in $names) {
     Invoke-Expression $statement[0].Extent.Text
 }
 foreach($name in @('ConvertTo-TunaGuiProcessArgument','Write-TunaGuiAtomicJson','Get-TunaGuiFinalizationGraceSeconds',
-    'Complete-TunaGuiChildOutputCapture','Get-TunaGuiTerminalPhaseDeadlineRequest','Invoke-TunaGuiSmokeWithHardDeadline')) {
+    'Complete-TunaGuiChildOutputCapture','Get-TunaGuiTerminalPhaseDeadlineRequest','Request-TunaGuiScenarioDeadline',
+    'Stop-TunaGuiSmokeApplicationDescendants','Invoke-TunaGuiSmokeWithHardDeadline')) {
     $text=Get-AttemptFunction $ast $name
     if($name -ceq 'Invoke-TunaGuiSmokeWithHardDeadline') {
         if(-not $env:NLINK_TEST_PRODUCTION_PARENT_PAYLOAD) {
@@ -116,15 +117,14 @@ if ($null -ne $localWriterRequest) { $localWriterRequest.Dispose() }
     Invoke-Expression $text
 }
 function Stop-TunaGuiSmokeProcessTree {param($Process) $Process.Kill(); [void]$Process.WaitForExit(5000)}
-function Stop-TunaGuiSmokeApplicationDescendants {throw 'Unexpected attempt GUI deadline'}
-function Request-TunaGuiScenarioDeadline {throw 'Unexpected attempt GUI deadline'}
 $script:guiReports=$null; $script:guiLaunches=0; $failure=''; $result=$null
+$failureRecord=$null; $unwindingFailure=$false
 $script:attemptForwarded=$false
 $script:payloadWrapper=$null; $script:payloadTaken=$false; $script:payloadChecked=$false
 $script:payloadWritersChecked=$false; $script:payloadWritersFailure=''
 try {
     try {$result=Invoke-TunaGuiSmokeWithHardDeadline -RepoRoot $RepoRoot -ArtifactDir $Directory -ExePath $ExePath -TimeoutSeconds $TimeoutSeconds -LocalWriterRelay $relay -FrontierRelayHandoff $handoff}
-    catch {$failure=$_.Exception.Message}
+    catch {$failureRecord=$_; $failure=$failureRecord.Exception.Message}
     if($env:NLINK_TEST_PRODUCTION_WRAPPER_PAYLOAD) {
         . (Join-Path $RepoRoot 'tests/nLink.SmokeTests.Core/Support/FrontierProductionWrapperPayloadProbe.ps1') -Stage Finished
     }
@@ -140,7 +140,9 @@ try {
             -not $script:guiReports.Stdout.IsCompleted -or -not $script:guiReports.Stderr.IsCompleted -or
             ($env:NLINK_TEST_ATTEMPT_CASE -cne 'gui-killed' -and $env:NLINK_TEST_PAYLOAD_WRAPPER_CASE -cne 'gui-killed' -and
                 $script:guiReports.Stdout.GetAwaiter().GetResult() -notmatch 'attempt-dispatch-gui-ok')) {
-            throw ('Attempt GUI failed: '+$failure+' / '+[IO.File]::ReadAllText((Join-Path $Directory 'gui-smoke-stderr.log')))
+            $stderrText=''
+            try {$stderrText=[IO.File]::ReadAllText((Join-Path $Directory 'gui-smoke-stderr.log'))} catch { }
+            throw ('Attempt GUI failed: '+$failure+' / '+$stderrText)
         }
         if($env:NLINK_TEST_ATTEMPT_CASE -ceq 'gui-killed' -or $env:NLINK_TEST_PAYLOAD_WRAPPER_CASE -ceq 'gui-killed') {if($result.ExitCode -eq 0) {throw 'Killed GUI accepted'}}
         elseif($result.ExitCode -ne $(if($env:NLINK_TEST_ATTEMPT_CASE -ceq 'gui-nonzero' -or $env:NLINK_TEST_PAYLOAD_WRAPPER_CASE -ceq 'gui-nonzero'){7}else{0})) {throw 'GUI exit gate changed'}
@@ -150,10 +152,18 @@ try {
         }
     }
     'attempt-dispatch-wrapper-ok'
+} catch {
+    $unwindingFailure=$true
+    if($null -ne $failureRecord) {throw $failureRecord}
+    throw
 } finally {
-    $relay.Dispose()
-    if($env:NLINK_TEST_PAYLOAD_PARENT_CASE) {
-        [Console]::Error.WriteLine('native-relay-wrapper; forward='+$handoff.NativeForwardDiagnosticForTest+'; transfer_close='+$handoff.NativeTransferCloseDiagnosticForTest)
+    try {
+        $relay.Dispose()
+        if($env:NLINK_TEST_PAYLOAD_PARENT_CASE) {
+            [Console]::Error.WriteLine('native-relay-wrapper; forward='+$handoff.NativeForwardDiagnosticForTest+'; transfer_close='+$handoff.NativeTransferCloseDiagnosticForTest)
+        }
+    } catch {
+        if(-not $unwindingFailure) {throw} # Cleanup must not replace an error already unwinding.
     }
 }
 if($env:NLINK_TEST_ATTEMPT_CASE -cin @('argv-changed','gui-nonzero','gui-killed') -or

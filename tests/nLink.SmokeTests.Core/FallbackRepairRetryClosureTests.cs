@@ -193,15 +193,98 @@ public sealed partial class SessionFileTransferV4SenderTests
 public sealed partial class NknAccelerationTransportTests
 {
     [Theory]
-    [InlineData(false)] [InlineData(true)]
+    [InlineData(false)]
+    [InlineData(true)]
     [Trait("FileTransferInfraSuite", "FallbackRepairRetryClosure")]
-    public async Task FallbackRepairRetryClosure_TransportRequiresExactStoppedIdleSession(bool peerStop)
+    public async Task FallbackRepairRetryClosure_StopPreservesSameSessionReplacementBetweenLocks(bool advanceGeneration)
+    {
+        FakeNknClient.ResetNetwork();
+        var client = new FakeNknClient("host.repair-replacement.address");
+        var peerClient = new FakeNknClient("peer.repair-replacement.address");
+        using var host = new NknSignalingTransport(client, NknTransportOptions.Load(), new NknIdentity("replacement", client.Address),
+            NknTunaAccelerationOptions.Disabled, new FakeNknAccelerationLane());
+        using var peer = new NknSignalingTransport(peerClient, NknTransportOptions.Load(), new NknIdentity("replacement-peer", peerClient.Address),
+            NknTunaAccelerationOptions.Disabled, new FakeNknAccelerationLane());
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        var sessionId = await ApproveNknSessionAsync(host, peer, timeout.Token,
+            InviteCapabilities.Chat | InviteCapabilities.FileTransfer, suppressAutomaticAccelerationNegotiation: true);
+        var original = RuntimeUnlockTransactionSnapshot.Idle;
+        foreach (var kind in new[] { RuntimeUnlockTransactionEventKind.OfferGenerationCreated,
+            RuntimeUnlockTransactionEventKind.AnswerReceived, RuntimeUnlockTransactionEventKind.PathProbeAcked })
+        {
+            original = RuntimeUnlockTransaction.Apply(new(kind, sessionId, "repair-replacement-transfer", 7, 11,
+                "replacement-test", PathProbeId: "replacement-probe", PathProbeTransport: FileTransferTransportKind.Tuna), original).State;
+        }
+        Assert.Equal(RuntimeUnlockTransactionState.RouteCommitPending, original.State);
+        var replacement = original with
+        {
+            TransactionGeneration = advanceGeneration ? 8 : original.TransactionGeneration,
+            OfferGeneration = advanceGeneration ? 12 : original.OfferGeneration,
+        };
+        Assert.NotSame(original, replacement);
+        Assert.Equal(original.SessionId, replacement.SessionId);
+        Assert.Equal(original.TransferId, replacement.TransferId);
+        if (!advanceGeneration) Assert.Equal(original, replacement);
+
+        // Adapter diagnostics only: no route, retry or coordinator authority is
+        // installed. Completing this existing proof emits a synchronous callback
+        // between reset's capture and retirement locks; no timing race is used.
+        SetPrivateField(host, "runtimeUnlockTransactionState", original);
+        SetPrivateField(host, "accelerationSessionId", sessionId);
+        SetPrivateField(host, "accelerationNegotiationSlotGeneration", 41L);
+        SetPrivateField(host, "transportAccelerationStatusReason", "replacement_fixture_armed");
+        Assert.True(Assert.IsType<bool>(InvokePrivateMethod(host, "StartTunaFallbackProofIfNeeded",
+            "replacement-fixture", sessionId, NknAccelerationLaneKind.Screen)));
+        var accelerationGate = GetPrivateField(host, "accelerationGate")!;
+        var replacements = 0;
+        host.TransportAccelerationStateChanged += ReplaceBetweenResetLocks;
+        try
+        {
+            await host.StopAccelerationAsync("header_switch_off", timeout.Token);
+        }
+        finally { host.TransportAccelerationStateChanged -= ReplaceBetweenResetLocks; }
+
+        Assert.Equal(1, replacements);
+        Assert.Equal(0L, Assert.IsType<long>(GetPrivateField(host, "accelerationNegotiationSlotGeneration")));
+        Assert.Same(replacement, GetPrivateField(host, "runtimeUnlockTransactionState"));
+        Assert.Equal(RuntimeUnlockTransactionState.RouteCommitPending, replacement.State);
+        Assert.True(replacement.RouteCommitPending);
+        Assert.Null(replacement.RetiredReason);
+
+        void ReplaceBetweenResetLocks(object? sender, NLink.Core.TransportAccelerationStateChangedEventArgs args)
+        {
+            if (args.Reason != "header_switch_off") return;
+            host.TransportAccelerationStateChanged -= ReplaceBetweenResetLocks;
+            Assert.Same(host, sender);
+            Assert.False(args.IsActive);
+            Assert.Null(args.PendingFileTransfer);
+            Assert.False(Monitor.IsEntered(accelerationGate));
+            lock (accelerationGate)
+            {
+                Assert.Same(original, GetPrivateField(host, "runtimeUnlockTransactionState"));
+                Assert.Null(GetPrivateField(host, "accelerationSessionId")); // Capture lock has completed.
+                Assert.Equal(41L, Assert.IsType<long>(GetPrivateField(host, "accelerationNegotiationSlotGeneration"))); // Retirement lock has not.
+                Assert.Null(GetPrivateField(host, "tunaFallbackProofState"));
+                SetPrivateField(host, "runtimeUnlockTransactionState", replacement);
+                replacements++;
+            }
+        }
+    }
+
+    [Theory]
+    [InlineData(false, false, false)] [InlineData(true, false, false)]
+    [InlineData(false, true, false)] [InlineData(true, true, false)]
+    [InlineData(false, true, true)] [InlineData(true, true, true)]
+    [Trait("FileTransferInfraSuite", "FallbackRepairRetryClosure")]
+    public async Task FallbackRepairRetryClosure_TransportRequiresExactStoppedIdleSession(bool peerStop, bool publicStop, bool foreignTransaction)
     {
         FakeNknClient.ResetNetwork();
         var client = new FakeNknClient("host.repair-closure.address");
         var peerClient = new FakeNknClient("peer.repair-closure.address");
-        using var host = new NknSignalingTransport(client, NknTransportOptions.Load(), new NknIdentity("closure", client.Address));
-        using var peer = new NknSignalingTransport(peerClient, NknTransportOptions.Load(), new NknIdentity("closure-peer", peerClient.Address));
+        using var host = new NknSignalingTransport(client, NknTransportOptions.Load(), new NknIdentity("closure", client.Address),
+            NknTunaAccelerationOptions.Disabled, new FakeNknAccelerationLane());
+        using var peer = new NknSignalingTransport(peerClient, NknTransportOptions.Load(), new NknIdentity("closure-peer", peerClient.Address),
+            NknTunaAccelerationOptions.Disabled, new FakeNknAccelerationLane());
         using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));
         var sessionId = await ApproveNknSessionAsync(host, peer, timeout.Token,
             InviteCapabilities.Chat | InviteCapabilities.FileTransfer, suppressAutomaticAccelerationNegotiation: true);
@@ -224,7 +307,42 @@ public sealed partial class NknAccelerationTransportTests
             fallbackTransportEpoch: source.TransportEpoch, fallbackBridgeRecoveryGeneration: source.BridgeRecoveryGeneration));
         var observer = (IFileTransferFallbackRepairRetryStopObserver)host;
         Assert.Null(observer.ObserveStoppedFallbackRepairRetry(drain, admission, generation));
-        SetField(peerStop ? "accelerationPeerUserStoppedSessionId" : "accelerationUserStoppedSessionId", sessionId);
+        if (publicStop)
+        {
+            // Seed only the adapter's diagnostic transaction, not route or retry authority.
+            var transaction = RuntimeUnlockTransactionSnapshot.Idle;
+            foreach (var kind in new[] { RuntimeUnlockTransactionEventKind.OfferGenerationCreated,
+                RuntimeUnlockTransactionEventKind.AnswerReceived, RuntimeUnlockTransactionEventKind.PathProbeAcked })
+            {
+                transaction = RuntimeUnlockTransaction.Apply(new(kind, foreignTransaction ? sessionId + "-retired-session" : sessionId, transferId, 7, 11,
+                    "stopped-closure-test", PathProbeId: "stopped-closure-probe",
+                    PathProbeTransport: FileTransferTransportKind.Tuna), transaction).State;
+            }
+            Assert.Equal(RuntimeUnlockTransactionState.RouteCommitPending, transaction.State);
+            SetField("runtimeUnlockTransactionState", transaction);
+            host.SetAccelerationAcceptedForTests(NknAccelerationLaneKind.File, sessionId);
+            peer.SetAccelerationAcceptedForTests(NknAccelerationLaneKind.File, sessionId);
+            await (peerStop ? peer : host).StopAccelerationAsync("header_switch_off", timeout.Token);
+            await WaitUntilAsync(() => Equals(sessionId, GetPrivateField(host,
+                peerStop ? "accelerationPeerUserStoppedSessionId" : "accelerationUserStoppedSessionId")),
+                TimeSpan.FromSeconds(3));
+            var retired = Assert.IsType<RuntimeUnlockTransactionSnapshot>(GetPrivateField(host, "runtimeUnlockTransactionState"));
+            if (foreignTransaction)
+            {
+                Assert.Same(transaction, retired);
+                Assert.Null(observer.ObserveStoppedFallbackRepairRetry(drain, admission, generation));
+                return;
+            }
+            Assert.Equal(RuntimeUnlockTransactionState.Retired, retired.State);
+            Assert.Equal(transaction.SessionId, retired.SessionId);
+            Assert.Equal(transaction.TransactionGeneration, retired.TransactionGeneration);
+            Assert.Equal(transaction.OfferGeneration, retired.OfferGeneration);
+            Assert.False(retired.RouteCommitPending);
+        }
+        else
+        {
+            SetField(peerStop ? "accelerationPeerUserStoppedSessionId" : "accelerationUserStoppedSessionId", sessionId);
+        }
         Assert.Equal(peerStop ? FileTransferFallbackRepairRetryStopReason.PeerSwitchOff : FileTransferFallbackRepairRetryStopReason.LocalSwitchOff,
             observer.ObserveStoppedFallbackRepairRetry(drain, admission, generation)!.Reason);
         foreach (var (field, busy, idle) in new (string, object?, object?)[]

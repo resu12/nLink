@@ -28,6 +28,14 @@ public sealed class FileTransferRecentProgressGraceHandoffTests : FileTransferOp
         => RecentProgressGrace_ExactDispatchedRepairTunaRetirement_HasIndexedAndGuiParity("stall_published_caught_up_with_progress", host);
 
     [Theory]
+    [InlineData("powershell")]
+    [InlineData("pwsh")]
+    [Trait("RetainedFallbackSuite", "FallbackFrontierRepair")]
+    [Trait("OpsSuite", "GuiHarness")]
+    public Task StallGrace_DelayedPublishedDispatchDiagnosticRequiresExactTunaHandoff(string host)
+        => RecentProgressGrace_ExactDispatchedRepairTunaRetirement_HasIndexedAndGuiParity("stall_published_delayed_diagnostic", host);
+
+    [Theory]
     [InlineData("recent_progress", "powershell")]
     [InlineData("recent_progress_retry_handoff", "powershell")]
     [InlineData("recent_progress_retry_handoff", "pwsh")]
@@ -46,7 +54,8 @@ public sealed class FileTransferRecentProgressGraceHandoffTests : FileTransferOp
             param([string]$RepoRoot, [string]$Kind)
             $ErrorActionPreference='Stop'
             $retainProgress=$Kind -eq 'stall_published_caught_up_with_progress'
-            $caughtUp=$retainProgress -or $Kind -eq 'stall_published_caught_up'
+            $delayedDiagnostic=$Kind -eq 'stall_published_delayed_diagnostic'
+            $caughtUp=$retainProgress -or $delayedDiagnostic -or $Kind -eq 'stall_published_caught_up'
             if($caughtUp){$Kind='stall_published'}
             $stallHighest=if($caughtUp){'40'}else{'70'}
             . (Join-Path $RepoRoot 'tools/FileTransferSoak/LogParsing.ps1')
@@ -237,6 +246,8 @@ public sealed class FileTransferRecentProgressGraceHandoffTests : FileTransferOp
                     'published_prior_duplicate','published_empty_optional_diagnostic','published_prior_event_conflict','published_prior_session_conflict','published_unrelated_progress')
                 if($retainProgress){$cases+=@('published_missing_source','published_wrong_source','published_aba_source')}
             }
+            if($delayedDiagnostic){$cases+=@('late_before_publication','late_clock_regression','late_old_dispatch',
+                'late_replacement','late_route_mutation','late_terminal','late_pause','late_wake_effect')}
             foreach($case in $cases){
                 [object[]]$events=if($Kind -in @('recent_progress_retry_handoff','stall_retry_handoff')){RetryHandoffFixture}elseif($Kind -in @('stall_progress','stall_progress_chain')){NaturalFixture -Coalesced:($Kind -eq 'stall_progress_chain')}else{Fixture}
                 if($Kind -in @('recent_progress_retry_handoff','stall_retry_handoff')){
@@ -410,7 +421,7 @@ public sealed class FileTransferRecentProgressGraceHandoffTests : FileTransferOp
                         target_protocol_version='6';target_transport='regular_nkn';fallback_leg_generation='3';fallback_transport_epoch='1';fallback_bridge_recovery_generation='1'}
                     Add 'filetransfer_v6_sparse_write_committed' 100 $scope @{contiguous_chunks_committed='1';next_chunk_index='41';highest_received_chunk_index=$stallHighest}
                     Add 'filetransfer_v6_receiver_state_sent' 102 $scope @{epoch='7';contiguous_committed_chunk_index='41';durable_received_highest_chunk_index=$stallHighest}
-                    Add 'filetransfer_v6_frontier_stall_grace_recheck_decided' 1864 $candidate.Fields @{
+                    Add 'filetransfer_v6_frontier_stall_grace_recheck_decided' $(if($delayedDiagnostic){2130}else{1864}) $candidate.Fields @{
                         decision_status='dispatched';decision_reason='exact_receiver_request_dispatched';authority_effect='none'}
                     $wake=$script:fixtureEvents[3]
                     $alias=Repair 'fta2-repair_replay-B' 61 41 'fta2-repair_replay-A'
@@ -460,6 +471,26 @@ public sealed class FileTransferRecentProgressGraceHandoffTests : FileTransferOp
                             Add 'filetransfer_fallback_frontier_repair_progress_observed' 2200 $other @{previous_frontier_chunk_index='41';current_frontier_chunk_index='59'}
                             $script:fixtureEvents[0].Fields.log_writer_sequence='110';$events+=@($script:fixtureEvents)
                         }
+                        'late_before_publication' {$wake.TimestampUtc=$origin.AddMilliseconds(2105);$wake.Fields.log_writer_attempt_utc_ticks=[string]$wake.TimestampUtc.UtcTicks}
+                        'late_clock_regression' {$wake.Fields.log_writer_attempt_utc_ticks=[string]$origin.AddMilliseconds(2099).UtcTicks}
+                        'late_wake_effect' {$wake.Fields.authority_effect='applied'}
+                        {$_ -in @('late_old_dispatch','late_replacement','late_route_mutation','late_terminal','late_pause')} {
+                            $copy=@($events|Where-Object {$_.EventName -eq 'filetransfer_fallback_frontier_repair_dispatched' -and $_.Fields.frontier_chunk_index -eq '41'})[0].PSObject.Copy()
+                            $copy.Fields=$copy.Fields.Clone();$copy.TimestampUtc=$origin.AddMilliseconds(2120)
+                            $copy.Fields.log_writer_attempt_utc_ticks=[string]$copy.TimestampUtc.UtcTicks;$copy.Fields.log_writer_sequence='130'
+                            $copy.EventName=switch($case){
+                                'late_old_dispatch' {'filetransfer_fallback_frontier_repair_dispatched'}
+                                'late_replacement' {'filetransfer_data_session_recreated'}
+                                'late_route_mutation' {'filetransfer_route_selected'}
+                                'late_terminal' {'file_transfer_inbound_terminal'}
+                                'late_pause' {'filetransfer_v6_receiver_state_sent'}
+                            }
+                            $copy.Fields.event=$copy.EventName
+                            if($case -eq 'late_replacement'){$copy.Fields.data_session_identity='replacement';$copy.Fields.data_session_generation='2'}
+                            if($case -eq 'late_route_mutation'){$copy.Fields.route='file_tuna_v4';$copy.Fields.protocol_version='4';$copy.Fields.live_route_epoch='4'}
+                            if($case -eq 'late_pause'){$copy.Fields.transfer_paused='1'}
+                            $events+=@($copy)
+                        }
                     }
                     # PowerShell 5 does not preserve input order for equal sort
                     # keys. Keep the original record before its conflicting copy;
@@ -470,6 +501,11 @@ public sealed class FileTransferRecentProgressGraceHandoffTests : FileTransferOp
                     $events=@($sortable|Sort-Object @{Expression={$_.Event.TimestampUtc}},
                         @{Expression={$_.Event.LineNumber}},InputOrder|ForEach-Object {$_.Event})
                     $sequence=0L;foreach($event in $events){$event.Sequence=++$sequence;$event.LineNumber=[int]$sequence}
+                    if($delayedDiagnostic -and $case -eq 'exact'){
+                        $retirement=@($events|Where-Object {$_.EventName -eq 'filetransfer_fallback_frontier_repair_contract_settled' -and $_.Fields.settlement_outcome -eq 'StaleRejected'})[0]
+                        $publication=@($events|Where-Object EventName -eq 'filetransfer_live_route_epoch_recovered')[0]
+                        if($wake.Sequence -le $publication.Sequence -or $publication.Sequence -le $retirement.Sequence){throw 'Delayed diagnostic fixture ordering changed'}
+                    }
                     if(@($events|Where-Object {$_.EventName -eq 'filetransfer_fallback_frontier_repair_progress_observed' -and $_.Fields.current_frontier_chunk_index -eq '41'}).Count -ne [int]$retainProgress){throw 'fixture predecessor progress coverage differs'}
                     $publishedIndex=New-FileTransferStallGracePublishedSourceIndex $events
                     $admission=Get-FileTransferStallGracePublishedSourceAdmission -Index $publishedIndex -Candidate $candidate
@@ -584,6 +620,6 @@ public sealed class FileTransferRecentProgressGraceHandoffTests : FileTransferOp
         var result = await RunPowerShellScriptTextAsync(script, [FindRepoRoot(), kind], host);
         Assert.True(result.ExitCode == 0, $"{result.Stdout}{Environment.NewLine}{result.Stderr}");
         Assert.Contains("pass exact", result.Stdout, StringComparison.Ordinal);
-        Assert.Contains(kind switch { "stall_retry_handoff" => "pass stall_terminal", "recent_progress_retry_handoff" => "pass retry_stale_recheck", "stall_progress" => "pass natural_missing_state", "stall_progress_chain" => "pass natural_chain_gap", "stall_published" or "stall_published_caught_up" or "stall_published_caught_up_with_progress" => "pass published_unrelated_progress", _ => "pass stall_progress_only" }, result.Stdout, StringComparison.Ordinal);
+        Assert.Contains(kind switch { "stall_retry_handoff" => "pass stall_terminal", "recent_progress_retry_handoff" => "pass retry_stale_recheck", "stall_progress" => "pass natural_missing_state", "stall_progress_chain" => "pass natural_chain_gap", "stall_published" or "stall_published_caught_up" or "stall_published_caught_up_with_progress" or "stall_published_delayed_diagnostic" => "pass published_unrelated_progress", _ => "pass stall_progress_only" }, result.Stdout, StringComparison.Ordinal);
     }
 }

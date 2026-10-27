@@ -154,6 +154,38 @@ public sealed class FrontierCanonicalTimeoutTests : FileTransferOpsScriptsTestBa
         Assert.Contains("primary-checkpoint-projection-ok", result.Stdout);
     }
 
+    public static IEnumerable<object[]> PhaseCheckpointCases =>
+        from host in new[] { "powershell", "pwsh" }
+        from scenario in new[] { "projection", "worker-loading", "normal", "registration-error", "full-error", "compact-error", "parity-error", "write-failure", "inactive", "limits", "timeout-child" }
+        select new object[] { host, scenario };
+
+    [Theory]
+    [MemberData(nameof(PhaseCheckpointCases))]
+    public async Task TailPhaseCheckpoints_PreserveOriginalWorkAndBoundedPrefixes(string host, string scenario)
+    {
+        if (!OperatingSystem.IsWindows()) return;
+        var root = FindRepoRoot();
+        var directory = NewDirectory(host + "-phase-" + scenario);
+        var script = await File.ReadAllTextAsync(Path.Combine(root, "tests/nLink.SmokeTests.Core/Support/FrontierPrimaryPhaseCheckpointControls.ps1"));
+        var timeout = scenario == "timeout-child";
+        var result = await RunPowerShellScriptTextAsync(script, [root, directory, scenario], host,
+            timeout: timeout ? TimeSpan.FromSeconds(15) : ScriptProcessTimeout);
+        await File.WriteAllTextAsync(Path.Combine(directory, "result.txt"), result.Stdout + result.Stderr);
+        if (!timeout)
+        {
+            Assert.True(result.ExitCode == 0, result.Stdout + result.Stderr);
+            Assert.Contains("primary-phase-checkpoint-control=" + scenario, result.Stdout);
+            return;
+        }
+        Assert.Equal(-1, result.ExitCode);
+        Assert.Contains("PowerShell harness timed out after 15s", result.Stderr);
+        var records = ReadCompletePrefix(await File.ReadAllBytesAsync(Path.Combine(directory, "test-primary-checkpoints.ndjson")));
+        Assert.Equal(new[] { "started", "compact-enter", "arrays-ready", "origins-ready", "registration-start", "registration-end", "full-start" },
+            records.Select(r => r.GetProperty("stage").GetString()));
+        Assert.All(records, r => Assert.True(r.GetProperty("diagnosticOnly").GetBoolean()));
+        Assert.False(File.Exists(Path.Combine(directory, "filetransfer-retained-analysis-attempt-receipt.json")));
+    }
+
     private static string NewDirectory(string name)
     {
         var path = Path.Combine(FindRepoRoot(), "artifacts", "canonical-timeout-implementation-20260928", name + "-" + Guid.NewGuid().ToString("N"));

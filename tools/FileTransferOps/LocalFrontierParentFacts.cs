@@ -71,7 +71,7 @@ namespace NLink.Tools
             using (var writer = new BinaryWriter(stream, Utf8))
             {
                 var text = new TextWriter(writer); var capture = preparation.Capture; var validation = capture.Validation;
-                check(); writer.Write(0x4e504631); writer.Write(1);
+                check(); writer.Write(0x4e504631); writer.Write(4); long flatExtra = 0;
                 writer.Write(nativePacket.Length); writer.Write(nativePacket);
                 text.Write(capture.AcceptanceRunId); text.Write(capture.ScenarioRunId); text.Write(source.SourceSha256);
                 writer.Write(capture.SourceBytes); writer.Write(capture.SourceLines); writer.Write(capture.Bookmark); writer.Write(source.VerifiedRangeCount);
@@ -82,18 +82,37 @@ namespace NLink.Tools
                     writer.Write(item.SynchronizationCount); writer.Write(item.Bookmark);
                 }
                 writer.Write(capture.CursorLineStarts.Count);
+                long previous = 0;
                 for (int i = 0; i < capture.CursorLineStarts.Count; i++)
-                { if (i % 4096 == 0) check(); writer.Write(capture.CursorLineStarts[i]); }
+                {
+                    if (i % 4096 == 0) check(); long offset = capture.CursorLineStarts[i];
+                    Require(offset < capture.SourceBytes && (i == 0 ? offset == 0 : offset > previous));
+                    flatExtra += 8 - WriteDelta(writer, offset - previous, 268435455); previous = offset;
+                    Require(stream.Position <= MaximumBytes - flatExtra);
+                }
                 var outputs = new[] { capture.Retained, capture.Writer, capture.Semantic, preparation.Evidence.Copy.Output, preparation.Evidence.Output };
                 foreach (var output in outputs)
                 {
                     text.Write(output.CreationPath); text.Write(output.FileIdentity); text.Write(output.Sha256);
                     writer.Write(output.ByteCount); writer.Write(output.LineCount);
                 }
-                foreach (var origins in new[] { capture.RetainedOrigins, capture.WriterOrigins, capture.SemanticOrigins })
+                var originTables = new[] { capture.RetainedOrigins, capture.WriterOrigins, capture.SemanticOrigins };
+                for (int role = 0; role < originTables.Length; role++)
                 {
+                    var origins = originTables[role];
+                    if (role == 0) Require(origins.Count == capture.SourceLines - capture.Bookmark);
+                    bool consecutive = role == 0 || (role == 1 && origins.Count == capture.SourceLines);
                     writer.Write(origins.Count);
-                    for (int i = 0; i < origins.Count; i++) { if (i % 4096 == 0) check(); writer.Write(origins[i]); }
+                    previous = 0;
+                    for (int i = 0; i < origins.Count; i++)
+                    {
+                        if (i % 4096 == 0) check(); int line = origins[i]; Require(line > previous && line <= capture.SourceLines);
+                        // Full writer tables cover 1..N; partial writer tables keep every gap.
+                        // Validate each supplied fact before omitting a redundant wire delta.
+                        if (consecutive) Require(line == (role == 0 ? capture.Bookmark : 0) + i + 1);
+                        flatExtra += consecutive ? 4 : 4 - WriteDelta(writer, line - previous, MaximumLines); previous = line;
+                        Require(stream.Position <= MaximumBytes - flatExtra);
+                    }
                 }
                 writer.Write(validation.SourceLineVisitCount); writer.Write(validation.WriterGapCount); writer.Write(validation.WriterDuplicateCount);
                 writer.Write(validation.WriterIdentityMismatchCount); writer.Write(validation.ChronologyInversionCount); writer.Write(validation.ChronologyCollisionCount);
@@ -130,9 +149,15 @@ namespace NLink.Tools
                     writer.Write(item.AttemptUtcTicks); writer.Write(item.AttemptCount); writer.Write(item.StreamIndex); writer.Write(item.SourceLine);
                 }
                 writer.Write(recovery.DeferredBatchKeys.Count); foreach (string key in recovery.DeferredBatchKeys) text.Write(key);
-                check(); writer.Flush();
+                check(); writer.Flush(); Require(stream.Position <= MaximumBytes - flatExtra);
                 var result = new byte[checked((int)stream.Position)]; Array.Copy(stream.GetBuffer(), result, result.Length); return result;
             }
+        }
+        private static int WriteDelta(BinaryWriter writer, long delta, long maximum)
+        {
+            Require(delta >= 0 && delta <= maximum); int count = 0;
+            do { byte part = (byte)(delta & 127); delta >>= 7; writer.Write((byte)(part | (delta == 0 ? 0 : 128))); count++; } while (delta != 0);
+            return count;
         }
         private static InvalidDataException Invalid() { return new InvalidDataException("frontier_parent_facts_invalid"); }
         private static void Require(bool condition, [System.Runtime.CompilerServices.CallerLineNumber] int line = 0)
@@ -153,7 +178,7 @@ namespace NLink.Tools
         }
         private sealed class Reader : IDisposable
         {
-            internal readonly BinaryReader Input; internal int TextUnits;
+            internal readonly BinaryReader Input; internal int TextUnits; private long flatExtra;
             internal Reader(byte[] bytes) { Input = new BinaryReader(new MemoryStream(bytes, false), Utf8); }
             internal byte[] Blob(int maximum)
             { int length = Count(maximum); Require(length <= Input.BaseStream.Length - Input.BaseStream.Position); var value = Input.ReadBytes(length); Require(value.Length == length); return value; }
@@ -166,6 +191,27 @@ namespace NLink.Tools
             }
             internal long Number(long minimum, long maximum)
             { long number = Input.ReadInt64(); Require(number >= minimum && number <= maximum); return number; }
+            internal long Delta(long previous, long maximum, int maximumBytes, int flatBytes)
+            {
+                long delta = 0;
+                for (int i = 0; i < maximumBytes; i++)
+                {
+                    byte part = Input.ReadByte(); delta |= (long)(part & 127) << (7 * i);
+                    if ((part & 128) != 0) continue;
+                    Require((i == 0 || (part & 127) != 0) && delta <= maximum - previous);
+                    flatExtra += flatBytes - i - 1;
+                    // Compression must not enlarge the former flat-v1 acceptance envelope.
+                    Require(Input.BaseStream.Length <= MaximumBytes - flatExtra);
+                    return previous + delta;
+                }
+                throw Invalid();
+            }
+            internal int ConsecutiveOrigin(long first, int index)
+            {
+                flatExtra += 4;
+                Require(Input.BaseStream.Length <= MaximumBytes - flatExtra);
+                return checked((int)(first + index + 1));
+            }
             public void Dispose() { Input.Dispose(); }
         }
     }

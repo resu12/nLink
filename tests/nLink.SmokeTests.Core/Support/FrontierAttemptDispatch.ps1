@@ -1,8 +1,21 @@
 param([string]$RepoRoot,[string]$Directory,[string]$Case,[string]$PayloadWrapperCase='',[string]$ParentPayloadCase='',[string]$PrimaryPayloadCase='',
-    [ValidateSet('','frontier-schedule','frontier-late-publication')][string]$DiagnosticCustodyCase='')
+    [ValidateSet('','frontier-schedule','frontier-late-publication')][string]$DiagnosticCustodyCase='',[string]$WorkerConfiguration=$env:NLINK_TEST_FRONTIER_WORKER_CONFIGURATION,
+    [ValidateSet('','canonical-cycle-v1','late-ineligible-v1')][string]$RouteCycleProfile='')
 $ErrorActionPreference='Stop'; Set-StrictMode -Version Latest
+if($WorkerConfiguration -cnotin @('Debug','Release')) {throw 'Unsupported frontier worker configuration'}
+if($env:NLINK_TEST_FRONTIER_WORKER_CONFIGURATION -and $WorkerConfiguration -cne $env:NLINK_TEST_FRONTIER_WORKER_CONFIGURATION) {
+    throw 'Frontier worker configuration differs from caller'
+}
+$env:NLINK_TEST_FRONTIER_WORKER_CONFIGURATION=$WorkerConfiguration
 # Only the reviewed actual-pair composite may use the full-size tail worker.
 $canonicalTailProfile=$Case -ceq 'writer-source-read-cross-process-carrier-full-canonical-tail-late-publication'
+if($RouteCycleProfile -and $WorkerConfiguration -cne 'Debug') {throw 'Route-cycle fixture requires Debug'}
+if($RouteCycleProfile -ceq 'canonical-cycle-v1' -and -not $canonicalTailProfile) {throw 'Route-cycle fixture requires the canonical tail'}
+if($RouteCycleProfile -ceq 'late-ineligible-v1' -and
+    ($Case -cne 'writer-source-read-cross-process-carrier-frontier-late-publication' -or $DiagnosticCustodyCase -cne 'frontier-late-publication')) {
+    throw 'Ineligibility control requires the original small late fixture'
+}
+$env:NLINK_TEST_FRONTIER_ROUTE_CYCLE=$RouteCycleProfile
 if(($canonicalTailProfile -or $PrimaryPayloadCase -ceq 'canonical-tail-late-publication') -and
     (-not $canonicalTailProfile -or $PayloadWrapperCase -cne 'writer-valid' -or $ParentPayloadCase -cne 'valid' -or
         $PrimaryPayloadCase -cne 'canonical-tail-late-publication' -or $DiagnosticCustodyCase)) {
@@ -119,7 +132,7 @@ $script:payloadParent=$null; $script:payloadParentResult=$null; $script:payloadP
 $script:payloadParentPulled=$false; $script:payloadParentFaulted=$false; $script:payloadParentFailure=''
 $scenario=@(Get-Phase5RouteAcceptanceScenarios ([pscustomobject]@{Scenarios=@{}}) | Where-Object Name -CEQ 'regular-v4-live-activation-off-on-off-256mb')[0]
 if($scenario.PayloadBytes -ne 268435456 -or ($scenario.ExpectedRouteChanges -join ',') -cne 'regular_nkn_v4_fast,file_tuna_v4,post_tuna_fallback_v6,file_tuna_v4,post_tuna_fallback_v6') {throw 'Canonical scenario changed'}
-$TimeoutSeconds=if($Case.StartsWith('writer-source-read-cross-process-carrier-full-')) {210} else {100}
+$TimeoutSeconds=if($RouteCycleProfile -ceq 'canonical-cycle-v1' -and $canonicalTailProfile) {270} elseif($Case.StartsWith('writer-source-read-cross-process-carrier-full-')) {210} else {100}
 $ProgressTimeoutSeconds=30; $publication=$null; $failure=''
 $beforeRun=$env:NLINK_FILETRANSFER_ACCEPTANCE_RUN_ID; $beforeScenario=$env:NLINK_FILETRANSFER_SCENARIO_RUN_ID
 $appExe=if($Case.StartsWith('writer-')) {(Get-Command pwsh -ErrorAction Stop).Source} else {(Get-Process -Id $PID).Path}

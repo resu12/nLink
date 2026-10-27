@@ -58,13 +58,16 @@ public sealed partial class FileTransferCoordinatorTests
         bool includeCallback = false, string? failureReason = null)
     {
         var envelopes = new List<FileTransferCoordinatorTransitionEnvelope>();
-        var pair = CreateCorrelatedBootstrapPair(capture: Capture);
+        var pair = CreateCorrelatedBootstrapPair(capture: Capture, providerGeneration: includeCallback ? 7 : 0);
         var state = outbound ? pair.Sender : pair.Receiver;
         var peerWake = peerEvidence ? StartCorrelated(outbound ? pair.Receiver : pair.Sender).Command!.Frame : null;
         var leg = state.CurrentLeg!;
         var checkpoint = new FileTransferRouteTransitionDurableCheckpoint(state.CurrentRuntimeOwner!.Value,
             state.CurrentRoutePublicationToken!.Value, state.TerminalGeneration, leg.Generation, leg.TransportEpochId,
-            leg.BridgeRecoveryGeneration, state.CurrentDataSessionGeneration, 3, 4, 6, 128, 2);
+            leg.BridgeRecoveryGeneration, state.CurrentDataSessionGeneration, 3, 4, 6, 128, 2)
+        {
+            DataSessionProviderGeneration = state.CurrentDataSessionProviderGeneration,
+        };
         var observation = new FileTransferFallbackV6ProofBootstrapObservation(state.SessionId, state.TransferId, state.Direction,
             1, 1, peerEvidence ? "correlated_bootstrap_peer_frame" : failureReason ?? "runtime_disabled",
             peerEvidence ? outbound ? "file_transfer_v6_state_frame_received" : "file_transfer_v6_frontier_request_frame_received"

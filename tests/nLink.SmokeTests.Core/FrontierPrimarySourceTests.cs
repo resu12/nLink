@@ -21,7 +21,8 @@ public sealed class FrontierPrimarySourceTests : FileTransferOpsScriptsTestBase
         from host in new[] { "powershell", "pwsh" }
         from scenario in new[] { "valid", "copied-worker", "copied-reader", "origin-substitution", "origin-index", "pre-eof",
             "repeat-open", "repeat-read", "partial-read", "reader-dispose", "inputs-dispose", "worker-dispose", "pin-close",
-            "post-scope", "post-facts", "parent-cancel", "post-parent-pin", "read-budget", "origin-budget", "wrong-count" }
+            "post-scope", "post-facts", "parent-cancel", "post-parent-pin", "read-budget", "origin-budget", "wrong-count",
+            "capture-window", "capture-boundary" }
         select new object[] { host, scenario };
 
     [Theory]

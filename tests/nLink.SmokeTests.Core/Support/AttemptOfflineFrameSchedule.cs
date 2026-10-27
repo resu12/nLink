@@ -50,11 +50,13 @@ internal sealed record AttemptOfflineFrameHint(string Sender, OfflineFileFrameMe
 // At most eight immutable ordinary descriptors, each consumed once. Repair and
 // control frames never get a hint and follow the existing byte path unchanged.
 internal sealed class AttemptOfflineFrameDescriptors(string sender, string session, string transfer,
-    AttemptCanonicalTailProfile? canonicalTail = null)
+    AttemptCanonicalTailProfile? canonicalTail = null, bool nonterminalSmallWindow = false)
 {
     private readonly object gate = new();
     private readonly AttemptOfflineFrameHint?[] hints = new AttemptOfflineFrameHint?[8];
     private readonly bool[] consumed = new bool[8];
+    private OfflineFileFrameMetadata? finalFrame;
+    private bool finalDropped, finalRepairObserved;
     private Exception? failure;
 
     internal void Observe(OfflineFileFrameMetadata frame)
@@ -63,7 +65,33 @@ internal sealed class AttemptOfflineFrameDescriptors(string sender, string sessi
         {
             try
             {
-                if (frame.IsRepair) return;
+                if (frame.IsRepair)
+                {
+                    if (nonterminalSmallWindow && frame.StartChunkIndex <= 8 && (long)frame.StartChunkIndex + frame.ChunkCount > 8)
+                    {
+                        if (!finalDropped || frame.SessionId != session || frame.TransferId != transfer ||
+                            frame.StartChunkIndex != 8 || frame.ChunkCount != 1 || frame.TransportEpoch is null or <= 0)
+                            throw new IOException("offline_schedule_final_repair_mismatch");
+                        if (!finalRepairObserved)
+                            Console.WriteLine("carrier-frontier-final=repair-described; chunk=8; count=1; epoch=" + frame.TransportEpoch +
+                                "; bytes=" + frame.EnvelopeLength + "; sha256=" + frame.EnvelopeSha256 + "; session=" + session + "; transfer=" + transfer);
+                        finalRepairObserved = true;
+                    }
+                    return; // Repair metadata is evidence only; repair bytes are never selected for a drop.
+                }
+                if (nonterminalSmallWindow && frame.StartChunkIndex == 8)
+                {
+                    if (canonicalTail is not null ||
+                        frame.SessionId != session || frame.TransferId != transfer || frame.ChunkCount != 1 || frame.TransportEpoch != 0)
+                        throw new IOException("offline_schedule_final_chunk_mismatch");
+                    if (finalFrame is null)
+                    {
+                        finalFrame = frame;
+                        Console.WriteLine("carrier-frontier-final=described; chunk=8; count=1; epoch=0; bytes=" + frame.EnvelopeLength +
+                            "; sha256=" + frame.EnvelopeSha256 + "; session=" + session + "; transfer=" + transfer);
+                    }
+                    return; // Only the first ordinary final frame is selected; no payload is retained.
+                }
                 var first = canonicalTail is null ? 0 : AttemptCanonicalTailProfile.FirstChunk;
                 if (canonicalTail is not null && frame.StartChunkIndex < first)
                 {
@@ -90,6 +118,20 @@ internal sealed class AttemptOfflineFrameDescriptors(string sender, string sessi
             catch (Exception error) { failure ??= error; }
         }
     }
+    internal bool TryDropFinal(byte kind, NknBridgeChannel lane, byte[] bytes)
+    {
+        lock (gate)
+        {
+            Check();
+            if (finalDropped || finalFrame is null || finalFrame.EnvelopeSha256 != Convert.ToHexString(SHA256.HashData(bytes))) return false;
+            if (kind != 0 || lane != NknBridgeChannel.Bulk || finalFrame.EnvelopeLength != bytes.Length)
+                throw new IOException("offline_schedule_final_drop_mismatch");
+            finalDropped = true;
+            Console.WriteLine("carrier-frontier-final=dropped-once; chunk=8; bytes=" + bytes.Length +
+                "; sha256=" + finalFrame.EnvelopeSha256 + "; session=" + session + "; transfer=" + transfer);
+            return true;
+        }
+    }
     internal byte[]? Consume(byte kind, NknBridgeChannel lane, byte[] bytes)
     {
         lock (gate)
@@ -107,7 +149,7 @@ internal sealed class AttemptOfflineFrameDescriptors(string sender, string sessi
         }
     }
     internal void Check() { lock (gate) { if (failure is not null) throw new IOException("offline_schedule_metadata_failed", failure); canonicalTail?.Check(); } }
-    internal void VerifyComplete() { lock (gate) { Check(); if (consumed.Any(value => !value)) throw new IOException("offline_schedule_metadata_missing"); } }
+    internal void VerifyComplete() { lock (gate) { Check(); if (consumed.Any(value => !value) || nonterminalSmallWindow && (!finalDropped || !finalRepairObserved)) throw new IOException("offline_schedule_metadata_missing"); } }
 }
 
 // Receive-side faults happen after an actual complete pipe write/read. The

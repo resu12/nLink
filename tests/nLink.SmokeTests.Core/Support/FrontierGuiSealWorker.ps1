@@ -174,10 +174,10 @@ try {
             if($Case -ceq 'cursor-join-prefix') {
                 [void]$entry.Events.begin.Set()
                 if(-not $entry.Events['held-ready'].WaitOne(15000)) { throw 'Original writer prefix deadline' }
-            } elseif($Case -cnotin @('cursor-empty-initial','cursor-join-empty')) { [IO.File]::AppendAllText($ledgerOrigin.SourcePath,"cursor startup fixture`r`n",[Text.UTF8Encoding]::new($false)) }
+            } elseif($Case -cnotin @('cursor-empty-initial','cursor-join-empty','cursor-parent-files-facts-valid')) { [IO.File]::AppendAllText($ledgerOrigin.SourcePath,"cursor startup fixture`r`n",[Text.UTF8Encoding]::new($false)) }
             if($Case -cnotin @('cursor-missing-initial','cursor-join-missing-initial')) {
                 $initialObservation=$ledgerOrigin.TryCaptureInitialObservation()
-                $expectedBookmark=if($Case -ceq 'cursor-join-prefix') {2} else {[int]($Case -cnotin @('cursor-empty-initial','cursor-join-empty'))}
+                $expectedBookmark=if($Case -ceq 'cursor-join-prefix') {2} else {[int]($Case -cnotin @('cursor-empty-initial','cursor-join-empty','cursor-parent-files-facts-valid'))}
                 if($null -eq $initialObservation -or -not $initialObservation.IsCurrent -or $initialObservation.Bookmark -ne $expectedBookmark) { throw 'Cursor initial phase observation missing' }
             }
         }

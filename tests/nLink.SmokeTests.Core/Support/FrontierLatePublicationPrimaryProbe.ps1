@@ -1,5 +1,8 @@
-param([ValidateSet('Capture','BeforeResolve','AfterResolve','AfterOptional','Closed')][string]$Stage,[switch]$CanonicalTail)
+param([ValidateSet('Capture','BeforeOptional','BeforeResolve','AfterResolve','AfterOptional','Closed')][string]$Stage,[switch]$CanonicalTail)
 $lateFlags=[Reflection.BindingFlags]'Instance,NonPublic'
+$ineligibleControl=$env:NLINK_TEST_FRONTIER_ROUTE_CYCLE -ceq 'late-ineligible-v1'
+if($ineligibleControl -and ($CanonicalTail -or $env:NLINK_TEST_DIAGNOSTIC_CUSTODY -cne 'frontier-late-publication' -or
+    $env:NLINK_TEST_FRONTIER_WORKER_CONFIGURATION -cne 'Debug')) {throw 'Ineligibility control profile mismatch'}
 function Read-LatePublicationField($Value,[string]$Name) {return $Value.GetType().GetField($Name,$lateFlags).GetValue($Value)}
 function Get-LatePublicationHash([byte[]]$Bytes) {
     $sha=[Security.Cryptography.SHA256]::Create()
@@ -155,6 +158,15 @@ if($Stage -ceq 'Capture') {
         NativeWriterCustodyEstablished=$false;PublicationCompletionIssued=$false}
     return
 }
+if($Stage -ceq 'BeforeOptional') {
+    if(-not $ineligibleControl) {throw 'BeforeOptional capture requires the ineligibility control'}
+    $script:latePublicationFailure=$firstCompactProofChainFailure
+    $script:latePublicationFull=$fullSnapshotEvaluation; $script:latePublicationCompact=$compactSnapshotEvaluation
+    $script:latePublicationCandidates=@($compactProofChainCandidateArray)
+    $script:latePublicationState=Get-LateState
+    $script:latePublicationReportsBefore=Get-LateReports
+    return
+}
 if($Stage -ceq 'BeforeResolve') {
     $script:latePublicationOmissionReason=$null
     $script:latePublicationResolverCalls++
@@ -215,6 +227,15 @@ if($Stage -ceq 'AfterResolve') {
     return
 }
 if($Stage -ceq 'AfterOptional') {
+    if($ineligibleControl) {
+        $script:latePublicationReportsAfter=Get-LateReports
+        Assert-LateStateUnchanged
+        if($script:latePublicationResolverCalls -ne 0 -or $script:latePublicationResolved -or $script:latePublicationOutput -or
+            $firstCompactProofChainFailure.Class -cne 'filetransfer_tuna_activation_delivery_unproven' -or
+            $fileTransferFallbackFrontierRecentProgressGraceRecheckProof.UnresolvedCount -ne 1 -or
+            $script:latePublicationReportsBefore -cne $script:latePublicationReportsAfter) {throw 'Ineligible failure acquired a witness or lost its original classification'}
+        return
+    }
     if($script:latePublicationResolverCalls -ne 1 -or $null -eq $script:latePublicationReportsBefore) {
         throw 'Original primary did not select the supported unresolved failure'
     }
@@ -244,6 +265,15 @@ $script:latePublicationFull=$null; $script:latePublicationCompact=$null; $script
 $script:latePublicationWitnesses=@(); $script:latePublicationPayload=$null; $script:latePublicationPins=@()
 $script:latePublicationOmissionReason=$null
 if($open -or -not $cleared) {throw 'Late publication primary retained handles or text'}
+if($ineligibleControl) {
+    if($selected -cne 'filetransfer_tuna_activation_delivery_unproven' -or $script:latePublicationResolverCalls -ne 0 -or
+        $script:latePublicationResolved -or $script:latePublicationOutput -or
+        (Read-LatePublicationField $nativePrimaryCustody 'resolutionAttempted') -or
+        (Read-LatePublicationField $nativePrimaryCustody 'witnessesAttempted')) {throw 'Ineligibility control invoked diagnostic resolution'}
+    $script:latePublicationChecked=$true
+    Write-Host 'attempt-late-publication-ineligible-checked'
+    return
+}
 if($selected -cne 'filetransfer_fallback_frontier_recent_progress_grace_recheck_missing' -or
     $script:latePublicationResolverCalls -ne 1 -or -not $script:latePublicationResolved -or -not $script:latePublicationOutput) {
     throw 'Late publication witness milestone remains unmet'

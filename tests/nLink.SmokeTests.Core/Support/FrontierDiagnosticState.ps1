@@ -16,12 +16,12 @@ function Fixture {
     return @{Failure=$failure;Candidates=[object[]]@($failure);Proof=$proof;Index=$index;Full=$view;Compact=$view.PSObject.Copy()}
 }
 function Capture($x,[int]$FullCount=1) { $capture.Invoke($null,[object[]]@($x.Failure,$x.Candidates,$x.Proof,$x.Index,$x.Full,$x.Compact,$FullCount,$visit)) }
-foreach($case in @('valid','hostile-equals','scalar-type','script-property','array-cap','field-cap','array-rank')) {
+foreach($case in @('valid','hostile-equals','scalar-type','script-property','array-cap','boundary-count-cap','array-rank')) {
     $x=Fixture; $reason=$null; $script:getters=0
     switch($case) {
         'script-property' {$x.Failure.PSObject.Properties.Remove('Reason'); $x.Failure | Add-Member ScriptProperty Reason {$script:getters++;'reason'}; $reason='frontier_diagnostic_note:Reason'}
         'array-cap' {$x.Candidates=[object[]](@($x.Failure)*8193); $reason='frontier_diagnostic_collection'}
-        'field-cap' {$x.Full.Boundaries=[object[]](@($x.Full.Boundaries[0])*8192); $reason='frontier_diagnostic_state_capacity'}
+        'boundary-count-cap' {$x.Full.Boundaries=[object[]](@($x.Full.Boundaries[0])*2); $reason='frontier_diagnostic_collection'}
         'array-rank' {$x.Index.AllEvents=[Array]::CreateInstance([object],1,1); $reason='frontier_diagnostic_collection'}
     }
     if($null -ne $reason) {

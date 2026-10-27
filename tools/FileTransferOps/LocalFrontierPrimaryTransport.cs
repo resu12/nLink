@@ -9,11 +9,12 @@ namespace NLink.Tools
     internal sealed class LocalFrontierPrimaryScope : IDisposable
     {
         private readonly MemoryMappedViewAccessor view;
-        private readonly byte[] header, body;
+        private readonly byte[] header, body, current;
+        private readonly object sync = new object();
         internal readonly byte[] Binding;
         internal LocalFrontierPrimaryScope(MemoryMappedFile map, byte[] body)
         {
-            this.body = (byte[])body.Clone(); header = new byte[64];
+            this.body = (byte[])body.Clone(); header = new byte[64]; current = new byte[64 + body.Length];
             view = map.CreateViewAccessor(0, 64 + body.Length, MemoryMappedFileAccess.Read);
             try
             {
@@ -28,18 +29,24 @@ namespace NLink.Tools
         {
             get
             {
-                try
+                lock (sync)
                 {
-                    var current = new byte[header.Length + body.Length];
-                    if (view.ReadArray(0, current, 0, current.Length) != current.Length) return false;
-                    for (int i = 0; i < header.Length; i++) if (current[i] != header[i]) return false;
-                    for (int i = 0; i < body.Length; i++) if (current[64 + i] != body[i]) return false;
-                    return true;
+                    try
+                    {
+                        if (view.ReadArray(0, current, 0, current.Length) != current.Length) return false;
+                        // Compare every copied byte; retained arrays are read afresh on each call.
+                        int headerWords = header.Length - header.Length % 8, bodyWords = body.Length - body.Length % 8;
+                        for (int i = 0; i < headerWords; i += 8) if (BitConverter.ToInt64(current, i) != BitConverter.ToInt64(header, i)) return false;
+                        for (int i = headerWords; i < header.Length; i++) if (current[i] != header[i]) return false;
+                        for (int i = 0; i < bodyWords; i += 8) if (BitConverter.ToInt64(current, 64 + i) != BitConverter.ToInt64(body, i)) return false;
+                        for (int i = bodyWords; i < body.Length; i++) if (current[64 + i] != body[i]) return false;
+                        return true;
+                    }
+                    catch { return false; }
                 }
-                catch { return false; }
             }
         }
-        public void Dispose() { view.Dispose(); }
+        public void Dispose() { lock (sync) { view.Dispose(); } }
     }
     internal sealed partial class LocalFrontierParentFacts
     {

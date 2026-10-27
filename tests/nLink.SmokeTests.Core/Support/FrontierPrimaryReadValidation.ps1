@@ -24,7 +24,12 @@ function Apply-ReadFault {
         'files-cancel' {$files.GetType().GetProperty('Cancelled',$flags).GetValue($files,$null).Set() | Out-Null}
         'facts-cancel' {$facts.GetType().GetProperty('Cancelled',$flags).GetValue($facts,$null).Set() | Out-Null}
         'dispose' {$owned.Dispose()}
-        'budget' {$field=@($work.GetType().GetFields($flags) | Where-Object {$_.Name -match '^_?elapsed$'})[0]; $field.SetValue($work,[long]([Diagnostics.Stopwatch]::Frequency*21))}
+        'budget' {
+            $limit=$owned.GetType().GetField('SourceCaptureMilliseconds',[Reflection.BindingFlags]'Static,NonPublic')
+            if($null -eq $limit -or $limit.GetRawConstantValue() -ne 60000) {throw 'Approved source capture budget changed'}
+            $field=@($work.GetType().GetFields($flags) | Where-Object {$_.Name -match '^_?elapsed$'})[0]
+            $field.SetValue($work,[long]([Diagnostics.Stopwatch]::Frequency*61))
+        }
         default {throw 'Unknown source fault'}
     }
 }

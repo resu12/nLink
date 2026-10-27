@@ -9047,8 +9047,13 @@ internal static partial class FileTransferCoordinator
     public static FileTransferCoordinatorActionDecision AuthorizeAction(
         FileTransferCoordinatorState state,
         FileTransferCoordinatorActionRequest request)
+        => FinalizeActionSnapshot(state, request, AuthorizeActionCore(state, request));
+
+    private static FileTransferCoordinatorActionDecision FinalizeActionSnapshot(
+        FileTransferCoordinatorState state,
+        FileTransferCoordinatorActionRequest request,
+        FileTransferCoordinatorActionDecision decision)
     {
-        var decision = AuthorizeActionCore(state, request);
         if (string.IsNullOrWhiteSpace(
                 state.PersistentState.CoordinatorInstanceId))
         {

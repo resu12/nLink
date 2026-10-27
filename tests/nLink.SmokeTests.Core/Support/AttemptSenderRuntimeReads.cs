@@ -10,8 +10,9 @@ internal sealed partial class AttemptSenderSourceChannel
 {
     private RuntimeReads? runtimeReads;
 
-    internal RuntimeReads? BindRuntimeReads(LocalFrontierAppRequest.AppLease candidate, SessionFileTransferService service)
+    internal RuntimeReads? BindRuntimeReads(LocalFrontierAppRequest.AppLease candidate, SessionFileTransferService service, bool routeCycle = false)
     {
+        if (routeCycle && !AttemptRouteCycleProfile.Enabled) throw new IOException("route_cycle_profile_required");
         var serviceGate = RuntimeReads.Field(service, "gate");
         if (serviceGate is null) return null;
         lock (serviceGate) lock (original)
@@ -27,7 +28,7 @@ internal sealed partial class AttemptSenderSourceChannel
                 state.RouteSelection.Route != FileTransferRoute.RegularNknV4Fast) return null;
             // TakeRead uses an interlocked claim rather than this lock.
             if (Interlocked.CompareExchange(ref taken, 3, 0) != 0) return null;
-            runtimeReads = new RuntimeReads(this, service, serviceGate, context);
+            runtimeReads = new RuntimeReads(this, service, serviceGate, context, routeCycle);
             return runtimeReads;
         }
     }
@@ -42,22 +43,22 @@ internal sealed partial class AttemptSenderSourceChannel
         private RuntimeOwnerToken? previousOwner;
         private RuntimeRead? active;
         private int opened;
+        private readonly bool routeCycle;
         internal static object? Field(object value, string name) => value.GetType().GetField(name, Flags)?.GetValue(value);
         private static object? Property(object value, string name) => value.GetType().GetProperty(name, Flags)?.GetValue(value);
 
-        internal RuntimeReads(AttemptSenderSourceChannel source, SessionFileTransferService service, object gate, object context)
-        { original = this; this.source = source; this.service = service; this.gate = gate; this.context = context; }
+        internal RuntimeReads(AttemptSenderSourceChannel source, SessionFileTransferService service, object gate, object context, bool routeCycle = false)
+        { original = this; this.source = source; this.service = service; this.gate = gate; this.context = context; this.routeCycle = routeCycle; }
 
         internal Stream? OpenRead()
         {
             lock (gate) lock (source.original)
             {
-                if (!OriginalCurrent() || opened == 4 || (opened < 2 && source.activeRead?.CanRead == true)) return null;
+                if (!OriginalCurrent() || opened == (routeCycle ? 6 : 4) || (opened < 2 && source.activeRead?.CanRead == true)) return null;
                 var state = SessionFileTransferV4SenderTests.CaptureJoinedNknStateForTest(service, context);
                 if (state.CurrentRuntimeOwner is not { } owner || state.CurrentRoutePublicationToken is not { } publication) return null;
                 var metadata = opened == 0;
-                var expected = opened < 2 ? FileTransferRoute.RegularNknV4Fast :
-                    opened == 2 ? FileTransferRoute.FileTunaV4 : FileTransferRoute.PostTunaFallbackV6;
+                var expected = AttemptRouteCycleProfile.ExpectedRoute(opened, routeCycle);
                 if (owner.Route != expected || (opened == 1 && previousOwner != owner) ||
                     (opened >= 2 && (owner.RuntimeGeneration != previousOwner!.Value.RuntimeGeneration + 1 ||
                         owner.LiveRouteEpoch != previousOwner.Value.LiveRouteEpoch + 1))) return null;

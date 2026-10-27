@@ -6,7 +6,8 @@ if($canonicalRolesMode) {
     . (Join-Path $RepoRoot 'tools/FileTransferOps/LocalGuiWriterRequest.ps1')
     . (Join-Path $RepoRoot 'tests/nLink.SmokeTests.Core/Support/FrontierAttemptDispatchGui.ps1') -Stage Entry
 } elseif($attemptMode) {
-    . (Join-Path $RepoRoot 'tests/nLink.SmokeTests.Core/Support/FrontierAttemptDispatchLoader.ps1') $RepoRoot
+    $passiveDirectory=if($env:NLINK_TEST_PAYLOAD_PRIMARY_CASE -ceq 'canonical-tail-late-publication') {Join-Path $Directory 'passive-diagnostics'} else {''}
+    . (Join-Path $RepoRoot 'tests/nLink.SmokeTests.Core/Support/FrontierAttemptDispatchLoader.ps1') $RepoRoot -PassiveDiagnosticDirectory $passiveDirectory
     . (Join-Path $RepoRoot 'tests/nLink.SmokeTests.Core/Support/FrontierAttemptDispatchGui.ps1') -Stage Entry
     if($env:NLINK_TEST_PAYLOAD_WRAPPER_CASE -like 'listener-*') {
         . (Join-Path $RepoRoot 'tests/nLink.SmokeTests.Core/Support/FrontierPayloadListenerProbe.ps1') -Stage Gui

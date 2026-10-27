@@ -91,7 +91,14 @@ namespace NLink.Tools
                     if (state == 2) Interlocked.Exchange(ref lastState, 2);
                     var current = new byte[Bytes];
                     if (view.ReadArray(0, current, 0, current.Length) != current.Length) return false;
-                    for (int i = 0; i < Bytes; i++) if ((i < 8 || i >= 12) && current[i] != snapshot[i]) return false;
+                    int words = Bytes - Bytes % 8;
+                    for (int i = 0; i < words; i += 8)
+                    {
+                        // Only state bytes 8..11 are mutable; reserved bytes 12..15 still compare.
+                        if (i == 8) { if (BitConverter.ToInt32(current, 12) != BitConverter.ToInt32(snapshot, 12)) return false; }
+                        else if (BitConverter.ToInt64(current, i) != BitConverter.ToInt64(snapshot, i)) return false;
+                    }
+                    for (int i = words; i < Bytes; i++) if (current[i] != snapshot[i]) return false;
                     return Facts == null || Facts.IsCurrent;
                 }
                 catch { return false; }

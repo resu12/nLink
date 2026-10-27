@@ -10,6 +10,9 @@ namespace NLink.Tools
     {
         private readonly List<Field> fields = new List<Field>();
         private readonly List<Sequence> sequences = new List<Sequence>();
+        private readonly List<BoundarySequence> boundaries = new List<BoundarySequence>();
+        private static readonly string[] BoundaryNames = { "coordinatorInstanceId", "boundaryId", "evidenceLineIndex",
+            "verdict", "decisionKind", "decisionStatus", "boundaryHash", "writer", "writerSequence" };
         private System.Array eventItems;
         private EventRow[] eventRows;
         private int cells;
@@ -39,8 +42,7 @@ namespace NLink.Tools
                     result.TerminalCatalog = new[] { (string)result.fields[start].Value, ((int)result.fields[start + 1].Value).ToString(System.Globalization.CultureInfo.InvariantCulture),
                         (string)result.fields[start + 2].Value, (string)result.fields[start + 3].Value, (string)result.fields[start + 4].Value };
                 result.Array(result.Reference(view, "AuthoritativeFamilies"), 64, false);
-                foreach (object boundary in result.Array(result.Reference(view, "Boundaries"), 8192, true))
-                    result.Values(boundary, "coordinatorInstanceId", "boundaryId", "evidenceLineIndex", "verdict", "decisionKind", "decisionStatus", "boundaryHash", "writer", "writerSequence");
+                result.CaptureBoundaries(result.Reference(view, "Boundaries"), fullCount);
             }
             return result;
         }
@@ -97,6 +99,30 @@ namespace NLink.Tools
                 throw new InvalidOperationException("frontier_diagnostic_note:" + name);
             return property;
         }
+        // Boundaries, like events, are input-sized identity state, not metadata.
+        // Preserve the original row/property checks and their charged visits.
+        private void CaptureBoundaries(object value, int fullCount)
+        {
+            var items = Unwrap(value) as System.Array;
+            if (items == null || items.Rank != 1 || items.GetLowerBound(0) != 0 ||
+                items.Length > fullCount || items.Length > LocalPublicationInputLimits.InputRecords)
+                throw new InvalidOperationException("frontier_diagnostic_collection");
+            var rows = new BoundaryRow[items.Length];
+            for (int i = 0; i < rows.Length; i++)
+            {
+                visit(); object item = items.GetValue(i);
+                if (item == null) throw new InvalidOperationException("frontier_diagnostic_owner");
+                var owner = PSObject.AsPSObject(item);
+                var values = new Field[BoundaryNames.Length];
+                for (int j = 0; j < values.Length; j++)
+                {
+                    var property = EventProperty(owner, BoundaryNames[j]);
+                    values[j] = new Field(owner, property, Scalar(property.Value), false);
+                }
+                rows[i] = new BoundaryRow(item, values);
+            }
+            boundaries.Add(new BoundarySequence(items, rows));
+        }
         private object[] Array(object value, long maximum, bool references)
         {
             var list = Unwrap(value) as System.Array;
@@ -123,6 +149,21 @@ namespace NLink.Tools
                 {
                     visit(); object value = sequence.Items.GetValue(i);
                     if (sequence.References ? !Object.ReferenceEquals(value, sequence.Values[i]) : !SameScalar(value, sequence.Values[i])) return false;
+                }
+            }
+            foreach (var sequence in boundaries)
+            {
+                visit(); if (sequence.Items.Length != sequence.Rows.Length) return false;
+                for (int i = 0; i < sequence.Rows.Length; i++)
+                {
+                    var row = sequence.Rows[i];
+                    visit(); if (!Object.ReferenceEquals(sequence.Items.GetValue(i), row.Item)) return false;
+                    foreach (var field in row.Fields)
+                    {
+                        visit();
+                        if (!Object.ReferenceEquals(field.Owner.Properties[field.Property.Name], field.Property) ||
+                            !SameScalar(field.Property.Value, field.Value)) return false;
+                    }
                 }
             }
             visit(); if (eventItems.Length != eventRows.Length) return false;
@@ -162,6 +203,16 @@ namespace NLink.Tools
         {
             internal readonly System.Array Items; internal readonly object[] Values; internal readonly bool References;
             internal Sequence(System.Array items, object[] values, bool references) { Items = items; Values = values; References = references; }
+        }
+        private struct BoundaryRow
+        {
+            internal readonly object Item; internal readonly Field[] Fields;
+            internal BoundaryRow(object item, Field[] fields) { Item = item; Fields = fields; }
+        }
+        private sealed class BoundarySequence
+        {
+            internal readonly System.Array Items; internal readonly BoundaryRow[] Rows;
+            internal BoundarySequence(System.Array items, BoundaryRow[] rows) { Items = items; Rows = rows; }
         }
     }
 }

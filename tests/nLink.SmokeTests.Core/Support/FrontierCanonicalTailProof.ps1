@@ -1,6 +1,11 @@
-param([string]$Directory,$Receipt,[string]$AnalysisFailure)
-# Preserve the original parent's classification of the failed route proof.
+param([string]$Directory,$Receipt,[string]$AnalysisFailure,[string]$RouteCycleProfile='',[string]$WorkerConfiguration='')
+# Only the explicit Debug cycle expects successful route proof; preserve the
+# original parent's operator failure and the legacy failed-route requirement.
 # A successful diagnostic join never promotes that classification or verdict.
+if($RouteCycleProfile -cnotin @('','canonical-cycle-v1') -or ($RouteCycleProfile -and $WorkerConfiguration -cne 'Debug')) {
+    throw 'Canonical tail proof requires the exact Debug cycle profile or legacy default'
+}
+$expectedRouteVerdict=if($RouteCycleProfile -ceq 'canonical-cycle-v1') {'pass'} else {'fail'}
 $expectedStatus=if($AnalysisFailure) {'proof_incomplete'} else {'completed'}
 if($null -eq $Receipt -or $Receipt.status -cne $expectedStatus -or
     [bool]$Receipt.completedProofArtifacts -eq [bool]$AnalysisFailure -or
@@ -20,7 +25,13 @@ if($parity.Verdict -cne 'pass') {throw 'Canonical tail snapshot parity changed'}
 $operator=Read-RouteAcceptanceKeyValueArtifact -Path (Join-Path $Directory 'filetransfer-operator-verdict.txt')
 $route=Read-RouteAcceptanceKeyValueArtifact -Path (Join-Path $Directory 'filetransfer-route-consistency-summary.txt')
 if($operator['verdict'] -cne 'FAIL_PROTOCOL_OR_INTEGRITY' -or $operator['gate_status'] -cne 'fail' -or
-    $route['live_route_epoch_proof_verdict'] -cne 'fail') {throw 'Canonical tail original failed route verdict changed'}
+    $route['live_route_epoch_proof_verdict'] -cne $expectedRouteVerdict) {throw 'Canonical tail original failed route verdict changed'}
+if($RouteCycleProfile -ceq 'canonical-cycle-v1') {
+    foreach($key in @('file_tuna_route_cycle_delivery_verdict','file_tuna_activation_1_delivery_verdict',
+        'file_tuna_activation_2_delivery_verdict','file_tuna_route_cycle_full_compact_parity_verdict')) {
+        if($operator[$key] -cne 'pass') {throw ('Canonical cycle delivery proof changed: '+$key)}
+    }
+}
 $observation=Get-Content -LiteralPath (Join-Path $Directory 'late-publication-primary-observation.json') -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
 if($observation.CanonicalTailProfile -cne 'canonical-tail-late-publication' -or -not $observation.SamePairJoined -or
     $observation.Outcome -cne 'PublishedWithinObservationBound' -or

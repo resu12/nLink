@@ -17,11 +17,12 @@ public sealed class SourceIteration : IDisposable {
 $mode=$Case.Substring('source-'.Length)
 $flags=[Reflection.BindingFlags]'Instance,NonPublic'; $clone=[object].GetMethod('MemberwiseClone',$flags)
 $signals=@{}; $worker=$null; $owned=$null; $reader=$null; $cursor=$null; $file=$null
-function Expire-SourceWork {
+function Set-SourceWork([long]$Milliseconds) {
     $watch=$owned.GetType().GetField('work',$flags).GetValue($owned)
     $elapsed=@($watch.GetType().GetFields($flags) | Where-Object {$_.Name -match '^_?elapsed$'})[0]
-    $elapsed.SetValue($watch,[long]([Diagnostics.Stopwatch]::Frequency*21))
+    $elapsed.SetValue($watch,[long]([Diagnostics.Stopwatch]::Frequency*$Milliseconds/1000))
 }
+function Expire-SourceWork {Set-SourceWork 61000}
 function Require-ReadFailure($Enumerator) {
     $failed=$false
     try {[void]$Enumerator.MoveNext()} catch {$failed=$true}
@@ -33,6 +34,18 @@ try {
     $worker=[NLink.Tools.LocalRetainedSourceRequest]::TryAttachFrontier($Name,$RequestId,$SourcePath,'frontier-gui-run','frontier-gui-scenario')
     if($null -eq $worker) {throw 'Native source worker unavailable'}
     $owned=$worker.FrontierInputs
+    if($mode -ceq 'capture-window') {
+        Set-SourceWork 20000
+        if(-not $owned.GetType().GetProperty('ResourceCurrent',$flags).GetValue($owned,$null)) {throw 'Producer boundary rejected at limit'}
+        Set-SourceWork 20001
+        if($owned.GetType().GetProperty('ResourceCurrent',$flags).GetValue($owned,$null)) {throw 'Producer admission inherited capture allowance'}
+        Set-SourceWork 21000
+        if(-not $worker.IsCurrent -or -not $owned.IsCurrent) {throw 'Original attached source lost capture allowance'}
+        $unattached=$clone.Invoke($owned,$null)
+        $owned.GetType().GetField('attached',$flags).SetValue($unattached,$false)
+        if($owned.GetType().GetProperty('SourceCaptureResourceCurrent',$flags).GetValue($unattached,$null) -or
+            $owned.GetType().GetProperty('RetainedMaximumMilliseconds',$flags).GetValue($unattached,$null) -ne 20000) {throw 'Unattached copy inherited capture allowance'}
+    }
     if($mode -ceq 'copied-worker') {
         $copy=$clone.Invoke($worker,$null)
         if($null -ne $copy.TryOpenSource()) {throw 'Copied worker opened native source'}
@@ -42,7 +55,7 @@ try {
     $reader=$worker.TryOpenSource()
     if(($null -eq $reader) -ne ($mode -ceq 'wrong-count')) {throw 'Native source open mismatch'}
     $retired=$mode -cin @('wrong-count','repeat-open','repeat-read','partial-read','reader-dispose','inputs-dispose','worker-dispose',
-        'pin-close','post-scope','post-facts','parent-cancel','post-parent-pin','read-budget','origin-budget')
+        'pin-close','post-scope','post-facts','parent-cancel','post-parent-pin','read-budget','origin-budget','capture-boundary')
     $post=$mode -cin @('post-scope','post-facts','parent-cancel','post-parent-pin')
     if($null -ne $reader) {
         if($reader.InputReadComplete -or $worker.OwnsCompletedSource($reader) -or $reader.GetFrontierPhysicalOrigin(1,'foreign')) {throw 'Unread source promoted completion/origin'}
@@ -62,9 +75,20 @@ try {
         } elseif($mode -ceq 'read-budget') {
             if($SourceDiagnostics -and -not $cursor.MoveNext()) {throw 'Diagnostic source did not reach its first line'}
             Expire-SourceWork; Require-ReadFailure $cursor
+        } elseif($mode -ceq 'capture-boundary') {
+            if(-not $cursor.MoveNext()) {throw 'Boundary source lost first line'}
+            Set-SourceWork 60000
+            if(-not $owned.IsCurrent -or $reader.InputReadComplete) {throw 'Capture boundary rejected at limit or invented EOF'}
+            $watch=$owned.GetType().GetField('work',$flags).GetValue($owned)
+            if($watch.ElapsedMilliseconds -ne 60000 -or $watch.IsRunning) {throw 'Boundary check reset or advanced stopped work'}
+            Set-SourceWork 60001
+            if($owned.IsCurrent -or $worker.IsCurrent) {throw 'Capture boundary accepted limit plus one'}
+            Require-ReadFailure $cursor
+            if($null -ne $worker.TryOpenSource() -or $owned.IsCurrent -or $watch.ElapsedMilliseconds -lt 60001 -or $watch.IsRunning) {throw 'Expired capture reopened or refilled'}
         } else {
             if(-not $cursor.MoveNext()) {throw 'Native source has no lines'}
             $lines.Add($cursor.Current)
+            if($mode -ceq 'capture-window') {Set-SourceWork 59000}
             if($reader.GetFrontierPhysicalOrigin(1,$lines[0]) -ne 0 -or $reader.InputReadComplete) {throw 'Partial read promoted physical origin'}
             if($post) { } elseif($mode -ceq 'partial-read') {$cursor.Dispose()} else {
                 if($mode -ceq 'pre-eof') {
@@ -127,6 +151,11 @@ try {
         if($worker.IsCurrent -or $owned.IsCurrent -or ($null -ne $reader -and $reader.InputReadComplete)) {throw 'Retired source stayed current'}
         if($null -ne $file -and $file.CanRead) {throw 'Retired source stream leaked'}
     } elseif(-not $worker.IsCurrent -or -not $reader.InputReadComplete) {throw 'Current native source retired unexpectedly'}
+    if($mode -ceq 'capture-window') {
+        $watch=$owned.GetType().GetField('work',$flags).GetValue($owned)
+        if($watch.ElapsedMilliseconds -lt 59000 -or $watch.ElapsedMilliseconds -ge 60000 -or $watch.IsRunning) {throw 'Source/origins reset or exceeded cumulative capture work'}
+        if($owned.NativeWriterCustodyEstablished -or $owned.PublicationCompletionIssued -or $owned.LiveProofEligible) {throw 'Capture allowance granted authority'}
+    }
     if($SourceDiagnostics) {
         $rejection=$owned.GetType().GetField('PrimarySourceRejectionForTest',$flags).GetValue($owned)
         $snapshot=$owned.GetType().GetField('PrimarySourceSnapshotForTest',$flags).GetValue($owned)
@@ -138,7 +167,7 @@ try {
         else {
             if($closeSnapshot -notmatch '; lines=[1-9][0-9]*;' -or $close -ceq 'open') {throw "Source diagnostic lost pre-close progress: $rejection / $close / $closeSnapshot"}
             if($mode -ceq 'parent-cancel' -and ($close -notmatch '^watch:' -or $snapshot -notmatch '; lines=0;')) {throw 'Cancellation diagnostic invented retained lines'}
-            if($mode -ceq 'read-budget' -and $snapshot -notmatch '^work_ms=2[1-9][0-9]{3}; lines=1;') {throw 'Source budget observation changed'}
+            if($mode -ceq 'read-budget' -and $snapshot -notmatch '^work_ms=6[1-9][0-9]{3}; lines=1;') {throw 'Source budget observation changed'}
         }
         $worker.Dispose(); $owned.Dispose()
         if($owned.GetType().GetField('PrimarySourceRejectionForTest',$flags).GetValue($owned) -cne $rejection -or

@@ -131,7 +131,8 @@ function Resolve-FileTransferNativeFrontierWitness {
                 foreach($view in @($FullView,$CompactView)) {
                     Require ($view.Mode -ceq 'SnapshotV1Authoritative' -and $view.ContractVersion -eq 1 -and $view.ArtifactEvidenceVerdict -ceq 'pass' -and
                         $view.StreamComplete -and $view.AuthoritativeFamilies.Count -le 64 -and 'route_runtime' -cin $view.AuthoritativeFamilies -and
-                        'route_transition' -cin $view.AuthoritativeFamilies -and $view.Boundaries.Count -le 8192) 'native_frontier_view'
+                        'route_transition' -cin $view.AuthoritativeFamilies -and $view.Boundaries.Count -le $Full.Length -and
+                        $view.Boundaries.Count -le [NLink.Tools.LocalPublicationInputLimits]::InputRecords) 'native_frontier_view'
                     $viewFields.Add([ordered]@{Mode=$view.Mode;Contract=$view.ContractVersion;Catalog=$view.CatalogVersion;Hash=$view.CatalogHash;
                         BoundaryHash=$view.BoundaryHash;Verdict=$view.ArtifactEvidenceVerdict;Stream=$view.StreamComplete;Families=@($view.AuthoritativeFamilies)})
                 }
@@ -185,7 +186,24 @@ function Resolve-FileTransferNativeFrontierWitness {
                     @($entries.Keys | Where-Object {$_ -cnotin @('RepairProgress','RecentArmed','StallCaptured','StallSuccessor','RecentRechecked','Write','FrameCaptured','DeliveryBound','AcceptedCompletion',$receipt.Outcome)}).Count -eq 0 -and
                     $receipt.Lifecycle[0].Kind -ceq 'RepairProgress' -and $receipt.Lifecycle[-1].Kind -ceq $receipt.Outcome) 'native_frontier_lifecycle_order'
                 $progressBinding=$entries.RepairProgress[0].Binding; $root=$entries.StallCaptured[0].Binding; $repair=$receipt.Repair
-                $progresses=@(Named 'filetransfer_fallback_frontier_repair_progress_observed' {param($x) $x.current_frontier_chunk_index -ceq [string]$progressBinding.After})
+                $progresses=@(Named 'filetransfer_fallback_frontier_repair_progress_observed' {
+                    param($x)
+                    if(-not $x.ContainsKey('current_frontier_chunk_index')) {
+                        # The ordinary legacy observation is not coordinator repair evidence.
+                        # Reject partial/mixed coordinator shapes; never fill in a missing field.
+                        $legacy=@('event','session_id','transfer_id','frontier_scope_session_id','frontier_scope_transfer_id',
+                            'direction','repair_request_key','reason','committed_frontier_before','committed_frontier_after','requested_chunk_count')
+                        Require (@($x.Keys | Where-Object {$_ -cnotin $legacy -and $_ -cnotmatch '\Alog_writer_[a-z_]+\z'}).Count -eq 0 -and
+                            $x['direction'] -cin @('inbound','outbound') -and
+                            -not [string]::IsNullOrWhiteSpace([string]$x['repair_request_key']) -and
+                            -not [string]::IsNullOrWhiteSpace([string]$x['reason']) -and
+                            (Test-FileTransferPublicationUseInteger ([string]$x['committed_frontier_before'])) -and
+                            (Test-FileTransferPublicationUseInteger ([string]$x['committed_frontier_after'])) -and
+                            (Test-FileTransferPublicationUseInteger ([string]$x['requested_chunk_count']))) 'native_frontier_progress_shape'
+                        return $false
+                    }
+                    return $x.current_frontier_chunk_index -ceq [string]$progressBinding.After
+                })
                 $prior=@($progresses | Where-Object {$_.Position -lt $failurePosition})
                 Require ($prior.Count -ge 1) 'native_frontier_progress_missing'; $progress=$prior[-1]; Pick $progress; Scope $progress
                 foreach($row in $rows) {

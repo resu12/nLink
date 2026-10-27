@@ -1,6 +1,7 @@
 using System.Reflection;
 using NLink.Core.FileTransfer;
 using NLink.Core.Logging;
+using NLink.Tests;
 
 namespace NLink.SmokeTests;
 
@@ -133,7 +134,10 @@ public sealed class FrontierAttemptWritersTests : FileTransferOpsScriptsTestBase
             started.Set();
             await ((Task)lifetime.GetType().GetField("setup", flags)!.GetValue(lifetime)!).WaitAsync(TimeSpan.FromSeconds(15));
             Assert.True((bool)lifetime.GetType().GetField("ready", flags)!.GetValue(lifetime)!);
-            await SessionFileTransferV4SenderTests.PrepareProducerRegistryAsync(lifetime, "producer-writer", role == "helpee" ? 0 : 1);
+            if (AttemptRouteCycleProfile.Enabled)
+                Assert.Equal(AttemptRouteCycleProfile.Scenario, scenario);
+            else
+                await SessionFileTransferV4SenderTests.PrepareProducerRegistryAsync(lifetime, "producer-writer", role == "helpee" ? 0 : 1);
             File.WriteAllText(Path.Combine(directory, role + ".attached"), Environment.GetEnvironmentVariable("NLINK_APP_FRONTIER_REQUEST_ID"));
             if (scenario.StartsWith("writer-destination-gui-", StringComparison.Ordinal)) ready.Set();
             if (role == "helper" && scenario.StartsWith("writer-destination-", StringComparison.Ordinal))
@@ -170,7 +174,25 @@ public sealed class FrontierAttemptWritersTests : FileTransferOpsScriptsTestBase
             }
             afterShutdown?.Invoke();
         }
-        Assert.True(lifetime.HandoffCompleted);
+        var catalog = lifetime.GetType().GetField("catalog", flags)!.GetValue(lifetime);
+        if (scenario is "writer-source-read-cross-process-carrier-frontier-hold" or
+            "writer-source-read-cross-process-carrier-full-frontier-hold")
+        {
+            // The legacy one-shot hold observation is not a closed-positive
+            // publication. Ordinary transfer/drain success must not promote it.
+            Assert.False(lifetime.HandoffCompleted);
+            Assert.NotNull(catalog);
+            Assert.Equal(role == "helper" ? 1 : 0,
+                catalog.GetType().GetProperty("AdmissionCount")!.GetValue(catalog));
+            var reason = catalog.GetType().GetProperty("FailureReason")!.GetValue(catalog);
+            Assert.Equal(role == "helper" ? "producer_not_closed_positive" : "native_request_revoked", reason);
+            Console.WriteLine($"carrier-frontier-custody=unavailable; role={role}; reason={reason}");
+            return;
+        }
+        Assert.True(lifetime.HandoffCompleted,
+            $"Original writer handoff incomplete; role={role}; " +
+            $"admissions={catalog?.GetType().GetProperty("AdmissionCount")?.GetValue(catalog)}; " +
+            $"catalog_failure={catalog?.GetType().GetProperty("FailureReason")?.GetValue(catalog)}");
         if (helperCompleted is not null && role == "helper") helperCompleted.Set();
     }
 }

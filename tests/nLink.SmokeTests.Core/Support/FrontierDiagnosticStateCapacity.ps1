@@ -37,11 +37,13 @@ if($evaluationLimit -ne 1073741824 -or [NLink.Tools.LocalPublicationInputLimits]
     [NLink.Tools.LocalPublicationInputLimits]::ProducerMilliseconds -ne 20000 -or $maximum -ne 262144) {throw 'Evaluation limit changed an independent admission/time bound'}
 $observations=@(foreach($count in @(0,1,73885,$maximum)) {
     $x=Fixture; $x.Index.AllEvents=[object[]](@($x.Failure.Event)*$count); $meter=Meter
+    if($count -eq 0) {$x.Full.Boundaries=[object[]]@();$x.Compact.Boundaries=[object[]]@()}
+    $boundaryVisits=if($count -eq 0){0}else{20}
     $guard=Capture $x $count $meter; $captured=[long]$meter.Visits.GetValue($meter.Inputs)
     $cells=[int]$type.GetField('cells',$flags).GetValue($guard)
-    if($cells -ne 61 -or $captured -ne 61+3L*$count -or -not $current.Invoke($guard,$null)) {throw 'Event admission lost metadata or visit accounting'}
+    if($cells -ne 41 -or $captured -ne 41+$boundaryVisits+3L*$count -or -not $current.Invoke($guard,$null)) {throw 'Event admission lost metadata or visit accounting'}
     $validated=[long]$meter.Visits.GetValue($meter.Inputs)-$captured
-    if($validated -ne 69+3L*$count) {throw 'Event revalidation lost charged checks'}
+    if($validated -ne 49+$boundaryVisits+3L*$count) {throw 'Event revalidation lost charged checks'}
     if($count -eq $maximum) {
         # The actual per-pass charge is checked above. Move only this inert
         # test meter near the cap; never execute a billion visits to exhaust it.
@@ -86,12 +88,12 @@ if([long]$meter.Visits.GetValue($meter.Inputs) -ne $evaluationLimit -or
     (Reason {$meter.Action.Invoke()}) -cne 'frontier_evaluation_budget' -or
     [long]$meter.Visits.GetValue($meter.Inputs) -ne $evaluationLimit+1) {throw 'Exact cumulative visit boundary changed'}
 $meter=Meter;$elapsed=@($meter.Watch.GetType().GetFields($flags) | Where-Object {$_.Name -match '^_?elapsed$'})[0]
-$elapsed.SetValue($meter.Watch,[long]([Diagnostics.Stopwatch]::Frequency*20));$meter.Action.Invoke()
-$elapsed.SetValue($meter.Watch,[long]([Diagnostics.Stopwatch]::Frequency*20001/1000))
+$elapsed.SetValue($meter.Watch,[long]([Diagnostics.Stopwatch]::Frequency*60));$meter.Action.Invoke()
+$elapsed.SetValue($meter.Watch,[long]([Diagnostics.Stopwatch]::Frequency*60001/1000))
 if((Reason {$meter.Action.Invoke()}) -cne 'frontier_evaluation_budget') {throw 'Exact cumulative work boundary changed'}
 # Build the real split representation, then exhaust work before currentness.
 $meter=Meter;$guard=Capture (Fixture) 1 $meter
-$elapsed.SetValue($meter.Watch,[long]([Diagnostics.Stopwatch]::Frequency*21))
+$elapsed.SetValue($meter.Watch,[long]([Diagnostics.Stopwatch]::Frequency*61))
 if((Reason {$current.Invoke($guard,$null)}) -cne 'frontier_evaluation_budget') {throw 'State currentness bypassed cumulative work'}
 foreach($milliseconds in @(21000,60000,70000,180000,180001)) {
     $meter=Meter -Evaluation

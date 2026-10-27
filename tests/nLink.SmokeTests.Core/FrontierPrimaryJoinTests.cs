@@ -5,6 +5,38 @@ namespace NLink.SmokeTests;
 public sealed class FrontierPrimaryJoinTests : FileTransferOpsScriptsTestBase
 {
     [Theory]
+    [InlineData("powershell")]
+    [InlineData("pwsh")]
+    public async Task PrimaryJoin_ProgressSelectionSeparatesLegacyAndCoordinatorRows(string host)
+    {
+        if (!OperatingSystem.IsWindows()) return;
+        var root = FindRepoRoot();
+        var directory = Path.Combine(root, "artifacts", "progress-selector", host + "-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(directory);
+        var script = await File.ReadAllTextAsync(Path.Combine(root, "tests/nLink.SmokeTests.Core/Support/FrontierProgressSelection.ps1"));
+        var result = await RunPowerShellScriptTextAsync(script, [root, directory], host);
+        await File.WriteAllTextAsync(Path.Combine(directory, "result.txt"), result.Stdout + Environment.NewLine + result.Stderr);
+        Assert.True(result.ExitCode == 0, result.Stdout + result.Stderr);
+        Assert.Contains("progress-selector=18; accepted=2; rejected=16; no-authority", result.Stdout);
+    }
+
+    [Theory]
+    [InlineData("powershell")]
+    [InlineData("pwsh")]
+    public async Task PrimaryJoin_ViewAdmissionUsesInputBoundsWithoutChangingCandidateLimits(string host)
+    {
+        if (!OperatingSystem.IsWindows()) return;
+        var root = FindRepoRoot();
+        var directory = Path.Combine(root, "artifacts", "view-admission", host + "-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(directory);
+        var script = await File.ReadAllTextAsync(Path.Combine(root, "tests/nLink.SmokeTests.Core/Support/FrontierViewAdmission.ps1"));
+        var result = await RunPowerShellScriptTextAsync(script, [root], host);
+        await File.WriteAllTextAsync(Path.Combine(directory, "result.txt"), result.Stdout + Environment.NewLine + result.Stderr);
+        Assert.True(result.ExitCode == 0, result.Stdout + result.Stderr);
+        Assert.Contains("frontier-view-admission=23; native-boundary-pairs=4; candidate-cap=8192; input-cap=262144; no-authority", result.Stdout);
+    }
+
+    [Theory]
     [InlineData("pwsh")]
     [InlineData("powershell")]
     public Task PrimaryJoin_BindsOriginalRedactedDataSessionWithoutChangingPrimary(string host)

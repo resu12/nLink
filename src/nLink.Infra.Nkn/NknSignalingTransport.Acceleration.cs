@@ -41610,8 +41610,18 @@ public sealed partial class NknSignalingTransport
             retryInterruptedRuntimeUnlockAuthorityBoundary = null;
         RuntimeUnlockResponderAnswerProbeConvergenceHold?
             invalidatedResponderConvergence;
+        RuntimeUnlockTransactionSnapshot? stoppedTransaction = null;
         lock (accelerationGate)
         {
+            if ((IsUserRequestedAccelerationStopReason(normalizedReason) ||
+                 IsRemoteUserRequestedAccelerationStopReason(normalizedReason)) &&
+                runtimeUnlockTransactionState.State != RuntimeUnlockTransactionState.Idle &&
+                !runtimeUnlockTransactionState.IsTerminal &&
+                string.Equals(runtimeUnlockTransactionState.SessionId,
+                    currentSessionSecurityState.SessionId?.Value, StringComparison.Ordinal))
+            {
+                stoppedTransaction = runtimeUnlockTransactionState;
+            }
             invalidatedResponderConvergence =
                 InvalidateRuntimeUnlockResponderAnswerProbeConvergenceUnsafe(
                     $"reset_{normalizedReason}",
@@ -41728,6 +41738,7 @@ public sealed partial class NknSignalingTransport
                 "reset_acceleration");
         }
 
+        RuntimeUnlockTransactionDecision? stoppedTransactionDecision = null;
         lock (accelerationGate)
         {
             accelerationNegotiationSlotGeneration = 0;
@@ -41738,7 +41749,19 @@ public sealed partial class NknSignalingTransport
             pendingRuntimeUnlockRetryNegotiationIntent = null;
             runtimeUnlockRetryNegotiationSlotReceipt = null;
             runtimeUnlockRetryPostFallbackReceiveRecoveryDeferral = null;
+            // The explicit stop closed this exact adapter attempt. A replacement
+            // transaction must retain its own lifecycle and cannot be retired here.
+            if (stoppedTransaction is not null &&
+                ReferenceEquals(runtimeUnlockTransactionState, stoppedTransaction))
+            {
+                stoppedTransactionDecision = ApplyRuntimeUnlockTransactionUnsafe(
+                    RuntimeUnlockTransactionEventKind.Retired,
+                    stoppedTransaction.SessionId, stoppedTransaction.OfferGeneration,
+                    $"reset_{normalizedReason}",
+                    transactionGeneration: stoppedTransaction.TransactionGeneration);
+            }
         }
+        LogRuntimeUnlockTransactionDecision(RuntimeUnlockTransactionEventKind.Retired, stoppedTransactionDecision);
         ClearPendingRuntimeUnlockAccelerationNegotiation();
         Interlocked.Exchange(ref accelerationNegotiationRetryAttempts, 0);
         Interlocked.Exchange(ref helperPaidOfferPriorityDelayConsumed, 0);

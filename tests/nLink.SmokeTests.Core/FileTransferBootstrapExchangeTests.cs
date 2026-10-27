@@ -474,13 +474,14 @@ public sealed partial class FileTransferCoordinatorTests
 
     private static (FileTransferCoordinatorState Sender, FileTransferCoordinatorState Receiver) CreateCorrelatedBootstrapPair(
         string? sessionId = null, string? transferId = null, FileTransferCoordinatorState? senderSource = null,
-        Action<FileTransferCoordinatorTransitionEnvelope>? capture = null)
+        Action<FileTransferCoordinatorTransitionEnvelope>? capture = null, long providerGeneration = 0)
     {
         var regular = FileTransferRouteResolver.Resolve(FileTransferRoute.RegularNknV4Fast);
         FileTransferCoordinatorState Empty(FileTransferDirection direction) => EmptyState(regular, direction) with
         {
             SessionId = sessionId ?? "session_coordinator", TransferId = transferId ?? "transfer_coordinator",
             CurrentDataSessionIdentity = "bootstrap-data-session", CurrentDataSessionGeneration = 17,
+            CurrentDataSessionProviderGeneration = providerGeneration,
             PersistentState = new() { CoordinatorInstanceId = "bootstrap-" + direction },
         };
         var sender = senderSource ?? Empty(FileTransferDirection.Outbound);

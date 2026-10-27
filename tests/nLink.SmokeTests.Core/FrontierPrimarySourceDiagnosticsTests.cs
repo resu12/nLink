@@ -9,8 +9,8 @@ namespace NLink.SmokeTests;
 public sealed class FrontierPrimarySourceDiagnosticsTests : FileTransferOpsScriptsTestBase
 {
     [Theory]
-    [InlineData("LocalFrontierPrimarySource.cs", "3eaabbd0cf73a81ce618e1bb332de90658f8dcc1e0670168a705575c43f6d20d")]
-    [InlineData("LocalFrontierPrimaryWorker.cs", "1b6cb2b3ad8599d87c2be10b2392e5bf13d6386640a7fc38c6cfa5d3904326ce")]
+    [InlineData("LocalFrontierPrimarySource.cs", "2eeabbf919f3e143ef79bc9f8f4975b029bbfade0f74df127c64ee05acb8eb46")]
+    [InlineData("LocalFrontierPrimaryWorker.cs", "20751743d93519f62fce19af1cf06ca28c32e90506565eb813a4793195f65f25")]
     public async Task DefaultProjection_MatchesReviewedContract(string file, string expected)
     {
         var source = await File.ReadAllTextAsync(Path.Combine(FindRepoRoot(), "tools/FileTransferOps", file));
@@ -35,10 +35,13 @@ public sealed class FrontierPrimarySourceDiagnosticsTests : FileTransferOpsScrip
         var worker = Regex.Replace(Project(await File.ReadAllTextAsync(Path.Combine(root, "tools/FileTransferOps/LocalFrontierPrimaryWorker.cs")), true), @"\s+", " ");
         var source = Regex.Replace(Project(await File.ReadAllTextAsync(Path.Combine(root, "tools/FileTransferOps/LocalFrontierPrimarySource.cs")), true), @"\s+", " ");
         Assert.Contains("private bool ResourceCurrent { get { return ResourceCurrentWithin(LocalPublicationInputLimits.ProducerMilliseconds); } }", worker);
+        Assert.Contains("private const int SourceCaptureMilliseconds = 60000;", worker);
+        Assert.Contains("private bool SourceCaptureResourceCurrent { get { return attached && ResourceCurrentWithin(SourceCaptureMilliseconds); } }", worker);
+        Assert.Contains("evaluation != null && sourceEnded ? RetainedMilliseconds : attached ? SourceCaptureMilliseconds : LocalPublicationInputLimits.ProducerMilliseconds", worker);
         Assert.Contains("return PrimarySourceCheckForTest(\"resource:closed\", !closed) && PrimarySourceBudgetForTest(\"resource:budget\", work.ElapsedMilliseconds, maximumMilliseconds) && PrimarySourceCheckForTest(\"resource:base\", PrimaryMeasuredCurrentForTest(0)) && PrimarySourceCheckForTest(\"resource:scope\", PrimaryMeasuredCurrentForTest(1)) && PrimarySourceCheckForTest(\"resource:files\", PrimaryMeasuredCurrentForTest(2)) && PrimarySourceCheckForTest(\"resource:pins\", PrimaryMeasuredCurrentForTest(3));", worker);
         Assert.Contains("return PrimaryBaseCheckForTest(\"identity\", Object.ReferenceEquals(frontierOriginal, this)) && PrimaryBaseCheckForTest(\"disposed\", Volatile.Read(ref disposed) == 0) && PrimaryBaseCheckForTest(\"parent-missing\", parentExit != null) && PrimaryBaseCheckForTest(\"parent-exit\", !parentExit.WaitOne(0)) && PrimaryBaseCheckForTest(\"request-closed\", !closed.WaitOne(0));", worker);
-        Assert.Contains("if (!PrimarySourceCheckForTest(\"read:closed\", !closed) || !PrimarySourceBudgetForTest(\"read:budget\", work.ElapsedMilliseconds) || !PrimarySourceCheckForTest(\"read:base\", PrimaryMeasuredCurrentForTest(0))) throw new IOException(\"frontier_source_not_current\");", source);
-        Assert.Contains("private void CheckSource() { if (!ResourceCurrent) throw new IOException(\"frontier_source_not_current\"); }", source);
+        Assert.Contains("if (!PrimarySourceCheckForTest(\"read:closed\", !closed) || !PrimarySourceBudgetForTest(\"read:budget\", work.ElapsedMilliseconds, SourceCaptureMilliseconds) || !PrimarySourceCheckForTest(\"read:base\", PrimaryMeasuredCurrentForTest(0))) throw new IOException(\"frontier_source_not_current\");", source);
+        Assert.Contains("private void CheckSource() { if (!SourceCaptureResourceCurrent) throw new IOException(\"frontier_source_not_current\"); }", source);
         Assert.Contains("if (closed) return; closed = true; PrimarySourceCloseForTest = caller;", worker);
         Assert.Contains("catch (Exception error) { PrimarySourceExceptionForTest = error.GetType().FullName + \":\" + error.Message; Close(); throw; }", source);
         Assert.DoesNotContain("Console.", worker + source);

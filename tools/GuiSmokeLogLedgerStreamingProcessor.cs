@@ -536,7 +536,8 @@ namespace NLink.Tools
         { this.source = source; this.current = current; this.allowFinalLine = allowFinalLine; this.readBoundary = readBoundary; }
         internal string ReadLine()
         {
-            using (var bytes = new MemoryStream())
+            MemoryStream bytes = null;
+            try
             {
                 while (true)
                 {
@@ -568,10 +569,10 @@ namespace NLink.Tools
 #endif
                         if (count == 0)
                         {
-                            if (bytes.Length != 0)
+                            if (bytes != null && bytes.Length != 0)
                             {
                                 if (!allowFinalLine) throw new InvalidDataException("cursor_unterminated_line");
-                                return FinishLine(bytes);
+                                return FinishLine(bytes.GetBuffer(), 0, (int)bytes.Length);
                             }
                             return null;
                         }
@@ -581,25 +582,36 @@ namespace NLink.Tools
 #endif
                     int lf = Array.IndexOf(buffer, (byte)10, offset, count - offset);
                     int take = (lf < 0 ? count : lf) - offset;
-                    if (bytes.Length + take > 4L * GuiSmokeLedgerStreamRead.MaximumLineCodeUnits + 3)
+                    if ((bytes == null ? 0 : bytes.Length) + take > 4L * GuiSmokeLedgerStreamRead.MaximumLineCodeUnits + 3)
                         throw new InvalidDataException("stream_source_line_limit");
+                    // A complete buffered record can be decoded in place. Only
+                    // fragmented records need scratch storage; checks and byte
+                    // positions are identical on both paths.
+                    if (bytes == null && lf >= 0)
+                    {
+                        int start = offset;
+                        offset += take + 1; position += take + 1;
+                        return FinishLine(buffer, start, take);
+                    }
+                    if (bytes == null) bytes = new MemoryStream();
                     bytes.Write(buffer, offset, take); offset += take; position += take;
 #if NLINK_TEST_NATIVE_CONTENT_ACQUISITION
                     NLink.Tests.NativeContentParserProfileForTest.ReaderStage(3, sample);
 #endif
                     if (lf < 0) continue;
                     offset++; position++;
-                    return FinishLine(bytes);
+                    return FinishLine(bytes.GetBuffer(), 0, (int)bytes.Length);
                 }
             }
+            finally { if (bytes != null) bytes.Dispose(); }
         }
-        private string FinishLine(MemoryStream bytes)
+        private string FinishLine(byte[] bytes, int start, int length)
         {
 #if NLINK_TEST_NATIVE_CONTENT_ACQUISITION
             long sample = NLink.Tests.NativeContentParserProfileForTest.ReaderStart();
 #endif
             if (LineStarts.Count == GuiSmokeLedgerStreamRead.MaximumLines) throw new InvalidDataException("cursor_line_limit");
-            string line = utf8.GetString(bytes.ToArray());
+            string line = utf8.GetString(bytes, start, length);
             if (lineStart == 0 && line.Length != 0 && line[0] == '\ufeff') line = line.Substring(1);
             if (line.EndsWith("\r", StringComparison.Ordinal)) line = line.Substring(0, line.Length - 1);
             if (line.Length > GuiSmokeLedgerStreamRead.MaximumLineCodeUnits) throw new InvalidDataException("stream_source_line_limit");

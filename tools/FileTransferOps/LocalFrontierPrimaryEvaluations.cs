@@ -35,7 +35,7 @@ namespace NLink.Tools
                     {
                         if (evaluationAttempted) return null;
                         evaluationAttempted = true;
-                        if (!ResourceCurrent || !sourceEnded || context == null || full == null || compact == null ||
+                        if (!SourceCaptureResourceCurrent || !sourceEnded || context == null || full == null || compact == null ||
                             fullOrdinals == null || compactOrdinals == null || full.Length > LocalPublicationInputLimits.InputRecords ||
                             compact.Length > full.Length || fullOrdinals.Length != full.Length || compactOrdinals.Length != compact.Length) return null;
                         evaluationVisits = sourceLines.Count;
@@ -63,7 +63,7 @@ namespace NLink.Tools
             private void VisitEvaluation()
             {
                 if (++evaluationVisits > LocalPublicationInputLimits.EvaluationVisits ||
-                    work.ElapsedMilliseconds > (evaluation == null ? LocalPublicationInputLimits.ProducerMilliseconds : RetainedMilliseconds))
+                    work.ElapsedMilliseconds > (evaluation == null ? SourceCaptureMilliseconds : RetainedMilliseconds))
                     throw new InvalidOperationException("frontier_evaluation_budget");
             }
             private int[] CaptureOrigins(string[] lines, int[] ordinals, string[] snapshot)

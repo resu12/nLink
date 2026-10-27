@@ -38,21 +38,25 @@ public sealed partial class NknFileTransferTransportTests
                 TransferId = transfer, ProtocolVersion = 4, SessionRole = FileTransferProtocol.SessionRoleSender,
                 ChunkSizeBytes = 1024, InitialPipelineDepth = 8 }, ct);
             await opened.Task.WaitAsync(ct);
-            var inbound = await receiver.OpenFileTransferDataSessionAsync(session, transfer, ct);
-            // The existing Coordinator fixture authors data-session generation
-            // 17. Reach that generation through real open/dispose operations.
-            while (Assert.IsType<long>(SecurityProperty(inbound, "Generation")) < 17)
-            {
-                inbound.Dispose();
-                inbound = await receiver.OpenFileTransferDataSessionAsync(session, transfer, ct);
-            }
-            using var inboundLifetime = inbound;
+            using var inbound = await receiver.OpenFileTransferDataSessionAsync(session, transfer, ct);
+            // Provider generation identifies this real transport session; it is
+            // independent of the Coordinator fixture's logical generation 17.
+            var providerGeneration = Assert.IsType<long>(SecurityProperty(inbound, "Generation"));
+            Assert.True(providerGeneration > 0);
+            Assert.NotEqual(17L, providerGeneration);
+            Assert.Equal(session, inbound.SessionId);
+            Assert.Equal(transfer, inbound.TransferId);
             var history = new List<FileTransferCoordinatorTransitionEnvelope>();
             FileTransferCoordinatorState? committed = null;
             var tokens = FileTransferCoordinatorTests.CreateDataPathIngressRouteCycle(session, transfer,
                 FileTransferDirection.Inbound, history.Add, initializeDataSession: true,
-                captureFallbackState: state => committed = state, stopBeforeFallbackYield: true);
+                captureFallbackState: state => committed = state, stopBeforeFallbackYield: true,
+                dataSessionProviderGeneration: providerGeneration);
             var operation = committed!.PersistentState.FileTransferRouteTransition.LastTerminalOperation!.Value;
+            Assert.Equal(17L, operation.Authority.DataSessionGeneration);
+            Assert.Equal(providerGeneration, operation.Authority.DataSessionProviderGeneration);
+            Assert.Equal(session, operation.Authority.SessionId);
+            Assert.Equal(transfer, operation.Authority.TransferId);
             var disposition = operation.DispositionCommand!.Value;
             var bridge = (IFileTransferRouteTransitionBridge)receiver;
             FileTransferDataFrame frame = mode == "control"

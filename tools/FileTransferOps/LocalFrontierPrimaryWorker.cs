@@ -78,9 +78,15 @@ namespace NLink.Tools
             internal FrontierWorkerInputs(Worker owner, LocalFrontierPrimaryScope scope, Stopwatch work) { this.owner = owner; this.scope = scope; this.work = work; }
             private bool ResourceCurrent
             { get { return ResourceCurrentWithin(LocalPublicationInputLimits.ProducerMilliseconds); } }
+            // Attachment retains the producer deadline. Capture and registration
+            // share this finite allowance and the original cumulative work clock.
+            private const int SourceCaptureMilliseconds = 60000;
+            private bool SourceCaptureResourceCurrent
+            { get { return attached && ResourceCurrentWithin(SourceCaptureMilliseconds); } }
             private const int RetainedMilliseconds = 180000;
             private int RetainedMaximumMilliseconds
-            { get { return evaluation != null && sourceEnded ? RetainedMilliseconds : LocalPublicationInputLimits.ProducerMilliseconds; } }
+            { get { return evaluation != null && sourceEnded ? RetainedMilliseconds :
+                attached ? SourceCaptureMilliseconds : LocalPublicationInputLimits.ProducerMilliseconds; } }
             // Registration selects a time allowance, never resource authority.
             private bool RetainedResourceCurrent
             { get { return ResourceCurrentWithin(RetainedMaximumMilliseconds); } }

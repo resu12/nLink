@@ -87,7 +87,7 @@ public sealed partial class FileTransferCoordinatorTests
     internal static FileTransferCoordinatorTransitionEnvelope[] CreateInitialTunaSourceCallbackSnapshotFixture(bool terminal)
     {
         var envelopes = new List<FileTransferCoordinatorTransitionEnvelope>();
-        var state = CreateInitialTunaBootstrapSourceFixture(FileTransferDirection.Outbound, false, envelopes);
+        var state = CreateInitialTunaBootstrapSourceFixture(FileTransferDirection.Outbound, false, envelopes, providerGeneration: 7);
         var callback = FileTransferCoordinator.IssueFallbackBootstrapSourceCallback(state, 1, 7, false, 0)!;
         Assert.NotNull(callback);
         var admitted = FileTransferCoordinator.CreateBootstrapSourceCallbackSnapshot(state, callback, "Admitted",
@@ -108,7 +108,7 @@ public sealed partial class FileTransferCoordinatorTests
     }
 
     private static FileTransferCoordinatorState CreateInitialTunaBootstrapSourceFixture(FileTransferDirection direction, bool independentGenerations,
-        List<FileTransferCoordinatorTransitionEnvelope>? envelopes = null, bool pairedIssuers = false)
+        List<FileTransferCoordinatorTransitionEnvelope>? envelopes = null, bool pairedIssuers = false, long providerGeneration = 0)
     {
         var preparation = CreateSessionPreparationFixture(ready: true);
         var reserved = FileTransferCoordinator.ReserveSessionPreparationAdmission(preparation.State, preparation.Permit.Scope,
@@ -120,6 +120,7 @@ public sealed partial class FileTransferCoordinatorTests
         {
             PersistentState = new() { CoordinatorInstanceId = "initial-source-" + direction },
             CurrentDataSessionIdentity = "initial-source-data-session", CurrentDataSessionGeneration = 17,
+            CurrentDataSessionProviderGeneration = providerGeneration,
             LastRuntimeOwnerGeneration = independentGenerations ? 6 : 0,
             LastTransferLegGeneration = independentGenerations ? 12 : 0,
         };

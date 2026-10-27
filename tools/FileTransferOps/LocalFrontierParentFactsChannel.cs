@@ -14,6 +14,7 @@ namespace NLink.Tools
         private MemoryMappedViewAccessor view;
         private EventWaitHandle ready, cancelled;
         private byte[] header, body;
+        private readonly byte[] currentHeader = new byte[HeaderBytes];
         private readonly object sync = new object();
         private int disposed, lastState = 1;
         internal LocalFrontierParentAcknowledgmentChannel Acknowledgment;
@@ -81,7 +82,8 @@ namespace NLink.Tools
                 {
                     if (disposed != 0 || !ready.WaitOne(0) || cancelled.WaitOne(0)) return false;
                     int state = State; if (state < lastState || state > 2 || state < 1) return false; lastState = state;
-                    for (int i = 0; i < HeaderBytes; i++) if ((i < 8 || i >= 12) && view.ReadByte(i) != header[i]) return false;
+                    if (view.ReadArray(0, currentHeader, 0, HeaderBytes) != HeaderBytes) return false;
+                    for (int i = 0; i < HeaderBytes; i++) if ((i < 8 || i >= 12) && currentHeader[i] != header[i]) return false;
                     // Padding is checked at publication/open only. It is never
                     // parsed or retained as facts. Revalidating unused capacity
                     // at every nested ownership check would spend the work

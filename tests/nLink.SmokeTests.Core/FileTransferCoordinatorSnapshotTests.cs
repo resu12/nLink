@@ -306,6 +306,12 @@ public sealed class FileTransferCoordinatorSnapshotTests
             payload.Length + ((4 - payload.Length % 4) % 4),
             '=');
         var json = Encoding.UTF8.GetString(Convert.FromBase64String(payload));
+        var reference = SerializeCanonicalReference(snapshot.Envelope);
+        Assert.Equal(reference, json);
+        Assert.Equal(reference, snapshot.Envelope.ToCanonicalJson());
+        Assert.Equal(
+            Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(reference))).ToLowerInvariant(),
+            snapshot.Envelope.CalculatePayloadSha256());
         using var document = JsonDocument.Parse(json);
         Assert.Equal(
             snapshot.Envelope.TransitionId,
@@ -397,6 +403,88 @@ public sealed class FileTransferCoordinatorSnapshotTests
                 decisionReason: "test"));
 
         Assert.Contains("Rejected decision mutated state", exception.Message);
+    }
+
+    [Theory]
+    [InlineData(false, false, false)]
+    [InlineData(false, false, true)]
+    [InlineData(false, true, false)]
+    [InlineData(false, true, true)]
+    [InlineData(true, false, false)]
+    [InlineData(true, false, true)]
+    [InlineData(true, true, false)]
+    [InlineData(true, true, true)]
+    public void TransitionLocalDescriptors_PreserveFullStateFingerprintAndMutationChecks(
+        bool hiddenMutation, bool suppliedOperationsAreComplete, bool storedFingerprint)
+    {
+        var initial = EmptyState();
+        var started = FileTransferCoordinator.Apply(
+            new FileTransferCoordinatorEvent(
+                FileTransferCoordinatorEventKind.StartTransfer,
+                FileTransferRouteResolver.Resolve(FileTransferRoute.RegularNknV4Fast),
+                FileTransferTransportHandoffKind.None,
+                FileTransferTransportKind.RegularNkn,
+                "snapshot_local_descriptors",
+                FileTransferLegState.Active,
+                CanSendData: true,
+                CommittedChunkIndex: 0,
+                HighestObservedChunkIndex: -1,
+                TransportEpochId: 0,
+                BridgeRecoveryGeneration: 0),
+            initial);
+        var before = FileTransferCoordinator.CreateTransitionSnapshot(
+            initial, started, "coordinator-test").State;
+        Assert.NotNull(before.CurrentRuntimeOwner);
+        if (!storedFingerprint)
+        {
+            before = before with
+            {
+                PersistentState = before.PersistentState with { SnapshotStateFingerprint = null },
+            };
+        }
+        var after = before with
+        {
+            RuntimeUnlockFallbackSurvivalState = hiddenMutation
+                ? new(true, true, false, false, false, false, false, false, false, false, false)
+                : before.RuntimeUnlockFallbackSurvivalState,
+        };
+        Assert.NotSame(before, after);
+        // This public-internal helper freshly builds descriptors independently
+        // of the transition-local reuse path under test.
+        var freshBefore = FileTransferCoordinator.CalculateSnapshotStateFingerprint(before);
+        var freshAfter = FileTransferCoordinator.CalculateSnapshotStateFingerprint(after);
+        Assert.Equal(hiddenMutation, freshBefore != freshAfter);
+        var expectedBefore = storedFingerprint
+            ? before.PersistentState.SnapshotStateFingerprint
+            : freshBefore;
+        var result = FileTransferCoordinator.CreateTransitionSnapshot(
+            before, after, "coordinator-test", 7, "DescriptorReuse", "Accepted", "test",
+            suppliedOperationsAreComplete: suppliedOperationsAreComplete);
+        var aggregate = result.Envelope.Aggregate;
+        Assert.Equal(aggregate.BeforeBoundary, aggregate.AfterBoundary);
+        Assert.Empty(aggregate.Operations);
+        Assert.Equal(expectedBefore, aggregate.BeforeStateFingerprint);
+        Assert.Equal(hiddenMutation ? 8 : 7, aggregate.AfterStateGeneration);
+        Assert.Equal(hiddenMutation ? "Accepted" : "Idempotent", result.Envelope.DecisionStatus);
+        var expectedAfter = hiddenMutation
+            ? FileTransferCoordinator.CalculateSnapshotFingerprint(new
+            {
+                PreviousStateFingerprint = expectedBefore,
+                Boundary = aggregate.AfterBoundary,
+                Operations = ImmutableArray<FileTransferCoordinatorOperationTransitionSnapshot>.Empty,
+            })
+            : expectedBefore;
+        Assert.Equal(expectedAfter, aggregate.AfterStateFingerprint);
+        if (hiddenMutation)
+        {
+            foreach (var status in new[] { "Rejected", "Idempotent" })
+            {
+                Assert.Throws<InvalidOperationException>(() =>
+                    FileTransferCoordinator.CreateTransitionSnapshot(
+                        before, after, "coordinator-test", 7, "DescriptorReuse", status, "test",
+                        suppliedOperationsAreComplete: suppliedOperationsAreComplete));
+            }
+        }
     }
 
     [Fact]
@@ -507,6 +595,76 @@ public sealed class FileTransferCoordinatorSnapshotTests
         Assert.Equal(
             FileTransferCoordinator.CalculateSnapshotFingerprint(left),
             FileTransferCoordinator.CalculateSnapshotFingerprint(right));
+    }
+
+    [Theory]
+    [InlineData("""{"z":null,"a":[true,false,0,-1,1.2300,1e+3]}""")]
+    [InlineData("""{"z":"<>&\"\\\n","a":"\u00e9\uD83D\uDE00"}""")]
+    [InlineData("""{"z":{"y":2,"a":1},"a":[{"b":false,"a":null},[]]}""")]
+    [InlineData("""{"b":1,"a":"first","a":"second"}""")]
+    [InlineData("""[{"z":1,"a":2},null,"text",123456789012345678901234567890]""")]
+    public void CanonicalUtf8_PreservesOriginalBytesAndFingerprint(string input)
+    {
+        using var document = JsonDocument.Parse(input);
+        var value = document.RootElement;
+        var reference = SerializeCanonicalReference(value);
+        var options = new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase };
+        Assert.Equal(reference, FileTransferCoordinatorTransitionEnvelope.SerializeCanonical(value, options));
+        Assert.Equal(
+            Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(reference))).ToLowerInvariant(),
+            FileTransferCoordinator.CalculateSnapshotFingerprint(value));
+    }
+
+    [Fact]
+    public void CanonicalUtf8_RecomputesMutableInputsWithoutAuthorityCaching()
+    {
+        var value = new Dictionary<string, object> { ["source"] = "original", ["generation"] = 1 };
+        var first = FileTransferCoordinator.CalculateSnapshotFingerprint(value);
+        value["source"] = "replacement";
+        value["generation"] = 2;
+        var second = FileTransferCoordinator.CalculateSnapshotFingerprint(value);
+        Assert.NotEqual(first, second);
+        Assert.Equal(
+            Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(SerializeCanonicalReference(value)))).ToLowerInvariant(),
+            second);
+        Assert.Equal("(none)", FileTransferCoordinator.CalculateSnapshotFingerprint(null));
+    }
+
+    // Frozen pre-optimization serializer: independently guards the exact bytes
+    // consumed by existing snapshot hashes and retained evidence.
+    private static string SerializeCanonicalReference(object value)
+    {
+        var element = JsonSerializer.SerializeToElement(value, value.GetType(),
+            new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase });
+        using var stream = new MemoryStream();
+        using (var writer = new Utf8JsonWriter(stream)) Write(writer, element);
+        return Encoding.UTF8.GetString(stream.ToArray());
+
+        static void Write(Utf8JsonWriter writer, JsonElement element)
+        {
+            switch (element.ValueKind)
+            {
+                case JsonValueKind.Object:
+                    writer.WriteStartObject();
+                    foreach (var property in element.EnumerateObject().OrderBy(property => property.Name, StringComparer.Ordinal))
+                    {
+                        writer.WritePropertyName(property.Name);
+                        Write(writer, property.Value);
+                    }
+                    writer.WriteEndObject();
+                    break;
+                case JsonValueKind.Array:
+                    writer.WriteStartArray();
+                    foreach (var item in element.EnumerateArray()) Write(writer, item);
+                    writer.WriteEndArray();
+                    break;
+                case JsonValueKind.String: writer.WriteStringValue(element.GetString()); break;
+                case JsonValueKind.Number: writer.WriteRawValue(element.GetRawText(), skipInputValidation: true); break;
+                case JsonValueKind.True: writer.WriteBooleanValue(true); break;
+                case JsonValueKind.False: writer.WriteBooleanValue(false); break;
+                default: writer.WriteNullValue(); break;
+            }
+        }
     }
 
     private static FileTransferCoordinatorState EmptyState()
