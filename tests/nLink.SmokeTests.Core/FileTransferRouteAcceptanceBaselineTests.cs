@@ -9,10 +9,12 @@ public sealed class FileTransferRouteAcceptanceBaselineTests : FileTransferOpsSc
     [Fact]
     public void FakeBaseline_IsTrackedTestDataWithAllBaselineScenarios()
     {
-        var arguments = WithFakeRouteAcceptanceBaseline(FindRepoRoot(), "Run-FileTransferRouteAcceptance.ps1",
+        var repoRoot = FindRepoRoot();
+        var arguments = WithFakeRouteAcceptanceBaseline(repoRoot, "Run-FileTransferRouteAcceptance.ps1",
             ["-MatrixMode", "phase4-ab-acceptance"], BuildFakeRouteAcceptanceEnvironment("baseline-test"));
         Assert.Equal("-BaselineManifestPath", arguments[^2]);
-        Assert.DoesNotContain(Path.DirectorySeparatorChar + "artifacts" + Path.DirectorySeparatorChar, arguments[^1]);
+        Assert.Equal(Path.Combine("tests", "nLink.SmokeTests.Core", "Fixtures", "route-acceptance-baseline.json"),
+            Path.GetRelativePath(repoRoot, arguments[^1]));
         using var manifest = JsonDocument.Parse(File.ReadAllText(arguments[^1]));
         Assert.Equal("synthetic-test-fixture", manifest.RootElement.GetProperty("source").GetString());
         var scenarios = manifest.RootElement.GetProperty("scenarios").EnumerateArray()

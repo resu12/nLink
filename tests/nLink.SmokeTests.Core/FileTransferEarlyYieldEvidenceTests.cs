@@ -14,7 +14,7 @@ public sealed class FileTransferEarlyYieldEvidenceTests : FileTransferOpsScripts
     {
         if (!OperatingSystem.IsWindows()) return;
         var repo = FindRepoRoot();
-        var root = Path.Combine(repo, "artifacts", "early-yield-evidence-20260930", host);
+        var root = Path.Combine(repo, "artifacts", "early-yield-evidence-20260930", Guid.NewGuid().ToString("N"), host);
         Directory.CreateDirectory(root);
         foreach (var direction in new[] { FileTransferDirection.Outbound, FileTransferDirection.Inbound })
         {
@@ -72,7 +72,7 @@ public sealed class FileTransferEarlyYieldEvidenceTests : FileTransferOpsScripts
     {
         if (!OperatingSystem.IsWindows()) return;
         var repo = FindRepoRoot();
-        var root = Path.Combine(repo, "artifacts", "early-yield-evidence-20260930", host, direction.ToString());
+        var root = Path.Combine(repo, "artifacts", "early-yield-evidence-20260930", Guid.NewGuid().ToString("N"), host, direction.ToString());
         Directory.CreateDirectory(root);
         var envelopes = FileTransferCoordinatorTests.CreateEarlyCheckpointClearProofSnapshotFixture(direction)
             .Select(SessionFileTransferService.CreateCoordinatorSnapshotEvidenceForTesting);
