@@ -98,7 +98,7 @@ public sealed class HelpeePageViewModelLifecycleTests : CoreSmokeTestsBase
 
     [Trait("Category", "Smoke")]
     [Fact]
-    public void HelpeePageViewModel_EndSession_ReturnsToWaitingScreenImmediately()
+    public async Task HelpeePageViewModel_EndSession_ReturnsToWaitingScreenImmediately()
     {
         var transportConfig = CreateDevLocalTestConfig();
         using var helpeeRuntime = new SessionRuntime(() => new DevLocalTransport());
@@ -107,62 +107,77 @@ public sealed class HelpeePageViewModelLifecycleTests : CoreSmokeTestsBase
             transportConfig,
             helpeeRuntime);
 
-        SetPrivateField(helpee, "connectionState", "Connected");
-        SetPrivateField(helpee, "wasConnected", true);
-        SetPrivateField(helpee, "effectivePhase", SessionUiPhase.Connected);
-        SetPrivateField(helpee, "isChatInputEnabled", true);
-        SetPrivateField(helpeeRuntime, "state", SessionRuntimeState.Connected);
-        SetPrivateField(helpeeRuntime, "transportState", TransportState.Connected);
-        SetPrivateField(
-            helpeeRuntime,
-            "currentFlowSnapshot",
-            helpeeRuntime.FlowSnapshot with
-            {
-                Phase = SessionFlowPhase.ActiveSession,
-                UiPhase = SessionUiPhase.Connected,
-                Role = SessionRuntimeRole.Helpee,
-                RuntimeState = SessionRuntimeState.Connected,
-                TransportState = TransportState.Connected,
-                ApprovalActive = true,
-                DisplayStatusText = "Connected",
-                DisplayConnectionState = "Connected",
-            });
-        InvokePrivateMethod(helpee, "UpdateUiFromSnapshot");
-        Assert.True(helpee.CanEndSession);
-        Assert.True(helpee.EndSessionCommand.CanExecute(null));
+        await WaitUntilAsync(
+            () => helpeeRuntime.State == SessionRuntimeState.Waiting && helpeeRuntime.CurrentLocalPeerAddress is not null,
+            TimeSpan.FromSeconds(3));
 
-        helpee.EndSessionCommand.Execute(null);
+        // Observe the immediate UI before disconnect or listener restart can advance it.
+        var gate = (SemaphoreSlim)GetPrivateField(helpeeRuntime, "lifecycleGate")!;
+        using var gateTimeout = new CancellationTokenSource(TimeSpan.FromSeconds(3));
+        await gate.WaitAsync(gateTimeout.Token);
+        try
+        {
+            SetPrivateField(helpee, "connectionState", "Connected");
+            SetPrivateField(helpee, "wasConnected", true);
+            SetPrivateField(helpee, "effectivePhase", SessionUiPhase.Connected);
+            SetPrivateField(helpee, "isChatInputEnabled", true);
+            SetPrivateField(helpeeRuntime, "state", SessionRuntimeState.Connected);
+            SetPrivateField(helpeeRuntime, "transportState", TransportState.Connected);
+            SetPrivateField(
+                helpeeRuntime,
+                "currentFlowSnapshot",
+                helpeeRuntime.FlowSnapshot with
+                {
+                    Phase = SessionFlowPhase.ActiveSession,
+                    UiPhase = SessionUiPhase.Connected,
+                    Role = SessionRuntimeRole.Helpee,
+                    RuntimeState = SessionRuntimeState.Connected,
+                    TransportState = TransportState.Connected,
+                    ApprovalActive = true,
+                    DisplayStatusText = "Connected",
+                    DisplayConnectionState = "Connected",
+                });
+            InvokePrivateMethod(helpee, "UpdateUiFromSnapshot");
+            Assert.True(helpee.CanEndSession);
+            Assert.True(helpee.EndSessionCommand.CanExecute(null));
 
-        Assert.False(helpee.IsConnectedView);
-        Assert.True(helpee.ShowWaitingPanel);
-        Assert.False(helpee.ShowConnectedPanel);
+            helpee.EndSessionCommand.Execute(null);
 
-        Assert.Contains(helpee.EffectivePhase, new[] { SessionUiPhase.Waiting, SessionUiPhase.Idle });
-        Assert.False(helpee.IsConnectedView);
-        Assert.True(helpee.ShowWaitingPanel);
-        Assert.False(helpee.IsChatInputEnabled);
-        Assert.False(helpee.CanEndSession);
+            Assert.False(helpee.IsConnectedView);
+            Assert.True(helpee.ShowWaitingPanel);
+            Assert.False(helpee.ShowConnectedPanel);
 
-        SetPrivateField(helpee, "localEndCommandInFlight", false);
-        SetPrivateField(
-            helpeeRuntime,
-            "currentFlowSnapshot",
-            helpeeRuntime.FlowSnapshot with
-            {
-                Phase = SessionFlowPhase.ActiveSession,
-                UiPhase = SessionUiPhase.Connected,
-                RuntimeState = SessionRuntimeState.Connected,
-                TransportState = TransportState.Connected,
-                ApprovalActive = true,
-                ShouldSuppressConnectedControls = false,
-                DisplayStatusText = "Connected",
-                DisplayConnectionState = "Connected",
-            });
+            Assert.Contains(helpee.EffectivePhase, new[] { SessionUiPhase.Waiting, SessionUiPhase.Idle });
+            Assert.False(helpee.IsConnectedView);
+            Assert.True(helpee.ShowWaitingPanel);
+            Assert.False(helpee.IsChatInputEnabled);
+            Assert.False(helpee.CanEndSession);
 
-        InvokePrivateMethod(helpee, "UpdateUiFromSnapshot");
+            SetPrivateField(helpee, "localEndCommandInFlight", false);
+            SetPrivateField(
+                helpeeRuntime,
+                "currentFlowSnapshot",
+                helpeeRuntime.FlowSnapshot with
+                {
+                    Phase = SessionFlowPhase.ActiveSession,
+                    UiPhase = SessionUiPhase.Connected,
+                    RuntimeState = SessionRuntimeState.Connected,
+                    TransportState = TransportState.Connected,
+                    ApprovalActive = true,
+                    ShouldSuppressConnectedControls = false,
+                    DisplayStatusText = "Connected",
+                    DisplayConnectionState = "Connected",
+                });
 
-        Assert.False(helpee.CanEndSession);
-        Assert.False(helpee.EndSessionCommand.CanExecute(null));
+            InvokePrivateMethod(helpee, "UpdateUiFromSnapshot");
+
+            Assert.False(helpee.CanEndSession);
+            Assert.False(helpee.EndSessionCommand.CanExecute(null));
+        }
+        finally
+        {
+            gate.Release();
+        }
     }
 
     [Trait("Category", "Smoke")]
