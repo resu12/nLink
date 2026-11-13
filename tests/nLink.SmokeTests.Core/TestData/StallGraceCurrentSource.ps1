@@ -35,6 +35,94 @@ function Reject([object[]]$Events,[string]$Label){
     if(-not (Gui $Events).Unresolved){throw "$Label GUI recovered or excluded"}
     if((Retained $Events) -cne '1/1/0/1'){throw "$Label retained did not stay unresolved"}
 }
+function CrossEpochFixture {
+    # Reuse the complete repair chain, but leave the predecessor in epoch 2
+    # while a new fallback publication owns epoch 4 (the scenario-6 shape).
+    $events=@(Fixture)
+    foreach($event in $events){
+        $current=[long]$event.Fields.log_writer_sequence -ge 14165
+        if($event.Fields.ContainsKey('live_route_epoch')){$event.Fields.live_route_epoch=if($current){'4'}else{'2'}}
+        foreach($name in @('runtime_generation','leg_generation','route_publication_generation','fallback_leg_generation')){
+            if($event.Fields.ContainsKey($name)){$event.Fields[$name]=if($current){'5'}else{'3'}}
+        }
+        foreach($name in @('bridge_recovery_generation','fallback_bridge_recovery_generation')){
+            if($event.Fields.ContainsKey($name)){$event.Fields[$name]='1'}
+        }
+        if($current){foreach($name in @('highest_received_chunk_index','durable_received_highest_chunk_index')){
+            if($event.Fields.ContainsKey($name)){$event.Fields[$name]='4448'}
+        }}
+    }
+    $wake=At $events '14842';$recheck=At $events '15184';$sent=At $events '15205'
+    foreach($name in @('wake_generation','stall_started_utc','wake_deadline_utc')){$recheck.Fields[$name]=$wake.Fields[$name]}
+    $recheck.Fields.decision_status='dispatched';$recheck.Fields.decision_reason='exact_receiver_request_dispatched'
+    $recheck.Fields.log_writer_sequence='15206'
+    $recheck.Fields.log_writer_attempt_utc_ticks=[string]([long]$sent.Fields.log_writer_attempt_utc_ticks+1)
+    $sent.Fields.reason='frontier_stall_grace_elapsed'
+    $tuna=At @(Fixture) '14165'
+    $tuna.EventName='filetransfer_route_selected';$tuna.Fields.event=$tuna.EventName
+    $tuna.Fields.log_writer_sequence='14164';$tuna.Fields.live_route_epoch='3'
+    $tuna.Fields.route='file_tuna_v4';$tuna.Fields.protocol_version='4'
+    $disposition=At @(Fixture) '14165'
+    $disposition.EventName='filetransfer_route_transition_disposition_applied';$disposition.Fields.event=$disposition.EventName
+    foreach($name in @('runtime_generation','leg_generation','route_publication_generation')){$disposition.Fields[$name]='5'}
+    $disposition.Fields.log_writer_sequence='14841'
+    $disposition.Fields.log_writer_attempt_utc_ticks=[string]([long]$wake.Fields.log_writer_attempt_utc_ticks-1)
+    $disposition.Fields.transition_kind='TunaV4ToPostTunaFallbackV6';$disposition.Fields.proof_boundary_kind='fallback_peer_proof'
+    $disposition.Fields.activation_authority_mode='none';$disposition.Fields.data_session_identity='(none)'
+    $disposition.Fields.decision_status='Applied';$disposition.Fields.decision_reason='filetransfer_route_transition_committed'
+    $position=0
+    foreach($event in (@($events)+@($tuna,$disposition) | Sort-Object {[long]$_.Fields.log_writer_sequence})){
+        $event.Sequence=++$position;$event.LineNumber=$position
+        $event
+    }
+}
+$crossEpoch=@(CrossEpochFixture)
+$crossEpochProof=Closure $crossEpoch
+if($null -eq $crossEpochProof.RecoveryEvent -or $crossEpochProof.RecoveryEvent.Fields.log_writer_sequence -cne '15454'){
+    throw 'Previous route epoch hid the independently published current-source repair'
+}
+foreach($width in @(1,8,16)){
+    $script:FileTransferFallbackFrontierGracePartitionWidth=$width
+    if((Retained $crossEpoch) -cne '1/1/1/0' -or (Gui $crossEpoch).Unresolved){throw "cross-epoch width $width differs"}
+}
+$script:FileTransferFallbackFrontierGracePartitionWidth=1
+foreach($missing in @('15175','15194','15203','15205','15206','15443','15444','15447','15454')){
+    Reject @(CrossEpochFixture | Where-Object {$_.Fields.log_writer_sequence -cne $missing}) "cross-epoch missing $missing"
+}
+Reject @(CrossEpochFixture | Where-Object {$_.Fields.log_writer_sequence -notin @('14165','14622')}) 'cross-epoch missing publication'
+foreach($mutation in @(
+    @('14165','route_publication_generation','6'),@('14165','coordinator_decision_reason','rejected'),
+    @('14165','publication_evidence_version','1'),@('14842','publication_evidence_version','1'),
+    @('14841','data_session_identity','other'),@('14841','activation_authority_mode','active'),
+    @('14841','decision_status','Rejected'),@('14841','proof_boundary_kind','tuna_activation'),@('14841','data_session_generation','2'),
+    @('15175','live_route_epoch','2'),@('15194','accepted_any','0'),@('15194','peer_visible_any','0'),
+    @('15194','request_correlation_id','other'),@('15203','dispatch_observed','0'),
+    @('15206','wake_generation','999'),@('15206','data_session_identity','other'),
+    @('15206','decision_status','stale'),@('15206','wake_deadline_utc','2026-09-06T04:33:09Z'),
+    @('15443','settlement_outcome','Superseded'),@('15444','runtime_generation','3'),
+    @('15447','decision_status','Rejected'),@('15454','transfer_paused','1'))){
+    $events=@(CrossEpochFixture);(At $events $mutation[0]).Fields[$mutation[1]]=$mutation[2]
+    # Both observations describe the new publication; do not leave a second
+    # valid observation that can independently admit the source.
+    if($mutation[0] -ceq '14165'){(At $events '14622').Fields[$mutation[1]]=$mutation[2]}
+    Reject $events ("cross-epoch " + ($mutation -join ':'))
+}
+$events=@(CrossEpochFixture);$late=At $events '14841';$wake=At $events '14842'
+$late.Sequence=[long]$wake.Sequence+1;$late.Fields.log_writer_sequence='14843'
+$late.Fields.log_writer_attempt_utc_ticks=[string]([long]$wake.Fields.log_writer_attempt_utc_ticks+1)
+Reject $events 'cross-epoch disposition after the wake'
+foreach($reuse in @('authority_id','repair_generation')){
+    $events=@(CrossEpochFixture);$old=(At $events '13579').Fields[$reuse];$current=(At $events '15175').Fields.authority_id
+    foreach($event in $events){if($event.Fields['authority_id'] -ceq $current){$event.Fields[$reuse]=$old}}
+    Reject $events "cross-epoch retired $reuse reused"
+}
+$events=@(CrossEpochFixture);$conflict=At @(CrossEpochFixture) '14165';$conflict.Fields.target_transport='Tuna'
+Reject (@($events)+@($conflict)) 'cross-epoch conflicting publication'
+$events=@(CrossEpochFixture);$conflict=At @(CrossEpochFixture) '15206';$conflict.Fields.decision_status='stale'
+Reject (@($events)+@($conflict)) 'cross-epoch conflicting recheck'
+$duplicates=@($crossEpoch)+@((At $crossEpoch '14165'),(At $crossEpoch '15206'))
+if((Retained $duplicates) -cne '1/1/1/0' -or (Gui $duplicates).Unresolved){throw 'cross-epoch identical copies changed proof'}
+'cross-epoch-current-source-ok'
 $good=@(Fixture)
 $proof=Closure $good
 if($proof.CurrentSource.Fields.runtime_generation -cne '7' -or $proof.HistoricalProgress.Fields.runtime_generation -cne '6' -or

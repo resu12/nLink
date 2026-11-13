@@ -604,10 +604,26 @@ function Get-FileTransferStallGraceCurrentSourceRecovery {
     $result = [pscustomobject]@{ CurrentSource = $null; HistoricalProgress = $HistoricalProgress; RecoveryEvent = $null }
     $complete = $scope + @('checkpoint_generation', 'data_session_identity', 'data_session_generation')
     $identity = @('log_writer_id', 'session_id', 'transfer_id')
+    $key = '{0}|{1}|{2}' -f $Candidate.Fields['log_writer_id'], $Candidate.Fields['session_id'], $Candidate.Fields['transfer_id']
+    if (-not $Index.ContainsKey($key)) { return $result }
+    $events = $Index[$key]
+    $publishedAdmission = $null
+    if ((Number $HistoricalProgress 'live_route_epoch') -gt 0 -and
+        (Number $Candidate 'live_route_epoch') -gt (Number $HistoricalProgress 'live_route_epoch')) {
+        # A prior fallback cycle may have reached this same frontier. It is not
+        # the source of the new wake: require independent current publication
+        # evidence instead of relaxing the same-epoch handoff's generation joins.
+        $publishedIndex = New-FileTransferStallGracePublishedSourceIndex -Events $events `
+            -SnapshotEvidence $Index['__CheckpointRepairContinuitySnapshotEvidence']
+        $publishedIndex.Conflicts = $Index['__conflicts']
+        $publishedAdmission = Get-FileTransferStallGracePublishedSourceAdmission -Index $publishedIndex -Candidate $Candidate
+        if ($null -eq $publishedAdmission -or -not $publishedAdmission.Admitted) { return $result }
+    }
     $stable = @('direction', 'route', 'protocol_version', 'live_route_epoch', 'terminal_generation',
         'transport_epoch', 'bridge_decision_generation', 'checkpoint_request_id', 'route_commit_generation')
     if (-not (Equal $Candidate $Candidate ($complete + $identity)) -or
-        -not (Equal $Candidate $HistoricalProgress ($stable + $identity)) -or
+        -not (Equal $Candidate $HistoricalProgress $identity) -or
+        ($null -eq $publishedAdmission -and -not (Equal $Candidate $HistoricalProgress $stable)) -or
         (Field $Candidate 'event') -cne 'filetransfer_v6_frontier_request_deferred' -or
         (Field $Candidate 'authority_effect') -cne 'none' -or (Number $Candidate 'elapsed_ms') -ne 0 -or
         (Number $Candidate 'wake_generation') -le 0 -or (Number $Candidate 'frontier_chunk_index') -lt 0 -or
@@ -616,22 +632,22 @@ function Get-FileTransferStallGraceCurrentSourceRecovery {
         (Field $Candidate 'data_session_identity') -in @('', '(none)', 'none') -or
         (Number $Candidate 'frontier_chunk_index') -ne (Number $HistoricalProgress 'current_frontier_chunk_index') -or
         (Number $Candidate 'highest_received_chunk_index') -lt ((Number $Candidate 'frontier_chunk_index') - 1)) { return $result }
-    foreach ($name in @('runtime_generation', 'leg_generation', 'route_publication_generation', 'bridge_recovery_generation')) {
-        if ((Number $HistoricalProgress $name) -lt 0 -or
-            (Number $Candidate $name) -ne ((Number $HistoricalProgress $name) + 1)) { return $result }
+    if ($null -eq $publishedAdmission) {
+        foreach ($name in @('runtime_generation', 'leg_generation', 'route_publication_generation', 'bridge_recovery_generation')) {
+            if ((Number $HistoricalProgress $name) -lt 0 -or
+                (Number $Candidate $name) -ne ((Number $HistoricalProgress $name) + 1)) { return $result }
+        }
     }
     $start = [DateTimeOffset]::MinValue; $deadline = [DateTimeOffset]::MinValue
     if (-not [DateTimeOffset]::TryParse((Field $Candidate 'stall_started_utc'), [ref]$start) -or
         -not [DateTimeOffset]::TryParse((Field $Candidate 'wake_deadline_utc'), [ref]$deadline) -or
         (Number $Candidate 'stall_grace_ms') -ne 750 -or $deadline.UtcTicks -ne ($start.UtcTicks + 7500000L)) { return $result }
 
-    $key = '{0}|{1}|{2}' -f $Candidate.Fields['log_writer_id'], $Candidate.Fields['session_id'], $Candidate.Fields['transfer_id']
-    if (-not $Index.ContainsKey($key)) { return $result }
-    $events = $Index[$key]
+    $sourceStart = if ($null -ne $publishedAdmission) { $publishedAdmission.Source } else { $HistoricalProgress }
     $low = 0; $high = $events.Count
     while ($low -lt $high) {
         $mid = $low + [int][Math]::Floor(($high - $low) / 2)
-        if ([long]$events[$mid].Sequence -lt [long]$HistoricalProgress.Sequence) { $low = $mid + 1 } else { $high = $mid }
+        if ([long]$events[$mid].Sequence -lt [long]$sourceStart.Sequence) { $low = $mid + 1 } else { $high = $mid }
     }
     $rows = [Collections.Generic.List[object]]::new(); $buckets = @{}
     # Stop at the first advancing published state. A failed proof cannot borrow
@@ -666,11 +682,13 @@ function Get-FileTransferStallGraceCurrentSourceRecovery {
             (Field $publication 'coordinator_decision_reason') -cne 'accepted') { return $result }
     }
     $publication = $publications[0] # All observations above prove the same exact publication.
-    $historicalStates = @(Named 'filetransfer_v6_fallback_frontier_repair_progress_state_forced' | Where-Object {
-        (Before $_) -and (Equal $_ $HistoricalProgress ($scope + @('authority_id', 'repair_generation', 'repair_request_key', 'range_fingerprint'))) -and
-        (Equal $_ $Candidate @('data_session_identity', 'data_session_generation'))
-    })
-    if ($historicalStates.Count -ne 1) { return $result }
+    if ($null -eq $publishedAdmission) {
+        $historicalStates = @(Named 'filetransfer_v6_fallback_frontier_repair_progress_state_forced' | Where-Object {
+            (Before $_) -and (Equal $_ $HistoricalProgress ($scope + @('authority_id', 'repair_generation', 'repair_request_key', 'range_fingerprint'))) -and
+            (Equal $_ $Candidate @('data_session_identity', 'data_session_generation'))
+        })
+        if ($historicalStates.Count -ne 1) { return $result }
+    }
     $currentStates = @(Named 'filetransfer_v6_receiver_state_sent' | Where-Object {
         [long]$_.Sequence -gt [long]$publication.Sequence -and (Before $_)
     })
@@ -681,6 +699,8 @@ function Get-FileTransferStallGraceCurrentSourceRecovery {
             (Field $state 'transport_epoch') -cne (Field $Candidate 'transport_epoch') -or
             (Field $state 'transfer_paused') -cne '0' -or (Number $state 'epoch') -le 0) { return $result }
     }
+    if ($null -ne $publishedAdmission -and $null -eq (Get-FileTransferStallGraceDispatchedProgressClosure `
+            -Events $rows.ToArray() -Episode $publishedAdmission.Episode -DiagnosticDispatchEvidenceOnly)) { return $result }
     $result.CurrentSource = $Candidate
     $grants = @(Named 'filetransfer_fallback_frontier_repair_authority_granted' | Where-Object {
         (After $_) -and (Number $_ 'frontier_chunk_index') -eq (Number $Candidate 'frontier_chunk_index')
@@ -762,6 +782,15 @@ function Get-FileTransferStallGraceCurrentSourceRecovery {
             if ($event.Fields.ContainsKey($name) -and (Field $event $name) -cne (Field $expected $name)) { return $result }
         }
         foreach ($name in @('data_session_identity', 'data_session_generation')) {
+            # Before this independently bound wake, the fallback disposition's
+            # identity is an absent activation proof, not a data-session change.
+            if ($null -ne $publishedAdmission -and (Before $event) -and $name -ceq 'data_session_identity' -and
+                (Field $event 'event') -ceq 'filetransfer_route_transition_disposition_applied' -and
+                (Field $event 'transition_kind') -ceq 'TunaV4ToPostTunaFallbackV6' -and
+                (Field $event 'proof_boundary_kind') -ceq 'fallback_peer_proof' -and
+                (Field $event 'activation_authority_mode') -ceq 'none' -and (Field $event $name) -ceq '(none)' -and
+                (Field $event 'decision_status') -ceq 'Applied' -and
+                (Field $event 'decision_reason') -ceq 'filetransfer_route_transition_committed') { continue }
             if ($event.Fields.ContainsKey($name) -and (Field $event $name) -cne (Field $Candidate $name)) { return $result }
         }
         if ([long]$event.Sequence -ge [long]$Candidate.Sequence -and $event.Fields.ContainsKey('checkpoint_generation') -and

@@ -163,9 +163,10 @@ internal static class TunaStatusPresentationMapper
             return reason;
         }
 
-        // This preflight observation can outlive listener startup. Current local
+        // These pre-start observations can outlive listener startup. Current local
         // progress may update presentation, never transport/route authority.
-        if (reason == "preflight_listener_unavailable" && sessionUnlockOn && IsLocalPayerRuntimeStatus(runtime))
+        if (reason is "preflight_listener_unavailable" or "session_security_state_not_eligible" &&
+            sessionUnlockOn && IsLocalPayerRuntimeStatus(runtime))
         {
             return runtime;
         }

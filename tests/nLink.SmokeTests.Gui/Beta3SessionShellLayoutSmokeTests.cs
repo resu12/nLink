@@ -322,6 +322,64 @@ public sealed class Beta3SessionShellLayoutSmokeTests : Beta3DefaultUiSmokeTestB
     }
 
     [Theory]
+    [InlineData("Helper")]
+    [InlineData("Helpee")]
+    [Trait("Category", "Smoke")]
+    public async Task SessionHeader_TunaListenerProgressRefreshesTipsAndPulse_OverPreSessionIneligibility(string role)
+    {
+        await fixture.Session.Dispatch(async () =>
+        {
+            EnsureAppServices();
+            var header = new SessionHeaderView
+            {
+                RoleText = role,
+                TunaStatusReason = "session_security_state_not_eligible",
+            };
+            var window = new Window { Content = header };
+            window.Show();
+            try
+            {
+                await FlushUiAsync();
+                var timer = Assert.IsType<DispatcherTimer>(typeof(SessionHeaderView)
+                    .GetField("tunaPulseTimer", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(header));
+                var fish = Assert.Single(header.GetVisualDescendants().OfType<Viewbox>());
+
+                InvokePrivate(header, "ApplyTunaUnlockToggleState", true, true, true, "", "waiting_for_approved_session");
+                Assert.Equal("Tuna is unavailable. Regular NKN is being used.", header.TunaPictogramTip);
+                Assert.False(timer.IsEnabled);
+
+                foreach (var status in new[] { "listener_starting", "listener_paths_starting", "provider_paths_ready", "waiting_for_peer_dial" })
+                {
+                    InvokePrivate(header, "ApplyTunaUnlockToggleState", true, true, true, "", status);
+                    var expected = TunaStatusPresentationMapper.FromState(false, null, status, true).Text;
+                    Assert.Equal(expected + " This computer is paying as the Tuna listener.", header.TunaPictogramTip);
+                    Assert.Equal(expected, header.TunaUnlockTip);
+                    Assert.Equal(header.TunaPictogramTip, ToolTip.GetTip(fish));
+                    Assert.True(timer.IsEnabled);
+                    Assert.True(header.TunaGlowOpacity > 0d);
+                    SetPrivateField(header, "tunaPulseStartedUtc", DateTime.UtcNow.AddMilliseconds(-350));
+                    InvokePrivate(header, "OnTunaPulseTimerTick", null, EventArgs.Empty);
+                    Assert.NotEqual(1d, header.TunaPulseScale);
+                    Assert.False(header.TunaActive);
+                    Assert.Equal("session_security_state_not_eligible", header.TunaStatusReason);
+                }
+
+                header.TunaActive = true;
+                Assert.Contains("active", header.TunaPictogramTip);
+                Assert.False(timer.IsEnabled);
+                Assert.Equal(1d, header.TunaPulseScale);
+            }
+            finally
+            {
+                InvokePrivate(header, "StopTunaPulse");
+                window.Close();
+            }
+
+            return true;
+        }, CancellationToken.None);
+    }
+
+    [Theory]
     [InlineData("listener_ready", true, true)]
     [InlineData("dialer_ready", true, false)]
     [InlineData("inactive", false, false)]

@@ -669,12 +669,14 @@ public void TunaStatusPresentationMapper_PassiveRouteProjectionDoesNotPulseWitho
 [InlineData("peer_connected")]
 public void TunaStatusPresentationMapper_ListenerProgressSupersedesProvisionalPreflightFailure(string runtimeStatus)
 {
-    var presentation = TunaStatusPresentationMapper.FromState(false, "preflight_listener_unavailable", runtimeStatus, true);
     var expected = TunaStatusPresentationMapper.FromState(false, null, runtimeStatus, true);
-
-    Assert.Equal(expected, presentation);
-    Assert.True(presentation.IsConnecting);
-    Assert.True(presentation.IsLocalPayer);
+    foreach (var reason in new[] { "preflight_listener_unavailable", "session_security_state_not_eligible" })
+    {
+        var presentation = TunaStatusPresentationMapper.FromState(false, reason, runtimeStatus, true);
+        Assert.Equal(expected, presentation);
+        Assert.True(presentation.IsConnecting);
+        Assert.True(presentation.IsLocalPayer);
+    }
 }
 
 [Theory]
@@ -684,6 +686,13 @@ public void TunaStatusPresentationMapper_ListenerProgressSupersedesProvisionalPr
 [InlineData("preflight_listener_unavailable", "waiting_for_approved_session", true)]
 [InlineData("preflight_listener_unavailable", "provider_paths_wait_timeout", true)]
 [InlineData("preflight_listener_unavailable", "dialer_starting", true)]
+[InlineData("session_security_state_not_eligible", "locked", false)]
+[InlineData("session_security_state_not_eligible", "off", false)]
+[InlineData("session_security_state_not_eligible", "listener_ready", false)]
+[InlineData("session_security_state_not_eligible", "waiting_for_approved_session", true)]
+[InlineData("session_security_state_not_eligible", "provider_paths_wait_timeout", true)]
+[InlineData("session_security_state_not_eligible", "dialer_starting", true)]
+[InlineData("session_security_state_not_eligible", "active", true)]
 [InlineData("header_switch_off", "listener_ready", true)]
 [InlineData("remote_header_switch_off", "listener_ready", true)]
 [InlineData("provider_paths_wait_timeout", "listener_ready", true)]
@@ -698,9 +707,12 @@ public void TunaStatusPresentationMapper_ProvisionalOverrideDoesNotOverrideStops
 [Fact]
 public void TunaStatusPresentationMapper_ActiveStateStillWinsOverProvisionalPreflightFailure()
 {
-    var presentation = TunaStatusPresentationMapper.FromState(true, "preflight_listener_unavailable", "listener_ready", true);
-    Assert.Equal("Tuna acceleration is active.", presentation.Text);
-    Assert.False(presentation.IsConnecting);
+    foreach (var reason in new[] { "preflight_listener_unavailable", "session_security_state_not_eligible" })
+    {
+        var presentation = TunaStatusPresentationMapper.FromState(true, reason, "listener_ready", true);
+        Assert.Equal("Tuna acceleration is active.", presentation.Text);
+        Assert.False(presentation.IsConnecting);
+    }
 }
 
 [Theory]
