@@ -3518,7 +3518,10 @@ public sealed partial class SessionFileTransferV4SenderTests
             ContiguousCommittedChunkIndex: 0,
             DurableHighestChunkIndex: -1,
             ChunkCount: GetPrivateProperty<int>(context, "ChunkCount"),
-            CheckpointGeneration: 1);
+            CheckpointGeneration: 1)
+        {
+            DataSessionProviderGeneration = sourceState.CurrentDataSessionProviderGeneration,
+        };
         var prepared =
             FileTransferCoordinator.PrepareFileTransferRouteTransition(
                 sourceState,

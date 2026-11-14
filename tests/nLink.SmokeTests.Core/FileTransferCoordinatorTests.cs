@@ -24800,7 +24800,7 @@ public sealed partial class FileTransferCoordinatorTests
             projectedOperation.ReceiptFingerprint);
     }
 
-    private static (
+    internal static (
         FileTransferCoordinatorState State,
         FileTransferRouteTransitionPrepareRequest Request,
         RuntimeUnlockRouteCommitProof FinalProof)
