@@ -2380,7 +2380,7 @@ function Get-FileTransferFrontierGraceTunaHandoffClosure {
             (Number $Grant 'repair_generation') -le 0 -or (Number $Grant 'frontier_chunk_index') -lt 0 -or
             (Number $Grant 'range_count') -le 0 -or (Number $Grant 'requested_chunk_count') -le 0 -or
             (Field $Grant 'source_kind') -cne 'ReceiverRequest' -or (Field $Grant 'target_transport') -cne 'regular_nkn' -or
-            (Field $Grant 'repair_request_key') -cne "fallback-frontier:$(Field $Grant 'frontier_chunk_index'):$(Field $Grant 'range_count'):$(Field $Grant 'range_fingerprint')") { return $false }
+            (Field $Grant 'repair_request_key') -cne "fallback-frontier:$(Field $Grant 'frontier_chunk_index'):$(Field $Grant 'requested_chunk_count'):$(Field $Grant 'range_fingerprint')") { return $false }
         foreach ($name in @('range_fingerprint', 'primary_protocol_repair_request_id', 'primary_request_correlation_id')) {
             if ((Field $Grant $name) -in @('', '(none)', 'none')) { return $false }
         }
@@ -2451,6 +2451,57 @@ function Get-FileTransferFrontierGraceTunaHandoffClosure {
                 ((Field $Episode.Progress 'authority_id') -notmatch '^fta2-repair_replay-.+' -or
                     (Number $Episode.Progress 'repair_generation') -le 0))) { return $null }
     }
+    $retryWake = $null
+    if ($publishedAdmission) {
+        $wakeScope = $scope + @('checkpoint_generation', 'data_session_identity', 'data_session_generation',
+            'frontier_chunk_index', 'stall_started_utc', 'authority_effect')
+        $decisions = @(Named 'filetransfer_v6_frontier_stall_grace_recheck_decided' | Where-Object {
+            (Field $_ 'frontier_chunk_index') -ceq (Field $stall 'frontier_chunk_index') -and
+            (Field $_ 'stall_started_utc') -ceq (Field $stall 'stall_started_utc')
+        } | Sort-Object Sequence)
+        if (@($decisions | Where-Object { (Field $_ 'decision_reason') -ceq 'same_frontier_retry_interval_pending' }).Count) {
+            # A retry-coalesced wake changes generation and deadline. These are
+            # no-effect observations, never substitutes for the repair/handoff below.
+            $previous = $stall
+            $versions = @{}
+            $versions[(Field $stall 'wake_generation')] = $stall
+            foreach ($decision in $decisions) {
+                if (-not (EqualFields $decision $stall $wakeScope) -or
+                    (Field $decision 'authority_effect') -cne 'none') { return $null }
+                $ticks = Number $decision 'log_writer_attempt_utc_ticks'
+                $generation = Field $decision 'wake_generation'
+                $status = Field $decision 'decision_status'
+                $reason = Field $decision 'decision_reason'
+                if ($status -ceq 'rearmed' -and $reason -cin @('highest_received_advanced', 'same_frontier_retry_interval_pending')) {
+                    if ($null -ne $retryWake -or (Number $decision 'wake_generation') -ne ((Number $previous 'wake_generation') + 1) -or
+                        $ticks -lt (Number $previous 'log_writer_attempt_utc_ticks')) { return $null }
+                    $deadline = UtcTicks $decision 'wake_deadline_utc'
+                    $priorDeadline = UtcTicks $previous 'wake_deadline_utc'
+                    if ($reason -ceq 'highest_received_advanced') {
+                        if ($deadline -ne $priorDeadline -or $ticks -ge $deadline -or
+                            (Number $decision 'highest_received_chunk_index') -le (Number $previous 'highest_received_chunk_index')) { return $null }
+                    }
+                    elseif ($deadline -le $priorDeadline -or $ticks -lt $priorDeadline -or $ticks -ge $deadline -or
+                        (Number $decision 'highest_received_chunk_index') -ne (Number $previous 'highest_received_chunk_index')) { return $null }
+                    $versions[$generation] = $decision
+                    $previous = $decision
+                    continue
+                }
+                if (-not $versions.ContainsKey($generation) -or
+                    -not (EqualFields $decision $versions[$generation] @('wake_deadline_utc', 'highest_received_chunk_index')) -or
+                    $ticks -lt (Number $versions[$generation] 'log_writer_attempt_utc_ticks')) { return $null }
+                if ($status -ceq 'stale' -and $reason -ceq 'wake_generation_replaced' -and
+                    (Number $decision 'wake_generation') -lt (Number $previous 'wake_generation')) { continue }
+                if ($generation -cne (Field $previous 'wake_generation')) { return $null }
+                if ($status -ceq 'rearmed' -and $reason -ceq 'stall_grace_deadline_pending' -and
+                    $ticks -lt (UtcTicks $previous 'wake_deadline_utc')) { continue }
+                if ($null -ne $retryWake -or $status -cne 'dispatched' -or $reason -cne 'exact_receiver_request_dispatched' -or
+                    $ticks -lt (UtcTicks $previous 'wake_deadline_utc')) { return $null }
+                $retryWake = $decision
+            }
+            if ($null -eq $retryWake) { return $null }
+        }
+    }
     $grants = @(Named 'filetransfer_fallback_frontier_repair_authority_granted' | Where-Object {
         [long]$_.Sequence -gt [long]$recheck.Sequence -and (EqualFields $_ $Episode.Progress $scope) -and
         (Field $_ 'frontier_chunk_index') -eq [string]$Episode.Frontier -and
@@ -2461,6 +2512,13 @@ function Get-FileTransferFrontierGraceTunaHandoffClosure {
         ($publishedAdmission -or (Number $_ 'repair_generation') -gt (Number $Episode.Progress 'repair_generation')) -and
         (Number $_ 'log_writer_attempt_utc_ticks') -ge (UtcTicks $stall 'wake_deadline_utc')
     })
+    $retryGrants = @($grants)
+    if ($null -ne $retryWake) {
+        $grants = @($grants | Where-Object {
+            $predecessor = Field $_ 'predecessor_authority_id'
+            @($retryGrants | Where-Object { (Field $_ 'authority_id') -ceq $predecessor }).Count -eq 0
+        })
+    }
     if ($Kind -eq 'stall' -and $grants.Count -ne 1) { return $null }
     $closures = [System.Collections.Generic.List[object]]::new()
     foreach ($grant in $grants) {
@@ -2499,7 +2557,7 @@ function Get-FileTransferFrontierGraceTunaHandoffClosure {
                 (Field $_ 'dispatch_observed') -eq '1' -and
                 (((Field $_ 'settlement_outcome') -eq 'StaleRejected' -and
                     (Field $_ 'decision_reason') -eq 'tuna_reactivation_replaced_fallback_owner') -or
-                    (-not $publishedAdmission -and (Field $_ 'settlement_outcome') -ceq 'SettledStalled'))
+                    ((-not $publishedAdmission -or $null -ne $retryWake) -and (Field $_ 'settlement_outcome') -ceq 'SettledStalled'))
             })
             if ($retirements.Count -ne 1) { break }
             $retirement = $retirements[0]
@@ -2526,7 +2584,7 @@ function Get-FileTransferFrontierGraceTunaHandoffClosure {
                     (Field $retirement 'settlement_outcome') -ceq 'SettledStalled') -and
                 ([long]$deliveries[0].Sequence -ge [long]$dispatches[0].Sequence -or
                     [long]$dispatches[0].Sequence -ge [long]$sends[0].Sequence)) { break }
-            if ($Kind -eq 'stall' -and $chainAuthorities.Count -eq 1 -and
+            if ($null -eq $retryWake -and $Kind -eq 'stall' -and $chainAuthorities.Count -eq 1 -and
                 (Field $retirement 'settlement_outcome') -ceq 'SettledStalled') {
                 # Highest-only writes replace the timer, not the frontier or deadline.
                 # Follow every captured version; stale callbacks never supply dispatch.
@@ -2587,6 +2645,7 @@ function Get-FileTransferFrontierGraceTunaHandoffClosure {
             })
             if ($successors.Count -ne 1) { break }
             $successor = $successors[0]
+            if ($null -ne $retryWake -and -not (ValidPublishedGrant $successor)) { break }
             if ([long]$successor.Sequence -le [long]$retirement.Sequence -or
                 (Number $retirement 'log_writer_attempt_utc_ticks') -lt (Number $grant 'log_writer_attempt_utc_ticks') -or
                 (Number $successor 'log_writer_attempt_utc_ticks') -lt (Number $retirement 'log_writer_attempt_utc_ticks') -or
@@ -2598,7 +2657,22 @@ function Get-FileTransferFrontierGraceTunaHandoffClosure {
         }
         if (-not $chainComplete) { continue }
         $delayedWake = $null
-        if ($publishedAdmission) {
+        if ($null -ne $retryWake) {
+            if ($chainAuthorities.Count -ne $retryGrants.Count -or
+                [long]$retryWake.Sequence -le [long]$sends[0].Sequence -or
+                [long]$retryWake.Sequence -ge [long]$retirement.Sequence -or
+                (Number $grant 'durable_received_highest_chunk_index') -ne (Number $retryWake 'highest_received_chunk_index') -or
+                (Number $grant 'log_writer_attempt_utc_ticks') -lt (UtcTicks $retryWake 'wake_deadline_utc')) { continue }
+            $priorTicks = Number $grant 'log_writer_attempt_utc_ticks'
+            $clockValid = $true
+            foreach ($entry in @($deliveries[0], $dispatches[0], $sends[0], $retryWake, $retirement)) {
+                $ticks = Number $entry 'log_writer_attempt_utc_ticks'
+                if ($ticks -lt $priorTicks) { $clockValid = $false; break }
+                $priorTicks = $ticks
+            }
+            if (-not $clockValid) { continue }
+        }
+        elseif ($publishedAdmission) {
             $wakeFields = $scope + @('checkpoint_generation', 'data_session_identity', 'data_session_generation',
                 'wake_generation', 'stall_started_utc', 'wake_deadline_utc', 'frontier_chunk_index', 'highest_received_chunk_index')
             $wakes = @(Named 'filetransfer_v6_frontier_stall_grace_recheck_decided' | Where-Object {
