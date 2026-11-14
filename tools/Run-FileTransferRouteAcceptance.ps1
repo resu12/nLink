@@ -12,6 +12,10 @@ param(
     [int]$GoodputOnlyRerunLimit = 1,
     [int]$SetupOnlyRerunLimit = 1,
     [switch]$StrictCampaignPreflight,
+    [string]$PortableSourceCommit = '',
+    [string]$PortableArchivePath = '',
+    [string]$ExpectedPortableArchiveSha256 = '',
+    [string]$ExpectedPortableExecutableSha256 = '',
     [int]$TimeoutSeconds = 900,
     [int]$ProgressTimeoutSeconds = 180,
     [int]$FallbackMaxAttempts = 2,
@@ -8541,11 +8545,69 @@ function Invoke-Phase5BridgeReadinessPreflight {
     }
 }
 
+function Assert-Phase5PinnedPortableInputs {
+    param(
+        [string]$RepoRoot, [string]$ResolvedExePath, [string]$SourceCommit,
+        [string]$ArchivePath, [string]$ArchiveSha256, [string]$ExecutableSha256
+    )
+
+    if ($SourceCommit -notmatch '^[0-9a-fA-F]{40}$' -or
+        $ArchiveSha256 -notmatch '^[0-9a-fA-F]{64}$' -or
+        $ExecutableSha256 -notmatch '^[0-9a-fA-F]{64}$' -or
+        [string]::IsNullOrWhiteSpace($ArchivePath)) { throw 'Pinned portable requires a full source commit and both artifact hashes.' }
+    & git -C $RepoRoot merge-base --is-ancestor $SourceCommit HEAD
+    if ($LASTEXITCODE -ne 0) { throw 'Pinned portable source is not an ancestor of HEAD.' }
+    $changed = @(& git -C $RepoRoot diff --name-only $SourceCommit --)
+    if ($LASTEXITCODE -ne 0) { throw 'Pinned portable source comparison failed.' }
+    $untracked = @(& git -C $RepoRoot ls-files --others --exclude-standard)
+    if ($LASTEXITCODE -ne 0) { throw 'Pinned portable untracked-input check failed.' }
+    # These validation-only files do not participate in the portable build.
+    $allowed = @('tools/FileTransferFrontierGraceHandoff.ps1',
+        'tools/Run-FileTransferRouteAcceptance.ps1',
+        'tests/nLink.SmokeTests.Core/FileTransferRecentProgressGraceHandoffTests.cs',
+        'tests/nLink.SmokeTests.Core/FileTransferPinnedPortableFreshnessTests.cs')
+    if (@($changed + $untracked | Where-Object { $_ -cnotin $allowed }).Count) {
+        throw 'Pinned portable application/build inputs changed.'
+    }
+    if ((Get-FileHash -LiteralPath $ArchivePath -Algorithm SHA256).Hash -ine $ArchiveSha256 -or
+        (Get-FileHash -LiteralPath $ResolvedExePath -Algorithm SHA256).Hash -ine $ExecutableSha256) {
+        throw 'Pinned portable artifact hash mismatch.'
+    }
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    $root = [IO.Path]::GetDirectoryName([IO.Path]::GetFullPath($ResolvedExePath))
+    $files = @(Get-ChildItem -LiteralPath $root -Recurse -File -Force)
+    if (@(Get-ChildItem -LiteralPath $root -Recurse -Force | Where-Object {
+        $_.Attributes -band [IO.FileAttributes]::ReparsePoint }).Count) { throw 'Pinned portable contains a reparse point.' }
+    $seen = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+    $archive = [IO.Compression.ZipFile]::OpenRead($ArchivePath)
+    try {
+        foreach ($entry in $archive.Entries) {
+            if ([string]::IsNullOrEmpty($entry.Name)) { continue }
+            $path = [IO.Path]::GetFullPath((Join-Path $root $entry.FullName))
+            if (-not $path.StartsWith($root + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase) -or
+                -not $seen.Add($path)) { throw 'Pinned portable archive path is invalid or duplicated.' }
+            $file = Get-Item -LiteralPath $path -ErrorAction Stop
+            if ($file.PSIsContainer -or $file.Length -ne $entry.Length) { throw 'Pinned portable member length mismatch.' }
+            $stream = $entry.Open(); $sha = [Security.Cryptography.SHA256]::Create()
+            try { $hash = [BitConverter]::ToString($sha.ComputeHash($stream)).Replace('-', '') }
+            finally { $sha.Dispose(); $stream.Dispose() }
+            if ((Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash -cne $hash) { throw 'Pinned portable member hash mismatch.' }
+        }
+        if ($seen.Count -ne $files.Count -or -not $seen.Contains([IO.Path]::GetFullPath($ResolvedExePath))) {
+            throw 'Pinned portable extracted membership mismatch.'
+        }
+    }
+    finally { $archive.Dispose() }
+    return $seen.Count
+}
+
 function Assert-Phase5RouteAcceptanceExecutableFresh {
     param(
         [Parameter(Mandatory = $true)][string]$RepoRoot,
         [Parameter(Mandatory = $true)][string]$RunRoot,
-        [Parameter(Mandatory = $true)][string]$ResolvedExePath
+        [Parameter(Mandatory = $true)][string]$ResolvedExePath,
+        [string]$SourceCommit = '', [string]$ArchivePath = '',
+        [string]$ArchiveSha256 = '', [string]$ExecutableSha256 = ''
     )
 
     $exeItem = Get-Item -LiteralPath $ResolvedExePath -ErrorAction Stop
@@ -8608,6 +8670,14 @@ function Assert-Phase5RouteAcceptanceExecutableFresh {
     else {
         'portable_executable_older_than_git_head'
     }
+    $pinnedMemberCount = 0
+    if (@($SourceCommit, $ArchivePath, $ArchiveSha256, $ExecutableSha256 | Where-Object {
+        -not [string]::IsNullOrWhiteSpace($_) }).Count) {
+        $pinnedMemberCount = Assert-Phase5PinnedPortableInputs -RepoRoot $RepoRoot -ResolvedExePath $ResolvedExePath `
+            -SourceCommit $SourceCommit -ArchivePath $ArchivePath -ArchiveSha256 $ArchiveSha256 -ExecutableSha256 $ExecutableSha256
+        $passed = $true
+        $reason = 'pinned_portable_unchanged_application_build_inputs'
+    }
     $lines = @(
         'Phase 5 Portable Executable Freshness Preflight',
         ("passed={0}" -f ($(if ($passed) { '1' } else { '0' }))),
@@ -8630,6 +8700,10 @@ function Assert-Phase5RouteAcceptanceExecutableFresh {
         latestSourceInputUtc = $latestInputUtc.ToString('o')
         latestSourceInputPath = $latestInputPath
         freshnessBaselineUtc = $baselineUtc.ToString('o')
+        pinnedSourceCommit = $SourceCommit
+        pinnedArchiveSha256 = $ArchiveSha256
+        pinnedExecutableSha256 = $ExecutableSha256
+        pinnedMemberCount = $pinnedMemberCount
     } | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $RunRoot 'phase5-portable-freshness-preflight.json') -Encoding UTF8
 
     if (-not $passed) {
@@ -14736,7 +14810,9 @@ try {
             $resolvedWalletPath = (Resolve-Path -LiteralPath (Resolve-RouteAcceptancePath -RepoRoot $repoRoot -Path $WalletPath)).Path
             $resolvedSidecarPath = (Resolve-Path -LiteralPath (Resolve-RouteAcceptancePath -RepoRoot $repoRoot -Path $SidecarPath)).Path
             if ($acceptancePhase -eq 'phase5') {
-                Assert-Phase5RouteAcceptanceExecutableFresh -RepoRoot $repoRoot -RunRoot $runRoot -ResolvedExePath $resolvedExePath
+                Assert-Phase5RouteAcceptanceExecutableFresh -RepoRoot $repoRoot -RunRoot $runRoot -ResolvedExePath $resolvedExePath `
+                    -SourceCommit $PortableSourceCommit -ArchivePath $PortableArchivePath `
+                    -ArchiveSha256 $ExpectedPortableArchiveSha256 -ExecutableSha256 $ExpectedPortableExecutableSha256
             }
 
             $resolvedBridgeDir = Ensure-RouteAcceptancePackagedBridgeRuntime -RepoRoot $repoRoot -ResolvedExePath $resolvedExePath -ArtifactDir $runRoot -Runtime $Runtime
