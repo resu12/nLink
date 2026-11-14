@@ -38166,7 +38166,7 @@ function Invoke-FileTransferTunaHandoffFallbackCycle {
         $secondExpectedHash = Get-FileSha256Hex -Path $AutopickPath
         $secondBookmark = Get-AppLogBookmark
         $secondStartedUtc = [datetime]::UtcNow
-        $secondSw = [System.Diagnostics.Stopwatch]::StartNew()
+        $secondSw = [System.Diagnostics.Stopwatch]::new()
         $secondTransferPhase = $null
         $secondRouteLine = ''
         Write-Host "[GUI Smoke][filetransfer_tuna] Starting second transfer after live reactivation; expecting file_tuna_v4 protocol 4." -ForegroundColor DarkGray
@@ -38204,6 +38204,7 @@ function Invoke-FileTransferTunaHandoffFallbackCycle {
             }
 
             $secondSendButton = Wait-TunaGuiSecondTransferReadinessOrThrow -Window $senderWindow -Bookmark $secondBookmark -TimeoutMs ([Math]::Min(60000, $StartupTimeoutMs)) -RouteMode $RouteMode -SenderRole $expectedOutboundRole
+            $secondSw.Start()
             Click-Element $secondSendButton
 
             $secondAcceptButton = Wait-TunaGuiFileTransferAcceptOrThrow -Window $receiverWindow -Bookmark $secondBookmark -TimeoutMs $StartupTimeoutMs -RouteMode $RouteMode
