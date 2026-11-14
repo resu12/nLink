@@ -132,6 +132,7 @@ foreach ($PayerMode in @('helpee','helper','both')) {
             $diagnosticTunaReadinessObserved = $true
             $secondTransferProofOk = $false
             $secondRouteLine = ''
+            $secondSw = [System.Diagnostics.Stopwatch]::new()
             $reachedPreparation = $false
             $caught = ''
             try {
