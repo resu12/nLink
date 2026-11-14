@@ -24,10 +24,13 @@ public sealed class FileTransferPinnedPortableFreshnessTests : FileTransferOpsSc
             $scratch=Join-Path ([IO.Path]::GetTempPath()) ('nlink-pinned-portable-'+[guid]::NewGuid().ToString('N'))
             [void][IO.Directory]::CreateDirectory($scratch)
             try {
-                foreach($case in @('exact','analyzer_delta','harness_delta','test_delta','default_fresh','default_stale',
+                $caseIndex=0
+                foreach($case in @('exact','analyzer_delta','harness_delta','test_delta',
+                    'scenario7_harness_delta','scenario7_test_delta','scenario7_both','scenario7_production_delta','scenario7_wrong_archive_hash',
+                    'unrelated_harness_delta','unrelated_test_delta','default_fresh','default_stale',
                     'partial_binding','wrong_archive_hash','wrong_exe_hash','wrong_source','production_delta',
                     'build_delta','untracked_input','member_changed','member_missing','extra_member','archive_traversal','duplicate_member')){
-                    $root=Join-Path $scratch $case; [void][IO.Directory]::CreateDirectory($root)
+                    $root=Join-Path $scratch ('c'+$caseIndex++); [void][IO.Directory]::CreateDirectory($root)
                     $repo=Join-Path $root 'repo'; [void][IO.Directory]::CreateDirectory((Join-Path $repo 'src'))
                     [void][IO.Directory]::CreateDirectory((Join-Path $repo 'build'))
                     [void][IO.Directory]::CreateDirectory((Join-Path $repo 'tools'))
@@ -48,11 +51,29 @@ public sealed class FileTransferPinnedPortableFreshnessTests : FileTransferOpsSc
                     [IO.Compression.ZipFile]::CreateFromDirectory($portable,$zip)
                     $zipHash=(Get-FileHash $zip).Hash; $exeHash=(Get-FileHash $exe).Hash
                     (Get-Item $exe).LastWriteTimeUtc=[DateTime]::UtcNow.AddDays(-2)
-                    $expected=$case -in @('exact','analyzer_delta','harness_delta','test_delta','default_fresh')
+                    $expected=$case -in @('exact','analyzer_delta','harness_delta','test_delta',
+                        'scenario7_harness_delta','scenario7_test_delta','scenario7_both','default_fresh')
+                    if($case -like 'scenario7_*'){
+                        if($case -ne 'scenario7_test_delta'){
+                            [IO.File]::WriteAllText((Join-Path $repo 'tools/GuiSmoke-Windows.ps1'),'stopwatch validation')
+                        }
+                        if($case -ne 'scenario7_harness_delta'){
+                            $test=Join-Path $repo 'tests/nLink.SmokeTests.Core/FileTransferSecondTransferTimingTests.cs'
+                            [void][IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($test))
+                            [IO.File]::WriteAllText($test,'timing regression')
+                        }
+                        & git -C $repo add .
+                        & git -C $repo -c user.name=Fixture -c user.email=fixture@invalid commit -q -m timing
+                        if($LASTEXITCODE -ne 0){throw 'Fixture timing commit failed'}
+                    }
                     switch($case){
                         'analyzer_delta' {[IO.File]::WriteAllText((Join-Path $repo 'tools/FileTransferFrontierGraceHandoff.ps1'),'analyzer')}
                         'harness_delta' {[IO.File]::WriteAllText((Join-Path $repo 'tools/Run-FileTransferRouteAcceptance.ps1'),'harness')}
                         'test_delta' {$test=Join-Path $repo 'tests/nLink.SmokeTests.Core/FileTransferPinnedPortableFreshnessTests.cs';[void][IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($test));[IO.File]::WriteAllText($test,'test')}
+                        'scenario7_production_delta' {[IO.File]::WriteAllText((Join-Path $repo 'src/app.cs'),'changed')}
+                        'scenario7_wrong_archive_hash' {$zipHash='0'*64}
+                        'unrelated_harness_delta' {[IO.File]::WriteAllText((Join-Path $repo 'tools/GuiSmoke-Windows-Other.ps1'),'unrelated')}
+                        'unrelated_test_delta' {$test=Join-Path $repo 'tests/nLink.SmokeTests.Core/FileTransferSecondTransferOtherTests.cs';[void][IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($test));[IO.File]::WriteAllText($test,'unrelated')}
                         'default_fresh' {(Get-Item $exe).LastWriteTimeUtc=[DateTime]::UtcNow.AddMinutes(1)}
                         'partial_binding' {$zipHash=''}
                         'wrong_archive_hash' {$zipHash='0'*64}

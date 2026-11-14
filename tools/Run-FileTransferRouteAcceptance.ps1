@@ -8564,7 +8564,9 @@ function Assert-Phase5PinnedPortableInputs {
     # These validation-only files do not participate in the portable build.
     $allowed = @('tools/FileTransferFrontierGraceHandoff.ps1',
         'tools/Run-FileTransferRouteAcceptance.ps1',
+        'tools/GuiSmoke-Windows.ps1',
         'tests/nLink.SmokeTests.Core/FileTransferRecentProgressGraceHandoffTests.cs',
+        'tests/nLink.SmokeTests.Core/FileTransferSecondTransferTimingTests.cs',
         'tests/nLink.SmokeTests.Core/FileTransferPinnedPortableFreshnessTests.cs')
     if (@($changed + $untracked | Where-Object { $_ -cnotin $allowed }).Count) {
         throw 'Pinned portable application/build inputs changed.'
