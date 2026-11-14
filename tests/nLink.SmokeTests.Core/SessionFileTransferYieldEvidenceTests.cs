@@ -32,7 +32,13 @@ public sealed partial class SessionFileTransferV4SenderTests
             Assert.True(Call($"Record{direction}FallbackTailLocalYieldLocked", context, leg, yield, 100, 99,
                 "service_yield_evidence"));
         }
-        await WaitUntilAsync(() => GetCoordinatorFallbackTailYieldSubstate(context).CurrentOperation?.LocalProof is not null, 5000);
+        await WaitUntilAsync(() =>
+        {
+            lock (GetServiceGate(service))
+            {
+                return GetCoordinatorFallbackTailYieldSubstate(context).CurrentOperation?.LocalProof is not null;
+            }
+        }, 5000);
         var envelope = GetPrivateProperty<FileTransferCoordinatorTransitionEnvelope>(context, "LastFallbackTailYieldSnapshotEnvelope");
         var projected = SessionFileTransferService.CreateCoordinatorSnapshotEvidenceForTesting(envelope);
         var row = Assert.Single(ReadOperationalLogTail(start).Split('\n'), line =>
