@@ -38,7 +38,7 @@ public sealed class WindowsH264MediaFoundationDiagnosticTests : IClassFixture<Sc
 
     [MfDiagnosticFact]
     [Trait("Category", "MfDiagnostic")]
-    public async Task MediaFoundationH264FrameEncoder_InputBufferProbe_RunsOnceAndRecordsSelection_WhenEncodeIsAttempted()
+    public async Task MediaFoundationH264FrameEncoder_InputBufferProbe_RunsOnlyForSinkWriterFallback()
     {
         if (!OperatingSystem.IsWindows())
         {
@@ -70,6 +70,15 @@ public sealed class WindowsH264MediaFoundationDiagnosticTests : IClassFixture<Sc
             }
             catch (Exception ex) when (ex is COMException || ex is InvalidOperationException)
             {
+            }
+
+            var metricsSource = Assert.IsAssignableFrom<IWindowsH264FrameEncoderMetricsSource>(encoder);
+            if (metricsSource.GetRuntimeMetricsSnapshot().EncoderPath == "persistent_transform")
+            {
+                Assert.Equal(0, MediaFoundationH264FrameEncoder.DebugInputBufferProbeExecutionCount);
+                Assert.Equal("status=not-run", MediaFoundationH264FrameEncoder.DebugLastInputBufferProbeSummary);
+                Assert.Equal("unknown", MediaFoundationH264FrameEncoder.DebugLastInputBufferRootCause);
+                return;
             }
 
             Assert.Equal(1, MediaFoundationH264FrameEncoder.DebugInputBufferProbeExecutionCount);
@@ -164,7 +173,10 @@ public sealed class WindowsH264MediaFoundationDiagnosticTests : IClassFixture<Sc
                 }
             }
 
-            Assert.Equal(1, MediaFoundationH264FrameEncoder.DebugInputBufferProbeExecutionCount);
+            var metricsSource = Assert.IsAssignableFrom<IWindowsH264FrameEncoderMetricsSource>(encoder);
+            Assert.Equal(
+                metricsSource.GetRuntimeMetricsSnapshot().EncoderPath == "persistent_transform" ? 0 : 1,
+                MediaFoundationH264FrameEncoder.DebugInputBufferProbeExecutionCount);
         }
         finally
         {

@@ -612,6 +612,29 @@ public sealed class WindowsH264InfrastructureTests : IClassFixture<ScreenShareCo
         Assert.Equal(1, received.StreamConfig!.StreamEpoch);
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    [Trait("Category", "Smoke")]
+    public async Task WindowsH264ScreenCaptureSource_EncoderFailureOrNoOutput_DoesNotPublishFrame(bool rejectInput)
+    {
+        await using var rawSource = new FakeWindowsRawCaptureSource();
+        await using var encoder = new NoOutputWindowsH264FrameEncoder(rejectInput);
+        await using var source = new WindowsH264ScreenCaptureSource(
+            ScreenCaptureTargetSelection.PrimaryDisplay,
+            rawCaptureSourceFactory: () => rawSource,
+            encoderFactory: () => encoder);
+        var receivedCount = 0;
+        source.FrameArrived += (_, _) => Interlocked.Increment(ref receivedCount);
+
+        await source.StartAsync(CancellationToken.None);
+        rawSource.RaiseFrame(new WindowsRawCaptureFrame(new DrawingBitmap(4, 3), capturedTsUtcMs: 123));
+        await encoder.Attempted.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        await source.StopAsync().WaitAsync(TimeSpan.FromSeconds(2));
+
+        Assert.Equal(0, receivedCount);
+    }
+
     [Fact]
     [Trait("Category", "Smoke")]
     public void MediaFoundationH264FrameEncoder_OptimizedNv12Conversion_MatchesLegacyForPattern()
@@ -2011,6 +2034,30 @@ public sealed class WindowsH264InfrastructureTests : IClassFixture<ScreenShareCo
                 LastSenderContinuityLossReason: runtimeSenderContinuityLossReason,
                 LastEncodeTotalDurationMs: 0,
                 MotionIntegrityEncoderRebuildPending: RuntimeMotionIntegrityEncoderRebuildPending);
+        }
+    }
+
+    private sealed class NoOutputWindowsH264FrameEncoder(bool rejectInput) : IWindowsH264FrameEncoder
+    {
+        public bool IsSupported => true;
+
+        public TaskCompletionSource<bool> Attempted { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public ValueTask<WindowsH264EncodedFrame?> EncodeAsync(
+            WindowsRawCaptureFrame frame,
+            WindowsH264EncodeOptions options,
+            CancellationToken cancellationToken)
+        {
+            Attempted.TrySetResult(true);
+            return rejectInput
+                ? ValueTask.FromException<WindowsH264EncodedFrame?>(new COMException("synthetic input rejection"))
+                : ValueTask.FromResult<WindowsH264EncodedFrame?>(null);
+        }
+
+        public ValueTask DisposeAsync() => ValueTask.CompletedTask;
+
+        public void StartRecoveryBurst(string reason, long streamEpoch)
+        {
         }
     }
 
