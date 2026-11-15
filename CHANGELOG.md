@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.7.0 hotfix revision 1] - Unreleased
+
+### Fixed
+
+- Screen-sharing encoder startup no longer waits for the sink-writer input-buffer probe before using the persistent software transform. This addresses the observed blank Helpee preview and missing Helper display caused by a blocked probe finalization; existing encode failure handling and sink-writer fallback remain intact.
+
+### Release identity
+
+- App version remains `0.7.0`; proposed separate tag: `v0.7.0-hotfix.1`. The original `v0.7.0` release, assets and checksums remain unchanged.
+- [Hotfix review metadata](docs/releases/0.7.0-hotfix.1.md) records the existing focused validation and outstanding release gates. This entry is not a publication or final-artifact qualification claim.
+
 ## [0.7.0] - Unreleased
 
 ### Added
