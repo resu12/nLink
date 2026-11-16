@@ -4,9 +4,10 @@ namespace NLink.Core.FileTransfer;
 
 internal enum FileTransferSessionPreparationPhase { Unavailable, Eligible, Pending, Ready, AdmissionReserved, Revoked, Starting }
 internal enum FileTransferSessionPreparationStatus { Accepted, Idempotent, Rejected, Stale }
-internal enum FileTransferAccelerationRequestPurpose { Unavailable, SessionPreparation, TransferActivation }
+internal enum FileTransferAccelerationRequestPurpose { Unavailable, SessionPreparation, TransferActivation, IdleSessionReestablishment }
 internal sealed record FileTransferAccelerationRequestSelection(FileTransferAccelerationRequestPurpose Purpose,
-    string Reason, FileTransferSessionPreparationPermit? Permit = null);
+    string Reason, FileTransferSessionPreparationPermit? Permit = null,
+    string? TerminalTransferId = null, FileTransferDirection? TerminalDirection = null, long TerminalGeneration = 0);
 
 internal sealed record FileTransferSessionPreparationScope(
     Guid ServiceInstanceId, long AttachmentGeneration, long SecurityGeneration,
@@ -87,13 +88,23 @@ internal static partial class FileTransferCoordinator
         FileTransferSessionPreparationState state, string sessionId,
         FileTransferCoordinatorState? transfer, DateTimeOffset now)
     {
-        if (transfer is not null)
-            return !transfer.IsTerminal && transfer.CurrentRoutePublicationToken is { } publication &&
+        if (transfer is { IsTerminal: false })
+            return transfer.CurrentRoutePublicationToken is { } publication &&
                 publication.SessionId == sessionId && IsRoutePublicationTokenCurrent(transfer, publication, out _)
                 ? new(FileTransferAccelerationRequestPurpose.TransferActivation, "current_transfer_publication")
                 : new(FileTransferAccelerationRequestPurpose.Unavailable, "transfer_publication_unavailable");
         if (state.Scope is not { } scope || scope.SessionId != sessionId || !IsPreparationScopeCurrent(state, scope, now))
             return new(FileTransferAccelerationRequestPurpose.Unavailable, "preparation_scope_unavailable");
+        // The service selects a terminal transfer only when neither direction is active.
+        // Allow a new session handshake, not reuse of the consumed preparation or file authority.
+        if (transfer is { IsTerminal: true })
+            return transfer.SessionId == sessionId && transfer.TerminalGeneration > 0 &&
+                state.Phase == FileTransferSessionPreparationPhase.AdmissionReserved &&
+                state.Admission is { } admission && admission.Scope == scope
+                ? new(FileTransferAccelerationRequestPurpose.IdleSessionReestablishment, "idle_after_terminal_transfer",
+                    TerminalTransferId: transfer.TransferId, TerminalDirection: transfer.Direction,
+                    TerminalGeneration: transfer.TerminalGeneration)
+                : new(FileTransferAccelerationRequestPurpose.Unavailable, "terminal_transfer_not_current");
         if (state.Phase == FileTransferSessionPreparationPhase.Eligible)
             return new(FileTransferAccelerationRequestPurpose.SessionPreparation, "preparation_eligible");
         if (state.Permit is { } permit && IsSessionPreparationPermitCurrent(state, permit, now))

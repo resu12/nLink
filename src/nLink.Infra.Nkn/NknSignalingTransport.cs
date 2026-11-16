@@ -3178,14 +3178,16 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
         ControlOutboundLane lane,
         CancellationToken ct,
         bool isLowPriorityMouseMove = false,
-        bool isLowPriorityScreenShareCursorState = false)
+        bool isLowPriorityScreenShareCursorState = false,
+        IdleSessionOfferBinding? idleAnswer = null)
         => controlOutboundQueue.QueueEnvelopeAsync(
             destination,
             envelope,
             lane,
             ct,
             isLowPriorityMouseMove,
-            isLowPriorityScreenShareCursorState);
+            isLowPriorityScreenShareCursorState,
+            idleAnswer);
 
     private void FlushLowPriorityControlOutboundQueue(string reason)
         => controlOutboundQueue.FlushLowPriority(reason);

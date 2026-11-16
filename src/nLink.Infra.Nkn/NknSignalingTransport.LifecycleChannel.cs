@@ -2340,7 +2340,8 @@ public sealed partial class NknSignalingTransport
         await SendEnvelopeAsync(destination, envelope, bytes, ct).ConfigureAwait(false);
     }
 
-    private async Task SendEnvelopeAsync(string destination, Envelope envelope, byte[] bytes, CancellationToken ct)
+    private async Task<bool> SendEnvelopeAsync(string destination, Envelope envelope, byte[] bytes, CancellationToken ct,
+        IdleSessionOfferBinding? idleAnswer = null)
     {
         var logBootstrapGate = false;
         QueuedScreenShareEnvelopeMetadata? bootstrapMetadata = null;
@@ -2374,6 +2375,8 @@ public sealed partial class NknSignalingTransport
 
             try
             {
+                // Recheck after the outbound gate: queued ACKs may outlive their handshake.
+                if (idleAnswer is not null && !IsIdleSessionAcceptedAnswerCurrent(idleAnswer)) return false;
                 NknRuntimeDiagnostics.IncrementMessagesSent();
                 await client.SendAsync(destination, bytes, ct).ConfigureAwait(false);
                 RecordTunaFallbackNknControlSent(envelope.Type);
@@ -2393,6 +2396,7 @@ public sealed partial class NknSignalingTransport
             {
                 Log($"Envelope sent (type={envelope.Type}, payload_len={envelope.Payload.Length}, msg_id={envelope.MessageId})");
             }
+            return true;
         }
         catch (Exception ex)
         {
@@ -3781,7 +3785,10 @@ public sealed partial class NknSignalingTransport
         TaskCompletionSource<bool> Completion,
         CancellationToken CancellationToken,
         bool IsLowPriorityMouseMove,
-        bool IsLowPriorityScreenShareCursorState);
+        bool IsLowPriorityScreenShareCursorState)
+    {
+        public IdleSessionOfferBinding? IdleAnswer { get; init; }
+    }
 
     private sealed class JoinRequestPayload
     {

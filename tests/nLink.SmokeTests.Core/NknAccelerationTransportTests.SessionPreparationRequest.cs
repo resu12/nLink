@@ -235,9 +235,13 @@ public sealed partial class NknAccelerationTransportTests
                 FileTransferCoordinator.SelectSessionPreparationRequest(pair.State(pair.PayerService), lifecycle.Current!.SessionId,
                     state with { CurrentRoutePublicationToken = null }, DateTimeOffset.UtcNow).Purpose);
             await pair.PayerService.CancelTransferAsync("prepared-admission", "test", pair.Token);
-            Assert.Equal(FileTransferAccelerationRequestPurpose.Unavailable, Select().Purpose);
+            Assert.Equal(lateAttachment ? FileTransferAccelerationRequestPurpose.Unavailable
+                : FileTransferAccelerationRequestPurpose.IdleSessionReestablishment, Select().Purpose);
+            var closedPreparation = pair.State(pair.PayerService);
             await pair.Payer.RequestAccelerationNegotiationAsync("runtime_unlock", pair.Token);
+            await WaitPreparationRequestIdle(pair);
             Assert.Equal(0, pair.PayerLane.Starts);
+            Assert.Same(closedPreparation, pair.State(pair.PayerService));
             Assert.Null(pair.State(pair.PayerService).Permit);
         });
 

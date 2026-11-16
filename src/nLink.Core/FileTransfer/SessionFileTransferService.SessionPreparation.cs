@@ -157,11 +157,18 @@ public sealed partial class SessionFileTransferService : IFileTransferSessionPre
                 var outbound = outboundTransfer is { IsTerminal: false };
                 var inbound = inboundTransfer is { IsTerminal: false };
                 if (outbound && inbound) return; // No ambiguous transfer owner selection.
-                FileTransferCoordinatorState? active = outbound ? CreateCoordinatorStateLocked(outboundTransfer!)
+                FileTransferCoordinatorState? selectedTransfer = outbound ? CreateCoordinatorStateLocked(outboundTransfer!)
                     : inbound ? CreateCoordinatorStateLocked(inboundTransfer!) : null;
-                if (active is null && (!EnsurePreparationScopeLocked(attachment, epoch) || !IsPreparationResourceCurrentLocked())) return;
+                if (selectedTransfer is null)
+                {
+                    if (!EnsurePreparationScopeLocked(attachment, epoch) || !IsPreparationResourceCurrentLocked()) return;
+                    selectedTransfer = outboundTransfer is { State: FileTransferTransferState.Completed or FileTransferTransferState.Canceled }
+                        ? CreateCoordinatorStateLocked(outboundTransfer)
+                        : inboundTransfer is { State: FileTransferTransferState.Completed or FileTransferTransferState.Canceled }
+                            ? CreateCoordinatorStateLocked(inboundTransfer) : null;
+                }
                 result = FileTransferCoordinator.SelectSessionPreparationRequest(sessionPreparation, epoch.SessionId,
-                    active, DateTimeOffset.UtcNow);
+                    selectedTransfer, DateTimeOffset.UtcNow);
             });
             return result;
         }

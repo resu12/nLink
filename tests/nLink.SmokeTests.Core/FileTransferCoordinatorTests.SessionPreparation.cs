@@ -159,6 +159,59 @@ public sealed partial class FileTransferCoordinatorTests
     }
 
     [Theory]
+    [InlineData("current", true)]
+    [InlineData("active_without_publication", false)]
+    [InlineData("missing_terminal_generation", false)]
+    [InlineData("wrong_transfer_session", false)]
+    [InlineData("wrong_request_session", false)]
+    [InlineData("expired_approval", false)]
+    [InlineData("revoked", false)]
+    [InlineData("missing_admission", false)]
+    [InlineData("wrong_admission_scope", false)]
+    [Trait("FileTransferCoordinatorSuite", "IdleSessionReestablishment")]
+    public void SessionPreparation_TerminalTransferAllowsOnlyIdleHandshake(string mutation, bool allowed)
+    {
+        var f = CreateSessionPreparationFixture();
+        var state = FileTransferCoordinator.ReserveSessionPreparationAdmission(f.State, f.Permit.Scope,
+            "first-admission", FileTransferDirection.Outbound, f.Now).State;
+        var regular = FileTransferRouteResolver.Resolve(FileTransferRoute.RegularNknV4Fast);
+        var terminal = FileTransferCoordinator.Apply(CoordinatorEvent(
+            FileTransferCoordinatorEventKind.Terminalized, regular, reason: "completed"), StartRegular(regular).State).State;
+        terminal = mutation switch
+        {
+            "active_without_publication" => terminal with { IsTerminal = false, CurrentRoutePublicationToken = null },
+            "missing_terminal_generation" => terminal with { TerminalGeneration = 0 },
+            "wrong_transfer_session" => terminal with { SessionId = "other" },
+            _ => terminal,
+        };
+        state = mutation switch
+        {
+            "revoked" => FileTransferCoordinator.RevokeSessionPreparationScope(state, f.Permit.Scope).State,
+            "missing_admission" => state with { Admission = null },
+            "wrong_admission_scope" => state with { Admission = state.Admission! with { Scope = f.Permit.Scope with { SessionId = "other" } } },
+            _ => state,
+        };
+        var selection = FileTransferCoordinator.SelectSessionPreparationRequest(state,
+            mutation == "wrong_request_session" ? "other" : f.Permit.Scope.SessionId, terminal,
+            mutation == "expired_approval" ? f.Permit.Scope.ApprovalExpiresUtc : f.Now);
+        Assert.Equal(allowed ? FileTransferAccelerationRequestPurpose.IdleSessionReestablishment
+            : FileTransferAccelerationRequestPurpose.Unavailable, selection.Purpose);
+        if (allowed)
+        {
+            Assert.Equal(terminal.TransferId, selection.TerminalTransferId);
+            Assert.Equal(terminal.Direction, selection.TerminalDirection);
+            Assert.Equal(terminal.TerminalGeneration, selection.TerminalGeneration);
+        }
+        Assert.Null(selection.Permit);
+        Assert.False(FileTransferCoordinator.IsSessionPreparationPermitCurrent(state, f.Permit, f.Now));
+        var reopen = FileTransferCoordinator.BeginSessionPreparation(state, f.Permit.Scope, "new", 2, true,
+            f.Now.AddSeconds(60), f.Now);
+        Assert.Equal(FileTransferSessionPreparationStatus.Rejected, reopen.Status);
+        Assert.Same(state, reopen.State);
+        Assert.Null(reopen.Permit);
+    }
+
+    [Theory]
     [InlineData(true, FileTransferDirection.Outbound)]
     [InlineData(true, FileTransferDirection.Inbound)]
     [InlineData(false, FileTransferDirection.Outbound)]

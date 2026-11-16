@@ -110,6 +110,7 @@ public sealed partial class NknAccelerationTransportTests : CoreSmokeTestsBase, 
                     null,
                     null,
                     null,
+                    null,
                 ]));
             await send.WaitAsync(TimeSpan.FromSeconds(2), cts.Token);
 
@@ -38822,6 +38823,7 @@ public sealed partial class NknAccelerationTransportTests : CoreSmokeTestsBase, 
         public NknTunaListenerStartRequest? LastListenerRequest { get; private set; }
 
         public Func<NknTunaListenerStartRequest, CancellationToken, Task<bool>>? BeforeListenerReadyForTests { get; set; }
+        public Func<string, Task>? BeforeStopForTests { get; set; }
 
         public void SetCanListen(bool value)
             => Volatile.Write(ref canListen, value ? 1 : 0);
@@ -39014,14 +39016,14 @@ public sealed partial class NknAccelerationTransportTests : CoreSmokeTestsBase, 
                 ? forward(lane, envelopeBytes.AsSpan().ToArray(), ct)
                 : Task.FromResult(false);
 
-        public Task StopAsync(string reason, CancellationToken ct)
+        public async Task StopAsync(string reason, CancellationToken ct)
         {
             Interlocked.Increment(ref stopCalls);
+            if (BeforeStopForTests is { } beforeStop) await beforeStop(reason);
             Volatile.Write(ref lastStopReason, reason);
             Volatile.Write(ref available, 0);
             IsLocalPaidListenerActive = false;
             StateChanged?.Invoke(this, new AccelerationStateChangedEventArgs(false, reason));
-            return Task.CompletedTask;
         }
 
         public void Dispose()

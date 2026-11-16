@@ -41,7 +41,8 @@ public sealed partial class NknSignalingTransport
             ControlOutboundLane lane,
             CancellationToken ct,
             bool isLowPriorityMouseMove = false,
-            bool isLowPriorityScreenShareCursorState = false)
+            bool isLowPriorityScreenShareCursorState = false,
+            IdleSessionOfferBinding? idleAnswer = null)
         {
             var completion = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
             var queued = new QueuedControlEnvelope(
@@ -50,7 +51,7 @@ public sealed partial class NknSignalingTransport
                 completion,
                 ct,
                 isLowPriorityMouseMove,
-                isLowPriorityScreenShareCursorState);
+                isLowPriorityScreenShareCursorState) { IdleAnswer = idleAnswer };
             var logBootstrapScreenShareControl = TryGetStartupScreenShareControlMetadata(envelope, out var startupScreenShareMetadata);
             List<TaskCompletionSource<bool>>? droppedCompletions = null;
             var shouldStartDrainer = false;
@@ -400,13 +401,14 @@ public sealed partial class NknSignalingTransport
 
                 try
                 {
-                    await owner.SendEnvelopeAsync(queued.Destination, queued.Envelope, queued.CancellationToken).ConfigureAwait(false);
+                    var sent = await owner.SendEnvelopeAsync(queued.Destination, queued.Envelope,
+                        EnvelopeCodec.Serialize(queued.Envelope), queued.CancellationToken, queued.IdleAnswer).ConfigureAwait(false);
                     if (logBootstrapScreenShareControl)
                     {
                         LogBootstrapScreenShareControlStage("sent", queued.Envelope, startupScreenShareMetadata!, queuedResult: true);
                     }
 
-                    queued.Completion.TrySetResult(true);
+                    queued.Completion.TrySetResult(sent);
                 }
                 catch (OperationCanceledException) when (queued.CancellationToken.IsCancellationRequested)
                 {

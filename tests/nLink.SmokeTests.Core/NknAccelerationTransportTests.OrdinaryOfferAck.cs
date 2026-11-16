@@ -57,8 +57,7 @@ public sealed partial class NknAccelerationTransportTests
             const string transferId = "transfer_ordinary_offer_ack";
             _ = await host.OpenFileTransferDataSessionAsync(sessionId, transferId, cts.Token);
             _ = await helper.OpenFileTransferDataSessionAsync(sessionId, transferId, cts.Token);
-            TrackAuthorizedRegularV4RouteForTests(host, transferId);
-            TrackAuthorizedRegularV4RouteForTests(helper, transferId);
+            // Data-session observations alone must not select Coordinator-owned transfer activation.
             var hostTransaction = GetPrivateField(host, "runtimeUnlockTransactionState");
             var helperTransaction = GetPrivateField(helper, "runtimeUnlockTransactionState");
             var hostLease = GetPrivateField(host, "runtimeUnlockTunaPathLeaseState");
