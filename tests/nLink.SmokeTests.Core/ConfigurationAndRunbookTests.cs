@@ -188,7 +188,7 @@ public sealed class ConfigurationAndRunbookTests : CoreSmokeTestsBase
     [Fact]
     public void SecurityAuditReport_TreatsFileTransferAsShippedAndResolved()
     {
-        var report = File.ReadAllText(Path.Combine(FindRepoRoot(), "SECURITY_AUDIT_REPORT.md"));
+        var report = File.ReadAllText(Path.Combine(FindRepoRoot(), "docs", "security", "audit-report.md"));
         var normalizedReport = report.Replace("\r\n", "\n", StringComparison.Ordinal);
 
         Assert.Contains("NLINK-SEC-001", report, StringComparison.Ordinal);
@@ -212,7 +212,7 @@ public sealed class ConfigurationAndRunbookTests : CoreSmokeTestsBase
         var repoRoot = FindRepoRoot();
         var bridgeScript = File.ReadAllText(Path.Combine(repoRoot, "installer", "Build-BridgeBundle.ps1"));
         var readme = File.ReadAllText(Path.Combine(repoRoot, "README.md"));
-        var report = File.ReadAllText(Path.Combine(repoRoot, "SECURITY_AUDIT_REPORT.md"));
+        var report = File.ReadAllText(Path.Combine(repoRoot, "docs", "security", "audit-report.md"));
 
         Assert.Contains("ci --ignore-scripts --no-audit --no-fund", bridgeScript, StringComparison.Ordinal);
         Assert.DoesNotContain("npm install", bridgeScript, StringComparison.OrdinalIgnoreCase);

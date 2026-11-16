@@ -34,10 +34,11 @@ Start here for current repo guidance. [0.7.0 hotfix revision 1](https://github.c
 - [`docs/BetaUxGate.md`](BetaUxGate.md): UX invariants for beta/release readiness.
 - [`docs/FIRST-RUN-PERFORMANCE.md`](FIRST-RUN-PERFORMANCE.md): first-run performance expectations.
 - [`docs/SessionUxContract.md`](SessionUxContract.md): session UI contract.
+- [Security audit and app-layer contract](security/audit-report.md): retained security findings, trust boundaries and dependency review; not a new audit of the latest build.
 
 ## Historical And Experimental References
 
 - `docs/releases/**`: published release records plus explicitly marked candidate drafts. Old release notes are not current operating instructions.
-- Dated file-transfer RCA, result, review, and contract documents are retained as evidence and decision history. They do not automatically describe current code or impose a new release prerequisite; check the covered source, contract, and payload before reusing their conclusions. Current gates are in the runbook and RC checklist, with approved test dispositions in [test-lanes.md](test-lanes.md).
+- [Historical archive](archive/README.md): file-transfer investigations and design notes, retained evidence summaries, and superseded screenshots. These are separated from current operator guidance; their original outcomes and limitations remain unchanged.
 - [`docs/tuna-poc-runbook.md`](tuna-poc-runbook.md): standalone synthetic benchmark, not authenticated nLink payload or release qualification.
-- `docs/images/**`: screenshots used by README and release docs.
+- `docs/images/**`: current README screenshots and provenance. Superseded captures are in [the image archive](archive/images/).

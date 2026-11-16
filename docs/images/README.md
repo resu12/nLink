@@ -16,17 +16,17 @@ The date identifies receipt of the images, not an independently verified capture
 
 ## Preserved earlier captures
 
-The following original 0.7.0 screenshots (CI #102, source `3a031df8`) remain unchanged but are no longer embedded in the root README:
+The following original 0.7.0 screenshots (CI #102, source `3a031df8`) are preserved byte-for-byte in `docs/archive/images/` and are no longer embedded in the root README:
 
 | Image | View | Privacy treatment |
 | --- | --- | --- |
-| `home-0.7.0.png` | Home | None |
-| `helper-0.7.0.png` | Helper waiting for requests | Address and QR covered with opaque masks |
-| `helpee-0.7.0.png` | Helpee address entry | Empty address field |
+| [home-0.7.0.png](../archive/images/home-0.7.0.png) | Home | None |
+| [helper-0.7.0.png](../archive/images/helper-0.7.0.png) | Helper waiting for requests | Address and QR covered with opaque masks |
+| [helpee-0.7.0.png](../archive/images/helpee-0.7.0.png) | Helpee address entry | Empty address field |
 
 These earlier captures do not show the hotfix-2 preparing-address state or fixed-position Wallet feedback, and are not runtime or release qualification.
 
-The historical `*-0.4.5.png` files remain unchanged for reference. They are no longer embedded in the current README.
+The historical `*-0.4.5.png` files are also preserved byte-for-byte in [the image archive](../archive/images/). They are no longer embedded in the current README.
 
 ## Remaining scope
 
