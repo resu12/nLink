@@ -41,7 +41,9 @@ internal static class TunaHeaderStateProjector
             : activeTransferUsesTuna
                 ? ActiveFileTunaReason
                 : "inactive";
-        return new TunaHeaderStateProjection(activeTransferUsesTuna, reason);
+        // A regular-NKN file route does not deactivate the session's Tuna connection.
+        // This is header presentation only; the transfer's route remains unchanged.
+        return new TunaHeaderStateProjection(transportActive || activeTransferUsesTuna, reason);
 
         void Inspect(FileTransferTransferSnapshot? transfer)
         {

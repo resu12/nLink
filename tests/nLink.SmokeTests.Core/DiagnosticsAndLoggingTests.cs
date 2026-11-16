@@ -716,12 +716,18 @@ public void TunaStatusPresentationMapper_ActiveStateStillWinsOverProvisionalPref
 }
 
 [Theory]
-[InlineData("regular_nkn_v4_fast", 4, false)]
-[InlineData("post_tuna_fallback_v6", 6, false)]
-[InlineData("file_tuna_v4", 4, true)]
-public void TunaHeaderStateProjector_UsesNonterminalTransferRouteAndPreservesTransportReason(
+[InlineData("regular_nkn_v4_fast", 4, false, false)]
+[InlineData("post_tuna_fallback_v6", 6, false, false)]
+[InlineData("file_tuna_v4", 4, false, true)]
+[InlineData("file_tuna_v4", 6, false, false)]
+[InlineData("file_tuna_v6", 6, false, false)]
+[InlineData("regular_nkn_v4_fast", 4, true, true)]
+[InlineData("post_tuna_fallback_v6", 6, true, true)]
+[InlineData("file_tuna_v4", 4, true, true)]
+public void TunaHeaderStateProjector_PreservesSessionActivityAndValidatedFileRoute(
     string route,
     int protocolVersion,
+    bool transportActive,
     bool expectedActive)
 {
     var transfer = new FileTransferTransferSnapshot(
@@ -731,13 +737,16 @@ public void TunaHeaderStateProjector_UsesNonterminalTransferRouteAndPreservesTra
         ChunkCount: 1, ChunkSizeBytes: 1024, ErrorCode: null,
         StatusMessage: "Sending", RouteToken: route, ProtocolVersion: protocolVersion);
 
+    var reason = transportActive ? "paid_listener_active" : "listener_starting";
     var projection = TunaHeaderStateProjector.FromSnapshot(
         new SessionFileTransferSnapshot(transfer, Inbound: null),
-        transportActive: true,
-        transportReason: "listener_starting");
+        transportActive,
+        transportReason: reason);
 
     Assert.Equal(expectedActive, projection.IsActive);
-    Assert.Equal("listener_starting", projection.StatusReason);
+    Assert.Equal(reason, projection.StatusReason);
+    Assert.Equal(route, transfer.RouteToken);
+    Assert.Equal(protocolVersion, transfer.ProtocolVersion);
 }
 
 [Fact]

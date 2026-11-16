@@ -20,6 +20,7 @@ using NLink.App.Services;
 using NLink.App.ViewModels;
 using NLink.App.Views;
 using NLink.Core;
+using NLink.Core.FileTransfer;
 using NLink.Core.Metrics;
 using NLink.Core.SessionConnect;
 using NLink.Core.SessionSecurity;
@@ -446,6 +447,71 @@ public sealed class Beta3SessionShellLayoutSmokeTests : Beta3DefaultUiSmokeTestB
                 Assert.False(timer.IsEnabled);
                 Assert.Equal(Color.FromRgb(111, 122, 136), ((ISolidColorBrush)header.TunaPictogramBrush).Color);
                 Assert.StartsWith("Tuna wallet is locked.", header.TunaPictogramTip);
+            }
+            finally
+            {
+                InvokePrivate(header, "StopTunaPulse");
+            }
+            await FlushUiAsync();
+            return true;
+        }, CancellationToken.None);
+    }
+
+    [Theory]
+    [InlineData(true, FileTransferDirection.Outbound, "regular_nkn_v4_fast", 4)]
+    [InlineData(true, FileTransferDirection.Inbound, "regular_nkn_v4_fast", 4)]
+    [InlineData(false, FileTransferDirection.Outbound, "regular_nkn_v4_fast", 4)]
+    [InlineData(false, FileTransferDirection.Inbound, "regular_nkn_v4_fast", 4)]
+    [InlineData(true, FileTransferDirection.Outbound, "post_tuna_fallback_v6", 6)]
+    [InlineData(true, FileTransferDirection.Inbound, "post_tuna_fallback_v6", 6)]
+    [InlineData(false, FileTransferDirection.Outbound, "post_tuna_fallback_v6", 6)]
+    [InlineData(false, FileTransferDirection.Inbound, "post_tuna_fallback_v6", 6)]
+    [Trait("Category", "Smoke")]
+    public async Task SessionHeader_TunaSessionColorAndTooltipSurviveFilePauseAndCancel(
+        bool localPayer, FileTransferDirection direction, string route, int protocol)
+    {
+        await fixture.Session.Dispatch(async () =>
+        {
+            EnsureAppServices();
+            var header = new SessionHeaderView();
+            SetPrivateField(header, "tunaUnlockToggleOn", localPayer);
+            SetPrivateField(header, "tunaRuntimeStatus", localPayer ? "listener_ready" : "dialer_ready");
+            var timer = Assert.IsType<DispatcherTimer>(typeof(SessionHeaderView)
+                .GetField("tunaPulseTimer", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(header));
+            var reason = localPayer ? "paid_listener_active" : "free_dialer_active";
+            var expectedTip = localPayer
+                ? "Tuna is active. This computer is paying as the Tuna listener."
+                : "Tuna is active and the other computer is paying.";
+            var transfer = new FileTransferTransferSnapshot(
+                "session", "transfer", direction,
+                direction == FileTransferDirection.Outbound ? FileTransferTransferState.Sending : FileTransferTransferState.Receiving,
+                "file.bin", 1024, null, 0, 0, 1, 1024, null, null,
+                RouteToken: route, ProtocolVersion: protocol);
+            try
+            {
+                foreach (var item in new FileTransferTransferSnapshot?[]
+                {
+                    null, transfer, transfer with { IsPaused = true }, transfer with { IsPeerPaused = true },
+                    transfer with { State = FileTransferTransferState.Canceled }, null,
+                })
+                {
+                    var snapshot = direction == FileTransferDirection.Outbound
+                        ? new SessionFileTransferSnapshot(item, null) : new SessionFileTransferSnapshot(null, item);
+                    var projection = TunaHeaderStateProjector.FromSnapshot(snapshot, true, reason);
+                    header.TunaActive = projection.IsActive;
+                    header.TunaStatusReason = projection.StatusReason;
+                    Assert.True(header.TunaActive);
+                    Assert.Equal(expectedTip, header.TunaPictogramTip);
+                    Assert.Equal(expectedTip, header.TunaUnlockTip);
+                    Assert.Equal(localPayer ? Color.FromRgb(255, 211, 91) : Color.FromRgb(125, 220, 255),
+                        ((ISolidColorBrush)header.TunaPictogramBrush).Color);
+                    Assert.Equal(1d, header.TunaPictogramOpacity);
+                    Assert.True(header.TunaGlowOpacity > 0d);
+                    Assert.False(timer.IsEnabled);
+                    Assert.Equal(1d, header.TunaPulseScale);
+                    Assert.Equal(route, transfer.RouteToken);
+                    Assert.Equal(protocol, transfer.ProtocolVersion);
+                }
             }
             finally
             {
