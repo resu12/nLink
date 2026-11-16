@@ -713,7 +713,7 @@ public sealed class DiagnosticsPageViewModel : ViewModelBase, IDisposable
         try
         {
             var state = TunaWalletLinkState.Linked(walletPath, nowProvider());
-            await SaveTunaWalletStateAsync(state, ct);
+            await SaveTunaWalletStateAsync(state, ct, replacingLink: true);
             copyFeedback.Show("Wallet linked");
         }
         catch (Exception ex)
@@ -849,9 +849,15 @@ public sealed class DiagnosticsPageViewModel : ViewModelBase, IDisposable
         }
     }
 
-    private async Task SaveTunaWalletStateAsync(TunaWalletLinkState state, CancellationToken ct)
+    private async Task SaveTunaWalletStateAsync(TunaWalletLinkState state, CancellationToken ct, bool replacingLink = false)
     {
-        if (tunaWalletLinkStore is not null)
+        if (tunaRuntimePilotService is not null)
+        {
+            await (replacingLink
+                ? tunaRuntimePilotService.ReplaceWalletLinkAsync(state, ct)
+                : tunaRuntimePilotService.SaveWalletLinkAsync(state, ct));
+        }
+        else if (tunaWalletLinkStore is not null)
         {
             await tunaWalletLinkStore.SaveAsync(state, ct);
         }
@@ -1097,20 +1103,16 @@ public sealed class DiagnosticsPageViewModel : ViewModelBase, IDisposable
     {
         try
         {
-            if (tunaWalletLinkStore is not null)
+            if (tunaRuntimePilotService is not null)
+            {
+                await tunaRuntimePilotService.UnlinkWalletAsync(ct);
+            }
+            else if (tunaWalletLinkStore is not null)
             {
                 await tunaWalletLinkStore.ClearAsync(ct);
             }
 
             tunaWalletState = TunaWalletLinkState.Unlinked;
-            if (tunaRuntimePilotService is not null)
-            {
-                await tunaRuntimePilotService.LockOrStopForSessionAsync(
-                    "wallet_unlinked",
-                    TunaRuntimeUnlockSource.Options,
-                    ct).ConfigureAwait(false);
-            }
-
             RefreshTunaWalletProperties();
             RefreshTunaRuntimeProperties();
             copyFeedback.Show("Wallet unlinked");

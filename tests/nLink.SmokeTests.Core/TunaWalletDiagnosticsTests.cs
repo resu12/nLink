@@ -777,6 +777,197 @@ public sealed class TunaWalletDiagnosticsTests
 
     [Fact]
     [Trait("Category", "Smoke")]
+    public async Task TunaWalletSidecarVerifier_CancellationReapsOwnedChild()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var root = CreateTempRoot();
+        var readyPath = Path.Combine(root, "verifier-ready");
+        using var cts = new CancellationTokenSource();
+        using var child = new Process
+        {
+            StartInfo = new ProcessStartInfo(Path.Combine(Environment.SystemDirectory, "WindowsPowerShell", "v1.0", "powershell.exe"))
+            {
+                UseShellExecute = false,
+                CreateNoWindow = true,
+                RedirectStandardInput = true,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                ArgumentList = { "-NoProfile", "-NonInteractive", "-Command",
+                    "$null = [Console]::ReadLine(); [IO.File]::WriteAllText($env:NLINK_TEST_VERIFIER_READY, 'ready'); Start-Sleep -Seconds 30" },
+                Environment = { ["NLINK_TEST_VERIFIER_READY"] = readyPath },
+            },
+        };
+
+        try
+        {
+            Assert.True(child.Start());
+            try
+            {
+                var reading = TunaWalletSidecarVerifier.ReadWalletStatusAsync(child, "stub-password".ToCharArray(), cts.Token);
+                await WaitUntilAsync(() => File.Exists(readyPath), TimeSpan.FromSeconds(5));
+                Assert.False(child.HasExited);
+
+                cts.Cancel();
+
+                await Assert.ThrowsAnyAsync<OperationCanceledException>(
+                    () => reading.WaitAsync(TimeSpan.FromSeconds(5)));
+                Assert.True(child.HasExited);
+            }
+            finally
+            {
+                if (!child.HasExited)
+                {
+                    child.Kill();
+                    await child.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(5));
+                }
+            }
+        }
+        finally
+        {
+            DeleteTempRoot(root);
+        }
+    }
+
+    [Theory]
+    [InlineData("lock")]
+    [InlineData("unlink")]
+    [InlineData("relink")]
+    [Trait("Category", "Smoke")]
+    public async Task TunaRuntimeUnlockCoordinator_DiscardsPendingValidationAfterWalletChange(string change)
+    {
+        var root = CreateTempRoot();
+        try
+        {
+            var verifier = new BlockingTunaWalletVerifier(
+                TunaWalletValidationResult.Ok("wallet-test-nkn.json", "NKN0123456789PUBLICADDRESS", "2.5000"));
+            var context = await CreateVerifiedRuntimeContextAsync(root, verifier);
+            using var vm = CreateViewModel(context.WalletStore, verifier, context.RuntimeService);
+            var password = "runtime-pass".ToCharArray();
+            var pending = context.RuntimeService.UnlockForSessionAsync(password, TunaRuntimeUnlockSource.Header);
+
+            try
+            {
+                await verifier.Entered.WaitAsync(TimeSpan.FromSeconds(2));
+                switch (change)
+                {
+                    case "lock":
+                        await context.RuntimeService.LockOrStopForSessionAsync("test_lock", TunaRuntimeUnlockSource.Header);
+                        break;
+                    case "unlink":
+                        await vm.UnlinkTunaWalletAsync();
+                        break;
+                    case "relink":
+                        // Even the same file is a different link when the user links it again.
+                        await vm.LinkTunaWalletAsync(context.WalletPath);
+                        break;
+                }
+            }
+            finally
+            {
+                verifier.Release();
+            }
+
+            var result = await pending.WaitAsync(TimeSpan.FromSeconds(2));
+            Assert.False(result.Success);
+            Assert.False(context.RuntimeService.HasSessionUnlock);
+            Assert.Equal("locked", context.RuntimeService.RuntimeStatus);
+            Assert.All(password, c => Assert.Equal('\0', c));
+
+            var wallet = await context.WalletStore.LoadAsync();
+            switch (change)
+            {
+                case "lock": Assert.Equal("1.2500", wallet.BalanceNkn); break;
+                case "unlink": Assert.Equal(TunaWalletLinkStatus.Unlinked, wallet.Status); break;
+                case "relink": Assert.Equal(TunaWalletLinkStatus.LinkedUnverified, wallet.Status); break;
+            }
+        }
+        finally
+        {
+            DeleteTempRoot(root);
+        }
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    [Trait("Category", "Smoke")]
+    public async Task TunaRuntimeUnlockCoordinator_LinkChangeDuringValidationSaveDoesNotUnlock(bool relink)
+    {
+        var root = CreateTempRoot();
+        try
+        {
+            var verifier = new FakeTunaWalletVerifier(
+                TunaWalletValidationResult.Ok("wallet-test-nkn.json", "NKN0123456789PUBLICADDRESS", "2.5000"));
+            var context = await CreateVerifiedRuntimeContextAsync(root, verifier);
+            var store = new BlockingWalletSave(context.WalletStore);
+            var runtime = new TunaRuntimePilotService(context.PreferenceStore, context.UsageStore, store, verifier);
+            using var vm = CreateViewModel(store, verifier, runtime);
+            var replacementPath = Path.Combine(root, "replacement-wallet.json");
+            var password = "runtime-pass".ToCharArray();
+            var pending = runtime.UnlockForSessionAsync(password, TunaRuntimeUnlockSource.Header);
+            Task change;
+            try
+            {
+                await store.SaveEntered.Task.WaitAsync(TimeSpan.FromSeconds(2));
+                change = relink ? vm.LinkTunaWalletAsync(replacementPath) : vm.UnlinkTunaWalletAsync();
+                Assert.False(change.IsCompleted);
+            }
+            finally
+            {
+                store.ReleaseSave.TrySetResult();
+            }
+
+            Assert.False((await pending.WaitAsync(TimeSpan.FromSeconds(2))).Success);
+            await change.WaitAsync(TimeSpan.FromSeconds(2));
+            Assert.False(runtime.HasSessionUnlock);
+            Assert.All(password, c => Assert.Equal('\0', c));
+            var wallet = await store.LoadAsync();
+            Assert.Equal(relink ? TunaWalletLinkStatus.LinkedUnverified : TunaWalletLinkStatus.Unlinked, wallet.Status);
+            Assert.Equal(relink ? replacementPath : null, wallet.WalletPath);
+        }
+        finally
+        {
+            DeleteTempRoot(root);
+        }
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public async Task TunaRuntimeUnlockCoordinator_RelinkClearsPreviouslyRetainedUnlock()
+    {
+        var root = CreateTempRoot();
+        try
+        {
+            var verifier = new FakeTunaWalletVerifier(
+                TunaWalletValidationResult.Ok("wallet-test-nkn.json", "NKN0123456789PUBLICADDRESS", "1.2500"));
+            var context = await CreateVerifiedRuntimeContextAsync(root, verifier);
+            using var vm = CreateViewModel(context.WalletStore, verifier, context.RuntimeService);
+            var result = await context.RuntimeService.UnlockForSessionAsync(
+                "runtime-pass".ToCharArray(), TunaRuntimeUnlockSource.Header);
+            Assert.True(result.Success);
+            Assert.True(context.RuntimeService.HasSessionUnlock);
+
+            var replacementPath = Path.Combine(root, "replacement-wallet.json");
+            await vm.LinkTunaWalletAsync(replacementPath);
+
+            Assert.False(context.RuntimeService.HasSessionUnlock);
+            Assert.Equal("locked", context.RuntimeService.RuntimeStatus);
+            var wallet = await context.WalletStore.LoadAsync();
+            Assert.Equal(TunaWalletLinkStatus.LinkedUnverified, wallet.Status);
+            Assert.Equal(replacementPath, wallet.WalletPath);
+        }
+        finally
+        {
+            DeleteTempRoot(root);
+        }
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
     public async Task TunaRuntimeUnlockCoordinator_LockWhileWaitingClearsSessionUnlock()
     {
         var root = CreateTempRoot();
@@ -2172,9 +2363,27 @@ public sealed class TunaWalletDiagnosticsTests
         }
     }
 
+    private sealed class BlockingWalletSave(ITunaWalletLinkStore inner) : ITunaWalletLinkStore
+    {
+        public TaskCompletionSource SaveEntered { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource ReleaseSave { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public Task<TunaWalletLinkState> LoadAsync(CancellationToken ct = default) => inner.LoadAsync(ct);
+
+        public Task ClearAsync(CancellationToken ct = default) => inner.ClearAsync(ct);
+
+        public async Task SaveAsync(TunaWalletLinkState state, CancellationToken ct = default)
+        {
+            SaveEntered.TrySetResult();
+            await ReleaseSave.Task.WaitAsync(ct);
+            await inner.SaveAsync(state, ct);
+        }
+    }
+
     private sealed class BlockingTunaWalletVerifier : ITunaWalletVerifier
     {
         private readonly TunaWalletValidationResult result;
+        private readonly TaskCompletionSource entered = new(TaskCreationOptions.RunContinuationsAsynchronously);
         private readonly TaskCompletionSource release =
             new(TaskCreationOptions.RunContinuationsAsynchronously);
 
@@ -2185,12 +2394,15 @@ public sealed class TunaWalletDiagnosticsTests
 
         public List<char[]> PasswordsSeen { get; } = new();
 
+        public Task Entered => entered.Task;
+
         public TunaWalletVerifierAvailability GetAvailability()
             => new(true, "available", "nlink-tuna-sidecar.exe");
 
         public async Task<TunaWalletValidationResult> ValidateAsync(string walletPath, char[] password, CancellationToken ct)
         {
             PasswordsSeen.Add(password.ToArray());
+            entered.TrySetResult();
             await release.Task.WaitAsync(ct);
             return result;
         }

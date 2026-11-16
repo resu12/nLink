@@ -1,4 +1,5 @@
 using System;
+using System.ComponentModel;
 using System.Diagnostics;
 using System.IO;
 using System.Security.Cryptography;
@@ -162,6 +163,7 @@ internal sealed class TunaWalletSidecarVerifier : ITunaWalletVerifier
 
         try
         {
+            timeoutCts.Token.ThrowIfCancellationRequested();
             using var process = new Process
             {
                 StartInfo = new ProcessStartInfo
@@ -185,22 +187,7 @@ internal sealed class TunaWalletSidecarVerifier : ITunaWalletVerifier
                 return TunaWalletValidationResult.Fail("sidecar_start_failed", walletFile);
             }
 
-            var stdoutTask = process.StandardOutput.ReadToEndAsync(timeoutCts.Token);
-            var stderrTask = process.StandardError.ReadToEndAsync(timeoutCts.Token);
-            var passwordText = new string(password);
-            try
-            {
-                await process.StandardInput.WriteLineAsync(passwordText.AsMemory(), timeoutCts.Token).ConfigureAwait(false);
-            }
-            finally
-            {
-                process.StandardInput.Close();
-                passwordText = string.Empty;
-            }
-
-            await process.WaitForExitAsync(timeoutCts.Token).ConfigureAwait(false);
-            var stdout = await stdoutTask.ConfigureAwait(false);
-            var stderr = await stderrTask.ConfigureAwait(false);
+            var (stdout, stderr) = await ReadWalletStatusAsync(process, password, timeoutCts.Token).ConfigureAwait(false);
 
             if (TryParseWalletReady(stdout, out var result))
             {
@@ -217,6 +204,59 @@ internal sealed class TunaWalletSidecarVerifier : ITunaWalletVerifier
         catch (Exception ex)
         {
             return TunaWalletValidationResult.Fail(SanitizeReason(ex.GetType().Name, walletPath), walletFile);
+        }
+    }
+
+    internal static async Task<(string Stdout, string Stderr)> ReadWalletStatusAsync(
+        Process process,
+        char[] password,
+        CancellationToken ct)
+    {
+        Task<string>? stdout = null;
+        Task<string>? stderr = null;
+        try
+        {
+            stdout = process.StandardOutput.ReadToEndAsync(ct);
+            stderr = process.StandardError.ReadToEndAsync(ct);
+            var passwordText = new string(password);
+            try
+            {
+                await process.StandardInput.WriteLineAsync(passwordText.AsMemory(), ct).ConfigureAwait(false);
+            }
+            finally
+            {
+                process.StandardInput.Close();
+                passwordText = string.Empty;
+            }
+
+            await process.WaitForExitAsync(ct).ConfigureAwait(false);
+            return (await stdout.ConfigureAwait(false), await stderr.ConfigureAwait(false));
+        }
+        finally
+        {
+            if (!process.HasExited)
+            {
+                try
+                {
+                    process.Kill();
+                }
+                catch (Exception ex) when ((ex is InvalidOperationException or Win32Exception) && process.HasExited)
+                {
+                    // The owned child exited between the check and Kill.
+                }
+
+                await process.WaitForExitAsync(CancellationToken.None).ConfigureAwait(false);
+            }
+
+            if (stdout is not null)
+            {
+                await ((Task)stdout).ConfigureAwait(ConfigureAwaitOptions.SuppressThrowing);
+            }
+
+            if (stderr is not null)
+            {
+                await ((Task)stderr).ConfigureAwait(ConfigureAwaitOptions.SuppressThrowing);
+            }
         }
     }
 
