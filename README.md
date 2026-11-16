@@ -28,21 +28,27 @@ The [original 0.7.0 release](https://github.com/resu12/nLink/releases/tag/v0.7.0
 
 ## Screenshots
 
-These home, helper and helpee images show the original **0.7.0 / CI #102** UI, not the unreleased hotfix-2 UI. The helper address and QR code are covered by opaque privacy masks. [Screenshot provenance and replacement status](docs/images/README.md) are recorded separately; screenshots are illustrations, not release qualification.
+Screenshots supplied by the user on **16 November 2026** during hotfix-2 review. They include the new preparing-address state and show the UI in use; they are not exact-build or CI qualification. See [screenshot provenance](docs/images/README.md).
 
 Home:
 
-![Home screen in nLink 0.7.0](docs/images/home-0.7.0.png)
+![nLink home screen with help and helper options](docs/images/home-2026-11-16.png)
 
-Helper:
+Helper preparing its address:
 
-![Helper screen in nLink 0.7.0, with address and QR code hidden](docs/images/helper-0.7.0.png)
+![Helper showing Preparing helper address, with Copy and Share disabled](docs/images/helper-2026-11-16.png)
 
 Helpee:
 
-![Helpee screen in nLink 0.7.0](docs/images/helpee-0.7.0.png)
+![Helpee screen for entering or importing the helper address](docs/images/helpee-2026-11-16.png)
 
-Current screen-sharing, remote-control and hotfix-2 wallet screenshots are not yet available. The old 0.4.5 images are retained in the repository but are no longer presented as current UI.
+Screen sharing:
+
+![Active screen sharing with the Helpee preview, chat and Stop sharing control](docs/images/screenshare-2026-11-16.png)
+
+File transfer:
+
+![File transfer in progress with Pause and Cancel controls](docs/images/file-transfer-2026-11-16.png)
 
 ## Usage notes
 
