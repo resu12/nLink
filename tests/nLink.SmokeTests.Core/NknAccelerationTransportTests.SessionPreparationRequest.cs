@@ -1,10 +1,121 @@
 using NLink.Core.FileTransfer;
+using NLink.Core.SessionConnect;
 using NLink.Infra.Nkn;
 
 namespace NLink.SmokeTests;
 
 public sealed partial class NknAccelerationTransportTests
 {
+    [Theory]
+    [InlineData(false, "current")]
+    [InlineData(true, "current")]
+    [InlineData(false, "key_reset")]
+    [InlineData(true, "key_reset")]
+    [InlineData(false, "cancel")]
+    [InlineData(true, "cancel")]
+    [InlineData(false, "payer")]
+    [InlineData(true, "payer")]
+    [InlineData(false, "stop")]
+    [InlineData(true, "stop")]
+    [Trait("FileTransferInfraSuite", "SessionPreparationRequest")]
+    public Task PreparationRequest_ScreenOnlyRetiredListenerFailureCannotPublishOrRetry(bool helperPays, string change)
+        => WithPublicPreparationPairAsync(helperPays, async pair =>
+        {
+            using var cancellation = CancellationTokenSource.CreateLinkedTokenSource(pair.Token);
+            var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var release = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var statuses = new System.Collections.Concurrent.ConcurrentQueue<string>();
+            pair.Payer.TransportAccelerationStateChanged += (_, args) => statuses.Enqueue(args.Reason);
+            pair.PayerLane.Configuration = NknAccelerationLaneKind.Screen;
+            pair.PayerLane.OrdinaryStartForTests = _ => { entered.TrySetResult(); return release.Task; };
+            var sessionId = pair.Payer.CurrentSessionSecurityState.SessionId!.Value.Value;
+            var decision = (long)InvokePrivateMethod(pair.Payer, "ResolvePayerDecisionIdForNegotiation",
+                "session_security_state_ready")!;
+            var operation = (Task)InvokePrivateMethod(pair.Payer, "TrySendAccelerationOfferCoreAsync",
+                "session_security_state_ready", decision, cancellation.Token, null, false, false, null)!;
+            try
+            {
+                await entered.Task.WaitAsync(pair.Token);
+                if (change == "key_reset") InvokePrivateMethod(pair.Payer, "ResetControlSecureState");
+                else if (change == "cancel") cancellation.Cancel();
+                else if (change == "payer") SetPrivateField(pair.Payer, "accelerationPayerDecisionId", decision + 1);
+                else if (change == "stop")
+                {
+                    SetPrivateField(pair.Payer, "accelerationSessionId", sessionId);
+                    SetPrivateField(pair.Payer, "accelerationNegotiatedLanes", NknAccelerationLaneKind.Screen);
+                    await pair.Payer.StopAccelerationAsync("user_stopped_tuna", pair.Token);
+                }
+                release.TrySetResult(false);
+                await operation.WaitAsync(pair.Token);
+                if (change == "current") Assert.Contains("listener_sidecar_unavailable", statuses);
+                else
+                {
+                    Assert.DoesNotContain("listener_sidecar_unavailable", statuses);
+                    Assert.Equal(0, GetPrivateField(pair.Payer, "accelerationNegotiationRetryAttempts"));
+                    Assert.Equal(0, GetPrivateField(pair.Payer, "pendingRuntimeUnlockAccelerationNegotiation"));
+                }
+                Assert.Equal(1, pair.PayerLane.OrdinaryStarts);
+                Assert.DoesNotContain(MsgType.TransportAccelerationOffer, pair.Sent);
+                Assert.False(pair.Payer.IsFileTunaActiveForRouteSelection);
+                Assert.Null(GetPrivateField(pair.Payer, "outboundAccelerationOfferNonce"));
+                Assert.Null(GetPrivateField(pair.Payer, "runtimeUnlockRecoveryRetryState"));
+            }
+            finally { release.TrySetResult(false); }
+        }, InviteCapabilities.Chat | InviteCapabilities.ScreenShare);
+
+    [Theory]
+    [InlineData(false, "current")]
+    [InlineData(true, "current")]
+    [InlineData(false, "key_reset")]
+    [InlineData(true, "key_reset")]
+    [InlineData(false, "stop")]
+    [InlineData(true, "stop")]
+    [Trait("FileTransferInfraSuite", "SessionPreparationRequest")]
+    public Task PreparationRequest_RetiredListenerFailureCannotPublishOrRetry(bool helperPays, string change)
+        => WithPublicPreparationPairAsync(helperPays, async pair =>
+        {
+            var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var release = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var statuses = new System.Collections.Concurrent.ConcurrentQueue<string>();
+            pair.Payer.TransportAccelerationStateChanged += (_, args) => statuses.Enqueue(args.Reason);
+            pair.PayerLane.Configuration = NknAccelerationLaneKind.File | NknAccelerationLaneKind.Screen;
+            pair.PayerLane.OrdinaryStartForTests = _ => { entered.TrySetResult(); return release.Task; };
+            var decision = (long)InvokePrivateMethod(pair.Payer, "ResolvePayerDecisionIdForNegotiation",
+                "session_security_state_ready")!;
+            var operation = (Task)InvokePrivateMethod(pair.Payer, "TrySendAccelerationOfferCoreAsync",
+                "session_security_state_ready", decision, pair.Token, null, false, false, null)!;
+            try
+            {
+                await entered.Task.WaitAsync(pair.Token);
+                if (change == "key_reset") InvokePrivateMethod(pair.Payer, "ResetControlSecureState");
+                else if (change == "stop")
+                {
+                    SetPrivateField(pair.Payer, "accelerationSessionId",
+                        ((IFileTransferSessionPreparationTransport)pair.Payer).SessionPreparationLifecycle.Current!.SessionId);
+                    SetPrivateField(pair.Payer, "accelerationNegotiatedLanes", pair.PayerLane.Configuration);
+                    await pair.Payer.StopAccelerationAsync("user_stopped_tuna", pair.Token);
+                }
+                release.TrySetResult(false);
+                await operation.WaitAsync(pair.Token);
+                if (change == "current") Assert.Contains("listener_sidecar_unavailable", statuses);
+                else
+                {
+                    Assert.DoesNotContain("listener_sidecar_unavailable", statuses);
+                    Assert.Equal(1, pair.PayerLane.OrdinaryStarts);
+                    Assert.Equal(0, GetPrivateField(pair.Payer, "accelerationNegotiationRetryAttempts"));
+                    Assert.Equal(0, GetPrivateField(pair.Payer, "pendingRuntimeUnlockAccelerationNegotiation"));
+                }
+                Assert.DoesNotContain(MsgType.TransportAccelerationOffer, pair.Sent);
+                Assert.False(pair.Payer.IsFileTunaActiveForRouteSelection);
+                Assert.Null(pair.PayerService.Snapshot.Inbound);
+                Assert.Null(pair.PayerService.Snapshot.Outbound);
+                Assert.Null(pair.State(pair.PayerService).ClaimedEvidence);
+                Assert.Null(GetPrivateField(pair.Payer, "outboundAccelerationOfferNonce"));
+                Assert.Null(GetPrivateField(pair.Payer, "runtimeUnlockRecoveryRetryState"));
+            }
+            finally { release.TrySetResult(false); }
+        });
+
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
@@ -311,7 +422,8 @@ public sealed partial class NknAccelerationTransportTests
         => WaitUntilAsync(() => (long)GetPrivateField(pair.Payer, "accelerationNegotiationSlotGeneration")! == 0 &&
             (long)GetPrivateField(pair.Dialer, "accelerationNegotiationSlotGeneration")! == 0, TimeSpan.FromSeconds(3));
 
-    private static async Task WithPublicPreparationPairAsync(bool helperPays, Func<PreparationHandshakePair, Task> test)
+    private static async Task WithPublicPreparationPairAsync(bool helperPays, Func<PreparationHandshakePair, Task> test,
+        InviteCapabilities capabilities = InviteCapabilities.Chat | InviteCapabilities.FileTransfer)
     {
         FakeNknClient.ResetNetwork();
         var prior = NknSignalingTransport.HelperPaidOfferHelpeePriorityDelayOverrideForTests;
@@ -319,7 +431,7 @@ public sealed partial class NknAccelerationTransportTests
         try
         {
             using var pair = new PreparationHandshakePair(helperPays);
-            await pair.Approve(begin: false);
+            await pair.Approve(begin: false, capabilities);
             await test(pair);
         }
         finally

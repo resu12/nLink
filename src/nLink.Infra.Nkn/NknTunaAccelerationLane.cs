@@ -160,7 +160,8 @@ internal sealed partial class NknTunaAccelerationLane : INknTunaAccelerationSess
             if (clientRole == ClientRole.Dialer && client?.IsAvailable == true) return false;
             if (client?.IsAvailable == true &&
                 clientRole == ClientRole.Listener &&
-                listenerRequest == request)
+                listenerRequest == request && currentFailureOrigin is null &&
+                (clientListenerLease is null || listenerSupervisor?.CaptureCurrentListenerAdoptionSnapshot() == clientListenerLease))
             {
                 return true;
             }
@@ -216,7 +217,11 @@ internal sealed partial class NknTunaAccelerationLane : INknTunaAccelerationSess
                 endpoint = started?.LocalIpc;
                 startedListener = listenerSupervisor.CaptureCurrentListenerAdoptionSnapshot();
             }
-            if (startedListener?.CurrentRequest != request) startedListener = null;
+            if (startedListener?.CurrentRequest != request)
+            {
+                startedListener = null;
+                endpoint = null; // An endpoint alone is not this startup's receipt.
+            }
         }
 
         if (string.IsNullOrWhiteSpace(endpoint))
@@ -255,7 +260,18 @@ internal sealed partial class NknTunaAccelerationLane : INknTunaAccelerationSess
             return false;
         }
 
-        ForwardCurrentClientReadyIfAvailable(nextClient, "ready");
+        if (startedListener is not null && listenerSupervisor?.CaptureCurrentListenerAdoptionSnapshot() != startedListener)
+        {
+            nextClient.MarkUnavailableFromSidecarEvent("listener_start_failed");
+            StopExactListener(startedListener, operation, "listener_start_failed");
+            return false;
+        }
+        if (!ForwardCurrentClientReadyIfAvailable(nextClient, "ready"))
+        {
+            nextClient.MarkUnavailableFromSidecarEvent("listener_start_failed");
+            StopExactListener(startedListener, operation, "listener_start_failed");
+            return false;
+        }
         return true;
     }
 
@@ -764,6 +780,10 @@ internal sealed partial class NknTunaAccelerationLane : INknTunaAccelerationSess
             }
         }
 
+        // Deduplicate the notification, not cleanup of this exact failed owner.
+        failedPreparedClient?.Dispose();
+        processToStop?.Stop(string.IsNullOrWhiteSpace(e.Reason) ? "client_unavailable" : e.Reason);
+        stopPreparedListener?.Invoke("preparation_lane_unavailable");
         if (!shouldForward)
         {
             LocalOperationalLog.Info(
@@ -772,20 +792,27 @@ internal sealed partial class NknTunaAccelerationLane : INknTunaAccelerationSess
             return;
         }
 
-        failedPreparedClient?.Dispose();
-        processToStop?.Stop(string.IsNullOrWhiteSpace(e.Reason) ? "client_unavailable" : e.Reason);
-        stopPreparedListener?.Invoke("preparation_lane_unavailable");
         StateChanged?.Invoke(this, forwardedEvent);
     }
 
     private void OnListenerSupervisorStateChanged(object? sender, AccelerationStateChangedEventArgs e)
     {
-        if (e.IsAvailable || e.SessionPreparationExecutionIdentity is not null)
+        // Rejecting an unauthenticated incoming stream does not kill the
+        // listener's accept loop, invalidate its route, or consume its one
+        // terminal-failure notification.
+        if (e.Reason.StartsWith("listener_stream_rejected_", StringComparison.Ordinal))
         {
-            StateChanged?.Invoke(this, e);
+            lock (gate)
+            {
+                if (disposed || e.ListenerFailureSource is not { } observation ||
+                    observation != clientListenerLease || observation.CurrentRequest != listenerRequest) return;
+                LocalOperationalLog.Info("NKN.Tuna", "event=tuna_listener_rejected_stream_observed; authority_effect=none");
+            }
             return;
         }
-        if (e.Reason is not ("listener_terminal_tuna_write_failed" or "listener_terminal_tuna_stream_eof"))
+        if (e.IsAvailable || e.ListenerFailureSource is null &&
+            (e.SessionPreparationExecutionIdentity is not null ||
+             e.Reason is not ("listener_terminal_tuna_write_failed" or "listener_terminal_tuna_stream_eof")))
         {
             StateChanged?.Invoke(this, e);
             return;
@@ -799,16 +826,21 @@ internal sealed partial class NknTunaAccelerationLane : INknTunaAccelerationSess
             origin = new(laneInstanceId, clientGeneration, source.ProcessRunId, ++failureGeneration);
             currentFailureOrigin = origin;
         }
-        StateChanged?.Invoke(this, new(false, e.Reason, origin));
+        StateChanged?.Invoke(this, new(false, e.Reason, origin,
+            sessionPreparationExecutionIdentity: e.SessionPreparationExecutionIdentity));
     }
 
-    private void ForwardCurrentClientReadyIfAvailable(NknTunaSidecarClient expectedClient, string reason)
+    private bool IsCurrentClientReadyUnsafe(NknTunaSidecarClient expectedClient)
+        => ReferenceEquals(client, expectedClient) && expectedClient.IsAvailable && currentFailureOrigin is null &&
+           (clientListenerLease is null || listenerSupervisor?.CaptureCurrentListenerAdoptionSnapshot() == clientListenerLease);
+
+    private bool ForwardCurrentClientReadyIfAvailable(NknTunaSidecarClient expectedClient, string reason)
     {
         var shouldForward = false;
         string? preparationIdentity = null;
         lock (gate)
         {
-            if (ReferenceEquals(client, expectedClient) && expectedClient.IsAvailable)
+            if (IsCurrentClientReadyUnsafe(expectedClient))
             {
                 lastDiagnostics = expectedClient.GetDiagnosticsSnapshot();
                 preparationIdentity = currentClientStart?.ExecutionIdentity;
@@ -821,6 +853,7 @@ internal sealed partial class NknTunaAccelerationLane : INknTunaAccelerationSess
             StateChanged?.Invoke(this, new AccelerationStateChangedEventArgs(true, reason,
                 sessionPreparationExecutionIdentity: preparationIdentity));
         }
+        lock (gate) return shouldForward && IsCurrentClientReadyUnsafe(expectedClient);
     }
 
     private void CaptureClientDiagnostics_NoLock(NknTunaSidecarClient? sidecarClient)
@@ -884,6 +917,7 @@ internal sealed partial class NknTunaAccelerationLane : INknTunaAccelerationSess
                 rejectNextClient = true;
             if (listenerLease is not null && listenerSupervisor?.CaptureCurrentListenerAdoptionSnapshot() != listenerLease)
                 rejectNextClient = true;
+            if (nextRole == ClientRole.Listener && !nextClient.IsAvailable) rejectNextClient = true;
             if (nextRole == ClientRole.Listener &&
                 clientRole == ClientRole.Dialer &&
                 client?.IsAvailable == true)

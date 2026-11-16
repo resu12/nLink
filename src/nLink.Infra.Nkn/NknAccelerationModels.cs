@@ -265,6 +265,14 @@ internal interface INknTunaListenerSidecarSupervisor : IDisposable
     event EventHandler<AccelerationStateChangedEventArgs>? StateChanged;
 }
 
+// A cap is evidence about one physical listener, not permission to stop a
+// replacement. The transport still performs its ordinary Core invalidation.
+internal interface INknListenerCapHandoffControl
+{
+    Task<bool> StopListenerForCapAsync(NknTunaListenerAdoptionSnapshot source, string reason,
+        Func<bool> isRuntimeCurrent, CancellationToken ct);
+}
+
 internal sealed record NknAccelerationLocalEndpoint(
     string TunaAddress,
     NknAccelerationLaneKind Lanes,

@@ -11,6 +11,118 @@ namespace NLink.SmokeTests;
 [Trait("Area", "Core")]
 public sealed class NknTunaLaneOwnershipTests
 {
+    [Fact]
+    public async Task ListenerStartup_EndpointWithoutCurrentReceiptCannotConnect()
+    {
+        var server = new TcpListener(IPAddress.Loopback, 0);
+        server.Start();
+        try
+        {
+            using var supervisor = new ExactSupervisor(((IPEndPoint)server.LocalEndpoint).ToString());
+            using var lane = CreateLane(supervisor);
+            supervisor.BeforeStart = _ => supervisor.TerminalFailure = true;
+            using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(3));
+            Assert.False(await lane.EnsureListenerSidecarConnectedAsync(supervisor.Request, timeout.Token));
+            Assert.False(server.Pending()); // Rejected before even opening IPC, not a failed connect.
+            Assert.Null(lane.CaptureCurrentLaneLease());
+            Assert.False(lane.IsAvailable);
+        }
+        finally { server.Stop(); }
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void ListenerStartup_ReadyCannotOutliveItsFailureReceipt(bool duringCallback)
+    {
+        using var supervisor = new ExactSupervisor();
+        using var lane = CreateLane(supervisor);
+        using var client = ReadyClient();
+        using var owner = Owner();
+        InstallReady(lane, client, true, owner, supervisor.Request);
+        var notifications = 0;
+        lane.StateChanged += (_, e) =>
+        {
+            if (e.IsAvailable) { notifications++; supervisor.TerminalFailure = true; }
+        };
+        if (!duringCallback) supervisor.TerminalFailure = true;
+        Assert.False((bool)Invoke(lane, "ForwardCurrentClientReadyIfAvailable", client, "ready")!);
+        Assert.Equal(duringCallback ? 1 : 0, notifications);
+    }
+
+    [Theory]
+    [InlineData(2)]
+    [InlineData(3)]
+    public void ListenerCapStop_ResetCommitRechecksExactSource(int retireAtCheck)
+    {
+        using var supervisor = new ExactSupervisor();
+        using var lane = CreateLane(supervisor);
+        using var client = ReadyClient();
+        using var owner = Owner();
+        InstallReady(lane, client, true, owner, supervisor.Request);
+        var lease = lane.CaptureCurrentLaneLease()!;
+        var transportClient = new FakeNknClient("cap-reset-fixture");
+        using var transport = new NknSignalingTransport(transportClient, NknTransportOptions.Load(),
+            new NknIdentity("cap-reset-fixture", transportClient.Address), NknTunaAccelerationOptions.Disabled, lane);
+        var checks = 0;
+        bool IsCurrent()
+        {
+            if (++checks == retireAtCheck)
+            {
+                Assert.True(lane.TryAdoptCurrentListener(lease.Listener!,
+                    supervisor.Request with { ExecutionIdentity = "successor" }, out _));
+                Set(transport, "accelerationSessionId", "successor-session");
+            }
+            return lane.CaptureCurrentLaneLease() == lease;
+        }
+        Assert.False((bool)Invoke(transport, "ResetAccelerationNegotiation", "byte_cap_reached", false, null,
+            NLink.Core.FileTransfer.RuntimeUnlockInitialActivationReceiveRecoveryHoldInvalidationKind.UserCancellation,
+            null, (Func<bool>)IsCurrent)!);
+        Assert.Equal(retireAtCheck, checks);
+        Assert.Equal("successor-session", Field(transport, "accelerationSessionId"));
+        Assert.True(client.IsAvailable);
+        Assert.Equal(0, supervisor.ExactStops);
+        Assert.Equal(0, supervisor.GlobalStops);
+    }
+
+    [Theory]
+    [InlineData("current")]
+    [InlineData("adopted")]
+    [InlineData("replaced")]
+    [InlineData("runtime_retired")]
+    [InlineData("successor_during_cleanup")]
+    public async Task ListenerCapStop_OnlyExactCurrentListenerCanCommit(string change)
+    {
+        using var supervisor = new ExactSupervisor();
+        using var lane = CreateLane(supervisor);
+        using var client = ReadyClient();
+        using var successor = ReadyClient();
+        using var owner = Owner();
+        InstallReady(lane, client, true, owner, supervisor.Request);
+        var source = lane.CaptureCurrentLaneLease()!.Listener!;
+        var transportClient = new FakeNknClient("cap-lifetime-test");
+        using var transport = new NknSignalingTransport(transportClient, NknTransportOptions.Load(),
+            new NknIdentity("cap-lifetime-test", transportClient.Address), NknTunaAccelerationOptions.Disabled, lane);
+        if (change == "adopted") Assert.True(lane.TryAdoptCurrentListener(source,
+            supervisor.Request with { ExecutionIdentity = "successor" }, out _));
+        if (change == "replaced")
+        {
+            supervisor.ReplaceRun();
+            InstallReady(lane, successor, true, owner, supervisor.Request);
+        }
+        if (change == "successor_during_cleanup")
+            supervisor.BeforeExactStop = () => InstallReady(lane, successor, false, owner);
+        var accepted = await transport.StopListenerForCapAsync(source, "byte_cap_reached",
+            () => change != "runtime_retired", CancellationToken.None);
+        Assert.Equal(change is "current" or "successor_during_cleanup", accepted);
+        Assert.Equal(accepted ? 1L : 0L, Field(transport, "accelerationExplicitStopGeneration"));
+        Assert.Equal(0, Field(transport, "accelerationLaneStopDrains"));
+        Assert.Equal(accepted ? 1 : 0, supervisor.ExactStops);
+        Assert.Equal(0, supervisor.GlobalStops);
+        if (change is "replaced" or "successor_during_cleanup") Assert.True(successor.IsAvailable);
+        else Assert.Equal(!accepted, client.IsAvailable);
+    }
+
     [Theory]
     [InlineData("File")]
     [InlineData("Screen")]
@@ -727,8 +839,10 @@ public sealed class NknTunaLaneOwnershipTests
         finally { server.Stop(); }
     }
 
-    [Fact]
-    public async Task PreparationConnection_LossDisposesExactClientWithoutStoppingSuccessor()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task PreparationConnection_LossDisposesExactClientWithoutStoppingSuccessor(bool terminalFirst)
     {
         using var lifetime = new CancellationTokenSource(TimeSpan.FromSeconds(8));
         using var revocation = new CancellationTokenSource();
@@ -748,6 +862,10 @@ public sealed class NknTunaLaneOwnershipTests
             var original = Assert.IsType<NknTunaLaneLease>(await start.WaitAsync(lifetime.Token));
             supervisor.BeforeExactStop = () => InstallReady(lane, successor, false, owner);
 
+            if (terminalFirst)
+                Invoke(lane, "OnListenerSupervisorStateChanged", supervisor,
+                    new AccelerationStateChangedEventArgs(false, "listener_terminal_tuna_stream_eof",
+                        sessionPreparationExecutionIdentity: "preparation-owner", listenerFailureSource: original.Listener));
             original.Client.MarkUnavailableFromSidecarEvent("remote_closed");
             revocation.Cancel();
 
@@ -785,6 +903,164 @@ public sealed class NknTunaLaneOwnershipTests
         Assert.True(client.IsAvailable);
         Assert.True(lane.TryStopCurrentLaneLease(successor, "current_adopter"));
         Assert.Equal(1, supervisor.ExactStops);
+    }
+
+    [Theory]
+    [InlineData("listener_sidecar_error", "current")]
+    [InlineData("listener_sidecar_error", "before")]
+    [InlineData("listener_sidecar_error", "after")]
+    [InlineData("listener_stream_rejected_test", "current")]
+    [InlineData("listener_stream_rejected_test", "before")]
+    [InlineData("listener_stream_rejected_test", "after")]
+    [InlineData("listener_cap_test", "current")]
+    [InlineData("listener_cap_test", "before")]
+    [InlineData("listener_cap_test", "after")]
+    [InlineData("listener_terminal_tuna_write_failed", "current")]
+    [InlineData("listener_terminal_tuna_write_failed", "before")]
+    [InlineData("listener_terminal_tuna_write_failed", "after")]
+    public void ListenerEvents_DeferredNotificationRetainsExactFailureOrigin(string reason, string adoption)
+    {
+        using var supervisor = new ExactSupervisor();
+        using var lane = CreateLane(supervisor);
+        using var client = ReadyClient();
+        using var owner = Owner();
+        InstallReady(lane, client, true, owner, supervisor.Request);
+        var original = lane.CaptureCurrentLaneLease()!.Listener!;
+        var successor = supervisor.Request with { ExecutionIdentity = "successor" };
+        var events = new List<AccelerationStateChangedEventArgs>();
+        lane.StateChanged += (_, e) => events.Add(e);
+        if (adoption == "before") Assert.True(lane.TryAdoptCurrentListener(original, successor, out _));
+
+        Invoke(lane, "OnListenerSupervisorStateChanged", supervisor,
+            new AccelerationStateChangedEventArgs(false, reason, listenerFailureSource: original));
+
+        if (adoption == "before" || reason.StartsWith("listener_stream_rejected_", StringComparison.Ordinal)) Assert.Empty(events);
+        else
+        {
+            var failure = Assert.IsType<NknAccelerationFailureOrigin>(Assert.Single(events).FailureOrigin);
+            Assert.True(lane.IsFailureOriginCurrent(failure));
+            if (adoption == "after")
+            {
+                Assert.True(lane.TryAdoptCurrentListener(original, successor, out _));
+                Assert.False(lane.IsFailureOriginCurrent(failure));
+                Assert.False(lane.TryApplyFailureOrigin(failure, () => throw new InvalidOperationException("stale_failure_applied")));
+            }
+        }
+        Assert.True(client.IsAvailable);
+        Assert.Equal(0, supervisor.GlobalStops);
+        Assert.Equal(0, supervisor.ExactStops);
+    }
+
+    [Theory]
+    [InlineData("listener_terminal_tuna_write_failed")]
+    [InlineData("listener_terminal_tuna_stream_eof")]
+    [InlineData("remote_closed")]
+    public void ListenerEvents_RejectedStreamDoesNotConsumeTerminalFailure(string terminal)
+    {
+        using var supervisor = new ExactSupervisor();
+        using var lane = CreateLane(supervisor);
+        using var client = ReadyClient();
+        using var owner = Owner();
+        InstallReady(lane, client, true, owner, supervisor.Request);
+        var source = lane.CaptureCurrentLaneLease()!.Listener!;
+        var events = new List<AccelerationStateChangedEventArgs>();
+        lane.StateChanged += (_, e) => events.Add(e);
+        Invoke(lane, "OnListenerSupervisorStateChanged", supervisor,
+            new AccelerationStateChangedEventArgs(false, "listener_stream_rejected_remote_address_mismatch", listenerFailureSource: source));
+        Assert.Empty(events);
+        Assert.Null(Field(lane, "currentFailureOrigin"));
+        Assert.True(client.IsAvailable);
+        if (terminal != "remote_closed")
+            Invoke(lane, "OnListenerSupervisorStateChanged", supervisor,
+                new AccelerationStateChangedEventArgs(false, terminal, listenerFailureSource: source));
+        Invoke(lane, "OnClientStateChanged", client, new AccelerationStateChangedEventArgs(false, "remote_closed"));
+        var failure = Assert.Single(events);
+        Assert.Equal(terminal, failure.Reason);
+        Assert.Equal(source.ProcessRunId, failure.FailureOrigin!.Value.ProcessRunId);
+        Assert.True(lane.IsFailureOriginCurrent(failure.FailureOrigin.Value));
+    }
+
+    [Theory]
+    [InlineData("error", false)]
+    [InlineData("error", true)]
+    [InlineData("tuna_bridge_terminal", false)]
+    [InlineData("tuna_bridge_terminal", true)]
+    [InlineData("exit", false)]
+    [InlineData("exit", true)]
+    [InlineData("tuna_stream_rejected", false)]
+    [InlineData("tuna_stream_rejected", true)]
+    public void ListenerStartup_FailureAfterReadyCannotPublishOrAdopt(string eventName, bool published)
+    {
+        using var supervisor = new NknTunaListenerSidecarSupervisor(new()
+        {
+            SidecarExePath = "not-started", WalletPath = "not-opened", TakeWalletPassword = () => throw new InvalidOperationException(),
+            MaxPriceNknPerMb = "0", MaxTotalMiB = 1, MaxDurationSec = 60,
+        });
+        using var owner = Owner();
+        var request = new NknTunaListenerStartRequest("test-peer", NknAccelerationLaneKind.File);
+        var endpoint = new NknTunaListenerSidecarEndpoint("127.0.0.1:1", "address");
+        Set(supervisor, "processOwner", owner);
+        Set(supervisor, "currentRequest", request);
+        var ready = new TaskCompletionSource<NknTunaListenerSidecarEndpoint>();
+        ready.SetResult(endpoint);
+        if (published)
+            Assert.NotNull(Invoke(supervisor, "TryPublishStartedListener", owner, request, endpoint, 0L, CancellationToken.None));
+        if (eventName == "exit")
+            Invoke(supervisor, "HandleOwnedExit", owner, (Process)Field(owner, "process"), ready, 0L);
+        else
+            Invoke(supervisor, "HandleOwnedStdoutLine", owner, (Process)Field(owner, "process"),
+                JsonSerializer.Serialize(new { @event = eventName, reason = "tuna_stream_eof" }), ready, Stopwatch.StartNew());
+        var failed = eventName != "tuna_stream_rejected";
+        Assert.Equal(failed, Field(supervisor, "terminalFailureObserved"));
+        Assert.Equal(!failed, Invoke(supervisor, "TryPublishStartedListener", owner, request, endpoint, 0L, CancellationToken.None) is not null);
+        Assert.True(ready.Task.IsCompletedSuccessfully); // The latch, not rewriting the completed TCS, rejects startup.
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void ListenerStartup_FailureBetweenSnapshotAndInstallCannotPublishReady(bool clientClosed)
+    {
+        using var supervisor = new ExactSupervisor();
+        using var lane = CreateLane(supervisor);
+        using var client = ReadyClient();
+        var source = supervisor.CaptureCurrentListenerAdoptionSnapshot()!;
+        var operation = Begin(lane);
+        if (clientClosed) Set(client, "available", 0);
+        else supervisor.TerminalFailure = true;
+        var role = typeof(NknTunaAccelerationLane).GetField("clientRole", BindingFlags.Instance | BindingFlags.NonPublic)!.FieldType;
+        var events = new List<AccelerationStateChangedEventArgs>();
+        lane.StateChanged += (_, e) => events.Add(e);
+        Assert.False((bool)Invoke(lane, "ReplaceStartedClient", client, Enum.Parse(role, "Listener"), null,
+            operation, CancellationToken.None, source.CurrentRequest, source)!);
+        Assert.False(lane.IsAvailable);
+        Assert.Empty(events);
+        Finish(lane, operation);
+    }
+
+    [Theory]
+    [InlineData("error")]
+    [InlineData("tuna_bridge_terminal")]
+    [InlineData("exit")]
+    public async Task ListenerStartup_TerminalBeforeReadyFailsPendingWait(string eventName)
+    {
+        using var supervisor = new NknTunaListenerSidecarSupervisor(new()
+        {
+            SidecarExePath = "not-started", WalletPath = "not-opened", TakeWalletPassword = () => throw new InvalidOperationException(),
+            MaxPriceNknPerMb = "0", MaxTotalMiB = 1, MaxDurationSec = 60,
+        });
+        using var owner = Owner();
+        Set(supervisor, "processOwner", owner);
+        Set(supervisor, "currentRequest", new NknTunaListenerStartRequest("test-peer", NknAccelerationLaneKind.File));
+        var ready = new TaskCompletionSource<NknTunaListenerSidecarEndpoint>(TaskCreationOptions.RunContinuationsAsynchronously);
+        if (eventName == "exit")
+            Invoke(supervisor, "HandleOwnedExit", owner, (Process)Field(owner, "process"), ready, 0L);
+        else
+            Invoke(supervisor, "HandleOwnedStdoutLine", owner, (Process)Field(owner, "process"),
+                JsonSerializer.Serialize(new { @event = eventName, reason = "tuna_stream_eof" }), ready, Stopwatch.StartNew());
+        await Assert.ThrowsAsync<InvalidOperationException>(async () => await ready.Task.WaitAsync(TimeSpan.FromSeconds(2)));
+        Assert.True((bool)Field(supervisor, "terminalFailureObserved"));
+        Assert.Null(supervisor.CaptureCurrentListenerAdoptionSnapshot());
     }
 
     [Fact]
@@ -896,8 +1172,10 @@ public sealed class NknTunaLaneOwnershipTests
         finally { if (queued) startGate.Release(); }
     }
 
-    [Fact]
-    public async Task RealSupervisor_StopRetiresQueuedStartupBeforeWalletAccess()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task RealSupervisor_StopRetiresQueuedStartupBeforeWalletAccess(bool dispose)
     {
         using var supervisor = new NknTunaListenerSidecarSupervisor(new()
         {
@@ -908,9 +1186,107 @@ public sealed class NknTunaLaneOwnershipTests
         await startGate.WaitAsync();
         var start = supervisor.EnsureStartedAsync(new("test-peer", NknAccelerationLaneKind.File), CancellationToken.None);
         Assert.False(start.IsCompleted);
-        supervisor.Stop("retire_queued_start");
+        if (dispose) supervisor.Dispose();
+        else supervisor.Stop("retire_queued_start");
         startGate.Release();
         Assert.Null(await start.WaitAsync(TimeSpan.FromSeconds(2)));
+    }
+
+    [Theory]
+    [InlineData("stop")]
+    [InlineData("dispose")]
+    [InlineData("detach")]
+    public async Task RealSupervisor_RetirementCancelsReadinessWithoutFailureOrRetry(string retirement)
+    {
+        var statuses = new List<string>();
+        using var supervisor = new NknTunaListenerSidecarSupervisor(new()
+        {
+            SidecarExePath = "not-started", WalletPath = "not-opened", TakeWalletPassword = () => throw new InvalidOperationException(),
+            MaxPriceNknPerMb = "0", MaxTotalMiB = 1, MaxDurationSec = 60, StatusChanged = statuses.Add,
+        });
+        using var owner = Owner();
+        var request = new NknTunaListenerStartRequest("test-peer", NknAccelerationLaneKind.File);
+        var endpoint = new NknTunaListenerSidecarEndpoint("127.0.0.1:1", "address");
+        var ready = new TaskCompletionSource<NknTunaListenerSidecarEndpoint>(TaskCreationOptions.RunContinuationsAsynchronously);
+        Set(supervisor, "processOwner", owner);
+        Set(supervisor, "currentRequest", request);
+        Set(supervisor, "pendingReady", ready);
+        Set(supervisor, "endpoint", endpoint);
+        if (retirement == "dispose") supervisor.Dispose();
+        else if (retirement == "stop") supervisor.Stop("test_retired");
+        else
+        {
+            Assert.True(supervisor.TryDetachCurrentListener(new(request, endpoint,
+                owner.Pid, owner.RunId, owner.StartedUtc, 0), out var stop));
+            stop!("test_retired");
+        }
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(async () =>
+            await ready.Task.WaitAsync(TimeSpan.FromSeconds(2)));
+        var statusCount = statuses.Count;
+        Assert.False((bool)Invoke(supervisor, "TryReportStartFailure", 0L, owner,
+            "listener_ready_timeout", "ready_timeout")!);
+        var retry = (Task<NknTunaListenerAdoptionSnapshot?>)Invoke(supervisor, "StartProcessAsync",
+            request, Array.Empty<char>(), 2, 2, 0L, CancellationToken.None)!;
+        Assert.Null(await retry);
+        Assert.Equal(statusCount, statuses.Count);
+        Assert.Null(Field(supervisor, "lastStartFailureReason"));
+        Assert.Null(Field(supervisor, "pendingReady"));
+    }
+
+    [Theory]
+    [InlineData("listener_ready_timeout")]
+    [InlineData("listener_failed")]
+    [InlineData("listener_canceled")]
+    public void RealSupervisor_OnlyCurrentStartupCanReportFailure(string reason)
+    {
+        var statuses = new List<string>();
+        using var supervisor = new NknTunaListenerSidecarSupervisor(new()
+        {
+            SidecarExePath = "not-started", WalletPath = "not-opened", TakeWalletPassword = () => throw new InvalidOperationException(),
+            MaxPriceNknPerMb = "0", MaxTotalMiB = 1, MaxDurationSec = 60, StatusChanged = statuses.Add,
+        });
+        using var oldOwner = Owner();
+        using var currentOwner = Owner();
+        Set(supervisor, "processOwner", currentOwner);
+        Set(supervisor, "stopGeneration", 2L);
+        Assert.False((bool)Invoke(supervisor, "TryReportStartFailure", 1L, currentOwner, reason, null)!);
+        Assert.False((bool)Invoke(supervisor, "TryReportStartFailure", 2L, oldOwner, reason, null)!);
+        Assert.Empty(statuses);
+        Assert.False((bool)Field(supervisor, "summaryObserved"));
+        Assert.False((bool)Field(currentOwner, "stopped"));
+        Assert.True((bool)Invoke(supervisor, "TryReportStartFailure", 2L, currentOwner, reason, null)!);
+        Assert.Equal(new[] { reason }, statuses);
+        Assert.Equal(reason, Field(supervisor, "lastStartFailureReason"));
+        Assert.True((bool)Field(supervisor, "summaryObserved"));
+    }
+
+    [Fact]
+    public void RealSupervisor_AccountingCallbackRetirementCannotPublishOldFailure()
+    {
+        var statuses = new List<string>();
+        var sink = new RetiringStartupUsageSink();
+        using var supervisor = new NknTunaListenerSidecarSupervisor(new()
+        {
+            SidecarExePath = "not-started", WalletPath = "not-opened", TakeWalletPassword = () => throw new InvalidOperationException(),
+            MaxPriceNknPerMb = "0", MaxTotalMiB = 1, MaxDurationSec = 60,
+            StatusChanged = statuses.Add, UsageSink = sink,
+        });
+        using var owner = Owner();
+        Set(supervisor, "processOwner", owner);
+        sink.OnIncomplete = supervisor.Dispose;
+        Assert.False((bool)Invoke(supervisor, "TryReportStartFailure", 0L, owner,
+            "listener_ready_timeout", "ready_timeout")!);
+        Assert.Empty(statuses);
+        Assert.True((bool)Field(owner, "stopped"));
+    }
+
+    private sealed class RetiringStartupUsageSink : INknTunaUsageTelemetrySink
+    {
+        public Action? OnIncomplete;
+        public Action? OnSummary;
+        public void RecordPayment(NknTunaPaymentTelemetry payment) { }
+        public void RecordSummary(NknTunaSessionUsageTelemetry summary) => OnSummary?.Invoke();
+        public void RecordIncomplete(string reason) => OnIncomplete?.Invoke();
     }
 
     private static ValueTask WriteStatusAsync(TcpClient connection, CancellationToken ct,
@@ -928,14 +1304,94 @@ public sealed class NknTunaLaneOwnershipTests
     [Theory]
     [InlineData(true, "tuna_bridge_terminal")]
     [InlineData(false, "tuna_bridge_terminal")]
+    [InlineData(true, "error")]
+    [InlineData(false, "error")]
+    [InlineData(true, "tuna_cap_handoff_requested")]
+    [InlineData(false, "tuna_cap_handoff_requested")]
+    public void ListenerEvents_RetiredDuringStatusCannotAffectSuccessor(bool preparation, string eventName)
+        => AssertListenerEventPurpose(preparation, eventName, false, retire: true);
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void ListenerEvents_RejectedStreamCannotInvokeLifecycleStatusSubscriber(bool preparation)
+        => AssertListenerEventPurpose(preparation, "tuna_stream_rejected", false, retire: true);
+
+    [Theory]
+    [InlineData(true, "tuna_bridge_terminal")]
+    [InlineData(false, "tuna_bridge_terminal")]
     [InlineData(true, "tuna_stream_rejected")]
     [InlineData(false, "tuna_stream_rejected")]
     [InlineData(true, "error")]
     [InlineData(false, "error")]
     [InlineData(true, "tuna_cap_handoff_requested")]
     [InlineData(false, "tuna_cap_handoff_requested")]
-    public void ListenerEvents_RetainCapturedPurposeAcrossOwnershipChange(bool preparation, string eventName)
+    public void ListenerEvents_CurrentOwnerRetainsPurpose(bool preparation, string eventName)
         => AssertListenerEventPurpose(preparation, eventName, false);
+
+    [Theory]
+    [InlineData("stop")]
+    [InlineData("dispose")]
+    [InlineData("replace")]
+    public void ListenerEvents_RetiredProcessCannotRequestCapHandoff(string retirement)
+    {
+        var handoffs = 0;
+        var retired = false;
+        using var owner = Owner();
+        using var successor = Owner();
+        NknTunaListenerSidecarSupervisor supervisor = null!;
+        using (supervisor = new(new()
+        {
+            SidecarExePath = "not-started", WalletPath = "not-opened", TakeWalletPassword = () => throw new InvalidOperationException(),
+            MaxPriceNknPerMb = "0", MaxTotalMiB = 1, MaxDurationSec = 60,
+            CapHandoffRequested = _ => handoffs++,
+            StatusChanged = _ =>
+            {
+                if (retired) return;
+                retired = true;
+                if (retirement == "stop") supervisor.Stop("test_retired");
+                else if (retirement == "dispose") supervisor.Dispose();
+                else Set(supervisor, "processOwner", successor);
+            },
+        }))
+        {
+            Set(supervisor, "currentRequest", new NknTunaListenerStartRequest("test-peer", NknAccelerationLaneKind.File));
+            Set(supervisor, "processOwner", owner);
+            var events = new List<AccelerationStateChangedEventArgs>();
+            supervisor.StateChanged += (_, e) => events.Add(e);
+            Invoke(supervisor, "HandleOwnedStdoutLine", owner, (Process)Field(owner, "process"),
+                "{\"event\":\"tuna_cap_handoff_requested\",\"capReason\":\"test_cap\"}",
+                new TaskCompletionSource<NknTunaListenerSidecarEndpoint>(), Stopwatch.StartNew());
+            Assert.True(retired);
+            Assert.Equal(0, handoffs);
+            Assert.Empty(events);
+            Assert.Null(Field(supervisor, "lastStartFailureReason"));
+            Assert.False((bool)Field(successor, "stopped"));
+        }
+    }
+
+    [Fact]
+    public void ListenerEvents_AccountingRetirementCannotPublishSummaryStatus()
+    {
+        var statuses = new List<string>();
+        var sink = new RetiringStartupUsageSink();
+        using var supervisor = new NknTunaListenerSidecarSupervisor(new()
+        {
+            SidecarExePath = "not-started", WalletPath = "not-opened", TakeWalletPassword = () => throw new InvalidOperationException(),
+            MaxPriceNknPerMb = "0", MaxTotalMiB = 1, MaxDurationSec = 60,
+            StatusChanged = statuses.Add, UsageSink = sink,
+        });
+        using var owner = Owner();
+        Set(supervisor, "processOwner", owner);
+        Set(supervisor, "currentRequest", new NknTunaListenerStartRequest("test-peer", NknAccelerationLaneKind.File));
+        sink.OnSummary = supervisor.Dispose;
+        Invoke(supervisor, "HandleOwnedStdoutLine", owner, (Process)Field(owner, "process"),
+            "{\"event\":\"summary\",\"capReached\":true}",
+            new TaskCompletionSource<NknTunaListenerSidecarEndpoint>(), Stopwatch.StartNew());
+        Assert.True((bool)Field(owner, "stopped"));
+        Assert.Empty(statuses);
+        Assert.True((bool)Field(supervisor, "summaryObserved"));
+    }
 
     [Theory]
     [InlineData("tuna_bridge_terminal")]
@@ -946,7 +1402,7 @@ public sealed class NknTunaLaneOwnershipTests
     public void FallbackListenerPreparation_ListenerFailureNeverRequestsRuntimeHandoff(string eventName)
         => AssertListenerEventPurpose(true, eventName, true);
 
-    private static void AssertListenerEventPurpose(bool preparation, string eventName, bool fallbackPreparation)
+    private static void AssertListenerEventPurpose(bool preparation, string eventName, bool fallbackPreparation, bool retire = false)
     {
         NknTunaListenerSidecarSupervisor supervisor = null!;
         var request = new NknTunaListenerStartRequest("test-peer", NknAccelerationLaneKind.File,
@@ -954,23 +1410,47 @@ public sealed class NknTunaLaneOwnershipTests
                 preparation ? NknTunaListenerLifetimePolicy.SessionPreparation : NknTunaListenerLifetimePolicy.GenericBounded,
             "captured-owner", PreparationOnly: fallbackPreparation);
         var handoffs = 0;
+        var statuses = new List<string>();
         using (supervisor = new(new()
         {
             SidecarExePath = "not-launched", WalletPath = "not-opened", TakeWalletPassword = () => throw new InvalidOperationException(),
             MaxPriceNknPerMb = "0", MaxTotalMiB = 1, MaxDurationSec = 60,
             CapHandoffRequested = _ => handoffs++,
-            StatusChanged = _ => Set(supervisor, "currentRequest", request with { ExecutionIdentity = "successor" }),
+            StatusChanged = status =>
+            {
+                statuses.Add(status);
+                if (retire) Set(supervisor, "currentRequest", request with { ExecutionIdentity = "successor" });
+            },
         }))
         using (var owner = Owner())
         {
             Set(supervisor, "currentRequest", request);
             Set(supervisor, "processOwner", owner);
+            Set(supervisor, "endpoint", new NknTunaListenerSidecarEndpoint("127.0.0.1:1", "test-listener"));
             var events = new List<AccelerationStateChangedEventArgs>();
-            supervisor.StateChanged += (_, e) => events.Add(e);
+            var callbackHeldGate = false;
+            supervisor.StateChanged += (_, e) =>
+            {
+                callbackHeldGate |= Monitor.IsEntered(Field(supervisor, "gate"));
+                events.Add(e);
+            };
             Invoke(supervisor, "HandleOwnedStdoutLine", owner, (Process)Field(owner, "process"),
                 JsonSerializer.Serialize(new { @event = eventName, reason = "test_reason", capReason = "test_cap" }),
                 new TaskCompletionSource<NknTunaListenerSidecarEndpoint>(), Stopwatch.StartNew());
-            if (!preparation && eventName == "tuna_cap_handoff_requested")
+            Assert.False(callbackHeldGate);
+            if (eventName == "tuna_stream_rejected")
+            {
+                Assert.Empty(statuses);
+                Assert.Same(request, Field(supervisor, "currentRequest"));
+                Assert.False((bool)Field(supervisor, "terminalFailureObserved"));
+            }
+            if (retire && eventName != "tuna_stream_rejected")
+            {
+                Assert.Empty(events);
+                Assert.Equal(0, handoffs);
+                Assert.Equal("successor", ((NknTunaListenerStartRequest)Field(supervisor, "currentRequest")).ExecutionIdentity);
+            }
+            else if (!preparation && eventName == "tuna_cap_handoff_requested")
             {
                 Assert.Empty(events);
                 Assert.Equal(1, handoffs);
@@ -1184,6 +1664,7 @@ public sealed class NknTunaLaneOwnershipTests
         public Action? BeforeExactStop;
         public Action<NknTunaListenerStartRequest>? BeforeStart;
         public bool ReplaceBeforeStartReturns;
+        public bool TerminalFailure;
         public bool CanOfferListener => true;
         public void ReplaceRun(NknTunaListenerStartRequest? request = null)
             => snapshot = snapshot! with { ProcessRunId = Guid.NewGuid().ToString("N"), CurrentRequest = request ?? snapshot.CurrentRequest };
@@ -1207,7 +1688,7 @@ public sealed class NknTunaLaneOwnershipTests
             BeforeStart?.Invoke(request);
             return Task.FromResult(snapshot?.Endpoint);
         }
-        public NknTunaListenerAdoptionSnapshot? CaptureCurrentListenerAdoptionSnapshot() => snapshot;
+        public NknTunaListenerAdoptionSnapshot? CaptureCurrentListenerAdoptionSnapshot() => TerminalFailure ? null : snapshot;
         public bool TryAdoptCurrentListener(NknTunaListenerAdoptionSnapshot expected, NknTunaListenerStartRequest request)
         {
             if (snapshot != expected) return false;

@@ -1094,7 +1094,7 @@ public sealed partial class NknSignalingTransport
 
     private void HandleSessionHandshakeResponse(string source, Envelope env)
     {
-        if (!TryGetPendingInboundHandshake(out var pending) || pending is null)
+        if (!TryBeginPendingInboundHandshakeResponse(out var pending) || pending is null)
         {
             if (TryParseHandshakeResponsePayload(env.Payload, out var replayResponse) &&
                 PeerAddress.TryParse(LocalPeerAddress, out var localAddress) &&
@@ -2805,7 +2805,22 @@ public sealed partial class NknSignalingTransport
         lock (gate)
         {
             state = pendingInboundHandshake;
-            return state is not null;
+            return state is not null && !state.ResponseReceived;
+        }
+    }
+
+    private bool TryBeginPendingInboundHandshakeResponse(out PendingInboundHandshakeState? state)
+    {
+        lock (gate)
+        {
+            state = pendingInboundHandshake;
+            if (state is null || state.ResponseReceived) return false;
+            // A response owns validation once received. A timer that already
+            // entered must not fail this handshake after response/approval.
+            // Keep the pending-join admission fence until validation finishes.
+            state.ResponseReceived = true;
+            CancelPendingInboundHandshakeTimeout();
+            return true;
         }
     }
 
@@ -2916,6 +2931,12 @@ public sealed partial class NknSignalingTransport
 
     private void OnPendingInboundHandshakeTimeout(long generation)
     {
+        // Claim expiry and commit its failure atomically against response receipt.
+        lock (gate) ExpirePendingInboundHandshake(generation);
+    }
+
+    private void ExpirePendingInboundHandshake(long generation)
+    {
         if (disposed || generation != Volatile.Read(ref pendingInboundHandshakeTimeoutGeneration))
         {
             return;
@@ -2927,7 +2948,7 @@ public sealed partial class NknSignalingTransport
             pending = pendingInboundHandshake;
         }
 
-        if (pending is null)
+        if (pending is null || pending.ResponseReceived)
         {
             return;
         }
@@ -2963,19 +2984,20 @@ public sealed partial class NknSignalingTransport
         return state.ChallengeExpiresAtUtc ?? state.CreatedAtUtc.Add(PendingJoinTimeout);
     }
 
-    private void UpdateSessionSecurityState(SessionSecurityState nextState)
+    private bool UpdateSessionSecurityState(SessionSecurityState nextState)
     {
         if (nextState is null)
         {
             throw new ArgumentNullException(nameof(nextState));
         }
 
+        var requestedState = nextState;
         nextState = PreserveActiveApprovedSessionIfStale(nextState);
 
         if (Equals(currentSessionSecurityState, nextState))
         {
             sessionPreparationLifecycle.ObserveSecurity(nextState);
-            return;
+            return ReferenceEquals(requestedState, nextState);
         }
 
         if (!ShouldRetainCapabilitySecureState(nextState))
@@ -2998,7 +3020,7 @@ public sealed partial class NknSignalingTransport
         SessionSecurityStateChanged?.Invoke(this, new TransportSessionSecurityStateChangedEventArgs(nextState));
         if (accelerationLane is null)
         {
-            return;
+            return true;
         }
 
         if (IsSessionAccelerationEligible(out _))
@@ -3009,6 +3031,7 @@ public sealed partial class NknSignalingTransport
         {
             ResetAccelerationNegotiation("session_security_state_not_eligible");
         }
+        return true;
     }
 
     private SessionSecurityState PreserveActiveApprovedSessionIfStale(SessionSecurityState nextState)
@@ -3106,11 +3129,15 @@ public sealed partial class NknSignalingTransport
 
     private void AbortOutboundHandshake(string reason, SessionHandshakeState failureState = SessionHandshakeState.Failed)
     {
+        if (!UpdateSessionSecurityState(currentSessionSecurityState.WithHandshakeFailure(failureState, reason)))
+        {
+            return;
+        }
+
         LocalOperationalLog.Warn(
             "SessionHandshake",
             $"event=failure; direction=outbound; reason={reason}; session_id={currentSessionSecurityState.SessionId?.Value ?? "(none)"}; helper_identity={currentSessionSecurityState.HelperAddress?.Value ?? "(none)"}");
         pendingOutboundHandshake = null;
-        UpdateSessionSecurityState(currentSessionSecurityState.WithHandshakeFailure(failureState, reason));
         ClearActivePeerSessionTracking(preserveHelpeeHostKeyPair: false);
         Disconnected?.Invoke(this, EventArgs.Empty);
     }
@@ -3139,6 +3166,20 @@ public sealed partial class NknSignalingTransport
         SessionHandshakeState failureState = SessionHandshakeState.Failed)
     {
         var effectiveSessionId = sessionId ?? pending.SessionId ?? SessionHandshakeProtocol.CreateSessionId();
+        var failure = pending.HelpeeAddress is PeerAddress helpeeAddress
+            ? SessionSecurityState.CreateHelpeeWaiting(helpeeAddress)
+                .WithHandshakeChallenge(effectiveSessionId, helpeeAddress, pending.HelperAddress,
+                    pending.InviteValidated, DateTimeOffset.UtcNow)
+                .WithHandshakeFailure(failureState, reason)
+            : currentSessionSecurityState.WithHandshakeFailure(failureState, reason);
+        if (!UpdateSessionSecurityState(failure))
+        {
+            // An ignored failure cannot revoke the retained session's envelope or keys,
+            // or send a rejection to its peer. Retire only this pending handshake.
+            ClearPendingInboundHandshake(pending.JoinRequestMessageId);
+            return;
+        }
+
         var result = new SessionHandshakeResult(effectiveSessionId, Verified: false, FailureReason: reason);
         var envelope = CreateEnvelope(
             pending.EnvelopeCode,
@@ -3147,28 +3188,9 @@ public sealed partial class NknSignalingTransport
             pending.JoinRequestMessageId);
         _ = SendEnvelopeAsync(pending.RemoteEndpoint, envelope, CancellationToken.None);
 
-        if (pending.HelpeeAddress is PeerAddress helpeeAddress)
-        {
-            LocalOperationalLog.Warn(
-                "SessionHandshake",
-                $"event=failure; direction=inbound; reason={reason}; session_id={effectiveSessionId.Value}; helper_identity={pending.HelperAddress.Value}; peer_id={source ?? "(none)"}");
-            UpdateSessionSecurityState(
-                SessionSecurityState.CreateHelpeeWaiting(helpeeAddress)
-                    .WithHandshakeChallenge(
-                        effectiveSessionId,
-                        helpeeAddress,
-                        pending.HelperAddress,
-                        pending.InviteValidated,
-                        DateTimeOffset.UtcNow)
-                    .WithHandshakeFailure(failureState, reason));
-        }
-        else
-        {
-            LocalOperationalLog.Warn(
-                "SessionHandshake",
-                $"event=failure; direction=inbound; reason={reason}; session_id={effectiveSessionId.Value}; helper_identity={pending.HelperAddress.Value}; peer_id={source ?? "(none)"}");
-            UpdateSessionSecurityState(currentSessionSecurityState.WithHandshakeFailure(failureState, reason));
-        }
+        LocalOperationalLog.Warn(
+            "SessionHandshake",
+            $"event=failure; direction=inbound; reason={reason}; session_id={effectiveSessionId.Value}; helper_identity={pending.HelperAddress.Value}; peer_id={source ?? "(none)"}");
 
         ClearPendingInboundHandshake(pending.JoinRequestMessageId);
         ClearActivePeerSessionTracking(preserveHelpeeHostKeyPair: true);
@@ -3917,6 +3939,7 @@ public sealed partial class NknSignalingTransport
         public string? ChallengeNonce { get; private init; }
         public DateTimeOffset? ChallengeExpiresAtUtc { get; private init; }
         public PeerAddress? HelpeeAddress { get; private init; }
+        public bool ResponseReceived { get; set; }
 
         public PendingInboundHandshakeState WithChallenge(
             SessionId sessionId,

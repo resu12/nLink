@@ -304,10 +304,11 @@ public sealed partial class NknAccelerationTransportTests
                 };
         }
 
-        public async Task Approve(bool begin = true)
+        public async Task Approve(bool begin = true,
+            InviteCapabilities capabilities = InviteCapabilities.Chat | InviteCapabilities.FileTransfer)
         {
             await ApproveNknSessionAsync(host, helper, Token,
-                InviteCapabilities.Chat | InviteCapabilities.FileTransfer, suppressAutomaticAccelerationNegotiation: true);
+                capabilities, suppressAutomaticAccelerationNegotiation: true);
             if (!begin) return;
             var lifecycle = ((IFileTransferSessionPreparationTransport)Payer).SessionPreparationLifecycle;
             Permit = lifecycle.Attachment!.Authority.Begin(lifecycle.Attachment, lifecycle.Current!,
@@ -415,6 +416,7 @@ public sealed partial class NknAccelerationTransportTests
         public NknTunaLaneLease? Current;
         public NknTunaLanePreparationRequest? Request;
         public int Starts, ExactStops, GlobalStops, OrdinaryStarts;
+        public Func<CancellationToken, Task<bool>>? OrdinaryStartForTests;
         public int Retains, Activations;
         public bool IsAvailable => Current is not null || runtime?.IsAvailable == true;
         public bool CanListen = true;
@@ -467,6 +469,11 @@ public sealed partial class NknAccelerationTransportTests
         }
         public Task<bool> EnsureListenerSidecarConnectedAsync(NknTunaListenerStartRequest request, CancellationToken ct)
         {
+            if (OrdinaryStartForTests is { } start)
+            {
+                Interlocked.Increment(ref OrdinaryStarts);
+                return start(ct);
+            }
             if (runtime is null) return EnsureListenerSidecarConnectedAsync(request.ExpectedRemotePeer, ct);
             Assert.Null(Current);
             Interlocked.Increment(ref OrdinaryStarts);

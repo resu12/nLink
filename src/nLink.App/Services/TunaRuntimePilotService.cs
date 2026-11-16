@@ -286,7 +286,9 @@ internal sealed record TunaUsageSessionRecord
             nextPaid,
             nextPaymentEventCount,
             completedFromSummary);
-        if (paymentTelemetryObserved && status is not TunaPaymentTelemetryStatus.NoPaymentTelemetryReported)
+        if (paymentTelemetryObserved &&
+            status is not TunaPaymentTelemetryStatus.NoPaymentTelemetryReported &&
+            status is not TunaPaymentTelemetryStatus.AccountingIncomplete)
         {
             status = TunaPaymentTelemetryStatus.Reported;
         }
@@ -1102,12 +1104,14 @@ internal sealed class TunaRuntimePilotService : ITunaRuntimePilotService
     {
         var normalizedReason = string.IsNullOrWhiteSpace(reason) ? "user_locked" : reason.Trim();
         ITransportAccelerationControl? control;
+        TunaUsageSessionRecord? recordedSession;
         var shouldStop = false;
         var shouldQueueStop = false;
         lock (gate)
         {
             shouldStop = IsTunaRuntimeSessionEngaged(runtimeStatus);
             ClearSessionUnlock_NoLock();
+            recordedSession = CompleteIncompleteSession_NoLock(normalizedReason);
             if (shouldStop && currentTransportControl is not null)
             {
                 runtimeStatus = "switching_to_regular_nkn";
@@ -1124,6 +1128,7 @@ internal sealed class TunaRuntimePilotService : ITunaRuntimePilotService
             control = currentTransportControl;
         }
 
+        LogUsageSessionRecorded(recordedSession);
         NotifyStateChanged();
 
         if (shouldQueueStop && control is not null)
@@ -1186,6 +1191,7 @@ internal sealed class TunaRuntimePilotService : ITunaRuntimePilotService
     {
         var normalized = (state ?? TunaRuntimePreferenceState.Default).Normalized();
         ITransportAccelerationControl? control = null;
+        TunaUsageSessionRecord? recordedSession = null;
         var shouldStop = false;
         lock (gate)
         {
@@ -1193,6 +1199,7 @@ internal sealed class TunaRuntimePilotService : ITunaRuntimePilotService
             {
                 shouldStop = IsTunaRuntimeSessionEngaged(runtimeStatus);
                 ClearSessionUnlock_NoLock();
+                recordedSession = CompleteIncompleteSession_NoLock("runtime_disabled");
                 control = currentTransportControl;
             }
 
@@ -1202,6 +1209,7 @@ internal sealed class TunaRuntimePilotService : ITunaRuntimePilotService
             preferenceStore.Save(preferences);
         }
 
+        LogUsageSessionRecorded(recordedSession);
         NotifyStateChanged();
         if (shouldStop && control is not null)
         {
@@ -1487,21 +1495,21 @@ internal sealed class TunaRuntimePilotService : ITunaRuntimePilotService
         var currentPreferences = Preferences;
         if (!currentPreferences.Enabled)
         {
-            SetRuntimeStatus("off");
+            usageSink.SetStatus("off");
             return null;
         }
 
         var availability = walletVerifier.GetAvailability();
         if (!availability.IsAvailable || string.IsNullOrWhiteSpace(availability.SidecarPath))
         {
-            SetRuntimeStatus("sidecar_unavailable");
+            usageSink.SetStatus("sidecar_unavailable");
             return null;
         }
 
         var wallet = LoadWalletState();
         if (wallet.Status != TunaWalletLinkStatus.VerifiedFunded || string.IsNullOrWhiteSpace(wallet.WalletPath))
         {
-            SetRuntimeStatus(StatusForWalletWithoutPaidListener(wallet));
+            usageSink.SetStatus(StatusForWalletWithoutPaidListener(wallet));
             return null;
         }
 
@@ -1511,6 +1519,9 @@ internal sealed class TunaRuntimePilotService : ITunaRuntimePilotService
             SidecarExePath = availability.SidecarPath,
             WalletPath = wallet.WalletPath,
             TakeWalletPassword = () => TakeUnlockedPasswordForListenerStart(usageSink),
+            TakeWalletPasswordIfCurrent = isCurrent => TakeUnlockedPasswordForListenerStart(usageSink, isCurrent),
+            BeginUsageAttemptIfCurrent = (runId, isCurrent) => BeginListenerUsageAttempt(usageSink, runId, isCurrent),
+            RuntimeGeneration = usageSink.Generation,
             MaxPriceNknPerMb = currentPreferences.MaxPriceNknPerMb,
             MaxTotalMiB = currentPreferences.MaxTotalMiB,
             MaxDurationSec = currentPreferences.MaxDurationSec,
@@ -1522,9 +1533,9 @@ internal sealed class TunaRuntimePilotService : ITunaRuntimePilotService
             ProviderReadyAttempts = 2,
             DegradedProviderGraceSeconds = EffectiveDegradedProviderGraceSeconds(),
             UsageSink = usageSink,
-            StatusChanged = SetRuntimeStatus,
-            CapHandoffRequested = RequestCapHandoff,
-            CanTakeWalletPassword = () => HasSessionUnlock,
+            StatusChanged = usageSink.SetStatus,
+            ListenerCapHandoffRequested = (reason, source) => RequestCapHandoff(reason, source, usageSink),
+            CanTakeWalletPassword = () => usageSink.IsLifetimeCurrent && HasSessionUnlock,
         };
     }
 
@@ -1566,12 +1577,13 @@ internal sealed class TunaRuntimePilotService : ITunaRuntimePilotService
                normalized.Equals("on", StringComparison.OrdinalIgnoreCase);
     }
 
-    private char[]? TakeUnlockedPasswordForListenerStart(RuntimeUsageSink usageSink)
+    private char[]? TakeUnlockedPasswordForListenerStart(RuntimeUsageSink usageSink, Func<bool>? isStartupCurrent = null)
     {
         char[] password;
         char[] passwordForSidecar;
         lock (gate)
         {
+            if (!usageSink.IsLifetimeCurrent || isStartupCurrent?.Invoke() == false) return null;
             password = unlockedPassword ?? [];
             if (password.Length == 0)
             {
@@ -1586,8 +1598,19 @@ internal sealed class TunaRuntimePilotService : ITunaRuntimePilotService
             passwordForSidecar = new char[password.Length];
             Array.Copy(password, passwordForSidecar, password.Length);
             ScheduleListenerRestartUnlockRetention_NoLock();
+        }
+
+        return passwordForSidecar;
+    }
+
+    private bool BeginListenerUsageAttempt(RuntimeUsageSink usageSink, string runId, Func<bool> isStartupCurrent)
+    {
+        lock (gate)
+        {
+            if (!usageSink.IsLifetimeCurrent || !isStartupCurrent()) return false;
             var now = DateTimeOffset.UtcNow;
-            currentSessionRunId = Guid.NewGuid().ToString("N");
+            currentSessionRunId = runId;
+            usageSink.RunId = currentSessionRunId;
             currentSessionPaymentEventCount = 0;
             runtimeStatus = "listener_starting";
             preferences = preferences.WithStatus(runtimeStatus);
@@ -1600,7 +1623,7 @@ internal sealed class TunaRuntimePilotService : ITunaRuntimePilotService
         }
 
         NotifyStateChanged();
-        return passwordForSidecar;
+        return true;
     }
 
     private void SetRuntimeStatusForTransportCreation(TunaWalletLinkState wallet)
@@ -1630,10 +1653,11 @@ internal sealed class TunaRuntimePilotService : ITunaRuntimePilotService
             _ => "wallet_missing_dialer_only",
         };
 
-    private void RecordPayment(NknTunaPaymentTelemetry payment)
+    private void RecordPayment(NknTunaPaymentTelemetry payment, RuntimeUsageSink? expectedListener = null)
     {
         lock (gate)
         {
+            if (expectedListener?.HasCurrentRun == false) return;
             var now = DateTimeOffset.UtcNow;
             currentSessionPaymentEventCount++;
             usage = usage.AddPayment(currentSessionRunId, payment.AmountNkn, payment.BytesMoved, now);
@@ -1649,11 +1673,12 @@ internal sealed class TunaRuntimePilotService : ITunaRuntimePilotService
         NotifyStateChanged();
     }
 
-    private void RecordSummary(NknTunaSessionUsageTelemetry summary)
+    private void RecordSummary(NknTunaSessionUsageTelemetry summary, RuntimeUsageSink? expectedListener = null)
     {
         TunaUsageSessionRecord? recordedSession;
         lock (gate)
         {
+            if (expectedListener?.HasCurrentRun == false) return;
             var now = DateTimeOffset.UtcNow;
             var paymentObserved = currentSessionPaymentTelemetryObserved || summary.PaymentTelemetryObserved;
             var sessionBytesMoved = Math.Max(summary.BytesMoved, currentSessionObservedBytesMoved);
@@ -1689,52 +1714,58 @@ internal sealed class TunaRuntimePilotService : ITunaRuntimePilotService
         NotifyStateChanged();
     }
 
-    private void RequestCapHandoff(string reason)
+    internal Func<Task>? BeforeListenerCapStopForTests { get; set; }
+    internal Task? ListenerCapStopForTests { get; private set; }
+    private (NknTunaListenerAdoptionSnapshot Source, long Generation, string? RunId)? pendingListenerCapStop;
+
+    private void RequestCapHandoff(string reason, NknTunaListenerAdoptionSnapshot source, RuntimeUsageSink usageSink)
     {
         var normalizedReason = string.IsNullOrWhiteSpace(reason)
             ? "cap_reached"
             : reason.Trim();
         ITransportAccelerationControl? control;
-        var shouldQueueStop = false;
+        string? runId;
+        (NknTunaListenerAdoptionSnapshot Source, long Generation, string? RunId) stopKey;
         lock (gate)
         {
-            runtimeStatus = "cap_handoff_pending";
-            preferences = preferences.WithStatus(runtimeStatus);
-            UpdateStartupTiming_NoLock(runtimeStatus, DateTimeOffset.UtcNow);
-            preferenceStore.Save(preferences);
+            if (!usageSink.IsCurrent || usageSink.RunId != source.ProcessRunId) return;
+            stopKey = (source, usageSink.Generation, source.ProcessRunId);
+            if (pendingListenerCapStop == stopKey) return;
+            pendingListenerCapStop = stopKey;
             control = currentTransportControl;
-            if (control is not null)
-            {
-                shouldQueueStop = Interlocked.CompareExchange(ref stopInProgress, 1, 0) == 0;
-            }
+            runId = source.ProcessRunId;
         }
 
-        NotifyStateChanged();
+        // The source is not admitted yet. Rejected caps must leave runtime
+        // presentation/preferences untouched, including after same-run adoption.
         LocalOperationalLog.Warn(
             "NKN.Tuna",
-            $"event=tuna_runtime_cap_handoff_requested; reason={SanitizeStatusToken(normalizedReason)}; stop_queued={(shouldQueueStop ? 1 : 0)}");
+            $"event=tuna_runtime_cap_handoff_requested; reason={SanitizeStatusToken(normalizedReason)}; stop_queued={(control is INknListenerCapHandoffControl ? 1 : 0)}");
 
-        if (control is null)
+        // Never fall back to an unbound stop: hard caps remain enforced by the
+        // sidecar if the exact listener is no longer owned by this transport.
+        if (control is not INknListenerCapHandoffControl boundControl)
         {
-            SetRuntimeStatus("cap_reached");
+            lock (gate) if (pendingListenerCapStop == stopKey) pendingListenerCapStop = null;
             return;
         }
+        bool IsCurrent() => usageSink.IsLifetimeCurrent && usageSink.RunId == runId &&
+            (Volatile.Read(ref currentSessionRunId) == runId || Volatile.Read(ref currentSessionRunId) is null);
 
-        if (!shouldQueueStop)
-        {
-            return;
-        }
-
-        _ = Task.Run(
+        ListenerCapStopForTests = Task.Run(
             async () =>
             {
+                var stopped = false;
                 try
                 {
+                    if (BeforeListenerCapStopForTests is { } before) await before().ConfigureAwait(false);
                     await StopAccelerationWithCompletionGuardAsync(
                             control,
                             normalizedReason,
                             TunaRuntimeUnlockSource.Options,
-                            CancellationToken.None)
+                            CancellationToken.None,
+                            async () => stopped = await boundControl.StopListenerForCapAsync(
+                                source, normalizedReason, IsCurrent, CancellationToken.None).ConfigureAwait(false))
                         .ConfigureAwait(false);
                 }
                 catch (Exception ex) when (ex is not OperationCanceledException)
@@ -1745,16 +1776,22 @@ internal sealed class TunaRuntimePilotService : ITunaRuntimePilotService
                 }
                 finally
                 {
+                    if (stopped) RecordIncompleteSession(normalizedReason, usageSink, runId);
+                    var changed = false;
                     lock (gate)
                     {
-                        Interlocked.Exchange(ref stopInProgress, 0);
-                        runtimeStatus = "cap_reached";
-                        preferences = preferences.WithStatus(runtimeStatus);
-                        UpdateStartupTiming_NoLock(runtimeStatus, DateTimeOffset.UtcNow);
-                        preferenceStore.Save(preferences);
+                        if (pendingListenerCapStop == stopKey) pendingListenerCapStop = null;
+                        if (stopped && IsCurrent())
+                        {
+                            runtimeStatus = "cap_reached";
+                            preferences = preferences.WithStatus(runtimeStatus);
+                            UpdateStartupTiming_NoLock(runtimeStatus, DateTimeOffset.UtcNow);
+                            preferenceStore.Save(preferences);
+                            changed = true;
+                        }
                     }
 
-                    NotifyStateChanged();
+                    if (changed) NotifyStateChanged();
                     LocalOperationalLog.Warn(
                         "NKN.Tuna",
                         $"event=tuna_runtime_cap_handoff_completed; reason={SanitizeStatusToken(normalizedReason)}");
@@ -1767,12 +1804,14 @@ internal sealed class TunaRuntimePilotService : ITunaRuntimePilotService
         ITransportAccelerationControl control,
         string reason,
         TunaRuntimeUnlockSource source,
-        CancellationToken ct)
+        CancellationToken ct,
+        Func<Task>? boundStop = null)
     {
         var stopTask = Task.Run(
             async () =>
             {
-                await control.StopAccelerationAsync(reason, ct).ConfigureAwait(false);
+                if (boundStop is not null) await boundStop().ConfigureAwait(false);
+                else await control.StopAccelerationAsync(reason, ct).ConfigureAwait(false);
             },
             CancellationToken.None);
 
@@ -1815,39 +1854,63 @@ internal sealed class TunaRuntimePilotService : ITunaRuntimePilotService
             TaskScheduler.Default);
     }
 
-    private void RecordIncompleteSession(string reason)
+    private void RecordIncompleteSession(string reason, RuntimeUsageSink? expectedListener = null, string? expectedRunId = null)
     {
         TunaUsageSessionRecord? recordedSession = null;
         lock (gate)
         {
+            if (expectedListener?.HasCurrentRun == false) return;
+            if (expectedRunId is not null &&
+                (currentSessionRunId != expectedRunId || expectedListener?.RunId != expectedRunId)) return;
             if (string.IsNullOrWhiteSpace(currentSessionRunId))
             {
                 return;
             }
 
-            var now = DateTimeOffset.UtcNow;
-            usage = usage.CompleteSession(
-                currentSessionRunId,
-                currentSessionObservedBytesMoved,
-                currentSessionPaymentTelemetryObserved,
-                null,
-                TunaPaymentTelemetryStatus.AccountingIncomplete,
-                currentSessionPaymentEventCount,
-                reason,
-                string.Empty,
-                reason,
-                completedFromSummary: false,
-                now);
-            recordedSession = usage.LastSessionRecord;
-            usageStore.Save(usage);
-            currentSessionRunId = null;
-            currentSessionPaymentEventCount = 0;
-            currentSessionPaymentTelemetryObserved = false;
-            currentSessionObservedBytesMoved = 0;
+            recordedSession = CompleteIncompleteSession_NoLock(reason);
         }
 
         LogUsageSessionRecorded(recordedSession);
         NotifyStateChanged();
+    }
+
+    private TunaUsageSessionRecord? CompleteIncompleteSession_NoLock(string reason)
+    {
+        if (string.IsNullOrWhiteSpace(currentSessionRunId)) return null;
+
+        // Deliberate revocation closes only the run held under gate; retired
+        // listener callbacks remain inadmissible, including after a new unlock.
+        usage = usage.CompleteSession(
+            currentSessionRunId,
+            currentSessionObservedBytesMoved,
+            currentSessionPaymentTelemetryObserved,
+            null,
+            TunaPaymentTelemetryStatus.AccountingIncomplete,
+            currentSessionPaymentEventCount,
+            reason,
+            string.Empty,
+            reason,
+            completedFromSummary: false,
+            DateTimeOffset.UtcNow);
+        var recordedSession = usage.LastSessionRecord;
+        currentSessionRunId = null;
+        currentSessionPaymentEventCount = 0;
+        currentSessionPaymentTelemetryObserved = false;
+        currentSessionObservedBytesMoved = 0;
+        try
+        {
+            usageStore.Save(usage);
+        }
+        catch (Exception ex)
+        {
+            // Accounting persistence must not prevent revocation or stopping
+            // the paid listener. Retain the closed record in memory, not as a
+            // claimed successful save, and keep retired callbacks inadmissible.
+            LocalOperationalLog.Warn("NKN.Tuna",
+                $"event=tuna_usage_session_persist_failed; session_run_id_hash={HashForLog(recordedSession?.SessionRunId)}; error={ex.GetType().Name}; completed_from_summary=0");
+            return null;
+        }
+        return recordedSession;
     }
 
     private static void LogUsageSessionRecorded(TunaUsageSessionRecord? record)
@@ -1874,7 +1937,8 @@ internal sealed class TunaRuntimePilotService : ITunaRuntimePilotService
     private void SetRuntimeStatus(string status)
         => TrySetRuntimeStatus(status, generation: null);
 
-    private bool TrySetRuntimeStatus(string status, long? generation, bool clearUnlock = false)
+    private bool TrySetRuntimeStatus(string status, long? generation, bool clearUnlock = false,
+        RuntimeUsageSink? expectedListener = null)
     {
         string previousStatus;
         string nextStatus;
@@ -1882,6 +1946,7 @@ internal sealed class TunaRuntimePilotService : ITunaRuntimePilotService
         bool changed;
         lock (gate)
         {
+            if (expectedListener?.IsCurrent == false) return false;
             if (generation is not null && generation != unlockGeneration)
             {
                 return false;
@@ -2338,10 +2403,24 @@ internal sealed class TunaRuntimePilotService : ITunaRuntimePilotService
     private sealed class RuntimeUsageSink : INknTunaUsageTelemetrySink
     {
         private readonly TunaRuntimePilotService owner;
+        private readonly ITransportAccelerationControl? control;
+        public long Generation { get; }
+        public string? RunId;
+        public bool IsLifetimeCurrent => Volatile.Read(ref owner.unlockGeneration) == Generation &&
+            ReferenceEquals(Volatile.Read(ref owner.currentTransportControl), control);
+        public bool IsCurrent => IsLifetimeCurrent &&
+            (Volatile.Read(ref owner.currentSessionRunId) is null || Volatile.Read(ref owner.currentSessionRunId) == RunId);
+        public bool HasCurrentRun => IsLifetimeCurrent && RunId is not null &&
+            Volatile.Read(ref owner.currentSessionRunId) == RunId;
 
         public RuntimeUsageSink(TunaRuntimePilotService owner)
         {
             this.owner = owner;
+            lock (owner.gate)
+            {
+                Generation = owner.unlockGeneration;
+                control = owner.currentTransportControl;
+            }
         }
 
         public void StartNewSession()
@@ -2355,11 +2434,13 @@ internal sealed class TunaRuntimePilotService : ITunaRuntimePilotService
             owner.NotifyStateChanged();
         }
 
-        public void RecordPayment(NknTunaPaymentTelemetry payment) => owner.RecordPayment(payment);
+        public void SetStatus(string status) => owner.TrySetRuntimeStatus(status, Generation, expectedListener: this);
 
-        public void RecordSummary(NknTunaSessionUsageTelemetry summary) => owner.RecordSummary(summary);
+        public void RecordPayment(NknTunaPaymentTelemetry payment) => owner.RecordPayment(payment, this);
 
-        public void RecordIncomplete(string reason) => owner.RecordIncompleteSession(reason);
+        public void RecordSummary(NknTunaSessionUsageTelemetry summary) => owner.RecordSummary(summary, this);
+
+        public void RecordIncomplete(string reason) => owner.RecordIncompleteSession(reason, this);
     }
 
     private sealed class RuntimeListenerSupervisor : INknTunaListenerSidecarSupervisor
@@ -2368,6 +2449,7 @@ internal sealed class TunaRuntimePilotService : ITunaRuntimePilotService
         private readonly TunaRuntimePilotService owner;
         private INknTunaListenerSidecarSupervisor? supervisor;
         private string? supervisorKey;
+        private long stopGeneration;
         private bool disposed;
 
         public RuntimeListenerSupervisor(
@@ -2401,16 +2483,36 @@ internal sealed class TunaRuntimePilotService : ITunaRuntimePilotService
         }
 
         public Task<NknTunaListenerSidecarEndpoint?> EnsureStartedAsync(NknTunaListenerStartRequest request, CancellationToken ct)
-            => GetOrCreateSupervisor(requireIdle: false)?.EnsureStartedAsync(request, ct)
-                ?? Task.FromResult<NknTunaListenerSidecarEndpoint?>(null);
+        {
+            var current = GetOrCreateSupervisor(false, ct, out var generation);
+            lock (gate)
+            {
+                return !disposed && generation == stopGeneration && ReferenceEquals(current, supervisor) && !ct.IsCancellationRequested
+                    ? current?.EnsureStartedAsync(request, ct) ?? Task.FromResult<NknTunaListenerSidecarEndpoint?>(null)
+                    : Task.FromResult<NknTunaListenerSidecarEndpoint?>(null);
+            }
+        }
 
         public Task<NknTunaListenerAdoptionSnapshot?> EnsureStartedIfIdleAsync(NknTunaListenerStartRequest request, CancellationToken ct)
-            => GetOrCreateSupervisor(requireIdle: true)?.EnsureStartedIfIdleAsync(request, ct)
-                ?? Task.FromResult<NknTunaListenerAdoptionSnapshot?>(null);
-
-        private INknTunaListenerSidecarSupervisor? GetOrCreateSupervisor(bool requireIdle)
         {
+            var current = GetOrCreateSupervisor(true, ct, out var generation);
+            lock (gate)
+            {
+                return !disposed && generation == stopGeneration && ReferenceEquals(current, supervisor) && !ct.IsCancellationRequested
+                    ? current?.EnsureStartedIfIdleAsync(request, ct) ?? Task.FromResult<NknTunaListenerAdoptionSnapshot?>(null)
+                    : Task.FromResult<NknTunaListenerAdoptionSnapshot?>(null);
+            }
+        }
+
+        private INknTunaListenerSidecarSupervisor? GetOrCreateSupervisor(bool requireIdle, CancellationToken ct, out long generation)
+        {
+            lock (gate)
+            {
+                generation = stopGeneration;
+                if (disposed || ct.IsCancellationRequested) return null;
+            }
             INknTunaListenerSidecarSupervisor current;
+            INknTunaListenerSidecarSupervisor? retired = null;
             var usageSink = new RuntimeUsageSink(owner);
             var options = owner.CreateListenerSidecarOptions(usageSink);
             if (options is null)
@@ -2421,15 +2523,17 @@ internal sealed class TunaRuntimePilotService : ITunaRuntimePilotService
             var nextKey = ListenerOptionsKey(options);
             lock (gate)
             {
-                ObjectDisposedException.ThrowIf(disposed, this);
-                if (requireIdle && supervisor is not null && !string.Equals(supervisorKey, nextKey, StringComparison.Ordinal))
+                if (disposed || ct.IsCancellationRequested || generation != stopGeneration || !usageSink.IsLifetimeCurrent)
+                    return null;
+                if (requireIdle && supervisor is not null && !string.Equals(supervisorKey, nextKey, StringComparison.Ordinal) &&
+                    supervisor is not NknTunaListenerSidecarSupervisor { IsIdle: true })
                     return null; // Preparation may not replace another child/configuration.
                 if (supervisor is null || !string.Equals(supervisorKey, nextKey, StringComparison.Ordinal))
                 {
                     if (supervisor is not null)
                     {
                         supervisor.StateChanged -= OnSupervisorStateChanged;
-                        supervisor.Dispose();
+                        retired = supervisor;
                     }
 
                     supervisor = new NknTunaListenerSidecarSupervisor(options);
@@ -2440,7 +2544,12 @@ internal sealed class TunaRuntimePilotService : ITunaRuntimePilotService
                 current = supervisor;
             }
 
-            return current;
+            // Cleanup may notify subscribers. It must not overwrite a supervisor
+            // installed by a reentrant or concurrent successor.
+            retired?.Dispose();
+            lock (gate)
+                return !disposed && !ct.IsCancellationRequested && generation == stopGeneration &&
+                    usageSink.IsLifetimeCurrent && ReferenceEquals(current, supervisor) ? current : null;
         }
 
         public NknTunaListenerAdoptionSnapshot? CaptureCurrentListenerAdoptionSnapshot()
@@ -2498,6 +2607,7 @@ internal sealed class TunaRuntimePilotService : ITunaRuntimePilotService
         {
             lock (gate)
             {
+                stopGeneration++;
                 supervisor?.Stop(reason);
             }
         }
@@ -2507,6 +2617,7 @@ internal sealed class TunaRuntimePilotService : ITunaRuntimePilotService
                 "|",
                 options.SidecarExePath,
                 options.WalletPath,
+                options.RuntimeGeneration.ToString(CultureInfo.InvariantCulture),
                 options.MaxPriceNknPerMb,
                 options.MaxTotalMiB.ToString(CultureInfo.InvariantCulture),
                 options.MaxDurationSec.ToString(CultureInfo.InvariantCulture),

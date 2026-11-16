@@ -3,9 +3,11 @@ using NLink.App.Services;
 using NLink.App.ViewModels;
 using NLink.Core;
 using NLink.Core.Diagnostics;
+using NLink.Core.Logging;
 using NLink.Infra.Nkn;
 using System.Diagnostics;
 using System.Reflection;
+using System.Text.Json;
 
 namespace NLink.SmokeTests;
 
@@ -13,6 +15,666 @@ namespace NLink.SmokeTests;
 [Trait("Area", "Core")]
 public sealed class TunaWalletDiagnosticsTests
 {
+    [Theory]
+    [InlineData("lock", false)]
+    [InlineData("lock", true)]
+    [InlineData("disable", false)]
+    [InlineData("disable", true)]
+    public async Task TunaRuntimeListenerLifetime_AccountingWriteFailureCannotPreventStop(string operation, bool accessDenied)
+    {
+        var root = CreateTempRoot();
+        VerifiedRuntimeContext? context = null;
+        FailingUsageSaveStore? store = null;
+        try
+        {
+            context = await CreateVerifiedRuntimeContextAsync(root,
+                new FakeTunaWalletVerifier(TunaWalletValidationResult.Ok("wallet", "public-address", "1")),
+                wrapUsageStore: inner => store = new FailingUsageSaveStore(inner));
+            var runtime = context.RuntimeService;
+            var control = new BoundCapControl();
+            SetPrivateField(runtime, "currentTransportControl", control);
+            var wallet = await context.WalletStore.LoadAsync();
+            runtime.UnlockForNextSession(wallet, "test-only".ToCharArray());
+            var options = RuntimeListenerOptions(runtime);
+            var runId = Guid.NewGuid().ToString("N");
+            Assert.True(options.BeginUsageAttemptIfCurrent!(runId, () => true));
+            options.UsageSink!.RecordPayment(new NknTunaPaymentTelemetry(0.25m, 0.25m, 1048576, null));
+            options.StatusChanged!("listener_ready");
+            var persisted = JsonSerializer.Serialize(context.UsageStore.Load());
+            var saves = store!.SaveCalls;
+            const string privateDetail = "test-only-private-accounting-path";
+            store.Failure = accessDenied ? new UnauthorizedAccessException(privateDetail) : new IOException(privateDetail);
+
+            async Task RevokeAsync()
+            {
+                if (operation == "lock")
+                    await runtime.LockOrStopForSessionAsync("test_lock", TunaRuntimeUnlockSource.Header);
+                else
+                    runtime.SavePreferences(new TunaRuntimePreferenceState { Enabled = false });
+            }
+
+            await RevokeAsync();
+            await WaitUntilAsync(() => control.UnboundStops == 1 &&
+                runtime.RuntimeStatus == (operation == "lock" ? "locked" : "off"), TimeSpan.FromSeconds(5));
+            Assert.False(runtime.HasSessionUnlock);
+            var closed = Assert.Single(runtime.Usage.SessionRecords);
+            Assert.Equal(runId, closed.SessionRunId);
+            Assert.NotNull(closed.EndedUtc);
+            Assert.False(closed.CompletedFromSummary);
+            Assert.Equal(TunaPaymentTelemetryStatus.AccountingIncomplete, closed.PaymentTelemetryStatus);
+            Assert.Equal(0.25m, closed.PaidNkn);
+            Assert.Equal(1, closed.PaymentEventCount);
+            Assert.Equal(1048576, closed.BytesMoved);
+            Assert.Equal(persisted, JsonSerializer.Serialize(context.UsageStore.Load())); // Failed save is not durable evidence.
+            Assert.Equal(saves + 1, store.SaveCalls);
+            var runHash = Assert.IsType<string>(typeof(TunaRuntimePilotService)
+                .GetMethod("HashForLog", BindingFlags.Static | BindingFlags.NonPublic)!.Invoke(null, [runId]));
+            var log = LocalOperationalLog.GetRecentLogText();
+            Assert.Contains($"event=tuna_usage_session_persist_failed; session_run_id_hash={runHash}; error={store.Failure.GetType().Name}", log);
+            Assert.DoesNotContain($"event=tuna_usage_session_recorded; session_run_id_hash={runHash}", log);
+            Assert.DoesNotContain(privateDetail, log);
+
+            await RevokeAsync();
+            options.UsageSink.RecordIncomplete("late_stop");
+            Assert.Equal(saves + 1, store.SaveCalls); // No automatic retry or duplicate closure.
+            Assert.Equal(closed, Assert.Single(runtime.Usage.SessionRecords));
+
+            store.Failure = null;
+            runtime.SavePreferences(new TunaRuntimePreferenceState { Enabled = true, LastRuntimeStatus = "locked" });
+            runtime.UnlockForNextSession(wallet, "replacement".ToCharArray());
+            var successor = RuntimeListenerOptions(runtime);
+            Assert.True(successor.BeginUsageAttemptIfCurrent!("successor-run", () => true));
+            successor.UsageSink!.RecordPayment(new NknTunaPaymentTelemetry(0.5m, 0.5m, 2097152, null));
+            var beforeLate = JsonSerializer.Serialize(context.UsageStore.Load());
+            options.UsageSink.RecordSummary(new NknTunaSessionUsageTelemetry(9999999, "late_summary", true, 9m));
+            options.UsageSink.RecordPayment(new NknTunaPaymentTelemetry(9m, 9m, 9999999, null));
+            Assert.Equal(beforeLate, JsonSerializer.Serialize(context.UsageStore.Load()));
+            Assert.Equal(closed, context.UsageStore.Load().SessionRecords[0]);
+            Assert.Equal("successor-run", context.UsageStore.Load().LastSessionRecord!.SessionRunId);
+            Assert.Equal(0.75m, context.UsageStore.Load().TotalPaidNkn);
+            Assert.Equal(1, control.UnboundStops);
+            Assert.Equal(0, control.BoundStops);
+        }
+        finally { context?.RuntimeService.ClearSessionUnlock(); DeleteTempRoot(root); }
+    }
+
+    [Theory]
+    [InlineData("lock", "listener_ready")]
+    [InlineData("lock", "peer_connected")]
+    [InlineData("disable", "listener_ready")]
+    [InlineData("disable", "peer_connected")]
+    public async Task TunaRuntimeListenerLifetime_RejectedStreamPreservesLifecycleAndUserStop(string operation, string status)
+    {
+        var root = CreateTempRoot();
+        VerifiedRuntimeContext? context = null;
+        try
+        {
+            context = await CreateListenerSupervisorRuntimeContextAsync(root);
+            var runtime = context.RuntimeService;
+            var control = new BoundCapControl();
+            SetPrivateField(runtime, "currentTransportControl", control);
+            runtime.UnlockForNextSession(await context.WalletStore.LoadAsync(), "test-only".ToCharArray());
+            var options = RuntimeListenerOptions(runtime);
+            using var supervisor = new NknTunaListenerSidecarSupervisor(options);
+            using var owner = UnstartedListenerOwner(); // No process or network launch.
+            var source = CreateListenerAdoptionSnapshot();
+            SetPrivateField(supervisor, "processOwner", owner);
+            SetPrivateField(supervisor, "currentRequest", source.CurrentRequest);
+            SetPrivateField(supervisor, "endpoint", source.Endpoint);
+            Assert.True(options.BeginUsageAttemptIfCurrent!(owner.RunId, () => true));
+            options.StatusChanged!(status);
+            var preferences = JsonSerializer.Serialize(context.PreferenceStore.Load());
+            var usage = JsonSerializer.Serialize(context.UsageStore.Load());
+            var observations = new List<AccelerationStateChangedEventArgs>();
+            supervisor.StateChanged += (_, e) => observations.Add(e);
+
+            ListenerOutput(supervisor, owner, "{\"event\":\"tuna_stream_rejected\",\"reason\":\"remote_address_mismatch\"}");
+
+            Assert.Equal(status, runtime.RuntimeStatus);
+            Assert.Equal(preferences, JsonSerializer.Serialize(context.PreferenceStore.Load()));
+            Assert.Equal(usage, JsonSerializer.Serialize(context.UsageStore.Load()));
+            Assert.True(runtime.HasSessionUnlock);
+            Assert.Equal("listener_stream_rejected_remote_address_mismatch", Assert.Single(observations).Reason);
+            Assert.False((bool)typeof(NknTunaListenerSidecarSupervisor)
+                .GetField("terminalFailureObserved", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(supervisor)!);
+            Assert.Equal(0, control.UnboundStops);
+
+            if (operation == "lock")
+                await runtime.LockOrStopForSessionAsync("test_lock", TunaRuntimeUnlockSource.Header);
+            else
+                runtime.SavePreferences(new TunaRuntimePreferenceState { Enabled = false });
+            await WaitUntilAsync(() => control.UnboundStops == 1 &&
+                runtime.RuntimeStatus == (operation == "lock" ? "locked" : "off"), TimeSpan.FromSeconds(5));
+            Assert.False(runtime.HasSessionUnlock);
+            var closed = Assert.Single(context.UsageStore.Load().SessionRecords);
+            Assert.Equal(owner.RunId, closed.SessionRunId);
+            Assert.NotNull(closed.EndedUtc);
+            Assert.Equal(TunaPaymentTelemetryStatus.AccountingIncomplete, closed.PaymentTelemetryStatus);
+            Assert.Equal(0, control.BoundStops);
+        }
+        finally { context?.RuntimeService.ClearSessionUnlock(); DeleteTempRoot(root); }
+    }
+
+    private sealed class FailingUsageSaveStore(ITunaUsageAccountingStore inner) : ITunaUsageAccountingStore
+    {
+        public Exception? Failure;
+        public int SaveCalls;
+        public TunaUsageAccountingState Load() => inner.Load();
+        public void Save(TunaUsageAccountingState state)
+        {
+            SaveCalls++;
+            if (Failure is { } failure) throw failure;
+            inner.Save(state);
+        }
+    }
+
+    [Theory]
+    [InlineData("lock", false)]
+    [InlineData("lock", true)]
+    [InlineData("disable", false)]
+    [InlineData("disable", true)]
+    public async Task TunaRuntimeListenerLifetime_LockDisableClosesExactRunAndRejectsRetiredCallbacks(string operation, bool startSuccessor)
+    {
+        var root = CreateTempRoot();
+        VerifiedRuntimeContext? context = null;
+        try
+        {
+            context = await CreateListenerSupervisorRuntimeContextAsync(root);
+            var runtime = context.RuntimeService;
+            var control = new BoundCapControl();
+            SetPrivateField(runtime, "currentTransportControl", control);
+            var wallet = await context.WalletStore.LoadAsync();
+            runtime.UnlockForNextSession(wallet, "test-only".ToCharArray());
+            var options = RuntimeListenerOptions(runtime);
+            // Synthetic usage callbacks only: no listener process or network is started.
+            Assert.True(options.BeginUsageAttemptIfCurrent!("retired-run", () => true));
+            options.UsageSink!.RecordPayment(new NknTunaPaymentTelemetry(0.25m, 0.25m, 1048576, null));
+            options.StatusChanged!("listener_ready");
+
+            async Task RevokeAsync()
+            {
+                if (operation == "lock")
+                    await runtime.LockOrStopForSessionAsync("test_lock", TunaRuntimeUnlockSource.Header);
+                else
+                    runtime.SavePreferences(new TunaRuntimePreferenceState { Enabled = false });
+            }
+
+            await RevokeAsync();
+            Assert.False(runtime.HasSessionUnlock);
+            Assert.Null(typeof(TunaRuntimePilotService).GetField("currentSessionRunId", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(runtime));
+            var closed = Assert.Single(context.UsageStore.Load().SessionRecords);
+            Assert.Equal("retired-run", closed.SessionRunId);
+            Assert.NotNull(closed.EndedUtc);
+            Assert.Equal(TunaPaymentTelemetryStatus.AccountingIncomplete, closed.PaymentTelemetryStatus);
+            Assert.False(closed.CompletedFromSummary);
+            Assert.Equal(0.25m, closed.PaidNkn);
+            Assert.Equal(1048576, closed.BytesMoved);
+            Assert.Equal(1, closed.PaymentEventCount);
+            Assert.Equal(operation == "lock" ? "test_lock" : "runtime_disabled", closed.StopReason);
+            Assert.Equal(0.25m, context.UsageStore.Load().TotalPaidNkn);
+            await WaitUntilAsync(() => control.UnboundStops == 1 &&
+                runtime.RuntimeStatus == (operation == "lock" ? "locked" : "off"), TimeSpan.FromSeconds(5));
+
+            // Repeated revocation must not create or rewrite historical accounting.
+            var closedUsage = JsonSerializer.Serialize(context.UsageStore.Load());
+            await RevokeAsync();
+            Assert.Equal(closedUsage, JsonSerializer.Serialize(context.UsageStore.Load()));
+
+            if (startSuccessor)
+            {
+                runtime.SavePreferences(new TunaRuntimePreferenceState { Enabled = true, LastRuntimeStatus = "locked" });
+                runtime.UnlockForNextSession(wallet, "replacement".ToCharArray());
+                var successor = RuntimeListenerOptions(runtime);
+                Assert.True(successor.BeginUsageAttemptIfCurrent!("successor-run", () => true));
+                successor.UsageSink!.RecordPayment(new NknTunaPaymentTelemetry(0.5m, 0.5m, 2097152, null));
+                successor.StatusChanged!("listener_ready");
+            }
+
+            var usage = JsonSerializer.Serialize(context.UsageStore.Load());
+            var preferences = JsonSerializer.Serialize(context.PreferenceStore.Load());
+            var status = runtime.RuntimeStatus;
+            options.UsageSink.RecordIncomplete("late_stop");
+            options.UsageSink.RecordSummary(new NknTunaSessionUsageTelemetry(9999999, "late_cap", true, 9m,
+                PaymentEventCount: 9, CapReached: true));
+            options.UsageSink.RecordPayment(new NknTunaPaymentTelemetry(9m, 9m, 9999999, null));
+            options.StatusChanged!("active");
+            Assert.False(options.BeginUsageAttemptIfCurrent!("late-run", () => true));
+
+            Assert.Equal(usage, JsonSerializer.Serialize(context.UsageStore.Load()));
+            Assert.Equal(preferences, JsonSerializer.Serialize(context.PreferenceStore.Load()));
+            Assert.Equal(status, runtime.RuntimeStatus);
+            Assert.Equal(startSuccessor, runtime.HasSessionUnlock);
+            Assert.Equal(closed, context.UsageStore.Load().SessionRecords[0]);
+            Assert.Equal(startSuccessor ? "successor-run" : null,
+                typeof(TunaRuntimePilotService).GetField("currentSessionRunId", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(runtime));
+            Assert.Equal(1, control.UnboundStops);
+            Assert.Equal(0, control.BoundStops);
+        }
+        finally { context?.RuntimeService.ClearSessionUnlock(); DeleteTempRoot(root); }
+    }
+
+    [Theory]
+    [InlineData("lock", false)]
+    [InlineData("lock", true)]
+    [InlineData("disable", false)]
+    [InlineData("disable", true)]
+    public async Task TunaRuntimeListenerLifetime_LockDisableWithoutActiveRunPreservesAccounting(string operation, bool completedSummary)
+    {
+        var root = CreateTempRoot();
+        VerifiedRuntimeContext? context = null;
+        try
+        {
+            context = await CreateListenerSupervisorRuntimeContextAsync(root);
+            var runtime = context.RuntimeService;
+            runtime.UnlockForNextSession(await context.WalletStore.LoadAsync(), "test-only".ToCharArray());
+            if (completedSummary)
+            {
+                var options = RuntimeListenerOptions(runtime);
+                Assert.True(options.BeginUsageAttemptIfCurrent!("completed-run", () => true));
+                options.UsageSink!.RecordPayment(new NknTunaPaymentTelemetry(0.25m, 0.25m, 1048576, null));
+                options.UsageSink.RecordSummary(new NknTunaSessionUsageTelemetry(1048576, "completed", true, 0.25m,
+                    PaymentEventCount: 1));
+                Assert.True(Assert.Single(context.UsageStore.Load().SessionRecords).CompletedFromSummary);
+            }
+
+            var before = JsonSerializer.Serialize(context.UsageStore.Load());
+            if (operation == "lock")
+                await runtime.LockOrStopForSessionAsync("test_lock", TunaRuntimeUnlockSource.Header);
+            else
+                runtime.SavePreferences(new TunaRuntimePreferenceState { Enabled = false });
+
+            Assert.False(runtime.HasSessionUnlock);
+            Assert.Equal(before, JsonSerializer.Serialize(context.UsageStore.Load()));
+            Assert.Equal(operation == "lock" ? "locked" : "off", runtime.RuntimeStatus);
+        }
+        finally { context?.RuntimeService.ClearSessionUnlock(); DeleteTempRoot(root); }
+    }
+
+    [Theory]
+    [InlineData("unlock", false)]
+    [InlineData("unlock", true)]
+    [InlineData("stop", false)]
+    [InlineData("stop", true)]
+    [InlineData("transport", false)]
+    [InlineData("transport", true)]
+    [InlineData("cancel", false)]
+    [InlineData("cancel", true)]
+    public async Task TunaRuntimeListenerLifetime_BlockedOptionsCannotReplaceSuccessor(string retirement, bool requireIdle)
+    {
+        var root = CreateTempRoot();
+        VerifiedRuntimeContext? context = null;
+        BlockingWalletLoad? store = null;
+        Task<object?>? oldSelection = null;
+        using var cancellation = new CancellationTokenSource();
+        try
+        {
+            context = await CreateVerifiedRuntimeContextAsync(root,
+                new FakeTunaWalletVerifier(TunaWalletValidationResult.Ok("wallet", "public-address", "1")),
+                wrapWalletStore: inner => store = new BlockingWalletLoad(inner));
+            var runtime = context.RuntimeService;
+            var wallet = await context.WalletStore.LoadAsync();
+            runtime.UnlockForNextSession(wallet, "first".ToCharArray());
+            using var wrapper = runtime.CreateRuntimeListenerSupervisorForTests();
+            var get = wrapper.GetType().GetMethod("GetOrCreateSupervisor", BindingFlags.Instance | BindingFlags.NonPublic)!;
+            Assert.IsType<NknTunaListenerSidecarSupervisor>(get.Invoke(wrapper, [false, CancellationToken.None, 0L]));
+            store!.BlockNextLoad = 1;
+            oldSelection = Task.Run(() => get.Invoke(wrapper, [requireIdle, cancellation.Token, 0L]));
+            await store.Entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            if (retirement == "unlock") runtime.UnlockForNextSession(wallet, "replacement".ToCharArray());
+            if (retirement == "stop") wrapper.Stop("retired");
+            if (retirement == "transport") SetPrivateField(runtime, "currentTransportControl", new BoundCapControl());
+            if (retirement == "cancel") cancellation.Cancel();
+            var successor = Assert.IsType<NknTunaListenerSidecarSupervisor>(get.Invoke(wrapper, [false, CancellationToken.None, 0L]));
+            var pending = new TaskCompletionSource<NknTunaListenerSidecarEndpoint>();
+            SetPrivateField(successor, "pendingReady", pending);
+            store.Release.TrySetResult();
+            Assert.Null(await oldSelection.WaitAsync(TimeSpan.FromSeconds(5)));
+            Assert.Same(successor, wrapper.GetType().GetField("supervisor", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(wrapper));
+            Assert.False((bool)typeof(NknTunaListenerSidecarSupervisor).GetField("disposed", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(successor)!);
+            Assert.False(pending.Task.IsCompleted);
+        }
+        finally
+        {
+            store?.Release.TrySetResult();
+            if (oldSelection is not null) await oldSelection.WaitAsync(TimeSpan.FromSeconds(5));
+            context?.RuntimeService.ClearSessionUnlock();
+            DeleteTempRoot(root);
+        }
+    }
+
+    [Theory]
+    [InlineData("retry")]
+    [InlineData("replacement")]
+    public async Task TunaRuntimeListenerLifetime_EachPhysicalAttemptRetainsItsOwnAccounting(string transition)
+    {
+        var root = CreateTempRoot();
+        VerifiedRuntimeContext? context = null;
+        try
+        {
+            context = await CreateListenerSupervisorRuntimeContextAsync(root);
+            var runtime = context.RuntimeService;
+            runtime.UnlockForNextSession(await context.WalletStore.LoadAsync(), "test-only".ToCharArray());
+            var options = RuntimeListenerOptions(runtime);
+            var password = Assert.IsType<char[]>(options.TakeWalletPasswordIfCurrent!(() => true));
+            Array.Clear(password);
+            using var supervisor = new NknTunaListenerSidecarSupervisor(options);
+            // Unstarted Process objects exercise ownership/accounting only; no child is launched.
+            using var first = UnstartedListenerOwner();
+            using var second = UnstartedListenerOwner();
+            var request = CreateListenerAdoptionSnapshot().CurrentRequest;
+            SetPrivateField(supervisor, "processOwner", first);
+            SetPrivateField(supervisor, "currentRequest", request);
+            Assert.True((bool)InvokeListener(supervisor, "BeginUsageAttempt", first, 0L, CancellationToken.None)!);
+            if (transition == "retry")
+                Assert.True((bool)InvokeListener(supervisor, "TryReportStartFailure", 0L, first, "listener_ready_timeout", "ready_timeout")!);
+            Assert.Same(first, InvokeListener(supervisor, "DetachProcessForStop_NoLock", "listener_replaced"));
+            var failed = Assert.Single(context.UsageStore.Load().SessionRecords);
+            Assert.Equal(first.RunId, failed.SessionRunId);
+            Assert.Equal(TunaPaymentTelemetryStatus.AccountingIncomplete, failed.PaymentTelemetryStatus);
+
+            SetPrivateField(supervisor, "processOwner", second);
+            SetPrivateField(supervisor, "summaryObserved", false);
+            Assert.True((bool)InvokeListener(supervisor, "BeginUsageAttempt", second, 0L, CancellationToken.None)!);
+            var before = JsonSerializer.Serialize(context.UsageStore.Load());
+            ListenerOutput(supervisor, first, "{\"event\":\"tuna_payment\",\"amountNkn\":9,\"cumulativeSpendNkn\":9}");
+            Assert.Equal(before, JsonSerializer.Serialize(context.UsageStore.Load()));
+            ListenerOutput(supervisor, second, "{\"event\":\"tuna_payment\",\"amountNkn\":0.25,\"cumulativeSpendNkn\":0.25,\"bytesMoved\":1048576}");
+            ListenerOutput(supervisor, second, "{\"event\":\"summary\",\"reason\":\"completed\",\"paymentObserved\":true,\"paymentEventCount\":1,\"cumulativeSpendNkn\":0.25,\"bytesMoved\":1048576}");
+            var usage = context.UsageStore.Load();
+            Assert.Equal(0.25m, usage.TotalPaidNkn);
+            Assert.Equal(2, usage.SessionRecords.Count);
+            Assert.Equal(failed, usage.SessionRecords[0]);
+            Assert.Equal(second.RunId, usage.LastSessionRecord!.SessionRunId);
+            Assert.True(usage.LastSessionRecord.CompletedFromSummary);
+        }
+        finally { context?.RuntimeService.ClearSessionUnlock(); DeleteTempRoot(root); }
+    }
+
+    [Theory]
+    [InlineData("replacement")]
+    [InlineData("adoption")]
+    public async Task TunaRuntimeListenerLifetime_StaleCapCannotPublishSuccessorStatus(string change)
+    {
+        var root = CreateTempRoot();
+        VerifiedRuntimeContext? context = null;
+        try
+        {
+            context = await CreateListenerSupervisorRuntimeContextAsync(root);
+            var runtime = context.RuntimeService;
+            var control = new BoundCapControl();
+            SetPrivateField(runtime, "currentTransportControl", control);
+            runtime.UnlockForNextSession(await context.WalletStore.LoadAsync(), "test-only".ToCharArray());
+            var options = RuntimeListenerOptions(runtime);
+            var source = CreateListenerAdoptionSnapshot();
+            Assert.True(options.BeginUsageAttemptIfCurrent!(source.ProcessRunId, () => true));
+            using var supervisor = new NknTunaListenerSidecarSupervisor(options);
+            options.StatusChanged!("listener_ready");
+            var beforeCap = JsonSerializer.Serialize(context.PreferenceStore.Load());
+            Action? deferredCap = null;
+            InvokeListener(supervisor, "HandleStdoutLineCore",
+                "{\"event\":\"tuna_cap_handoff_requested\",\"capReason\":\"byte_cap_reached\"}",
+                new TaskCompletionSource<NknTunaListenerSidecarEndpoint>(), new Stopwatch(), source.CurrentRequest,
+                source, (Func<bool>)(() => true), null, (Action<Action>)(action => deferredCap = action));
+            Assert.NotNull(deferredCap);
+            Assert.Equal(beforeCap, JsonSerializer.Serialize(context.PreferenceStore.Load()));
+            var successor = change == "replacement"
+                ? source with { ProcessRunId = "successor-run" }
+                : source with { OwnershipGeneration = source.OwnershipGeneration + 1 };
+            if (change == "replacement")
+            {
+                options.UsageSink!.RecordIncomplete("replaced");
+                Assert.True(options.BeginUsageAttemptIfCurrent!(successor.ProcessRunId, () => true));
+            }
+            control.CurrentSource = successor;
+            options.StatusChanged!("listener_ready");
+            var preferences = JsonSerializer.Serialize(context.PreferenceStore.Load());
+            var usage = JsonSerializer.Serialize(context.UsageStore.Load());
+            var notifications = 0;
+            runtime.StateChanged += (_, _) => notifications++;
+            deferredCap!();
+            if (runtime.ListenerCapStopForTests is { } rejected) await rejected.WaitAsync(TimeSpan.FromSeconds(5));
+            Assert.Equal(0, control.BoundStops);
+            Assert.Equal(0, control.UnboundStops);
+            Assert.Equal(0, notifications);
+            Assert.Equal("listener_ready", runtime.RuntimeStatus);
+            Assert.Equal(preferences, JsonSerializer.Serialize(context.PreferenceStore.Load()));
+            Assert.Equal(usage, JsonSerializer.Serialize(context.UsageStore.Load()));
+
+            options.ListenerCapHandoffRequested!("byte_cap_reached", successor);
+            await runtime.ListenerCapStopForTests!.WaitAsync(TimeSpan.FromSeconds(5));
+            Assert.Equal(1, control.BoundStops);
+            Assert.Equal("cap_reached", runtime.RuntimeStatus);
+            Assert.Equal(successor.ProcessRunId, context.UsageStore.Load().LastSessionRecord!.SessionRunId);
+        }
+        finally { context?.RuntimeService.ClearSessionUnlock(); DeleteTempRoot(root); }
+    }
+
+    private static NknTunaSidecarProcessOwner UnstartedListenerOwner()
+        => (NknTunaSidecarProcessOwner)typeof(NknTunaSidecarProcessOwner)
+            .GetConstructors(BindingFlags.Instance | BindingFlags.NonPublic).Single()
+            .Invoke(new object?[] { "listener", new Process(), null });
+
+    private static object? InvokeListener(NknTunaListenerSidecarSupervisor supervisor, string method, params object?[] args)
+        => typeof(NknTunaListenerSidecarSupervisor).GetMethod(method, BindingFlags.Instance | BindingFlags.NonPublic)!.Invoke(supervisor, args);
+
+    private static void ListenerOutput(NknTunaListenerSidecarSupervisor supervisor, NknTunaSidecarProcessOwner owner, string line)
+        => InvokeListener(supervisor, "HandleOwnedStdoutLine", owner,
+            typeof(NknTunaSidecarProcessOwner).GetField("process", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(owner),
+            line, new TaskCompletionSource<NknTunaListenerSidecarEndpoint>(), new Stopwatch());
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task TunaRuntimeListenerLifetime_NewUnlockRefreshesOnlyIdleSupervisor(bool pending)
+    {
+        var root = CreateTempRoot();
+        VerifiedRuntimeContext? context = null;
+        try
+        {
+            context = await CreateListenerSupervisorRuntimeContextAsync(root);
+            var runtime = context.RuntimeService;
+            var wallet = await context.WalletStore.LoadAsync(CancellationToken.None);
+            runtime.UnlockForNextSession(wallet, "first".ToCharArray());
+            using var wrapper = runtime.CreateRuntimeListenerSupervisorForTests();
+            var get = wrapper.GetType().GetMethod("GetOrCreateSupervisor", BindingFlags.Instance | BindingFlags.NonPublic)!;
+            var original = Assert.IsType<NknTunaListenerSidecarSupervisor>(get.Invoke(wrapper, [false, CancellationToken.None, 0L]));
+            if (pending) SetPrivateField(original, "pendingReady", new TaskCompletionSource<NknTunaListenerSidecarEndpoint>());
+            runtime.UnlockForNextSession(wallet, "replacement".ToCharArray());
+            var next = get.Invoke(wrapper, [true, CancellationToken.None, 0L]);
+            if (pending) Assert.Null(next);
+            else Assert.NotSame(original, Assert.IsType<NknTunaListenerSidecarSupervisor>(next));
+        }
+        finally { context?.RuntimeService.ClearSessionUnlock(); DeleteTempRoot(root); }
+    }
+
+    [Theory]
+    [InlineData("current")]
+    [InlineData("unlock_before_stop")]
+    [InlineData("transport_before_stop")]
+    [InlineData("run_before_stop")]
+    [InlineData("unlock_after_stop")]
+    [InlineData("run_after_stop")]
+    public async Task TunaRuntimeListenerLifetime_CapCannotStopOrOverwriteSuccessor(string change)
+    {
+        var root = CreateTempRoot();
+        VerifiedRuntimeContext? context = null;
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var completed = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        try
+        {
+            context = await CreateListenerSupervisorRuntimeContextAsync(root);
+            var runtime = context.RuntimeService;
+            var control = new BoundCapControl { Completion = change is "unlock_after_stop" or "run_after_stop" ? completed.Task : Task.CompletedTask };
+            SetPrivateField(runtime, "currentTransportControl", control);
+            var wallet = await context.WalletStore.LoadAsync(CancellationToken.None);
+            runtime.UnlockForNextSession(wallet, "test-only".ToCharArray());
+            var options = RuntimeListenerOptions(runtime);
+            var password = Assert.IsType<char[]>(options.TakeWalletPasswordIfCurrent!(() => true));
+            Array.Clear(password);
+            var source = CreateListenerAdoptionSnapshot();
+            Assert.True(options.BeginUsageAttemptIfCurrent!(source.ProcessRunId, () => true));
+            var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            runtime.BeforeListenerCapStopForTests = () => { entered.TrySetResult(); return release.Task; };
+            options.ListenerCapHandoffRequested!("byte_cap_reached", source);
+            var task = Assert.IsAssignableFrom<Task>(runtime.ListenerCapStopForTests);
+            options.ListenerCapHandoffRequested!("byte_cap_reached", source);
+            Assert.Same(task, runtime.ListenerCapStopForTests);
+            await entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            if (change == "unlock_before_stop") runtime.UnlockForNextSession(wallet, "replacement".ToCharArray());
+            if (change == "transport_before_stop") SetPrivateField(runtime, "currentTransportControl", new BoundCapControl());
+            if (change == "run_before_stop")
+            {
+                var replacementPassword = Assert.IsType<char[]>(options.TakeWalletPasswordIfCurrent!(() => true));
+                Array.Clear(replacementPassword);
+                Assert.True(options.BeginUsageAttemptIfCurrent!("replacement-run", () => true));
+            }
+            var successorStatus = runtime.RuntimeStatus;
+            release.TrySetResult();
+            if (change is "unlock_after_stop" or "run_after_stop")
+            {
+                await control.Committed.Task.WaitAsync(TimeSpan.FromSeconds(5));
+                if (change == "unlock_after_stop") runtime.UnlockForNextSession(wallet, "replacement".ToCharArray());
+                else
+                {
+                    var replacementPassword = Assert.IsType<char[]>(options.TakeWalletPasswordIfCurrent!(() => true));
+                    Array.Clear(replacementPassword);
+                    Assert.True(options.BeginUsageAttemptIfCurrent!("replacement-run", () => true));
+                }
+                successorStatus = runtime.RuntimeStatus;
+                completed.TrySetResult();
+            }
+            await task.WaitAsync(TimeSpan.FromSeconds(5));
+            Assert.Equal(change is "current" or "unlock_after_stop" or "run_after_stop" ? 1 : 0, control.BoundStops);
+            Assert.Equal(0, control.UnboundStops);
+            Assert.Equal(change == "current" ? "cap_reached" : successorStatus, runtime.RuntimeStatus);
+            if (control.BoundStops != 0) Assert.Equal(source, control.Source);
+            if (change is "run_before_stop" or "run_after_stop")
+                Assert.NotNull(typeof(TunaRuntimePilotService).GetField("currentSessionRunId", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(runtime));
+        }
+        finally
+        {
+            release.TrySetResult();
+            completed.TrySetResult();
+            if (context?.RuntimeService.ListenerCapStopForTests is { } task) await task.WaitAsync(TimeSpan.FromSeconds(5));
+            context?.RuntimeService.ClearSessionUnlock();
+            DeleteTempRoot(root);
+        }
+    }
+
+    [Theory]
+    [InlineData("stop")]
+    [InlineData("cancel")]
+    [InlineData("unlock")]
+    [InlineData("transport")]
+    public async Task TunaRuntimeListenerLifetime_RetiredPreflightCannotMutateWalletOrUsage(string retirement)
+    {
+        var root = CreateTempRoot();
+        VerifiedRuntimeContext? context = null;
+        using var release = new ManualResetEventSlim();
+        try
+        {
+            var sidecar = Path.Combine(root, "not-an-executable.fixture");
+            await File.WriteAllTextAsync(sidecar, "fixture only");
+            context = await CreateListenerSupervisorRuntimeContextAsync(root, sidecar);
+            var runtime = context.RuntimeService;
+            var wallet = await context.WalletStore.LoadAsync(CancellationToken.None);
+            runtime.UnlockForNextSession(wallet, "test-only".ToCharArray());
+            var options = RuntimeListenerOptions(runtime);
+            using var supervisor = new NknTunaListenerSidecarSupervisor(options);
+            using var cancellation = new CancellationTokenSource();
+            var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            supervisor.BeforeWalletPasswordForTests = () =>
+            {
+                entered.TrySetResult();
+                Assert.True(release.Wait(TimeSpan.FromSeconds(5)));
+            };
+            var start = Task.Run(() => supervisor.EnsureStartedAsync(
+                new("fixture-peer", NknAccelerationLaneKind.File), cancellation.Token));
+            try
+            {
+                await entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+                if (retirement == "stop") supervisor.Stop("test_retired");
+                if (retirement == "cancel") cancellation.Cancel();
+                if (retirement == "transport") SetPrivateField(runtime, "currentTransportControl", new BoundCapControl());
+                if (retirement == "unlock") runtime.UnlockForNextSession(wallet, "replacement".ToCharArray());
+                var status = runtime.RuntimeStatus;
+                var usage = context.UsageStore.Load();
+                release.Set();
+                Assert.Null(await start.WaitAsync(TimeSpan.FromSeconds(5)));
+                Assert.Equal(status, runtime.RuntimeStatus);
+                Assert.Equal(usage, context.UsageStore.Load());
+                Assert.Null(typeof(TunaRuntimePilotService).GetField("listenerRestartUnlockRetentionCts", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(runtime));
+                Assert.True(runtime.HasSessionUnlock);
+                // Stale configuration callbacks cannot overwrite the successor either.
+                if (retirement is "unlock" or "transport")
+                {
+                    options.StatusChanged!("sidecar_missing");
+                    Assert.Equal(status, runtime.RuntimeStatus);
+                    Assert.Null(options.TakeWalletPasswordIfCurrent!(() => true));
+                }
+            }
+            finally { release.Set(); await start.WaitAsync(TimeSpan.FromSeconds(5)); }
+        }
+        finally { release.Set(); context?.RuntimeService.ClearSessionUnlock(); DeleteTempRoot(root); }
+    }
+
+    [Fact]
+    public async Task TunaRuntimeListenerLifetime_CurrentPreflightRetainsPasswordButOnlyAttemptStartsAccounting()
+    {
+        var root = CreateTempRoot();
+        VerifiedRuntimeContext? context = null;
+        try
+        {
+            context = await CreateListenerSupervisorRuntimeContextAsync(root);
+            var runtime = context.RuntimeService;
+            runtime.UnlockForNextSession(await context.WalletStore.LoadAsync(CancellationToken.None), "fixture-password".ToCharArray());
+            var options = RuntimeListenerOptions(runtime);
+            var before = context.UsageStore.Load();
+            Assert.Null(options.TakeWalletPasswordIfCurrent!(() => false));
+            Assert.Equal(before, context.UsageStore.Load());
+            var password = Assert.IsType<char[]>(options.TakeWalletPasswordIfCurrent!(() => true));
+            Assert.Equal("fixture-password".ToCharArray(), password);
+            Array.Clear(password);
+            Assert.Equal(before, context.UsageStore.Load());
+            Assert.False(options.BeginUsageAttemptIfCurrent!("retired-attempt", () => false));
+            Assert.Equal(before, context.UsageStore.Load());
+            Assert.True(options.BeginUsageAttemptIfCurrent!("current-attempt", () => true));
+            Assert.Equal("listener_starting", runtime.RuntimeStatus);
+            Assert.True(runtime.HasSessionUnlock);
+            Assert.NotNull(typeof(TunaRuntimePilotService).GetField("currentSessionRunId", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(runtime));
+        }
+        finally { context?.RuntimeService.ClearSessionUnlock(); DeleteTempRoot(root); }
+    }
+
+    private static NknTunaListenerSidecarOptions RuntimeListenerOptions(TunaRuntimePilotService runtime)
+    {
+        var sinkType = typeof(TunaRuntimePilotService).GetNestedType("RuntimeUsageSink", BindingFlags.NonPublic)!;
+        var sink = Activator.CreateInstance(sinkType, runtime);
+        return Assert.IsType<NknTunaListenerSidecarOptions>(typeof(TunaRuntimePilotService)
+            .GetMethod("CreateListenerSidecarOptions", BindingFlags.Instance | BindingFlags.NonPublic)!.Invoke(runtime, [sink]));
+    }
+
+    private sealed class BoundCapControl : ITransportAccelerationControl, INknListenerCapHandoffControl
+    {
+        public int BoundStops, UnboundStops;
+        public NknTunaListenerAdoptionSnapshot? Source;
+        public NknTunaListenerAdoptionSnapshot? CurrentSource;
+        public Task Completion = Task.CompletedTask;
+        public TaskCompletionSource Committed = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public Task RequestAccelerationNegotiationAsync(string reason, CancellationToken ct) => Task.CompletedTask;
+        public Task StopAccelerationAsync(string reason, CancellationToken ct) { UnboundStops++; return Task.CompletedTask; }
+        public async Task<bool> StopListenerForCapAsync(NknTunaListenerAdoptionSnapshot source, string reason,
+            Func<bool> isRuntimeCurrent, CancellationToken ct)
+        {
+            if (!isRuntimeCurrent() || (CurrentSource is not null && CurrentSource != source)) return false;
+            Source = source;
+            BoundStops++;
+            Committed.TrySetResult();
+            await Completion;
+            return true;
+        }
+    }
+
     [Fact]
     [Trait("Category", "Smoke")]
     public async Task TunaWalletLinkStore_PersistsLinkedPathOnlyWithoutSecrets()
@@ -492,6 +1154,38 @@ public sealed class TunaWalletDiagnosticsTests
         Assert.False(session.CompletedFromSummary);
         Assert.Equal("sidecar_exited_before_summary", session.StopReason);
         Assert.True(usage.HasUnknownCost);
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public void TunaUsageAccountingState_IncompletePaidSessionPreservesStatusAndObservedPayment()
+    {
+        var now = DateTimeOffset.Parse("2026-05-05T12:00:00Z");
+        var usage = TunaUsageAccountingState.Empty
+            .StartNewSession("run-incomplete-paid", "listener", now)
+            .AddPayment("run-incomplete-paid", 0.25m, 1_000_000, now)
+            .CompleteSession(
+                "run-incomplete-paid",
+                1_000_000,
+                paymentTelemetryObserved: true,
+                cumulativeSpendNkn: null,
+                paymentTelemetryStatus: TunaPaymentTelemetryStatus.AccountingIncomplete,
+                paymentEventCount: 1,
+                stopReason: "user_locked",
+                capReason: string.Empty,
+                fallbackReason: "user_locked",
+                completedFromSummary: false,
+                now.AddSeconds(1));
+
+        var session = Assert.Single(usage.SessionRecords);
+        Assert.Equal(TunaPaymentTelemetryStatus.AccountingIncomplete, session.PaymentTelemetryStatus);
+        Assert.False(session.CompletedFromSummary);
+        Assert.Equal(now.AddSeconds(1), session.EndedUtc);
+        Assert.Equal(0.25m, session.PaidNkn);
+        Assert.Equal(0.25m, usage.TotalPaidNkn);
+        Assert.Equal(1, session.PaymentEventCount);
+        Assert.Equal(1_000_000, session.BytesMoved);
+        Assert.True(usage.LastSessionCostUnknown);
     }
 
     [Fact]
@@ -1995,7 +2689,9 @@ public sealed class TunaWalletDiagnosticsTests
         string root,
         ITunaWalletVerifier verifier,
         bool enabled = true,
-        TimeSpan? stopCompletionTimeout = null)
+        TimeSpan? stopCompletionTimeout = null,
+        Func<ITunaWalletLinkStore, ITunaWalletLinkStore>? wrapWalletStore = null,
+        Func<ITunaUsageAccountingStore, ITunaUsageAccountingStore>? wrapUsageStore = null)
     {
         var walletPath = Path.Combine(root, "wallet-test-nkn.json");
         await File.WriteAllTextAsync(walletPath, "{}");
@@ -2018,8 +2714,8 @@ public sealed class TunaWalletDiagnosticsTests
         var usageStore = new JsonTunaUsageAccountingStore(() => Path.Combine(root, "tuna-usage-accounting.json"));
         var runtimeService = new TunaRuntimePilotService(
             preferenceStore,
-            usageStore,
-            walletStore,
+            wrapUsageStore?.Invoke(usageStore) ?? usageStore,
+            wrapWalletStore?.Invoke(walletStore) ?? walletStore,
             verifier,
             stopCompletionTimeout: stopCompletionTimeout);
         return new VerifiedRuntimeContext(walletStore, preferenceStore, usageStore, runtimeService, walletPath);
@@ -2361,6 +3057,24 @@ public sealed class TunaWalletDiagnosticsTests
 
             return Task.FromResult(lastResult ?? TunaWalletValidationResult.Fail("no_result"));
         }
+    }
+
+    private sealed class BlockingWalletLoad(ITunaWalletLinkStore inner) : ITunaWalletLinkStore
+    {
+        public int BlockNextLoad;
+        public TaskCompletionSource Entered { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource Release { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public async Task<TunaWalletLinkState> LoadAsync(CancellationToken ct = default)
+        {
+            if (Interlocked.Exchange(ref BlockNextLoad, 0) != 0)
+            {
+                Entered.TrySetResult();
+                await Release.Task.WaitAsync(ct);
+            }
+            return await inner.LoadAsync(ct);
+        }
+        public Task SaveAsync(TunaWalletLinkState state, CancellationToken ct = default) => inner.SaveAsync(state, ct);
+        public Task ClearAsync(CancellationToken ct = default) => inner.ClearAsync(ct);
     }
 
     private sealed class BlockingWalletSave(ITunaWalletLinkStore inner) : ITunaWalletLinkStore

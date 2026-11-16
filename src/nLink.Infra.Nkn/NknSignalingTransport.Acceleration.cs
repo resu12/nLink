@@ -12,7 +12,7 @@ using NLink.Core.SessionSecurity;
 
 namespace NLink.Infra.Nkn;
 
-public sealed partial class NknSignalingTransport
+public sealed partial class NknSignalingTransport : INknListenerCapHandoffControl
 {
     private const int TunaSidecarProtocolVersion = NknTunaSidecarCompatibility.AppProtocolVersion;
     private const int AccelerationNegotiationMaxRetryAttempts = 3;
@@ -15889,6 +15889,7 @@ public sealed partial class NknSignalingTransport
             return;
         }
 
+        var startupControlKey = controlSessionSharedKey;
         var localRole = ResolveLocalSessionRole();
         var pausedForActivationNegotiation = false;
         void PauseActivationIfNeeded(string pauseTrigger)
@@ -16406,6 +16407,16 @@ public sealed partial class NknSignalingTransport
                      ct).ConfigureAwait(false);
         // A failed listener callback is no more authoritative than a ready one.
         if (startupBinding is not null && !IsStartupTransferActivationBindingCurrent(startupBinding)) return;
+        if (!isRuntimeUnlockActivation &&
+            (ct.IsCancellationRequested || IsStaleLocalPayerDecision(payerDecisionId) ||
+             sessionId != currentSessionSecurityState.SessionId?.Value ||
+             !ReferenceEquals(startupControlKey, controlSessionSharedKey) ||
+             !TryGetCurrentEnvelopeCode(out var currentEnvelope) || currentEnvelope != envelopeCode ||
+             IsAccelerationUserStoppedForCurrentSession() ||
+             IsAccelerationPeerUserStoppedForFallbackSession(sessionId))) return;
+        if (!isRuntimeUnlockActivation && startupAttachment is not null && startupEpoch is not null &&
+            (idleUnlock is not null && !IsIdleSessionUnlockCurrent(idleUnlock) ||
+             !IsSessionPreparationRequestBindingCurrent(startupAttachment, startupEpoch))) return;
         if (!listenerConnected || string.IsNullOrWhiteSpace(tunaSession.LocalTunaAddress))
         {
             NotifyTransportAccelerationStateChanged("listener_sidecar_unavailable");
@@ -16463,12 +16474,6 @@ public sealed partial class NknSignalingTransport
 
         if (!isRuntimeUnlockActivation && startupAttachment is not null && startupEpoch is not null)
         {
-            if (idleUnlock is not null && !IsIdleSessionUnlockCurrent(idleUnlock) ||
-                ct.IsCancellationRequested || IsStaleLocalPayerDecision(payerDecisionId) ||
-                !IsSessionPreparationRequestBindingCurrent(startupAttachment, startupEpoch) ||
-                IsAccelerationUserStoppedForCurrentSession() ||
-                IsAccelerationPeerUserStoppedForFallbackSession(startupEpoch.SessionId)) return;
-
             var selection = startupAttachment.Authority.SelectRequest(startupAttachment, startupEpoch);
             if (selection.Purpose == FileTransferAccelerationRequestPurpose.TransferActivation)
             {
@@ -41447,6 +41452,46 @@ public sealed partial class NknSignalingTransport
     public async Task StopAccelerationAsync(string reason, CancellationToken ct)
     {
         using var stopDrain = BeginAccelerationLaneStopDrain(invalidateIdleUnlock: true);
+        await StopAccelerationCoreAsync(reason, ct).ConfigureAwait(false);
+    }
+
+    Task<bool> INknListenerCapHandoffControl.StopListenerForCapAsync(NknTunaListenerAdoptionSnapshot source,
+        string reason, Func<bool> isRuntimeCurrent, CancellationToken ct)
+        => StopListenerForCapAsync(source, reason, isRuntimeCurrent, ct);
+
+    internal async Task<bool> StopListenerForCapAsync(NknTunaListenerAdoptionSnapshot source,
+        string reason, Func<bool> isRuntimeCurrent, CancellationToken ct)
+    {
+        IDisposable stopDrain;
+        NknTunaLaneLease lease;
+        INknTunaAccelerationSession lane;
+        var controlKey = controlSessionSharedKey;
+        var sessionId = currentSessionSecurityState.SessionId;
+        lock (accelerationGate)
+        {
+            if (ct.IsCancellationRequested || !isRuntimeCurrent() ||
+                accelerationLane is not INknTunaAccelerationSession currentLane ||
+                currentLane.CaptureCurrentLaneLease() is not { } currentLease || currentLease.Listener != source)
+                return false;
+            lane = currentLane;
+            lease = currentLease;
+            controlKey = controlSessionSharedKey;
+            sessionId = currentSessionSecurityState.SessionId;
+            // Commit the stop before queuing any physical shutdown. A later
+            // unlock waits behind this drain and is not invalidated on completion.
+            stopDrain = BeginAccelerationLaneStopDrain(invalidateIdleUnlock: true);
+        }
+        bool IsSourceCurrent() => ReferenceEquals(controlSessionSharedKey, controlKey) &&
+            currentSessionSecurityState.SessionId == sessionId && lane.CaptureCurrentLaneLease() == lease;
+        using (stopDrain)
+            return await StopAccelerationCoreAsync(reason, ct, lane, lease, IsSourceCurrent).ConfigureAwait(false);
+    }
+
+    private async Task<bool> StopAccelerationCoreAsync(string reason, CancellationToken ct,
+        INknTunaAccelerationSession? exactLane = null, NknTunaLaneLease? exactLease = null,
+        Func<bool>? expectedSourceCurrent = null)
+    {
+        if (expectedSourceCurrent?.Invoke() == false) return false;
         var normalizedReason = string.IsNullOrWhiteSpace(reason) ? "user_locked" : SanitizeLogToken(reason);
         var bootstrapLocalStops = CaptureFallbackBootstrapLocalStopSources(normalizedReason);
         var shouldNotifyRemoteDown = TryCaptureAccelerationNegotiation(out var downSessionId, out var downLanes);
@@ -41458,16 +41503,17 @@ public sealed partial class NknSignalingTransport
                     invalidationKind:
                         RuntimeUnlockInitialActivationReceiveRecoveryHoldInvalidationKind
                             .UserCancellation,
-                    bootstrapLocalStops: bootstrapLocalStops))
+                    bootstrapLocalStops: bootstrapLocalStops,
+                    expectedSourceCurrent: expectedSourceCurrent))
             {
-                return;
+                return false;
             }
         }
         finally
         {
             // The exact Core source hold must capture in-flight callbacks before
             // retiring the admitted lane can expose their failed completions.
-            if (bootstrapLocalStops.Length > 0) { RetireSessionPreparationExecution(); }
+            if (bootstrapLocalStops.Length > 0 && expectedSourceCurrent?.Invoke() != false) { RetireSessionPreparationExecution(); }
         }
 
         if (shouldNotifyRemoteDown && IsUserRequestedAccelerationStopReason(normalizedReason))
@@ -41479,6 +41525,9 @@ public sealed partial class NknSignalingTransport
         {
             ScheduleAccelerationDownNotification(downSessionId, downLanes, normalizedReason);
         }
+
+        if (exactLane is not null && exactLease is not null)
+            return exactLane.TryStopCurrentLaneLease(exactLease, normalizedReason);
 
         if (accelerationLane is INknTunaAccelerationSession tunaSession)
         {
@@ -41493,6 +41542,7 @@ public sealed partial class NknSignalingTransport
                     $"event=tuna_acceleration_stop_failed; reason={normalizedReason}; error={ex.GetType().Name}");
             }
         }
+        return true;
     }
 
     private void ScheduleAccelerationLaneStop(string reason)
@@ -41707,8 +41757,10 @@ public sealed partial class NknSignalingTransport
             invalidationKind =
                 RuntimeUnlockInitialActivationReceiveRecoveryHoldInvalidationKind
                     .GenericReset,
-        FileTransferBootstrapLocalStopSource[]? bootstrapLocalStops = null)
+        FileTransferBootstrapLocalStopSource[]? bootstrapLocalStops = null,
+        Func<bool>? expectedSourceCurrent = null)
     {
+        if (expectedSourceCurrent?.Invoke() == false) return false;
         var normalizedReason = SanitizeLogToken(reason);
         if (initialActivationHoldAlreadyInvalidated &&
             expectedInvalidatedHoldRequest is { } expectedRequest &&
@@ -41737,6 +41789,9 @@ public sealed partial class NknSignalingTransport
         }
         var bootstrapLocalStopAlreadyPublished =
             PublishFallbackBootstrapLocalStopsBeforeReset(bootstrapLocalStops, normalizedReason);
+        // Core callbacks can synchronously retire/adopt the listener or replace
+        // the authenticated session. A cap observation cannot reset that successor.
+        if (expectedSourceCurrent?.Invoke() == false) return false;
         RetireFallbackListenerPreparation();
         string? fallbackSessionId;
         NknAccelerationLaneKind fallbackLanes;
@@ -41764,6 +41819,7 @@ public sealed partial class NknSignalingTransport
         RuntimeUnlockTransactionSnapshot? stoppedTransaction = null;
         lock (accelerationGate)
         {
+            if (expectedSourceCurrent?.Invoke() == false) return false;
             if ((IsUserRequestedAccelerationStopReason(normalizedReason) ||
                  IsRemoteUserRequestedAccelerationStopReason(normalizedReason)) &&
                 runtimeUnlockTransactionState.State != RuntimeUnlockTransactionState.Idle &&
@@ -41893,6 +41949,7 @@ public sealed partial class NknSignalingTransport
         RuntimeUnlockTransactionDecision? stoppedTransactionDecision = null;
         lock (accelerationGate)
         {
+            if (expectedSourceCurrent?.Invoke() == false) return false;
             accelerationNegotiationSlotGeneration = 0;
             accelerationNegotiationSlotOwner =
                 AccelerationNegotiationSlotOwner.None;
