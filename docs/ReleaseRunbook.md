@@ -4,7 +4,44 @@ This runbook describes the version-neutral steps to ship `v<version>` from a cle
 
 It is the canonical release process; use [rc-validation-checklist.md](release/rc-validation-checklist.md) for sign-off. A successful build, source checkpoint, or operator-analyzer PASS does not by itself qualify a release. Do not tag or publish before mandatory security/route proofs, payload provenance, packaging checks, and CI sign-off are established.
 
-## Current Qualification Update (2026-10-15)
+## Published 0.7.0 Hotfix Revision 1 (2026-11-15)
+
+[`v0.7.0-hotfix.1`](https://github.com/resu12/nLink/releases/tag/v0.7.0-hotfix.1) is published at `d235dcf144c626b42d0a159c9aa7d18882f06c7d`, using CI #103's exact validated portable, installer and checksum file. The application version remains `0.7.0`. The original release below is preserved, not replaced.
+
+- The encoder startup fix removes the primary persistent-transform path's dependency on the hanging sink-writer probe. Existing fallback/failure handling remains.
+- Required CI gates and exact artifact validation passed. The user confirmed screen sharing in the post-reboot CI #103 session; earlier ACK/setup and capture-tool failures remain historical, not retroactive passes.
+- The exact CI #102 -> CI #103 same-version replacement passed once in Windows Sandbox: self-tests, 14 payload hashes, retained registration and synthetic user-state preservation. Evidence: `artifacts/ci103-same-version-upgrade-once/evidence/result.json`. No host install or general real-user migration guarantee is implied.
+- A separate unsigned-artifact exception was explicitly approved for these bytes. Both releases' public downloads were verified against their own checksums. The 16 November documentation review read public metadata/digests only; it did not repeat downloads or runtime tests.
+
+Exact hotfix-1 hashes, downloads and retained local validation are in [the release record](releases/0.7.0-hotfix.1.md).
+
+## Unreleased 0.7.0 Hotfix Revision 2
+
+[Hotfix 2](releases/0.7.0-hotfix.2.md), source `efa1965e`, has a local review build and focused regression results. It is not published or final-artifact-qualified. Obtain the existing applicable CI, payload/live, installer and signing decisions for the selected bytes before separate release approval. Do not inherit either previous unsigned exception, move a published tag, replace assets, or relabel old failures. Case 10323 remains paused.
+
+## Current 0.7.0 Release Record (2026-11-15)
+
+[nLink 0.7.0 is published](https://github.com/resu12/nLink/releases/tag/v0.7.0). Tag `v0.7.0` points to `3a031df816a38fe1f4197f214160bad9064d2066`. This record supersedes the release-selection and pending-publication status in the dated candidate records below; their evidence, failures, warnings and original outcomes remain historical.
+
+- **CI:** [run #102, attempt 1](https://github.com/resu12/nLink/actions/runs/43627348596), on the exact tagged commit, passed runtime contracts, all five analyzer lanes, fake acceptance, compatibility smoke, reliability, packaging and installer smoke.
+- **Exact published assets:** the three files from CI #102's `release-assets` artifact, ID `14144275156`, were uploaded unchanged. Artifact ZIP SHA-256: `d3e3e8d4211af3ae95c948c4210b14298a7e5ddb0ee847fc8fde3bc9db89d706`. No release-time rebuild occurred.
+- **Validation:** portable package/version and bridge/Tuna manifest checks passed. The exact installer passed CI silent install, installed-app self-test and uninstall. All three public links subsequently returned HTTP 200 without authentication; both package hashes matched the downloaded checksum file and CI pins.
+- **Unsigned exception:** the installer and application are unsigned under the explicitly accepted 0.7.0 exception. This is not an Authenticode or trusted-publisher pass.
+- **Scope:** CI #102 did not run the optional live GUI campaign. Historical GUI, upgrade, security and performance evidence retains its original source/contract/payload scope; it is not a fresh exact-binary qualification of these CI artifacts. No throughput guarantee is made. Case 10323 remains paused, and its historical outcomes are unchanged.
+
+| Published file | SHA-256 |
+| --- | --- |
+| `nLink-Portable-win-x64-0.7.0.zip` | `13057bf6e6b9f2419d7bb32520862400bb5b79c192d55131f803ba18b5a01db0` |
+| `nLink-Setup-win-x64-0.7.0.exe` | `d3c57680030622d2664f275cef2c6def88a6ed0ed59c1ff53471b94e8a9e42a1` |
+| `SHA256SUMS.txt` | `d952963083fe4198c18547ebc69034e5a6cad58be603481dcec4824e06ea6a0f` |
+
+The published tag and downloads are immutable release evidence. Post-release documentation updates do not replace them or change their qualification scope.
+
+<a id="current-qualification-update-2026-10-15"></a>
+
+## Historical Qualification Update (2026-10-15)
+
+The following is the preserved October 15 candidate record. Its selected paths, hashes and pending sign-off statements describe that date, not the published CI #102 assets above.
 
 `0.7.0` remains unpublished. The selected runtime and portable are from `cf8ea2963e2533d1fa32069fe6f4a9fa2f78c13c`; later documentation edits do not replace or rebuild those bytes.
 

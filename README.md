@@ -8,41 +8,43 @@ Powered by NKN. Official website: https://nkn.org/
 
 Minimal `.NET 8` / Avalonia desktop app for Windows with deterministic smoke tests.
 
-## 0.7.0 Release Candidate
+## Download 0.7.0 hotfix revision 1
 
-This branch prepares `0.7.0`; it is not a published release. It keeps H.264 screen sharing and regular NKN file transfer, and adds optional, default-off Tuna acceleration and wallet controls. The October 15 seven-scenario GUI gate passed strict file-transfer correctness on `cf8ea296`, including helper-to-helpee payer handoff. Authenticated-delivery proof and exact-payload installer upgrade/uninstall checks passed; separate performance FAIL/WARN results remain recorded. Final CI and release sign-off are still pending. See the [release notes](docs/releases/0.7.0.md) and [current candidate evidence](docs/ReleaseRunbook.md#current-qualification-update-2026-10-15).
+[Download the latest published 0.7.0 hotfix](https://github.com/resu12/nLink/releases/tag/v0.7.0-hotfix.1), released **15 November 2026** from `d235dcf1` with CI #103's exact validated artifacts. It fixes the screen-sharing encoder startup hang that could leave both the Helpee preview and Helper display blank. The app still reports **0.7.0**: use the release tag and its own `SHA256SUMS.txt` to distinguish packages. Windows artifacts are unsigned under the explicitly accepted hotfix-1 exception.
+
+The [original 0.7.0 release](https://github.com/resu12/nLink/releases/tag/v0.7.0) and its CI #102 downloads remain unchanged. See the [hotfix-1 notes](docs/releases/0.7.0-hotfix.1.md) and [release records](docs/ReleaseRunbook.md#published-070-hotfix-revision-1-2026-11-15) for validation scope.
+
+**Hotfix revision 2 is in preparation, not published.** The current candidate adds idle Tuna startup/re-establishment fixes, wallet unlock/cancellation safeguards, a “Preparing helper address…” state, and wallet feedback that stays visible while scrolling. Its local build and focused tests are not final release qualification. See the [candidate notes](docs/releases/0.7.0-hotfix.2.md).
 
 ## Quick Start (Windows)
 
 1. Download the Installer (recommended) or Portable ZIP from [GitHub Releases](https://github.com/resu12/nLink/releases). A source-branch version is not necessarily a published release.
-2. Helper opens nLink, clicks `I want to help`, and copies the helper address.
+2. Helper opens nLink, clicks `I want to help someone`, and waits for the full helper address beginning with `nlinkh1.` before copying it. Do not copy the brief short bootstrap address shown by older builds.
 3. Helpee opens nLink, clicks `I need help`, enters the provided helper address, and clicks `Request help`.
 4. Helper receives the incoming help request and clicks `Accept`.
 5. Both sides compare the session verification symbols, then Helpee clicks `Allow`.
 6. Chat opens on both sides.
 7. If `Transfer files` is allowed for the session, either side can click `Send file`.
 
-The screenshots below use a historical baseline: nLink 0.4.5; they are not current 0.7.0 UI captures.
+## Screenshots
+
+These home, helper and helpee images show the original **0.7.0 / CI #102** UI, not the unreleased hotfix-2 UI. The helper address and QR code are covered by opaque privacy masks. [Screenshot provenance and replacement status](docs/images/README.md) are recorded separately; screenshots are illustrations, not release qualification.
 
 Home:
 
-![Home screen](docs/images/home-0.4.5.png)
+![Home screen in nLink 0.7.0](docs/images/home-0.7.0.png)
 
 Helper:
 
-![Helper screen](docs/images/helper-0.4.5.png)
+![Helper screen in nLink 0.7.0, with address and QR code hidden](docs/images/helper-0.7.0.png)
 
 Helpee:
 
-![Helpee screen](docs/images/helpee-0.4.5.png)
+![Helpee screen in nLink 0.7.0](docs/images/helpee-0.7.0.png)
 
-Screen sharing:
+Current screen-sharing, remote-control and hotfix-2 wallet screenshots are not yet available. The old 0.4.5 images are retained in the repository but are no longer presented as current UI.
 
-![Screen sharing session](docs/images/screenshare-0.4.5.png)
-
-Remote control:
-
-![Remote control session](docs/images/remote-control-0.4.5.png)
+## Usage notes
 
 If connection fails:
 Open Options -> Diagnostics -> Copy diagnostics and include it when reporting issues. If a screenshare soak artifact has already been analyzed, Options includes a compact screenshare evidence summary; for hangs or freezes, use Options -> Diagnostics -> Save Hang Report. See [`docs/supportability.md`](docs/supportability.md) for the support evidence checklist.
@@ -54,7 +56,7 @@ For release-safe builds, Options -> Diagnostics should show:
 - `invite_security_release_ready: Yes`
 - `invite_security_warning: none`
 
-Normal release UX uses a raw helper address and an approval-time session verification sequence, then a direct helpee-side `Request help` flow with QR/share/copy support where needed. The approval check is a compact five-symbol comparison on both screens.
+Normal release UX uses a verified helper-address payload (`nlinkh1.`) and an approval-time session verification sequence, then a direct helpee-side `Request help` flow with QR/share/copy support where needed. The approval check is a compact five-symbol comparison on both screens.
 
 Notes:
 
@@ -77,7 +79,7 @@ Notes:
 - Tuna startup status and a pulsing fish indicate an unlocked connection attempt, not proof of payload delivery. Gray is inactive, light blue is the non-paying side, and yellow identifies the selected paying listener. Linking or validating a wallet does not spend NKN; starting a paid listener can. See the [Tuna guide](docs/nkn-tuna-implementation.md).
 - The strict Phase 5 release gate requires actual payload delivery, SHA integrity, coordinator-published routes, authenticated Tuna delivery, fallback, and terminal GUI completion. Performance is reported separately under the existing policy, without changing numeric baselines or promising Tuna/fallback throughput.
 - Large file transfers over NKN can still be noticeably slower than local or direct network copy. Live screenshare latency can also vary with NKN/network delivery.
-- Release exception: Windows artifacts for `0.7.0` are unsigned; verify downloads with `SHA256SUMS.txt`.
+- The original `v0.7.0` and `v0.7.0-hotfix.1` Windows artifacts each have an explicit unsigned-artifact exception. Verify downloads against the checksum file from the same tag; these exceptions do not approve future hotfix-2 artifacts.
 - Installer path: `%LOCALAPPDATA%\Programs\nLink`
 
 License:
@@ -138,10 +140,12 @@ License:
 - Output release assets:
   `artifacts/releases/<version>/nLink-Portable-win-x64-<version>.zip`
   `artifacts/releases/<version>/nLink-Setup-win-x64-<version>.exe`
-- Final release notes:
+- Published hotfix-1 release notes:
+  [`docs/releases/0.7.0-hotfix.1.md`](docs/releases/0.7.0-hotfix.1.md)
+- Original 0.7.0 release notes:
   [`docs/releases/0.7.0.md`](docs/releases/0.7.0.md)
-- GitHub release body:
-  [`docs/releases/0.7.0-github.md`](docs/releases/0.7.0-github.md)
+- Unreleased hotfix-2 candidate and release-body draft:
+  [notes](docs/releases/0.7.0-hotfix.2.md), [draft](docs/releases/0.7.0-hotfix.2-github.md)
 - RC/final validation checklist:
   [`docs/release/rc-validation-checklist.md`](docs/release/rc-validation-checklist.md)
 

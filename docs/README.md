@@ -1,6 +1,6 @@
 # nLink Docs
 
-Start here for current repo guidance. `0.7.0` is a release candidate, not yet published. Its current qualification status and retained evidence are summarized in the [release runbook](ReleaseRunbook.md#current-qualification-update-2026-10-15); candidate notes live in [releases/0.7.0.md](releases/0.7.0.md).
+Start here for current repo guidance. [0.7.0 hotfix revision 1](https://github.com/resu12/nLink/releases/tag/v0.7.0-hotfix.1) is published from `d235dcf1` with CI #103's exact artifacts. The original 0.7.0 release remains unchanged. [Hotfix revision 2](releases/0.7.0-hotfix.2.md) is an unreleased candidate; source-branch features and local builds are not published-release claims.
 
 ## Current Operator Guides
 
@@ -18,7 +18,10 @@ Start here for current repo guidance. `0.7.0` is a release candidate, not yet pu
 
 ## Release And Validation
 
-- [`docs/ReleaseRunbook.md`](ReleaseRunbook.md): canonical release process, package provenance, and current candidate evidence.
+- [Published hotfix-1 notes](releases/0.7.0-hotfix.1.md) and [original 0.7.0 notes](releases/0.7.0.md).
+- [Hotfix-2 candidate notes](releases/0.7.0-hotfix.2.md) and [release-body draft](releases/0.7.0-hotfix.2-github.md).
+- [README screenshot provenance](images/README.md): captured version, privacy masks and pending replacements.
+- [`docs/ReleaseRunbook.md`](ReleaseRunbook.md): canonical release process, published package provenance, and historical candidate evidence.
 - [`docs/build-test-lock-avoidance.md`](build-test-lock-avoidance.md): Windows-safe build/test command shapes for avoiding generated-output locks during repeated manual runs.
 - [`docs/release/rc-validation-checklist.md`](release/rc-validation-checklist.md): active RC validation checklist.
 - [`docs/release/rc-guardrails.md`](release/rc-guardrails.md): RC guardrail workflow rules.

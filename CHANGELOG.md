@@ -5,7 +5,10 @@
 ### Fixed
 
 - Unlocking Tuna in an idle approved session now uses the existing session handshake for screen-only and combined file/screen permissions, without requiring a transfer or screen-sharing session to start first. File-only preparation and coordinator-owned file route activation remain separate.
+- Idle Tuna can re-establish after a completed or canceled transfer. Delayed stops, first-send failures, stale answers and queued ACKs are fenced to the current session and unlock attempt without granting file-route authority.
 - Pending wallet unlocks are invalidated when the wallet is locked, unlinked or replaced; a late validation/save cannot restore the previous wallet's unlock. Canceled or timed-out wallet verification terminates and reaps its child process.
+- Helper address, Copy/Share actions and QR output stay unavailable until the full verified helper address is ready; “Preparing helper address…” replaces the briefly visible short address.
+- Options -> Wallet feedback stays below the scrollable content, so validation results remain visible without scrolling back to the top.
 - The screen-sharing recovery-keyframe regression safely polls bitmap width across concurrent bitmap replacement/disposal without changing its assertion or timeout.
 
 ### Release identity
@@ -13,7 +16,7 @@
 - App version remains `0.7.0`; proposed separate tag: `v0.7.0-hotfix.2`. Both published releases, their assets and checksums remain unchanged.
 - [Hotfix revision 2 review metadata](docs/releases/0.7.0-hotfix.2.md) records the scope and remaining release gates. This candidate is not yet published or live-validated.
 
-## [0.7.0 hotfix revision 1] - Unreleased
+## [0.7.0 hotfix revision 1] - 2026-11-15
 
 ### Fixed
 
@@ -21,10 +24,10 @@
 
 ### Release identity
 
-- App version remains `0.7.0`; proposed separate tag: `v0.7.0-hotfix.1`. The original `v0.7.0` release, assets and checksums remain unchanged.
-- [Hotfix review metadata](docs/releases/0.7.0-hotfix.1.md) records the existing focused validation and outstanding release gates. This entry is not a publication or final-artifact qualification claim.
+- [Published as `v0.7.0-hotfix.1`](https://github.com/resu12/nLink/releases/tag/v0.7.0-hotfix.1) from `d235dcf1`, using CI #103's exact portable, installer and checksums under an explicit unsigned-artifact exception. App version remains `0.7.0`; the original release and downloads are unchanged.
+- [Hotfix release notes](docs/releases/0.7.0-hotfix.1.md) distinguish retained local regressions, final-portable observations and isolated same-version installer validation. Public downloads were verified against their own checksum file.
 
-## [0.7.0] - Unreleased
+## [0.7.0] - 2026-11-15
 
 ### Added
 
@@ -37,7 +40,7 @@
 ### Changed
 
 - Release version sources and packaging defaults now resolve to `0.7.0`.
-- README and release-facing documentation distinguish the `0.7.0` candidate from published releases and record correctness separately from performance qualification.
+- Released from `3a031df8` with the exact portable, installer and checksums validated in CI #102. Historical correctness and performance results retain their original source/payload scope.
 - Packaging now rejects stale bridge manifests whose `appVersion` does not match `VERSION`, so bridge bundles must be regenerated after version bumps.
 - Tuna remains default-off and explicitly opt-in through advanced Options or developer controls; a linked or funded wallet does not change runtime transport behavior by itself.
 - Diagnostics copy/export redaction now covers Tuna wallet paths, wallet addresses, password-like fields, seeds, and private-key material.
@@ -55,7 +58,7 @@
 
 ### Packaging
 
-- Windows installer and portable release assets for `0.7.0` are prepared together with `SHA256SUMS.txt`.
+- Windows installer and portable release assets for `0.7.0` are [published](https://github.com/resu12/nLink/releases/tag/v0.7.0) with `SHA256SUMS.txt`; public downloads and SHA-256 checksums were verified.
 - The Tuna sidecar verifier is bundled under `tuna/win-x64/` so Options -> Wallet validation works in packaged builds while runtime acceleration remains default-off.
 - Public Windows artifacts are unsigned for this release as an accepted exception.
 

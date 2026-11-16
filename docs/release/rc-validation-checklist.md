@@ -1,6 +1,6 @@
 # RC Validation Checklist
 
-This is a sign-off template, not a record that unchecked items failed or passed. Current `0.7.0` candidate evidence is in [ReleaseRunbook.md](../ReleaseRunbook.md#current-qualification-update-2026-10-15); copy only applicable source/contract/payload-bound results into an approved release sign-off. Keep remaining CI and unqualified rebuilds explicit.
+This is a sign-off template, not a record that unchecked items failed or passed. The published original `0.7.0` and hotfix-1 records are in [ReleaseRunbook.md](../ReleaseRunbook.md#published-070-hotfix-revision-1-2026-11-15); historical candidate evidence remains separately labeled there. [Hotfix 2](../releases/0.7.0-hotfix.2.md) remains unreleased. For future releases, copy only applicable source/contract/payload-bound results into an approved release sign-off. Do not infer a fresh live GUI or upgrade result from CI success.
 
 ## Build & Packaging
 
