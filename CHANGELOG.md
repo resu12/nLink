@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.7.0 hotfix revision 2] - Unreleased
+
+### Fixed
+
+- Unlocking Tuna in an idle approved session now uses the existing session handshake for screen-only and combined file/screen permissions, without requiring a transfer or screen-sharing session to start first. File-only preparation and coordinator-owned file route activation remain separate.
+- Pending wallet unlocks are invalidated when the wallet is locked, unlinked or replaced; a late validation/save cannot restore the previous wallet's unlock. Canceled or timed-out wallet verification terminates and reaps its child process.
+- The screen-sharing recovery-keyframe regression safely polls bitmap width across concurrent bitmap replacement/disposal without changing its assertion or timeout.
+
+### Release identity
+
+- App version remains `0.7.0`; proposed separate tag: `v0.7.0-hotfix.2`. Both published releases, their assets and checksums remain unchanged.
+- [Hotfix revision 2 review metadata](docs/releases/0.7.0-hotfix.2.md) records the scope and remaining release gates. This candidate is not yet published or live-validated.
+
 ## [0.7.0 hotfix revision 1] - Unreleased
 
 ### Fixed

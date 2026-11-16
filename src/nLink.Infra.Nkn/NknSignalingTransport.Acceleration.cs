@@ -41234,13 +41234,33 @@ public sealed partial class NknSignalingTransport
             return Task.CompletedTask;
         }
 
+        // A screen-only unlock has no file-transfer activation transaction to
+        // complete. Negotiate the approved session before any media starts.
+        if (runtimeUnlockRequested && IsSessionAccelerationEligible(out var unlockedLanes) &&
+            (unlockedLanes & NknAccelerationLaneKind.File) == 0)
+        {
+            RequestIdleSessionAccelerationAfterUnlock();
+            return Task.CompletedTask;
+        }
+
         if (runtimeUnlockRequested && currentSessionSecurityState.HasCapability(CapabilityGrant.FileTransfer, DateTimeOffset.UtcNow))
         {
             var selection = SelectSessionPreparationRequest();
             if (selection.Purpose != FileTransferAccelerationRequestPurpose.TransferActivation)
             {
                 if (selection.Purpose == FileTransferAccelerationRequestPurpose.SessionPreparation)
-                    _ = RequestSessionPreparationAsync(ct);
+                {
+                    // An idle session with Screen permission needs the same lane handshake
+                    // as automatic session startup, not a File-only preparation lease.
+                    // Core still owns any transfer admitted while the listener starts.
+                    if (IsSessionAccelerationEligible(out var idleLanes) &&
+                        (idleLanes & NknAccelerationLaneKind.Screen) != 0)
+                    {
+                        RequestIdleSessionAccelerationAfterUnlock();
+                    }
+                    else
+                        _ = RequestSessionPreparationAsync(ct);
+                }
                 else
                     LocalOperationalLog.Info("NKN.Tuna",
                         $"event=session_preparation_request_rejected; reason={SanitizeLogToken(selection.Reason)}; authority_effect=none");
@@ -41295,6 +41315,13 @@ public sealed partial class NknSignalingTransport
                 runtimeUnlockRequested ||
                 requiresRuntimeUnlockRetryDispatchInstall);
         return Task.CompletedTask;
+    }
+
+    private void RequestIdleSessionAccelerationAfterUnlock()
+    {
+        NotifyTransportAccelerationStateChanged("renegotiating_after_user_unlock");
+        Interlocked.Exchange(ref accelerationNegotiationRetryAttempts, 0);
+        ScheduleAccelerationNegotiationIfEligible("session_ready_after_user_unlock");
     }
 
     public async Task StopAccelerationAsync(string reason, CancellationToken ct)
