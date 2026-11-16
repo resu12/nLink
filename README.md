@@ -14,7 +14,7 @@ Minimal `.NET 8` / Avalonia desktop app for Windows with deterministic smoke tes
 
 The [original 0.7.0 release](https://github.com/resu12/nLink/releases/tag/v0.7.0) and its CI #102 downloads remain unchanged. See the [hotfix-1 notes](docs/releases/0.7.0-hotfix.1.md) and [release records](docs/ReleaseRunbook.md#published-070-hotfix-revision-1-2026-11-15) for validation scope.
 
-**Hotfix revision 2 is in preparation, not published.** The current candidate adds idle Tuna startup/re-establishment fixes, wallet unlock/cancellation safeguards, a “Preparing helper address…” state, and wallet feedback that stays visible while scrolling. Its local build and focused tests are not final release qualification. See the [candidate notes](docs/releases/0.7.0-hotfix.2.md).
+**Hotfix revision 2 is in preparation, not published.** The current candidate adds idle Tuna startup/re-establishment fixes, authenticated-session cleanup and listener-lifetime safeguards, a transfer-safe Tuna indicator, wallet unlock/cancellation safeguards, a “Preparing helper address…” state, and wallet feedback that stays visible while scrolling. The latest local review build is from `ba507366`; its unsigned packages and 172 passing focused lifecycle/authentication tests are not final release qualification. See the [candidate notes](docs/releases/0.7.0-hotfix.2.md).
 
 ## Quick Start (Windows)
 

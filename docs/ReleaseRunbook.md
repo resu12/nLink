@@ -17,7 +17,7 @@ Exact hotfix-1 hashes, downloads and retained local validation are in [the relea
 
 ## Unreleased 0.7.0 Hotfix Revision 2
 
-[Hotfix 2](releases/0.7.0-hotfix.2.md), source `efa1965e`, has a local review build and focused regression results. It is not published or final-artifact-qualified. Obtain the existing applicable CI, payload/live, installer and signing decisions for the selected bytes before separate release approval. Do not inherit either previous unsigned exception, move a published tag, replace assets, or relabel old failures. Case 10323 remains paused.
+[Hotfix 2](releases/0.7.0-hotfix.2.md), source `ba507366`, has a fresh local unsigned portable/installer, 172/172 passing focused lifecycle/authentication regressions, and successful packaging checks with all 14 portable files matched to staging. It includes the session-cleanup, stale-listener, accounting-stop and session-icon fixes. It is not published or final-artifact-qualified; no CI, live-session or installer-lifecycle pass is claimed for this build. Obtain the existing applicable CI, payload/live, installer and signing decisions for the selected bytes before separate release approval. Preserve older review packages and failures; do not inherit either previous unsigned exception, move a published tag or replace assets. Case 10323 remains paused.
 
 ## Current 0.7.0 Release Record (2026-11-15)
 

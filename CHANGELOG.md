@@ -6,6 +6,10 @@
 
 - Unlocking Tuna in an idle approved session now uses the existing session handshake for screen-only and combined file/screen permissions, without requiring a transfer or screen-sharing session to start first. File-only preparation and coordinator-owned file route activation remain separate.
 - Idle Tuna can re-establish after a completed or canceled transfer. Delayed stops, first-send failures, stale answers and queued ACKs are fenced to the current session and unlock attempt without granting file-route authority.
+- Stale handshake failures no longer clear a retained approved session's envelope or keys. Response receipt and timeout handling are serialized without bypassing authentication, expiry or replay checks.
+- Listener startup, readiness, cap-stop and delayed telemetry effects are bound to the current listener/session lifetime so retired callbacks cannot overwrite a successor's state or accounting. FileTransferCoordinator remains the file-route authority.
+- Locking or disabling Tuna closes the current usage record once, preserving observed payments and completed summaries. An accounting-write failure is reported without blocking the authorized stop or claiming a durable save. Rejected incoming streams remain diagnostic-only and do not make a healthy listener ineligible for lock/disable.
+- The session Tuna icon retains its session-state color during active or paused file transfers instead of being overridden by the transfer-specific route presentation.
 - Pending wallet unlocks are invalidated when the wallet is locked, unlinked or replaced; a late validation/save cannot restore the previous wallet's unlock. Canceled or timed-out wallet verification terminates and reaps its child process.
 - Helper address, Copy/Share actions and QR output stay unavailable until the full verified helper address is ready; “Preparing helper address…” replaces the briefly visible short address.
 - Options -> Wallet feedback stays below the scrollable content, so validation results remain visible without scrolling back to the top.
@@ -15,6 +19,7 @@
 
 - App version remains `0.7.0`; proposed separate tag: `v0.7.0-hotfix.2`. Both published releases, their assets and checksums remain unchanged.
 - [Hotfix revision 2 review metadata](docs/releases/0.7.0-hotfix.2.md) records the scope and remaining release gates. This candidate is not yet published or live-validated.
+- The latest local unsigned portable/installer is built from `ba507366`. Packaging checks passed; the consolidated focused lifecycle/authentication selection passed 172/172 before packaging. Earlier failures remain historical, and no CI, live-session or installer-lifecycle qualification is claimed for these bytes.
 
 ## [0.7.0 hotfix revision 1] - 2026-11-15
 
