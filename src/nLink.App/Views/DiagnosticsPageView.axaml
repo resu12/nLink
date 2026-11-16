@@ -3,12 +3,14 @@
              xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
              xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
              xmlns:vm="using:NLink.App.ViewModels"
+             xmlns:converters="using:Avalonia.Data.Converters"
              mc:Ignorable="d"
              x:Class="NLink.App.Views.DiagnosticsPageView"
              x:DataType="vm:DiagnosticsPageViewModel">
 
-    <Grid Background="{StaticResource AppBackgroundBrush}">
-        <ScrollViewer HorizontalScrollBarVisibility="Disabled"
+    <Grid Background="{StaticResource AppBackgroundBrush}" RowDefinitions="*,Auto">
+        <ScrollViewer x:Name="OptionsScrollViewer"
+                      HorizontalScrollBarVisibility="Disabled"
                       VerticalScrollBarVisibility="Auto"
                       Margin="24">
             <StackPanel HorizontalAlignment="Center"
@@ -19,11 +21,18 @@
                            HorizontalAlignment="Center"
                            TextAlignment="Center"/>
 
-                <TextBlock Classes="appCaption"
+                <TextBlock x:Name="PageFeedback"
+                           Classes="appCaption"
                            Text="{Binding CopyFeedback.Text}"
                            HorizontalAlignment="Center"
-                           TextAlignment="Center"
-                           IsVisible="{Binding CopyFeedback.IsVisible}"/>
+                           TextAlignment="Center">
+                    <TextBlock.IsVisible>
+                        <MultiBinding Converter="{x:Static converters:BoolConverters.And}">
+                            <Binding Path="CopyFeedback.IsVisible"/>
+                            <Binding Path="!IsSelected" ElementName="WalletTab"/>
+                        </MultiBinding>
+                    </TextBlock.IsVisible>
+                </TextBlock>
 
                 <TabControl HorizontalAlignment="Stretch">
                     <TabItem Header="Settings">
@@ -102,7 +111,7 @@
                         </StackPanel>
                     </TabItem>
 
-                    <TabItem Header="Wallet">
+                    <TabItem x:Name="WalletTab" Header="Wallet">
                         <StackPanel Spacing="16"
                                     Margin="0,16,0,0">
                             <Border Classes="appCard" Padding="16">
@@ -502,5 +511,17 @@
                 </StackPanel>
             </StackPanel>
         </ScrollViewer>
+        <Panel Grid.Row="1"
+               Margin="24,0,24,16"
+               MinHeight="20"
+               MaxWidth="820"
+               IsVisible="{Binding IsSelected, ElementName=WalletTab}">
+            <TextBlock x:Name="WalletFeedback"
+                       Classes="appCaption"
+                       Text="{Binding CopyFeedback.Text}"
+                       TextAlignment="Center"
+                       TextWrapping="Wrap"
+                       IsVisible="{Binding CopyFeedback.IsVisible}"/>
+        </Panel>
     </Grid>
 </UserControl>

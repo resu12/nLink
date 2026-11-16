@@ -85,8 +85,10 @@ public sealed class SessionIdentityAndVerificationTests : SessionHeaderAndBanner
     }
 
     [Trait("Category", "LegacySmoke")]
-    [Fact]
-    public async Task HelperViewModel_RuntimeHelperAddress_OverridesSeparatelyResolvedBootstrapAddress()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task HelperViewModel_BootstrapAddress_WaitsForRuntimeBeforeSharing(bool hasResolvedIdentity)
     {
         FakeNknClient.ResetNetwork();
         try
@@ -98,24 +100,46 @@ public sealed class SessionIdentityAndVerificationTests : SessionHeaderAndBanner
             var options = NknTransportOptions.Load();
             var fakeClient = new FakeNknClient(fallbackAddress, authoritativeAddress);
             var identity = new NknIdentity("helper-id", fallbackAddress);
+            var clipboard = new FakeClipboardService();
+            var shareService = new RecordingHelperAddressShareService();
             using var transport = new NknSignalingTransport(fakeClient, options, identity);
             using var helperRuntime = new SessionRuntime(() => new ScriptedSignalingTransport());
             SetPrivateField(helperRuntime, "role", SessionRuntimeRole.Helper);
             SetPrivateField(helperRuntime, "transport", transport);
             using var helper = new HelperPageViewModel(cancelAction: static () =>
             {
-            }, transportConfig, helperRuntime, bootstrapHelperIdentityResolver: _ => Task.FromResult<PeerAddress?>(separatelyResolvedAddress), qrCodeService: new NoOpQrCodeService());
+            }, transportConfig, helperRuntime,
+                clipboardService: clipboard,
+                inviteShareService: shareService,
+                bootstrapHelperIdentityResolver: _ => Task.FromResult<PeerAddress?>(hasResolvedIdentity ? separatelyResolvedAddress : null),
+                qrCodeService: new NoOpQrCodeService());
             var pending = Assert.IsAssignableFrom<Task>(InvokePrivateMethod(helper, "ResolveBootstrapHelperIdentityAsync", CancellationToken.None));
             await pending;
-            Assert.Equal(separatelyResolvedAddress.Value, helper.HelperIdentityBootstrapText);
+            Assert.Null(helperRuntime.CurrentLocalPeerAddress);
+            Assert.Empty(helper.HelperIdentityBootstrapText);
+            Assert.Equal("Preparing helper address…", helper.HelperIdentityBootstrapWatermarkText);
+            Assert.False(helper.HasReadyHelperIdentityBootstrapText);
             Assert.False(helper.HasHelperIdentityBootstrapVerificationCode);
+            Assert.False(helper.ShowHelperBootstrapQr);
+            Assert.True(helper.ShowHelperBootstrapQrPlaceholder);
+            Assert.Equal(string.Empty, GetPrivateField(helper, "lastHelperBootstrapQrPayload"));
+            await helper.CopyHelperIdentityCommand.ExecuteAsync(null);
+            await helper.ShareHelperIdentityCommand.ExecuteAsync(null);
+            Assert.Empty(clipboard.LastText);
+            Assert.Null(shareService.LastText);
             await transport.HostByAddressAsync(CancellationToken.None);
-            InvokePrivateMethod(helper, "CacheBootstrapHelperIdentityFromRuntimeIfAvailable");
+            InvokePrivateMethod(helper, "SyncFromRuntime");
+            Assert.True(helper.HasReadyHelperIdentityBootstrapText);
             Assert.StartsWith("nlinkh1.", helper.HelperIdentityBootstrapText, StringComparison.Ordinal);
             Assert.NotEqual(separatelyResolvedAddress.Value, helper.HelperIdentityBootstrapText);
             Assert.True(HelperBootstrapQrPayload.TryParse(helper.HelperIdentityBootstrapText, out var parsedBootstrap));
             Assert.NotNull(parsedBootstrap);
             Assert.Equal(authoritativeAddress, parsedBootstrap!.HelperAddress.Value);
+            Assert.Equal(helper.HelperIdentityBootstrapText, GetPrivateField(helper, "lastHelperBootstrapQrPayload"));
+            await helper.CopyHelperIdentityCommand.ExecuteAsync(null);
+            await helper.ShareHelperIdentityCommand.ExecuteAsync(null);
+            Assert.Equal(helper.HelperIdentityBootstrapText, clipboard.LastText);
+            Assert.Equal(helper.HelperIdentityBootstrapText, shareService.LastText);
         }
         finally
         {
@@ -386,4 +410,14 @@ public sealed class SessionIdentityAndVerificationTests : SessionHeaderAndBanner
         Assert.False(helper.ShowFirstPillVerificationCode);
     }
 
+    private sealed class RecordingHelperAddressShareService : IInviteShareService
+    {
+        public string? LastText { get; private set; }
+
+        public Task<InviteShareResult> ShareInviteAsync(string inviteText, CancellationToken ct)
+        {
+            LastText = inviteText;
+            return Task.FromResult(new InviteShareResult(true));
+        }
+    }
 }

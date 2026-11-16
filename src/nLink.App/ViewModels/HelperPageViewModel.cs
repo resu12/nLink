@@ -427,9 +427,6 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
             : HasAuthoritativeHelperRequestTargetAddress
                 ? HelperRequestTargetAddress
             : null;
-    private PeerAddress? HelperIdentityForDisplay =>
-        HelperRequestTargetAddress ??
-        bootstrapHelperIdentity;
     private bool IsNknTransport =>
         string.Equals(transportConfig.Key, "NKN", StringComparison.OrdinalIgnoreCase);
     private bool RequiresHelperIdentityBootstrap =>
@@ -440,7 +437,7 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
 
     public string HelperIdentityBootstrapWatermarkText =>
         string.IsNullOrWhiteSpace(HelperIdentityBootstrapText)
-            ? "Please wait..."
+            ? "Preparing helper address…"
             : "Helper address unavailable";
 
     public string HelperIdentityBootstrapHintText =>
@@ -2676,9 +2673,7 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
                         : null));
         }
 
-        return HelperIdentityForDisplay is { } helperIdentityForDisplay
-            ? helperIdentityForDisplay.Value
-            : string.Empty;
+        return string.Empty;
     }
 
     private string GetHelperBootstrapShareValue()
@@ -2721,7 +2716,7 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
             await UiThreadDispatch.RunAsync(() =>
             {
                 RefreshAutomaticIdentityRecoveryWarning();
-                // Keep the first stable helper identity visible through pre-connected UI states.
+                // Cache the stable identity for binding; only the runtime target address is shareable.
                 if (bootstrapHelperIdentity is null && resolved is not null)
                 {
                     bootstrapHelperIdentity = resolved;
