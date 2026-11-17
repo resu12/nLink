@@ -8,17 +8,23 @@ Powered by NKN. Official website: https://nkn.org/
 
 Minimal `.NET 8` / Avalonia desktop app for Windows with deterministic smoke tests.
 
-## Download 0.7.0 hotfix revision 1
+## Download 0.7.0 hotfix revision 2
 
-[Download the latest published 0.7.0 hotfix](https://github.com/resu12/nLink/releases/tag/v0.7.0-hotfix.1), released **15 November 2026** from `d235dcf1` with CI #103's exact validated artifacts. It fixes the screen-sharing encoder startup hang that could leave both the Helpee preview and Helper display blank. The app still reports **0.7.0**: use the release tag and its own `SHA256SUMS.txt` to distinguish packages. Windows artifacts are unsigned under the explicitly accepted hotfix-1 exception.
+[Download 0.7.0 hotfix revision 2](https://github.com/resu12/nLink/releases/tag/v0.7.0-hotfix.2), released **17 November 2026** from `36557e07` with CI #108's exact validated artifacts. The app still reports **0.7.0**: use the release tag and its own `SHA256SUMS.txt` to distinguish packages.
 
-The [original 0.7.0 release](https://github.com/resu12/nLink/releases/tag/v0.7.0) and its CI #102 downloads remain unchanged. See the [hotfix-1 notes](docs/releases/0.7.0-hotfix.1.md) and [release records](docs/ReleaseRunbook.md#published-070-hotfix-revision-1-2026-11-15) for validation scope.
+- [Windows x64 installer (recommended)](https://github.com/resu12/nLink/releases/download/v0.7.0-hotfix.2/nLink-Setup-win-x64-0.7.0.exe)
+- [Windows x64 portable ZIP](https://github.com/resu12/nLink/releases/download/v0.7.0-hotfix.2/nLink-Portable-win-x64-0.7.0.zip)
+- [SHA256SUMS.txt](https://github.com/resu12/nLink/releases/download/v0.7.0-hotfix.2/SHA256SUMS.txt)
 
-**Hotfix revision 2 is in preparation, not published.** The current candidate adds idle Tuna startup/re-establishment fixes, authenticated-session cleanup and listener-lifetime safeguards, a transfer-safe Tuna indicator, wallet unlock/cancellation safeguards, a “Preparing helper address…” state, and wallet feedback that stays visible while scrolling. The latest local review build is from `ba507366`; its unsigned packages and 172 passing focused lifecycle/authentication tests are not final release qualification. See the [candidate notes](docs/releases/0.7.0-hotfix.2.md).
+Hotfix 2 adds idle Tuna startup/re-establishment fixes, authenticated-session cleanup and listener-lifetime safeguards, a transfer-safe Tuna indicator, wallet unlock/cancellation safeguards, a “Preparing helper address…” state, and wallet feedback that stays visible while scrolling. It includes hotfix 1's screen-sharing encoder startup fix.
+
+All eight required [CI #108 jobs](https://github.com/resu12/nLink/actions/runs/43920671484), including installer smoke, and RC Guardrails passed. Public downloads were verified against their checksums and the exact CI artifact pins. Optional GUI smoke was skipped; these results do not claim new live Tuna, same-version upgrade or performance qualification. See the [published release notes](https://github.com/resu12/nLink/releases/tag/v0.7.0-hotfix.2) for scope and limits.
+
+**The Windows app and installer are unsigned**, under an explicit hotfix-2 exception. Windows may show publisher or SmartScreen warnings. Checksums identify the downloads but do not replace a digital signature. The [original 0.7.0 release](https://github.com/resu12/nLink/releases/tag/v0.7.0) and [hotfix 1](https://github.com/resu12/nLink/releases/tag/v0.7.0-hotfix.1), including their assets and checksums, remain unchanged.
 
 ## Quick Start (Windows)
 
-1. Download the Installer (recommended) or Portable ZIP from [GitHub Releases](https://github.com/resu12/nLink/releases). A source-branch version is not necessarily a published release.
+1. Download the Installer (recommended) or Portable ZIP from [hotfix 2's release page](https://github.com/resu12/nLink/releases/tag/v0.7.0-hotfix.2). A source-branch version is not necessarily a published release.
 2. Helper opens nLink, clicks `I want to help someone`, and waits for the full helper address beginning with `nlinkh1.` before copying it. Do not copy the brief short bootstrap address shown by older builds.
 3. Helpee opens nLink, clicks `I need help`, enters the provided helper address, and clicks `Request help`.
 4. Helper receives the incoming help request and clicks `Accept`.
@@ -85,7 +91,7 @@ Notes:
 - Tuna startup status and a pulsing fish indicate an unlocked connection attempt, not proof of payload delivery. Gray is inactive, light blue is the non-paying side, and yellow identifies the selected paying listener. Linking or validating a wallet does not spend NKN; starting a paid listener can. See the [Tuna guide](docs/nkn-tuna-implementation.md).
 - The strict Phase 5 release gate requires actual payload delivery, SHA integrity, coordinator-published routes, authenticated Tuna delivery, fallback, and terminal GUI completion. Performance is reported separately under the existing policy, without changing numeric baselines or promising Tuna/fallback throughput.
 - Large file transfers over NKN can still be noticeably slower than local or direct network copy. Live screenshare latency can also vary with NKN/network delivery.
-- The original `v0.7.0` and `v0.7.0-hotfix.1` Windows artifacts each have an explicit unsigned-artifact exception. Verify downloads against the checksum file from the same tag; these exceptions do not approve future hotfix-2 artifacts.
+- The `v0.7.0`, `v0.7.0-hotfix.1` and `v0.7.0-hotfix.2` Windows artifacts each have an explicit unsigned-artifact exception. Verify downloads against the checksum file from the same tag; these exceptions do not approve future release artifacts.
 - Installer path: `%LOCALAPPDATA%\Programs\nLink`
 
 License:
@@ -150,8 +156,10 @@ License:
   [`docs/releases/0.7.0-hotfix.1.md`](docs/releases/0.7.0-hotfix.1.md)
 - Original 0.7.0 release notes:
   [`docs/releases/0.7.0.md`](docs/releases/0.7.0.md)
-- Unreleased hotfix-2 candidate and release-body draft:
-  [notes](docs/releases/0.7.0-hotfix.2.md), [draft](docs/releases/0.7.0-hotfix.2-github.md)
+- Published hotfix-2 release notes and exact downloads:
+  [0.7.0 hotfix revision 2](https://github.com/resu12/nLink/releases/tag/v0.7.0-hotfix.2)
+- Historical hotfix-2 preparation records (pre-publication status and local-build hashes):
+  [candidate notes](docs/releases/0.7.0-hotfix.2.md), [release-body draft](docs/releases/0.7.0-hotfix.2-github.md)
 - RC/final validation checklist:
   [`docs/release/rc-validation-checklist.md`](docs/release/rc-validation-checklist.md)
 
