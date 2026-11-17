@@ -26,10 +26,6 @@ Minimal `.NET 8` / Avalonia desktop app for Windows with deterministic smoke tes
 6. Chat opens on both sides.
 7. If `Transfer files` is allowed for the session, either side can click `Send file`.
 
-## Screenshots
-
-Screenshots supplied by the user on **16 November 2026** during hotfix-2 review. They include the new preparing-address state and show the UI in use; they are not exact-build or CI qualification. See [screenshot provenance](docs/images/README.md).
-
 Home:
 
 ![nLink home screen with help and helper options](docs/images/home-2026-11-16.png)
