@@ -21113,7 +21113,7 @@ function Get-FileTransferBridgeRecoveryExecutionStartupPayloadIsolationCorrelati
     else {
         @($Events | Where-Object { $null -ne $_ } | Sort-Object Sequence, LineNumber)
     }
-    [object[]]$rawEvidence = @(Get-FileTransferBridgeRecoveryStartupRawEvidence -Events $orderedEvents -RawSourceLines $RawSourceLines)
+    [object[]]$rawEvidence = $null
     [object[]]$commands = @($orderedEvents | Where-Object {
         $_.EventName -eq 'filetransfer_bridge_recovery_execution_command_issued'
     })
@@ -21238,6 +21238,9 @@ function Get-FileTransferBridgeRecoveryExecutionStartupPayloadIsolationCorrelati
         }
         $spawn = $spawnCandidates[0]
         $spawnPid = Get-FileTransferEventField -Event $spawn -Name 'pid' -Default ''
+        if ($null -eq $rawEvidence) {
+            $rawEvidence = @(Get-FileTransferBridgeRecoveryStartupRawEvidence -Events $orderedEvents -RawSourceLines $RawSourceLines)
+        }
         $processStarted = @($rawEvidence | Where-Object {
             [int64]$_.Sequence -gt [int64]$spawn.Sequence -and
             [int64]$_.Sequence -lt [int64]$completion.Sequence -and
