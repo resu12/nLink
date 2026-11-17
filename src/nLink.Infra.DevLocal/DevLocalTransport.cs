@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.IO.Pipes;
 using System.Security.Cryptography;
 using System.Text;
@@ -16,7 +17,7 @@ using NLink.Core.SessionSecurity;
 namespace NLink.Infra.DevLocal;
 
 // DEV ONLY: local machine named-pipe transport for testing two app instances without real networking.
-public sealed class DevLocalTransport : ISignalingTransport, IAddressTargetSignalingTransport, IInviteTargetSignalingTransport, IAddressHostSignalingTransport, IHostReadySignalingTransport, ILocalPeerAddressSignalingTransport, IHelpRequestSignalingTransport, ISessionSecuritySignalingTransport, IRemoteControlCapabilityProvider, IRemoteControlSignalingTransport, IScreenShareSignalingTransport, IScreenShareCursorOverlayCapabilityProvider, IFileTransferSignalingTransport, IFileTransferProtocolCapabilities, IFileTransferTransportProfileProvider
+public sealed class DevLocalTransport : ISignalingTransport, IAddressTargetSignalingTransport, IInviteTargetSignalingTransport, IAddressHostSignalingTransport, IHostReadySignalingTransport, ILocalPeerAddressSignalingTransport, IHelpRequestSignalingTransport, ISessionSecuritySignalingTransport, IRemoteControlCapabilityProvider, IRemoteControlSignalingTransport, IScreenShareSignalingTransport, IScreenShareCursorOverlayCapabilityProvider, IFileTransferSignalingTransport, IFileTransferSessionContextProvider, IFileTransferProtocolCapabilities, IFileTransferTransportProfileProvider, IFileTransferRegularV4FrontierRepairPressureInstallBridge, IFileTransferRouteTransitionBridge, IFileTransferRegularV4FrontierRepairSettlementObserver
 {
     private const string HelpRequestFrameType = "help_request";
     private const string HelpRequestDecisionFrameType = "help_request_decision";
@@ -57,6 +58,11 @@ public sealed class DevLocalTransport : ISignalingTransport, IAddressTargetSigna
     private const string FileTransferCancelFrameType = "file_transfer_cancel";
     private const string FileTransferErrorFrameType = "file_transfer_error";
     private const string FileTransferCompleteFrameType = "file_transfer_complete";
+    private const string FileTransferPauseControlFrameType = "file_transfer_pause_control";
+    private const string FileTransferHeartbeatFrameType = "file_transfer_heartbeat";
+    private const string FileTransferTransportEpochFrameType = "file_transfer_transport_epoch";
+    private const string FileTransferTransportProbeFrameType = "file_transfer_transport_probe";
+    private const string FileTransferRepairProofFrameType = "file_transfer_repair_proof";
     private const int ConnectTimeoutMs = 2000;
 
     private static readonly JsonSerializerOptions JsonOptions = new()
@@ -79,7 +85,20 @@ public sealed class DevLocalTransport : ISignalingTransport, IAddressTargetSigna
     private readonly SessionReplayWindow inboundScreenShareReplayWindow = new();
     private readonly SessionReplayWindow inboundFileTransferReplayWindow = new();
     private readonly Dictionary<string, FileTransferTransportState> fileTransferStates = new(StringComparer.Ordinal);
-    private readonly Dictionary<string, TransportFileTransferDataSession> fileTransferDataSessions = new(StringComparer.Ordinal);
+    private readonly ConcurrentDictionary<string, TransportFileTransferDataSession> fileTransferDataSessions = new(StringComparer.Ordinal);
+    private readonly object regularV4RepairPressureGate = new();
+    private readonly Dictionary<string, DevLocalRegularV4RepairPressureShadow> regularV4RepairPressures = new(StringComparer.Ordinal);
+    private readonly object fileTransferRouteTransitionGate = new();
+    private FileTransferFallbackV6ProofBootstrapCommand?
+        activeFallbackV6ProofBootstrapCommand;
+    private Task<FileTransferFallbackV6ProofBootstrapReceipt>?
+        activeFallbackV6ProofBootstrapTask;
+    private FileTransferFallbackV6ProofBootstrapReceipt?
+        lastFallbackV6ProofBootstrapReceipt;
+    private DevLocalFileTransferRouteTransitionExecutionShadow
+        fileTransferRouteTransitionExecutionShadow =
+            DevLocalFileTransferRouteTransitionExecutionShadow.Empty;
+    private long nextFileTransferDataSessionGeneration;
     private const bool LocalRemoteControlSupported = true;
     private const bool LocalScreenShareCursorOverlaySupported = true;
     private readonly DevLocalImpairmentPolicy? impairmentPolicy;
@@ -90,7 +109,7 @@ public sealed class DevLocalTransport : ISignalingTransport, IAddressTargetSigna
     private SessionId? activeApprovedSessionId;
     private PeerAddress? activeApprovedHelperAddress;
 
-    public bool SupportsFileTransferV4Streaming => true;
+    public bool SupportsFileTransferV6Streaming => true;
     public FileTransferTransportProfileKind FileTransferTransportProfileKind => FileTransferTransportProfileKind.Default;
     private byte[]? controlSessionSharedKey;
     private long nextOutboundChatSecureSequence;
@@ -117,6 +136,778 @@ public sealed class DevLocalTransport : ISignalingTransport, IAddressTargetSigna
         screenShareFrameReassembler.FrameReady += OnScreenShareFrameReady;
         screenShareFrameReassembler.KeyframeRequested += OnScreenShareKeyframeRequested;
     }
+
+    FileTransferRegularV4FrontierRepairPressureInstallReceipt
+        IFileTransferRegularV4FrontierRepairPressureInstallBridge.InstallRegularV4FrontierRepairPressure(
+            FileTransferRegularV4FrontierRepairPressureInstallCommand command)
+    {
+        var pressure = command.Pressure;
+        var authority = pressure.RepairAuthority;
+        var pressureReason = pressure.Reason;
+        if (authority is null)
+        {
+            return new FileTransferRegularV4FrontierRepairPressureInstallReceipt(
+                Authority: null,
+                FileTransferRegularV4FrontierRepairPressureInstallStatus.Rejected,
+                "repair_authority_missing",
+                Math.Max(0, command.InstallGeneration),
+                pressureReason);
+        }
+
+        var key = GetRegularV4RepairPressureKey(
+            authority.SessionId,
+            authority.TransferId,
+            authority.Direction);
+        var expectedTargetTransport =
+            string.Equals(authority.RouteToken, "file_tuna_v4", StringComparison.Ordinal)
+                ? FileTransferTransportKind.Tuna
+                : string.Equals(authority.RouteToken, "regular_nkn_v4_fast", StringComparison.Ordinal)
+                    ? FileTransferTransportKind.RegularNkn
+                    : FileTransferTransportKind.Unknown;
+
+        if (command.InstallGeneration <= 0 ||
+            string.IsNullOrWhiteSpace(pressure.SessionId) ||
+            string.IsNullOrWhiteSpace(pressure.TransferId) ||
+            string.IsNullOrWhiteSpace(pressure.Reason) ||
+            !string.Equals(pressure.SessionId, authority.SessionId, StringComparison.Ordinal) ||
+            !string.Equals(pressure.TransferId, authority.TransferId, StringComparison.Ordinal) ||
+            authority.AuthorityId.IsDefault ||
+            authority.PredecessorAuthorityId is { IsDefault: true } ||
+            authority.ProtocolVersion != FileTransferProtocol.ProtocolVersionV4 ||
+            expectedTargetTransport == FileTransferTransportKind.Unknown ||
+            authority.TargetTransport != expectedTargetTransport ||
+            authority.RuntimeGeneration <= 0 ||
+            authority.LegGeneration <= 0 ||
+            authority.RoutePublicationGeneration <= 0 ||
+            authority.DecisionGeneration <= 0)
+        {
+            return new FileTransferRegularV4FrontierRepairPressureInstallReceipt(
+                authority,
+                FileTransferRegularV4FrontierRepairPressureInstallStatus.Rejected,
+                command.InstallGeneration <= 0
+                    ? "regular_v4_frontier_repair_install_generation_invalid"
+                    : "repair_authority_invalid",
+                Math.Max(0, command.InstallGeneration),
+                pressureReason);
+        }
+
+        lock (regularV4RepairPressureGate)
+        {
+            regularV4RepairPressures.TryGetValue(key, out var existing);
+            var shadow = existing ?? DevLocalRegularV4RepairPressureShadow.Empty;
+            var current = shadow.Current;
+            if (current is not null && Equals(current.Command, command))
+            {
+                return new FileTransferRegularV4FrontierRepairPressureInstallReceipt(
+                    authority,
+                    FileTransferRegularV4FrontierRepairPressureInstallStatus.Idempotent,
+                    "regular_v4_frontier_repair_pressure_install_idempotent",
+                    command.InstallGeneration,
+                    pressureReason);
+            }
+
+            if (current?.Authority.AuthorityId == authority.AuthorityId ||
+                shadow.RetainedPredecessor?.Authority.AuthorityId == authority.AuthorityId ||
+                shadow.LastPredecessorSettlement?.Command.Settlement.AuthorityId == authority.AuthorityId ||
+                shadow.LastFinalSettlement?.Command.Settlement.AuthorityId == authority.AuthorityId)
+            {
+                return new FileTransferRegularV4FrontierRepairPressureInstallReceipt(
+                    authority,
+                    FileTransferRegularV4FrontierRepairPressureInstallStatus.Rejected,
+                    "regular_v4_frontier_repair_authority_id_reuse",
+                    command.InstallGeneration,
+                    pressureReason);
+            }
+
+            var initialInstall =
+                authority.PredecessorAuthorityId is null &&
+                current is null &&
+                shadow.RetainedPredecessor is null;
+            var successorInstall = authority.PredecessorAuthorityId is { IsDefault: false } predecessorAuthorityId &&
+                                   current is not null &&
+                                   current.Authority.AuthorityId == predecessorAuthorityId &&
+                                   shadow.RetainedPredecessor is null &&
+                                   DevLocalRegularV4RepairSuccessorScopeMatches(
+                                       current.Authority,
+                                       authority);
+            if (!initialInstall && !successorInstall)
+            {
+                return new FileTransferRegularV4FrontierRepairPressureInstallReceipt(
+                    authority,
+                    FileTransferRegularV4FrontierRepairPressureInstallStatus.Rejected,
+                    authority.PredecessorAuthorityId is null
+                        ? "regular_v4_frontier_repair_initial_pressure_conflict"
+                        : current is not null &&
+                          current.Authority.AuthorityId == authority.PredecessorAuthorityId
+                            ? "regular_v4_frontier_repair_successor_scope_mismatch"
+                            : "regular_v4_frontier_repair_predecessor_missing",
+                    command.InstallGeneration,
+                    pressureReason);
+            }
+
+            var installGeneration = command.InstallGeneration;
+            var receipt = new FileTransferRegularV4FrontierRepairPressureInstallReceipt(
+                authority,
+                FileTransferRegularV4FrontierRepairPressureInstallStatus.Installed,
+                initialInstall
+                    ? "regular_v4_frontier_repair_initial_pressure_installed"
+                    : "regular_v4_frontier_repair_successor_pressure_installed",
+                installGeneration,
+                pressureReason);
+            var installed = new DevLocalRegularV4RepairInstalledCommandShadow(command, receipt);
+            regularV4RepairPressures[key] = shadow with
+            {
+                Current = installed,
+                RetainedPredecessor = successorInstall ? current : null,
+                LastPredecessorSettlement = initialInstall ? null : shadow.LastPredecessorSettlement,
+                LastFinalSettlement = null,
+            };
+            return receipt;
+        }
+    }
+
+    FileTransferRegularV4FrontierRepairPressureSettlementApplyReceipt
+        IFileTransferRegularV4FrontierRepairPressureInstallBridge.ApplyRegularV4FrontierRepairPressureSettlement(
+            FileTransferRegularV4FrontierRepairPressureSettlementCommand command)
+    {
+        var settlement = command.Settlement;
+        var key = GetRegularV4RepairPressureKey(
+            settlement.SessionId,
+            settlement.TransferId,
+            settlement.Direction);
+        lock (regularV4RepairPressureGate)
+        {
+            regularV4RepairPressures.TryGetValue(key, out var existing);
+            var shadow = existing ?? DevLocalRegularV4RepairPressureShadow.Empty;
+            if (shadow.LastFinalSettlement is { } previousFinalReceipt &&
+                Equals(previousFinalReceipt.Command, command))
+            {
+                return previousFinalReceipt with
+                {
+                    Status = FileTransferRegularV4FrontierRepairPressureSettlementApplyStatus.Idempotent,
+                    Reason = "regular_v4_frontier_repair_pressure_settlement_apply_idempotent",
+                };
+            }
+            if (shadow.LastPredecessorSettlement is { } previousPredecessorReceipt &&
+                Equals(previousPredecessorReceipt.Command, command))
+            {
+                return previousPredecessorReceipt with
+                {
+                    Status = FileTransferRegularV4FrontierRepairPressureSettlementApplyStatus.Idempotent,
+                    Reason = "regular_v4_frontier_repair_pressure_settlement_apply_idempotent",
+                };
+            }
+
+            var current = shadow.Current;
+            if (current is null ||
+                current.Authority.AuthorityId != command.CurrentAuthorityId ||
+                current.Receipt.InstallGeneration != command.InstallGeneration)
+            {
+                return new FileTransferRegularV4FrontierRepairPressureSettlementApplyReceipt(
+                    command,
+                    FileTransferRegularV4FrontierRepairPressureSettlementApplyStatus.Rejected,
+                    "regular_v4_frontier_repair_pressure_settlement_current_binding_mismatch",
+                    CurrentAuthorityCleared: false,
+                    RetainedPredecessorCleared: false);
+            }
+            if (shadow.RetainedPredecessor?.Authority.AuthorityId !=
+                command.RetainedPredecessorAuthorityId)
+            {
+                return new FileTransferRegularV4FrontierRepairPressureSettlementApplyReceipt(
+                    command,
+                    FileTransferRegularV4FrontierRepairPressureSettlementApplyStatus.Rejected,
+                    "regular_v4_frontier_repair_pressure_settlement_predecessor_binding_mismatch",
+                    CurrentAuthorityCleared: false,
+                    RetainedPredecessorCleared: false);
+            }
+
+            if (settlement.Outcome == FileTransferRegularV4FrontierRepairSettlementOutcome.Superseded)
+            {
+                var predecessorMatches =
+                    shadow.RetainedPredecessor is { } retainedPredecessor &&
+                    DevLocalRegularV4RepairAuthorityMatchesSettlement(
+                        retainedPredecessor.Authority,
+                        settlement) &&
+                    current.Authority.PredecessorAuthorityId == settlement.AuthorityId &&
+                    settlement.SuccessorAuthorityId == current.Authority.AuthorityId &&
+                    command.RetainedPredecessorAuthorityId == settlement.AuthorityId;
+                var receipt = new FileTransferRegularV4FrontierRepairPressureSettlementApplyReceipt(
+                    command,
+                    predecessorMatches
+                        ? FileTransferRegularV4FrontierRepairPressureSettlementApplyStatus.Applied
+                        : FileTransferRegularV4FrontierRepairPressureSettlementApplyStatus.Rejected,
+                    predecessorMatches
+                        ? "regular_v4_frontier_repair_pressure_settlement_applied"
+                        : "regular_v4_frontier_repair_pressure_settlement_predecessor_binding_mismatch",
+                    CurrentAuthorityCleared: false,
+                    RetainedPredecessorCleared: predecessorMatches);
+                if (predecessorMatches)
+                {
+                    regularV4RepairPressures[key] = shadow with
+                    {
+                        RetainedPredecessor = null,
+                        LastPredecessorSettlement = receipt,
+                    };
+                }
+
+                return receipt;
+            }
+
+            if (!DevLocalRegularV4RepairAuthorityMatchesSettlement(
+                    current.Authority,
+                    settlement))
+            {
+                return new FileTransferRegularV4FrontierRepairPressureSettlementApplyReceipt(
+                    command,
+                    FileTransferRegularV4FrontierRepairPressureSettlementApplyStatus.Rejected,
+                    "regular_v4_frontier_repair_pressure_settlement_authority_mismatch",
+                    CurrentAuthorityCleared: false,
+                    RetainedPredecessorCleared: false);
+            }
+            if (current.Authority.PredecessorAuthorityId is { IsDefault: false } predecessorAuthorityId &&
+                (shadow.RetainedPredecessor is not null ||
+                 shadow.LastPredecessorSettlement?.Command.Settlement.AuthorityId != predecessorAuthorityId))
+            {
+                return new FileTransferRegularV4FrontierRepairPressureSettlementApplyReceipt(
+                    command,
+                    FileTransferRegularV4FrontierRepairPressureSettlementApplyStatus.Rejected,
+                    "regular_v4_frontier_repair_predecessor_pressure_not_retired",
+                    CurrentAuthorityCleared: false,
+                    RetainedPredecessorCleared: false);
+            }
+
+            var finalReceipt = new FileTransferRegularV4FrontierRepairPressureSettlementApplyReceipt(
+                command,
+                FileTransferRegularV4FrontierRepairPressureSettlementApplyStatus.Applied,
+                "regular_v4_frontier_repair_pressure_settlement_applied",
+                CurrentAuthorityCleared: true,
+                RetainedPredecessorCleared: false);
+            regularV4RepairPressures[key] = shadow with
+            {
+                Current = null,
+                RetainedPredecessor = null,
+                LastFinalSettlement = finalReceipt,
+            };
+            return finalReceipt;
+        }
+    }
+
+    FileTransferRouteTransitionPauseBindReceipt
+        IFileTransferRouteTransitionBridge.BindFileTransferRouteTransitionPause(
+            FileTransferRouteTransitionPauseBindCommand command)
+    {
+        FileTransferRouteTransitionPauseBindReceipt receipt;
+        if (command.Authority.IsDefault ||
+            !TryGetFileTransferRouteTransitionDataSession(
+                command.Authority,
+                out var currentSession))
+        {
+            receipt = new FileTransferRouteTransitionPauseBindReceipt(
+                command,
+                FileTransferRouteTransitionPauseBindStatus.Rejected,
+                command.Authority.IsDefault
+                    ? "filetransfer_route_transition_authority_invalid"
+                    : "filetransfer_route_transition_data_session_not_current");
+        }
+        else
+        {
+            lock (fileTransferRouteTransitionGate)
+            {
+                var shadow = fileTransferRouteTransitionExecutionShadow;
+                if (shadow.Current is { } current &&
+                    current.Command == command)
+                {
+                    receipt = current.Receipt with
+                    {
+                        Status = FileTransferRouteTransitionPauseBindStatus.Idempotent,
+                        Reason = "filetransfer_route_transition_pause_bind_idempotent",
+                    };
+                }
+                else if (shadow.Current is { } predecessor &&
+                         shadow.RetainedPredecessor is null &&
+                         command.PredecessorAuthority ==
+                         predecessor.Command.Authority &&
+                         command.Authority.PredecessorTransitionAuthorityId ==
+                         predecessor.Command.Authority.AuthorityId)
+                {
+                    receipt = new FileTransferRouteTransitionPauseBindReceipt(
+                        command,
+                        FileTransferRouteTransitionPauseBindStatus.Installed,
+                        "filetransfer_route_transition_pause_rebound");
+                    fileTransferRouteTransitionExecutionShadow = shadow with
+                    {
+                        Current =
+                            new DevLocalFileTransferRouteTransitionPauseBindingShadow(
+                                command,
+                                receipt),
+                        RetainedPredecessor = predecessor,
+                    };
+                }
+                else if (shadow.Current is not null ||
+                         shadow.PendingAvailabilityDisposition is not null)
+                {
+                    receipt = new FileTransferRouteTransitionPauseBindReceipt(
+                        command,
+                        FileTransferRouteTransitionPauseBindStatus.Rejected,
+                        "filetransfer_route_transition_pause_binding_conflict");
+                }
+                else if (shadow.RetainedPredecessor is { } retained)
+                {
+                    if (command.PredecessorAuthority ==
+                            retained.Command.Authority &&
+                        command.Authority.PredecessorTransitionAuthorityId ==
+                        retained.Command.Authority.AuthorityId)
+                    {
+                        receipt = new FileTransferRouteTransitionPauseBindReceipt(
+                            command,
+                            FileTransferRouteTransitionPauseBindStatus.Installed,
+                            "filetransfer_route_transition_pause_rebound");
+                        fileTransferRouteTransitionExecutionShadow = shadow with
+                        {
+                            Current =
+                                new DevLocalFileTransferRouteTransitionPauseBindingShadow(
+                                    command,
+                                    receipt),
+                        };
+                    }
+                    else
+                    {
+                        receipt = new FileTransferRouteTransitionPauseBindReceipt(
+                            command,
+                            FileTransferRouteTransitionPauseBindStatus.Rejected,
+                            "filetransfer_route_transition_superseded_pause_handoff_pending");
+                    }
+                }
+                else if ((shadow.LastCurrentDisposition is { } terminal &&
+                          terminal.Command.Authority.AuthorityId ==
+                          command.Authority.AuthorityId) ||
+                         (shadow.LastPredecessorDisposition is { } predecessorTerminal &&
+                          predecessorTerminal.Command.Authority.AuthorityId ==
+                          command.Authority.AuthorityId))
+                {
+                    receipt = new FileTransferRouteTransitionPauseBindReceipt(
+                        command,
+                        FileTransferRouteTransitionPauseBindStatus.Rejected,
+                        "filetransfer_route_transition_terminal");
+                }
+                else if (command.PredecessorAuthority is not null ||
+                         command.Authority.PredecessorTransitionAuthorityId is
+                             not null)
+                {
+                    receipt = new FileTransferRouteTransitionPauseBindReceipt(
+                        command,
+                        FileTransferRouteTransitionPauseBindStatus.Rejected,
+                        "filetransfer_route_transition_predecessor_pause_not_current");
+                }
+                else
+                {
+                    receipt = new FileTransferRouteTransitionPauseBindReceipt(
+                        command,
+                        FileTransferRouteTransitionPauseBindStatus.Installed,
+                        "filetransfer_route_transition_pause_bound");
+                    fileTransferRouteTransitionExecutionShadow = shadow with
+                    {
+                        Current =
+                            new DevLocalFileTransferRouteTransitionPauseBindingShadow(
+                            command,
+                            receipt),
+                    };
+                    currentSession!.SetTransitionAvailability(
+                        isAvailable: false,
+                        "filetransfer_route_transition_prepared",
+                        command.Authority.TargetTransport,
+                        notify: false);
+                }
+            }
+        }
+
+        return receipt;
+    }
+
+    event EventHandler<FileTransferFallbackV6ProofBootstrapEvaluationRequestedEventArgs>?
+        IFileTransferRouteTransitionBridge.FallbackV6ProofBootstrapEvaluationRequested
+    {
+        add { }
+        remove { }
+    }
+
+    Task<FileTransferFallbackV6ProofBootstrapReceipt>
+        IFileTransferRouteTransitionBridge.ExecuteFileTransferFallbackV6ProofBootstrapAsync(
+            FileTransferFallbackV6ProofBootstrapCommand command,
+            FileTransferTransportEpochFrameV6 epochFrame,
+            FileTransferDataFrame proofFrame,
+            IFileTransferDataSession dataSession,
+            Func<bool> isCommandCurrent,
+            CancellationToken ct)
+    {
+        lock (fileTransferRouteTransitionGate)
+        {
+            if (lastFallbackV6ProofBootstrapReceipt is { } terminal &&
+                terminal.Command == command &&
+                terminal.Status is not FileTransferFallbackV6ProofBootstrapReceiptStatus.Held)
+            {
+                return Task.FromResult(terminal);
+            }
+
+            if (activeFallbackV6ProofBootstrapTask is { } active)
+            {
+                return activeFallbackV6ProofBootstrapCommand == command
+                    ? active
+                    : Task.FromResult(new FileTransferFallbackV6ProofBootstrapReceipt(
+                        command,
+                        FileTransferFallbackV6ProofBootstrapReceiptStatus.Rejected,
+                        null,
+                        "filetransfer_fallback_v6_proof_bootstrap_execution_conflict"));
+            }
+
+            var task = Task.Run(
+                () => ExecuteFallbackV6ProofBootstrapCoreAsync(
+                    command,
+                    epochFrame,
+                    proofFrame,
+                    dataSession,
+                    isCommandCurrent,
+                    ct),
+                CancellationToken.None);
+            activeFallbackV6ProofBootstrapCommand = command;
+            activeFallbackV6ProofBootstrapTask = task;
+            return task;
+        }
+    }
+
+    private async Task<FileTransferFallbackV6ProofBootstrapReceipt>
+        ExecuteFallbackV6ProofBootstrapCoreAsync(
+            FileTransferFallbackV6ProofBootstrapCommand command,
+            FileTransferTransportEpochFrameV6 epochFrame,
+            FileTransferDataFrame proofFrame,
+            IFileTransferDataSession dataSession,
+            Func<bool> isCommandCurrent,
+            CancellationToken ct)
+    {
+        FileTransferFallbackV6ProofBootstrapReceipt receipt;
+        try
+        {
+            if (!string.Equals(dataSession.SessionId, command.Observation.SessionId, StringComparison.Ordinal) ||
+                !string.Equals(dataSession.TransferId, command.Observation.TransferId, StringComparison.Ordinal) ||
+                epochFrame.TransportEpoch != command.TargetTransportEpoch ||
+                !FileTransferProtocol.TryValidateFallbackV6ProofBootstrapCommandFrame(
+                    command,
+                    proofFrame,
+                    out var identity) ||
+                !isCommandCurrent())
+            {
+                receipt = new FileTransferFallbackV6ProofBootstrapReceipt(
+                    command,
+                    FileTransferFallbackV6ProofBootstrapReceiptStatus.Rejected,
+                    null,
+                    "filetransfer_fallback_v6_proof_bootstrap_execution_invalid");
+            }
+            else
+            {
+                await dataSession.SendAsync(epochFrame, ct).ConfigureAwait(false);
+                if (!isCommandCurrent())
+                {
+                    receipt = new FileTransferFallbackV6ProofBootstrapReceipt(
+                        command,
+                        FileTransferFallbackV6ProofBootstrapReceiptStatus.Rejected,
+                        null,
+                        "filetransfer_fallback_v6_proof_bootstrap_stale_before_proof_send");
+                }
+                else
+                {
+                    await dataSession.SendAsync(proofFrame, ct).ConfigureAwait(false);
+                    receipt = new FileTransferFallbackV6ProofBootstrapReceipt(
+                        command,
+                        FileTransferFallbackV6ProofBootstrapReceiptStatus.Delivered,
+                        identity,
+                        "filetransfer_fallback_v6_proof_bootstrap_delivered");
+                }
+            }
+        }
+        catch (Exception ex) when (ex is InvalidOperationException or ObjectDisposedException or OperationCanceledException)
+        {
+            receipt = new FileTransferFallbackV6ProofBootstrapReceipt(
+                command,
+                ct.IsCancellationRequested || dataSession.IsAvailable
+                    ? FileTransferFallbackV6ProofBootstrapReceiptStatus.Rejected
+                    : FileTransferFallbackV6ProofBootstrapReceiptStatus.Held,
+                null,
+                ct.IsCancellationRequested
+                    ? "filetransfer_fallback_v6_proof_bootstrap_canceled"
+                    : dataSession.IsAvailable
+                        ? "filetransfer_fallback_v6_proof_bootstrap_send_failed"
+                        : "filetransfer_fallback_v6_proof_bootstrap_data_session_unavailable");
+        }
+
+        lock (fileTransferRouteTransitionGate)
+        {
+            if (activeFallbackV6ProofBootstrapCommand == command)
+            {
+                activeFallbackV6ProofBootstrapCommand = null;
+                activeFallbackV6ProofBootstrapTask = null;
+                lastFallbackV6ProofBootstrapReceipt = receipt;
+            }
+        }
+
+        return receipt;
+    }
+
+    FileTransferRouteTransitionDispositionReceipt
+        IFileTransferRouteTransitionBridge.ApplyFileTransferRouteTransitionDisposition(
+            FileTransferRouteTransitionDispositionCommand command)
+    {
+        FileTransferRouteTransitionDispositionReceipt receipt;
+        var scheduleAvailability = false;
+        lock (fileTransferRouteTransitionGate)
+        {
+            var shadow = fileTransferRouteTransitionExecutionShadow;
+            var currentMatches =
+                shadow.Current is { } current &&
+                current.Command.Authority == command.Authority;
+            var predecessorMatches =
+                shadow.RetainedPredecessor is { } predecessor &&
+                predecessor.Command.Authority == command.Authority;
+            FileTransferRouteTransitionDispositionReceipt? prior =
+                shadow.LastCurrentDisposition is { } previous &&
+                previous.Command == command
+                    ? previous
+                    : shadow.LastPredecessorDisposition is { } predecessorPrevious &&
+                      predecessorPrevious.Command == command
+                        ? predecessorPrevious
+                        : null;
+            if (prior is { } exact)
+            {
+                receipt = exact with
+                {
+                    Status = FileTransferRouteTransitionDispositionApplyStatus.Idempotent,
+                    Reason = "filetransfer_route_transition_disposition_idempotent",
+                };
+            }
+            else if (command.Authority.IsDefault ||
+                string.IsNullOrWhiteSpace(command.Reason) ||
+                !FileTransferCoordinator
+                    .IsFileTransferRouteTransitionDispositionCommandValid(
+                        command))
+            {
+                receipt = new FileTransferRouteTransitionDispositionReceipt(
+                    command,
+                    FileTransferRouteTransitionDispositionApplyStatus.Rejected,
+                    "filetransfer_route_transition_disposition_invalid");
+            }
+            else if (!currentMatches && !predecessorMatches)
+            {
+                receipt = new FileTransferRouteTransitionDispositionReceipt(
+                    command,
+                    FileTransferRouteTransitionDispositionApplyStatus.Rejected,
+                    "filetransfer_route_transition_pause_binding_not_current");
+            }
+            else
+            {
+                receipt = new FileTransferRouteTransitionDispositionReceipt(
+                    command,
+                    FileTransferRouteTransitionDispositionApplyStatus.Applied,
+                    command.Kind switch
+                    {
+                        FileTransferRouteTransitionDispositionKind.Committed =>
+                            "filetransfer_route_transition_committed",
+                        FileTransferRouteTransitionDispositionKind.RolledBack =>
+                            "filetransfer_route_transition_rolled_back",
+                        FileTransferRouteTransitionDispositionKind.Superseded =>
+                            "filetransfer_route_transition_superseded",
+                        _ =>
+                            "filetransfer_route_transition_terminal_invalidated",
+                    });
+
+                if (predecessorMatches)
+                {
+                    fileTransferRouteTransitionExecutionShadow = shadow with
+                    {
+                        RetainedPredecessor = null,
+                        LastPredecessorDisposition = receipt,
+                        LastCurrentDisposition =
+                            command.Kind ==
+                            FileTransferRouteTransitionDispositionKind.Superseded
+                                ? shadow.LastCurrentDisposition
+                                : receipt,
+                    };
+                }
+                else
+                {
+                    var retainSuperseded =
+                        command.Kind ==
+                        FileTransferRouteTransitionDispositionKind.Superseded;
+                    fileTransferRouteTransitionExecutionShadow = shadow with
+                    {
+                        Current = null,
+                        RetainedPredecessor = retainSuperseded
+                            ? shadow.Current
+                            : shadow.RetainedPredecessor,
+                        LastCurrentDisposition = receipt,
+                    };
+                }
+
+                scheduleAvailability = command.Kind is
+                    FileTransferRouteTransitionDispositionKind.Committed or
+                    FileTransferRouteTransitionDispositionKind.RolledBack;
+                if (scheduleAvailability)
+                {
+                    fileTransferRouteTransitionExecutionShadow =
+                        fileTransferRouteTransitionExecutionShadow with
+                        {
+                            PendingAvailabilityDisposition = command,
+                        };
+                }
+            }
+        }
+
+        if (scheduleAvailability)
+        {
+            _ = Task.Run(
+                () => ApplyFileTransferRouteTransitionAvailability(
+                    receipt.Command),
+                CancellationToken.None);
+        }
+
+        return receipt;
+    }
+
+    private bool TryGetFileTransferRouteTransitionDataSession(
+        FileTransferRouteTransitionAuthority authority,
+        out TransportFileTransferDataSession? session)
+    {
+        if (fileTransferDataSessions.TryGetValue(
+                authority.TransferId,
+                out var candidate) &&
+            !candidate.IsDisposed &&
+            authority.DataSessionProviderGeneration > 0 &&
+            candidate.Generation == authority.DataSessionProviderGeneration &&
+            string.Equals(
+                candidate.SessionId,
+                authority.SessionId,
+                StringComparison.Ordinal))
+        {
+            session = candidate;
+            return true;
+        }
+
+        session = null;
+        return false;
+    }
+
+    private void ApplyFileTransferRouteTransitionAvailability(
+        FileTransferRouteTransitionDispositionCommand command)
+    {
+        TransportFileTransferDataSession? session;
+        lock (fileTransferRouteTransitionGate)
+        {
+            var shadow = fileTransferRouteTransitionExecutionShadow;
+            if (shadow.PendingAvailabilityDisposition != command ||
+                shadow.LastCurrentDisposition is not { } terminal ||
+                terminal.Command != command ||
+                shadow.Current is not null ||
+                shadow.RetainedPredecessor is not null)
+            {
+                return;
+            }
+
+            if (!TryGetFileTransferRouteTransitionDataSession(
+                    command.Authority,
+                    out session))
+            {
+                fileTransferRouteTransitionExecutionShadow = shadow with
+                {
+                    PendingAvailabilityDisposition = null,
+                };
+                return;
+            }
+        }
+
+        try
+        {
+            var committed =
+                command.Kind ==
+                FileTransferRouteTransitionDispositionKind.Committed;
+            session!.SetTransitionAvailability(
+                isAvailable: true,
+                committed
+                    ? "filetransfer_route_transition_committed"
+                    : "filetransfer_route_transition_rolled_back",
+                committed
+                    ? command.Authority.TargetTransport
+                    : command.Authority.SourceTransport,
+                notify: true);
+        }
+        finally
+        {
+            lock (fileTransferRouteTransitionGate)
+            {
+                if (fileTransferRouteTransitionExecutionShadow
+                        .PendingAvailabilityDisposition == command)
+                {
+                    fileTransferRouteTransitionExecutionShadow =
+                        fileTransferRouteTransitionExecutionShadow with
+                        {
+                            PendingAvailabilityDisposition = null,
+                        };
+                }
+            }
+        }
+    }
+
+    public void ObserveRegularV4FrontierRepairSettlement(
+        FileTransferRegularV4FrontierRepairSettlement settlement)
+    {
+        // Coordinator-owned pressure is mutated only through the synchronous apply command.
+    }
+
+    private static string GetRegularV4RepairPressureKey(
+        string sessionId,
+        string transferId,
+        FileTransferDirection direction)
+        => $"{sessionId}\u001f{transferId}\u001f{direction}";
+
+    private static bool DevLocalRegularV4RepairAuthorityMatchesSettlement(
+        FileTransferRegularV4FrontierRepairAuthority authority,
+        FileTransferRegularV4FrontierRepairSettlement settlement)
+        => authority.AuthorityId == settlement.AuthorityId &&
+           string.Equals(authority.SessionId, settlement.SessionId, StringComparison.Ordinal) &&
+           string.Equals(authority.TransferId, settlement.TransferId, StringComparison.Ordinal) &&
+           authority.Direction == settlement.Direction &&
+           string.Equals(authority.RouteToken, settlement.RouteToken, StringComparison.Ordinal) &&
+           authority.ProtocolVersion == settlement.ProtocolVersion &&
+           authority.LiveRouteEpoch == settlement.LiveRouteEpoch &&
+           authority.RuntimeGeneration == settlement.RuntimeGeneration &&
+           authority.TerminalGeneration == settlement.TerminalGeneration &&
+           authority.LegGeneration == settlement.LegGeneration &&
+           authority.TransportEpoch == settlement.TransportEpoch &&
+           authority.BridgeRecoveryGeneration == settlement.BridgeRecoveryGeneration &&
+           authority.BridgeDecisionGeneration == settlement.BridgeDecisionGeneration &&
+           authority.RoutePublicationGeneration == settlement.RoutePublicationGeneration &&
+           authority.RouteCommitGeneration == settlement.RouteCommitGeneration &&
+           authority.TargetTransport == settlement.TargetTransport &&
+           string.Equals(authority.RepairKey, settlement.RepairKey, StringComparison.Ordinal) &&
+           authority.FrontierChunkIndex == settlement.FrontierChunkIndex &&
+           authority.DurableReceivedHighestChunkIndex == settlement.DurableReceivedHighestChunkIndex &&
+           authority.PendingRepairCount == settlement.RequestedChunkCount &&
+           authority.DecisionGeneration == settlement.DecisionGeneration;
+
+    private static bool DevLocalRegularV4RepairSuccessorScopeMatches(
+        FileTransferRegularV4FrontierRepairAuthority predecessor,
+        FileTransferRegularV4FrontierRepairAuthority successor)
+        => string.Equals(predecessor.SessionId, successor.SessionId, StringComparison.Ordinal) &&
+           string.Equals(predecessor.TransferId, successor.TransferId, StringComparison.Ordinal) &&
+           predecessor.Direction == successor.Direction &&
+           string.Equals(predecessor.RouteToken, successor.RouteToken, StringComparison.Ordinal) &&
+           predecessor.ProtocolVersion == successor.ProtocolVersion &&
+           predecessor.LiveRouteEpoch == successor.LiveRouteEpoch &&
+           predecessor.RuntimeGeneration == successor.RuntimeGeneration &&
+           predecessor.TerminalGeneration == successor.TerminalGeneration &&
+           predecessor.LegGeneration == successor.LegGeneration &&
+           predecessor.TransportEpoch == successor.TransportEpoch &&
+           predecessor.BridgeRecoveryGeneration == successor.BridgeRecoveryGeneration &&
+           predecessor.RoutePublicationGeneration == successor.RoutePublicationGeneration &&
+           predecessor.RouteCommitGeneration == successor.RouteCommitGeneration &&
+           predecessor.TargetTransport == successor.TargetTransport;
 
     public event EventHandler<IncomingJoinRequestEventArgs>? IncomingJoinRequest;
     public event EventHandler<IncomingHelpRequestEventArgs>? IncomingHelpRequest;
@@ -154,10 +945,18 @@ public sealed class DevLocalTransport : ISignalingTransport, IAddressTargetSigna
     public event EventHandler<FileTransferCancelReceivedEventArgs>? FileTransferCancelReceived;
     public event EventHandler<FileTransferErrorReceivedEventArgs>? FileTransferErrorReceived;
     public event EventHandler<FileTransferCompleteReceivedEventArgs>? FileTransferCompleteReceived;
+    public event EventHandler<FileTransferPauseControlReceivedEventArgs>? FileTransferPauseControlReceived;
+    public event EventHandler<FileTransferHeartbeatReceivedEventArgs>? FileTransferHeartbeatReceived;
+    public event EventHandler<FileTransferTransportEpochReceivedEventArgs>? FileTransferTransportEpochReceived;
+    public event EventHandler<FileTransferTransportProbeReceivedEventArgs>? FileTransferTransportProbeReceived;
+    public event EventHandler<FileTransferRepairProofReceivedEventArgs>? FileTransferRepairProofReceived;
+    public event EventHandler<FileTransferFallbackTailYieldProofReceivedEventArgs>? FileTransferFallbackTailYieldProofReceived;
 
     public bool LocalSupportsRemoteControl => LocalRemoteControlSupported;
     public string LocalPeerAddress => localPeerAddress;
     public SessionSecurityState CurrentSessionSecurityState => currentSessionSecurityState;
+
+    public string? CurrentFileTransferSessionId => currentSessionSecurityState.SessionId?.Value;
     public bool RemoteSupportsRemoteControl => remoteSupportsRemoteControl;
     public bool SessionSupportsRemoteControl => LocalSupportsRemoteControl && RemoteSupportsRemoteControl;
     public bool LocalSupportsScreenShareCursorOverlay => LocalScreenShareCursorOverlaySupported;
@@ -683,6 +1482,41 @@ public sealed class DevLocalTransport : ISignalingTransport, IAddressTargetSigna
         return SendFileTransferFrameAsync(FileTransferCompleteFrameType, FileTransferPayloadCodec.Serialize(normalizedMessage), normalizedMessage.TransferId, ct);
     }
 
+    public Task SendFileTransferPauseControlAsync(FileTransferPauseControlV6 message, CancellationToken ct)
+    {
+        ArgumentNullException.ThrowIfNull(message);
+        var normalizedMessage = EnsureFileTransferSessionId(message);
+        return SendFileTransferFrameAsync(FileTransferPauseControlFrameType, FileTransferPayloadCodec.Serialize(normalizedMessage), normalizedMessage.TransferId, ct);
+    }
+
+    public Task SendFileTransferHeartbeatAsync(FileTransferHeartbeatV6 message, CancellationToken ct)
+    {
+        ArgumentNullException.ThrowIfNull(message);
+        var normalizedMessage = EnsureFileTransferSessionId(message);
+        return SendFileTransferFrameAsync(FileTransferHeartbeatFrameType, FileTransferPayloadCodec.Serialize(normalizedMessage), normalizedMessage.TransferId, ct);
+    }
+
+    public Task SendFileTransferTransportEpochAsync(FileTransferTransportEpochV6 message, CancellationToken ct)
+    {
+        ArgumentNullException.ThrowIfNull(message);
+        var normalizedMessage = EnsureFileTransferSessionId(message);
+        return SendFileTransferFrameAsync(FileTransferTransportEpochFrameType, FileTransferPayloadCodec.Serialize(normalizedMessage), normalizedMessage.TransferId, ct);
+    }
+
+    public Task SendFileTransferTransportProbeAsync(FileTransferTransportProbeV6 message, CancellationToken ct)
+    {
+        ArgumentNullException.ThrowIfNull(message);
+        var normalizedMessage = EnsureFileTransferSessionId(message);
+        return SendFileTransferFrameAsync(FileTransferTransportProbeFrameType, FileTransferPayloadCodec.Serialize(normalizedMessage), normalizedMessage.TransferId, ct);
+    }
+
+    public Task SendFileTransferRepairProofAsync(FileTransferRepairProofV6 message, CancellationToken ct)
+    {
+        ArgumentNullException.ThrowIfNull(message);
+        var normalizedMessage = EnsureFileTransferSessionId(message);
+        return SendFileTransferFrameAsync(FileTransferRepairProofFrameType, FileTransferPayloadCodec.Serialize(normalizedMessage), normalizedMessage.TransferId, ct);
+    }
+
     public Task<IFileTransferDataSession> OpenFileTransferDataSessionAsync(string sessionId, string transferId, CancellationToken ct)
     {
         ThrowIfDisposed();
@@ -693,12 +1527,13 @@ public sealed class DevLocalTransport : ISignalingTransport, IAddressTargetSigna
             : sessionId.Trim();
         var normalizedTransferId = NormalizeRequiredFileTransferId(transferId);
 
-        if (!fileTransferDataSessions.TryGetValue(normalizedTransferId, out var session))
-        {
-            session = new TransportFileTransferDataSession(this, normalizedSessionId, normalizedTransferId);
-            fileTransferDataSessions[normalizedTransferId] = session;
-        }
-        else if (!string.Equals(session.SessionId, normalizedSessionId, StringComparison.Ordinal))
+        var session = fileTransferDataSessions.GetOrAdd(normalizedTransferId,
+            id => new TransportFileTransferDataSession(
+                this,
+                normalizedSessionId,
+                id,
+                Interlocked.Increment(ref nextFileTransferDataSessionGeneration)));
+        if (!string.Equals(session.SessionId, normalizedSessionId, StringComparison.Ordinal))
         {
             throw new InvalidOperationException("File-transfer data session id mismatch for existing transfer.");
         }
@@ -797,7 +1632,9 @@ public sealed class DevLocalTransport : ISignalingTransport, IAddressTargetSigna
 
         await SendFileTransferRawFrameAsync(
                 FileTransferDataFrameType,
-                FileTransferDataFrameCodec.Serialize(frame),
+                FileTransferProtocol.IsV4DataFrame(frame)
+                    ? FileTransferDataFrameCodec.SerializeLegacyV4(frame)
+                    : FileTransferDataFrameCodec.Serialize(frame),
                 transferId,
                 ct)
             .ConfigureAwait(false);
@@ -2241,6 +3078,79 @@ public sealed class DevLocalTransport : ISignalingTransport, IAddressTargetSigna
         }
     }
 
+    private void SafeRaiseFileTransferPauseControlReceived(FileTransferPauseControlV6 message)
+    {
+        LogFileTransferFrameEvent("received", FileTransferPauseControlFrameType, message.TransferId);
+        try
+        {
+            FileTransferPauseControlReceived?.Invoke(this, new FileTransferPauseControlReceivedEventArgs(message, peerId: "devlocal-peer"));
+        }
+        catch
+        {
+        }
+    }
+
+    private void SafeRaiseFileTransferHeartbeatReceived(FileTransferHeartbeatV6 message)
+    {
+        try
+        {
+            FileTransferHeartbeatReceived?.Invoke(this, new FileTransferHeartbeatReceivedEventArgs(message, peerId: "devlocal-peer"));
+        }
+        catch
+        {
+        }
+    }
+
+    private void SafeRaiseFileTransferTransportEpochReceived(FileTransferTransportEpochV6 message)
+    {
+        LogFileTransferFrameEvent("received", FileTransferTransportEpochFrameType, message.TransferId);
+        try
+        {
+            FileTransferTransportEpochReceived?.Invoke(this, new FileTransferTransportEpochReceivedEventArgs(message, peerId: "devlocal-peer"));
+        }
+        catch
+        {
+        }
+    }
+
+    private void SafeRaiseFileTransferTransportProbeReceived(FileTransferTransportProbeV6 message)
+    {
+        LogFileTransferFrameEvent("received", FileTransferTransportProbeFrameType, message.TransferId);
+        try
+        {
+            FileTransferTransportProbeReceived?.Invoke(this, new FileTransferTransportProbeReceivedEventArgs(message, peerId: "devlocal-peer"));
+        }
+        catch
+        {
+        }
+    }
+
+    private void SafeRaiseFileTransferRepairProofReceived(FileTransferRepairProofV6 message)
+    {
+        LogFileTransferFrameEvent("received", FileTransferRepairProofFrameType, message.TransferId);
+        try
+        {
+            FileTransferRepairProofReceived?.Invoke(this, new FileTransferRepairProofReceivedEventArgs(message, peerId: "devlocal-peer"));
+        }
+        catch
+        {
+        }
+    }
+
+    private void SafeRaiseFileTransferFallbackTailYieldProofReceived(FileTransferFallbackTailYieldFrameV6 message)
+    {
+        LogFileTransferFrameEvent("received", FileTransferDataFrameType, message.TransferId);
+        try
+        {
+            FileTransferFallbackTailYieldProofReceived?.Invoke(
+                this,
+                new FileTransferFallbackTailYieldProofReceivedEventArgs(message, peerId: "devlocal-peer"));
+        }
+        catch
+        {
+        }
+    }
+
     private bool TryHandleFileTransferFrame(TransportFrame frame)
     {
         if (!IsFileTransferFrameType(frame.Type))
@@ -2382,6 +3292,76 @@ public sealed class DevLocalTransport : ISignalingTransport, IAddressTargetSigna
             return true;
         }
 
+        if (string.Equals(frame.Type, FileTransferPauseControlFrameType, StringComparison.Ordinal))
+        {
+            if (TryDecryptFileTransferPayload(payloadBytes, FileTransferPauseControlFrameType, expectedSender, out var securePayload) &&
+                FileTransferPayloadCodec.TryDeserializePauseControl(securePayload.Plaintext, out var message) &&
+                TryValidateFileTransferSecureMetadata(FileTransferPauseControlFrameType, securePayload.Metadata, message.TransferId) &&
+                TryValidateFileTransferMessageSession("pause_control", message.SessionId, message.TransferId) &&
+                TryValidateAndTrackFileTransferMessage(FileTransferPauseControlFrameType, message.TransferId, inbound: true, applyStateChange: true, out _))
+            {
+                SafeRaiseFileTransferPauseControlReceived(message);
+            }
+
+            return true;
+        }
+
+        if (string.Equals(frame.Type, FileTransferHeartbeatFrameType, StringComparison.Ordinal))
+        {
+            if (TryDecryptFileTransferPayload(payloadBytes, FileTransferHeartbeatFrameType, expectedSender, out var securePayload) &&
+                FileTransferPayloadCodec.TryDeserializeHeartbeat(securePayload.Plaintext, out var message) &&
+                TryValidateFileTransferSecureMetadata(FileTransferHeartbeatFrameType, securePayload.Metadata, message.TransferId) &&
+                TryValidateFileTransferMessageSession("heartbeat", message.SessionId, message.TransferId) &&
+                TryValidateAndTrackFileTransferMessage(FileTransferHeartbeatFrameType, message.TransferId, inbound: true, applyStateChange: true, out _))
+            {
+                SafeRaiseFileTransferHeartbeatReceived(message);
+            }
+
+            return true;
+        }
+
+        if (string.Equals(frame.Type, FileTransferTransportEpochFrameType, StringComparison.Ordinal))
+        {
+            if (TryDecryptFileTransferPayload(payloadBytes, FileTransferTransportEpochFrameType, expectedSender, out var securePayload) &&
+                FileTransferPayloadCodec.TryDeserializeTransportEpoch(securePayload.Plaintext, out var message) &&
+                TryValidateFileTransferSecureMetadata(FileTransferTransportEpochFrameType, securePayload.Metadata, message.TransferId) &&
+                TryValidateFileTransferMessageSession("transport_epoch", message.SessionId, message.TransferId) &&
+                TryValidateAndTrackFileTransferMessage(FileTransferTransportEpochFrameType, message.TransferId, inbound: true, applyStateChange: true, out _))
+            {
+                SafeRaiseFileTransferTransportEpochReceived(message);
+            }
+
+            return true;
+        }
+
+        if (string.Equals(frame.Type, FileTransferTransportProbeFrameType, StringComparison.Ordinal))
+        {
+            if (TryDecryptFileTransferPayload(payloadBytes, FileTransferTransportProbeFrameType, expectedSender, out var securePayload) &&
+                FileTransferPayloadCodec.TryDeserializeTransportProbe(securePayload.Plaintext, out var message) &&
+                TryValidateFileTransferSecureMetadata(FileTransferTransportProbeFrameType, securePayload.Metadata, message.TransferId) &&
+                TryValidateFileTransferMessageSession("transport_probe", message.SessionId, message.TransferId) &&
+                TryValidateAndTrackFileTransferMessage(FileTransferTransportProbeFrameType, message.TransferId, inbound: true, applyStateChange: true, out _))
+            {
+                SafeRaiseFileTransferTransportProbeReceived(message);
+            }
+
+            return true;
+        }
+
+        if (string.Equals(frame.Type, FileTransferRepairProofFrameType, StringComparison.Ordinal))
+        {
+            if (TryDecryptFileTransferPayload(payloadBytes, FileTransferRepairProofFrameType, expectedSender, out var securePayload) &&
+                FileTransferPayloadCodec.TryDeserializeRepairProof(securePayload.Plaintext, out var message) &&
+                TryValidateFileTransferSecureMetadata(FileTransferRepairProofFrameType, securePayload.Metadata, message.TransferId) &&
+                TryValidateFileTransferMessageSession("repair_proof", message.SessionId, message.TransferId) &&
+                TryValidateAndTrackFileTransferMessage(FileTransferRepairProofFrameType, message.TransferId, inbound: true, applyStateChange: true, out _))
+            {
+                SafeRaiseFileTransferRepairProofReceived(message);
+            }
+
+            return true;
+        }
+
         if (string.Equals(frame.Type, FileTransferDataFrameType, StringComparison.Ordinal))
         {
             if (!TryDecryptFileTransferPayload(payloadBytes, FileTransferDataFrameType, expectedSender, out var securePayload))
@@ -2389,7 +3369,9 @@ public sealed class DevLocalTransport : ISignalingTransport, IAddressTargetSigna
                 return true;
             }
 
-            if (!FileTransferDataFrameCodec.TryDeserialize(securePayload.Plaintext, out var message) || message is null)
+            if ((!FileTransferDataFrameCodec.TryDeserialize(securePayload.Plaintext, out var message) &&
+                 !FileTransferDataFrameCodec.TryDeserializeLegacyV4(securePayload.Plaintext, out message)) ||
+                message is null)
             {
                 LocalOperationalLog.Warn(
                     "SessionSecurity",
@@ -3052,6 +4034,13 @@ public sealed class DevLocalTransport : ISignalingTransport, IAddressTargetSigna
 
         if (currentState.IsTerminal)
         {
+            if (string.Equals(frameType, FileTransferCancelFrameType, StringComparison.Ordinal) &&
+                currentState.Phase == FileTransferTransportPhase.Canceled)
+            {
+                nextState = currentState;
+                return true;
+            }
+
             failureReason = "transfer_already_terminal";
             return false;
         }
@@ -3178,6 +4167,24 @@ public sealed class DevLocalTransport : ISignalingTransport, IAddressTargetSigna
             return true;
         }
 
+        if (string.Equals(frameType, FileTransferPauseControlFrameType, StringComparison.Ordinal) ||
+            string.Equals(frameType, FileTransferHeartbeatFrameType, StringComparison.Ordinal) ||
+            string.Equals(frameType, FileTransferTransportEpochFrameType, StringComparison.Ordinal) ||
+            string.Equals(frameType, FileTransferTransportProbeFrameType, StringComparison.Ordinal) ||
+            string.Equals(frameType, FileTransferRepairProofFrameType, StringComparison.Ordinal))
+        {
+            if (currentState.Phase is not FileTransferTransportPhase.Accepted
+                and not FileTransferTransportPhase.Started
+                and not FileTransferTransportPhase.Transferring)
+            {
+                failureReason = $"{frameType}_requires_accept";
+                return false;
+            }
+
+            nextState = currentState;
+            return true;
+        }
+
         if (string.Equals(frameType, FileTransferCompleteFrameType, StringComparison.Ordinal))
         {
             if (currentState.Phase is not FileTransferTransportPhase.Started and not FileTransferTransportPhase.Transferring)
@@ -3235,6 +4242,13 @@ public sealed class DevLocalTransport : ISignalingTransport, IAddressTargetSigna
         nextState = default;
         failureReason = string.Empty;
 
+        if (!FileTransferProtocol.IsV6DataFrame(frame) &&
+            !FileTransferProtocol.IsV4DataFrame(frame))
+        {
+            failureReason = "protocol_not_supported";
+            return false;
+        }
+
         if (!hasExisting)
         {
             failureReason = "unknown_transfer_id";
@@ -3247,13 +4261,22 @@ public sealed class DevLocalTransport : ISignalingTransport, IAddressTargetSigna
             return false;
         }
 
-        if (frame is FileTransferPauseControlFrameV4)
+        if (frame is FileTransferPauseControlFrameV4
+            or FileTransferCompleteFrameV4
+            or FileTransferCancelFrameV4
+            or FileTransferErrorFrameV4)
+        {
+            failureReason = "lifecycle_data_frame_unsupported";
+            return false;
+        }
+
+        if (IsV6RecoveryControlDataFrame(frame))
         {
             if (currentState.Phase is not FileTransferTransportPhase.Accepted
                 and not FileTransferTransportPhase.Started
                 and not FileTransferTransportPhase.Transferring)
             {
-                failureReason = "pause_control_requires_start";
+                failureReason = "recovery_control_requires_start";
                 return false;
             }
 
@@ -3315,50 +4338,6 @@ public sealed class DevLocalTransport : ISignalingTransport, IAddressTargetSigna
             return true;
         }
 
-        if (frame is FileTransferCompleteFrameV4)
-        {
-            if (currentState.Phase is not FileTransferTransportPhase.Accepted
-                and not FileTransferTransportPhase.Started
-                and not FileTransferTransportPhase.Transferring)
-            {
-                failureReason = "complete_requires_transfer";
-                return false;
-            }
-
-            if (currentState.InitiatedLocally != inbound)
-            {
-                failureReason = inbound ? "unexpected_inbound_complete_for_remote_sender" : "unexpected_outbound_complete_for_local_sender";
-                return false;
-            }
-
-            nextState = currentState with { Phase = FileTransferTransportPhase.Completed };
-            return true;
-        }
-
-        if (frame is FileTransferCancelFrameV4)
-        {
-            if (!CanTransitionToTerminalFileTransferState(currentState.Phase))
-            {
-                failureReason = "cancel_not_allowed_in_current_state";
-                return false;
-            }
-
-            nextState = currentState with { Phase = FileTransferTransportPhase.Canceled };
-            return true;
-        }
-
-        if (frame is FileTransferErrorFrameV4)
-        {
-            if (!CanTransitionToTerminalFileTransferState(currentState.Phase))
-            {
-                failureReason = "error_not_allowed_in_current_state";
-                return false;
-            }
-
-            nextState = currentState with { Phase = FileTransferTransportPhase.Failed };
-            return true;
-        }
-
         failureReason = "unsupported_data_frame_type";
         return false;
     }
@@ -3369,6 +4348,12 @@ public sealed class DevLocalTransport : ISignalingTransport, IAddressTargetSigna
 
     private static bool IsReceiverFeedbackDataFrame(FileTransferDataFrame frame)
         => frame is FileTransferStateFrameV4;
+
+    private static bool IsV6RecoveryControlDataFrame(FileTransferDataFrame frame)
+        => frame is FileTransferTransportEpochFrameV6
+            or FileTransferTransportProbeFrameV6
+            or FileTransferFrontierRequestFrameV6
+            or FileTransferRepairProofFrameV6;
 
     private static bool IsSenderStateControlDataFrame(
         FileTransferDataFrame frame,
@@ -3385,7 +4370,7 @@ public sealed class DevLocalTransport : ISignalingTransport, IAddressTargetSigna
 
     private static bool IsBenignLateFileTransferDataFrameRejection(FileTransferDataFrame frame, string failureReason)
         => ((failureReason is "unknown_transfer_id" or "transfer_already_terminal") &&
-            (IsReceiverFeedbackDataFrame(frame) || IsTerminalDataFrame(frame) || frame is FileTransferPauseControlFrameV4)) ||
+            (IsReceiverFeedbackDataFrame(frame) || IsV6RecoveryControlDataFrame(frame) || IsTerminalDataFrame(frame) || frame is FileTransferPauseControlFrameV4)) ||
            (failureReason == "transfer_already_terminal" && IsSenderDataFrame(frame));
 
     private static void LogFileTransferFrameEvent(string direction, string frameType, string transferId)
@@ -3560,6 +4545,11 @@ public sealed class DevLocalTransport : ISignalingTransport, IAddressTargetSigna
         FileTransferCancelFrameType => FileTransferCancelFrameType,
         FileTransferErrorFrameType => FileTransferErrorFrameType,
         FileTransferCompleteFrameType => FileTransferCompleteFrameType,
+        FileTransferPauseControlFrameType => FileTransferPauseControlFrameType,
+        FileTransferHeartbeatFrameType => FileTransferHeartbeatFrameType,
+        FileTransferTransportEpochFrameType => FileTransferTransportEpochFrameType,
+        FileTransferTransportProbeFrameType => FileTransferTransportProbeFrameType,
+        FileTransferRepairProofFrameType => FileTransferRepairProofFrameType,
         _ => throw new ArgumentOutOfRangeException(nameof(frameType), frameType, "Unsupported file-transfer frame type."),
     };
 
@@ -3645,6 +4635,41 @@ public sealed class DevLocalTransport : ISignalingTransport, IAddressTargetSigna
             TransferId = NormalizeRequiredFileTransferId(message.TransferId),
         };
 
+    private FileTransferPauseControlV6 EnsureFileTransferSessionId(FileTransferPauseControlV6 message)
+        => message with
+        {
+            SessionId = ResolveControlSessionId(message.SessionId),
+            TransferId = NormalizeRequiredFileTransferId(message.TransferId),
+        };
+
+    private FileTransferHeartbeatV6 EnsureFileTransferSessionId(FileTransferHeartbeatV6 message)
+        => message with
+        {
+            SessionId = ResolveControlSessionId(message.SessionId),
+            TransferId = NormalizeRequiredFileTransferId(message.TransferId),
+        };
+
+    private FileTransferTransportEpochV6 EnsureFileTransferSessionId(FileTransferTransportEpochV6 message)
+        => message with
+        {
+            SessionId = ResolveControlSessionId(message.SessionId),
+            TransferId = NormalizeRequiredFileTransferId(message.TransferId),
+        };
+
+    private FileTransferTransportProbeV6 EnsureFileTransferSessionId(FileTransferTransportProbeV6 message)
+        => message with
+        {
+            SessionId = ResolveControlSessionId(message.SessionId),
+            TransferId = NormalizeRequiredFileTransferId(message.TransferId),
+        };
+
+    private FileTransferRepairProofV6 EnsureFileTransferSessionId(FileTransferRepairProofV6 message)
+        => message with
+        {
+            SessionId = ResolveControlSessionId(message.SessionId),
+            TransferId = NormalizeRequiredFileTransferId(message.TransferId),
+        };
+
     private string ResolveControlSessionId(string? current)
     {
         return string.IsNullOrWhiteSpace(current)
@@ -3670,12 +4695,13 @@ public sealed class DevLocalTransport : ISignalingTransport, IAddressTargetSigna
 
     private void DeliverFileTransferDataFrame(FileTransferDataFrame frame)
     {
-        if (!fileTransferDataSessions.TryGetValue(frame.TransferId, out var session))
-        {
-            session = new TransportFileTransferDataSession(this, frame.SessionId, frame.TransferId);
-            fileTransferDataSessions[frame.TransferId] = session;
-        }
-        else if (!string.Equals(session.SessionId, frame.SessionId, StringComparison.Ordinal))
+        var session = fileTransferDataSessions.GetOrAdd(frame.TransferId,
+            id => new TransportFileTransferDataSession(
+                this,
+                frame.SessionId,
+                id,
+                Interlocked.Increment(ref nextFileTransferDataSessionGeneration)));
+        if (!string.Equals(session.SessionId, frame.SessionId, StringComparison.Ordinal))
         {
             LocalOperationalLog.Warn(
                 "SessionSecurity",
@@ -3684,12 +4710,16 @@ public sealed class DevLocalTransport : ISignalingTransport, IAddressTargetSigna
         }
 
         session.Deliver(frame);
+        if (frame is FileTransferFallbackTailYieldFrameV6 yieldFrame)
+        {
+            SafeRaiseFileTransferFallbackTailYieldProofReceived(yieldFrame);
+        }
     }
 
     private sealed class TransportFileTransferDataSession : IFileTransferDataSession
     {
         private readonly DevLocalTransport owner;
-        private readonly Channel<FileTransferDataFrame> frames = Channel.CreateUnbounded<FileTransferDataFrame>(
+        private readonly Channel<FileTransferReceivedDataFrame> frames = Channel.CreateUnbounded<FileTransferReceivedDataFrame>(
             new UnboundedChannelOptions
             {
                 SingleReader = true,
@@ -3698,25 +4728,36 @@ public sealed class DevLocalTransport : ISignalingTransport, IAddressTargetSigna
             });
         private int disposed;
         private int activeReader;
+        private int available = 1;
 
-        public TransportFileTransferDataSession(DevLocalTransport owner, string sessionId, string transferId)
+        public TransportFileTransferDataSession(
+            DevLocalTransport owner,
+            string sessionId,
+            string transferId,
+            long generation)
         {
             this.owner = owner;
             SessionId = sessionId;
             TransferId = transferId;
+            Generation = generation;
         }
 
         public string SessionId { get; }
 
         public string TransferId { get; }
 
-        public bool IsAvailable => true;
+        public long Generation { get; }
 
-#pragma warning disable CS0067
+        public bool IsAvailable => Volatile.Read(ref available) != 0;
+
+        public bool IsDisposed => Volatile.Read(ref disposed) != 0;
+
         public event EventHandler<FileTransferDataSessionAvailabilityChangedEventArgs>? AvailabilityChanged;
-#pragma warning restore CS0067
 
         public async ValueTask<FileTransferDataFrame> ReceiveAsync(CancellationToken ct)
+            => (await ReceiveWithMetadataAsync(ct).ConfigureAwait(false)).Frame;
+
+        public async ValueTask<FileTransferReceivedDataFrame> ReceiveWithMetadataAsync(CancellationToken ct)
         {
             if (Interlocked.CompareExchange(ref activeReader, 1, 0) != 0)
             {
@@ -3752,7 +4793,35 @@ public sealed class DevLocalTransport : ISignalingTransport, IAddressTargetSigna
             LocalOperationalLog.Info(
                 "SessionSecurity",
                 $"event=filetransfer_data_frame_dispatched; transport=devlocal; transfer_id={frame.TransferId}; session_id={frame.SessionId}; frame_type={frame.Type}; chunk_index={GetFileTransferDataFrameChunkIndex(frame)}");
-            frames.Writer.TryWrite(frame);
+            frames.Writer.TryWrite(new FileTransferReceivedDataFrame(frame, FileTransferTransportKind.RegularNkn, "regular_nkn", DateTimeOffset.UtcNow));
+        }
+
+        public void SetTransitionAvailability(
+            bool isAvailable,
+            string reason,
+            FileTransferTransportKind targetTransport,
+            bool notify)
+        {
+            if (disposed != 0)
+            {
+                return;
+            }
+
+            var next = isAvailable ? 1 : 0;
+            var previous = Interlocked.Exchange(ref available, next);
+            if (!notify || previous == next)
+            {
+                return;
+            }
+
+            AvailabilityChanged?.Invoke(
+                this,
+                new FileTransferDataSessionAvailabilityChangedEventArgs(
+                    isAvailable,
+                    reason,
+                    requiresResumeRequest: false,
+                    FileTransferTransportHandoffKind.None,
+                    targetTransport));
         }
 
         public void Dispose()
@@ -3788,7 +4857,12 @@ public sealed class DevLocalTransport : ISignalingTransport, IAddressTargetSigna
                string.Equals(frameType, FileTransferDataFrameType, StringComparison.Ordinal) ||
                string.Equals(frameType, FileTransferCancelFrameType, StringComparison.Ordinal) ||
                string.Equals(frameType, FileTransferErrorFrameType, StringComparison.Ordinal) ||
-               string.Equals(frameType, FileTransferCompleteFrameType, StringComparison.Ordinal);
+               string.Equals(frameType, FileTransferCompleteFrameType, StringComparison.Ordinal) ||
+               string.Equals(frameType, FileTransferPauseControlFrameType, StringComparison.Ordinal) ||
+               string.Equals(frameType, FileTransferHeartbeatFrameType, StringComparison.Ordinal) ||
+               string.Equals(frameType, FileTransferTransportEpochFrameType, StringComparison.Ordinal) ||
+               string.Equals(frameType, FileTransferTransportProbeFrameType, StringComparison.Ordinal) ||
+               string.Equals(frameType, FileTransferRepairProofFrameType, StringComparison.Ordinal);
     }
 
     private void ThrowIfDisposed()
@@ -4242,4 +5316,37 @@ public sealed class DevLocalTransport : ISignalingTransport, IAddressTargetSigna
         bool InviteValidated,
         SessionId? SessionId,
         CapabilityGrant RequestedCapabilities);
+
+    private sealed record DevLocalRegularV4RepairInstalledCommandShadow(
+        FileTransferRegularV4FrontierRepairPressureInstallCommand Command,
+        FileTransferRegularV4FrontierRepairPressureInstallReceipt Receipt)
+    {
+        public FileTransferRegularV4FrontierRepairAuthority Authority => Receipt.Authority!;
+    }
+
+    private sealed record DevLocalRegularV4RepairPressureShadow(
+        DevLocalRegularV4RepairInstalledCommandShadow? Current,
+        DevLocalRegularV4RepairInstalledCommandShadow? RetainedPredecessor,
+        FileTransferRegularV4FrontierRepairPressureSettlementApplyReceipt? LastPredecessorSettlement,
+        FileTransferRegularV4FrontierRepairPressureSettlementApplyReceipt? LastFinalSettlement)
+    {
+        public static DevLocalRegularV4RepairPressureShadow Empty { get; } =
+            new(null, null, null, null);
+    }
+
+    private sealed record DevLocalFileTransferRouteTransitionPauseBindingShadow(
+        FileTransferRouteTransitionPauseBindCommand Command,
+        FileTransferRouteTransitionPauseBindReceipt Receipt);
+
+    private sealed record DevLocalFileTransferRouteTransitionExecutionShadow(
+        DevLocalFileTransferRouteTransitionPauseBindingShadow? Current,
+        DevLocalFileTransferRouteTransitionPauseBindingShadow? RetainedPredecessor,
+        FileTransferRouteTransitionDispositionReceipt? LastCurrentDisposition,
+        FileTransferRouteTransitionDispositionReceipt? LastPredecessorDisposition,
+        FileTransferRouteTransitionDispositionCommand?
+            PendingAvailabilityDisposition)
+    {
+        internal static DevLocalFileTransferRouteTransitionExecutionShadow Empty { get; } =
+            new(null, null, null, null, null);
+    }
 }

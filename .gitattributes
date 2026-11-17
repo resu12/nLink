@@ -1,2 +1,5 @@
 # Auto detect text files and perform LF normalization
 * text=auto
+
+# This compatibility catalog is validated against an exact raw-byte SHA256 pin.
+/tools/FileTransferOps/LegacyV0EvidenceCatalog.json -text whitespace=cr-at-eol

@@ -100,7 +100,8 @@ function Resolve-IsccPath {
 
 function Assert-BridgeBundleRuntime {
     param(
-        [Parameter(Mandatory = $true)][string]$BridgeDir
+        [Parameter(Mandatory = $true)][string]$BridgeDir,
+        [string]$ExpectedAppVersion = ""
     )
 
     if (-not (Test-Path $BridgeDir)) {
@@ -122,6 +123,25 @@ function Assert-BridgeBundleRuntime {
         $nodeExe = Join-Path $BridgeDir "node.exe"
         if (-not (Test-Path $nodeExe)) {
             throw "Bridge runtime not found. Run the bridge bundle build step first."
+        }
+
+        foreach ($requiredFile in @("package.json", "package-lock.json", "bridge-manifest.json", "bridge-dependencies.json")) {
+            if (-not (Test-Path (Join-Path $BridgeDir $requiredFile))) {
+                throw "Bridge runtime not found. Run the bridge bundle build step first."
+            }
+        }
+
+        if (-not [string]::IsNullOrWhiteSpace($ExpectedAppVersion)) {
+            $manifestPath = Join-Path $BridgeDir "bridge-manifest.json"
+            $manifest = Get-Content -Path $manifestPath -Raw | ConvertFrom-Json
+            $actualAppVersion = [string]$manifest.appVersion
+            if ($actualAppVersion -ne $ExpectedAppVersion) {
+                throw "Bridge runtime version mismatch: expected bridge-manifest.json appVersion '$ExpectedAppVersion', got '$actualAppVersion'. Rebuild the bridge bundle after changing VERSION: $manifestPath"
+            }
+        }
+
+        if (Test-Path (Join-Path $BridgeDir "node_modules")) {
+            throw "Bridge runtime must not ship node_modules. Rebuild the bridge bundle."
         }
     }
 }
@@ -154,7 +174,8 @@ function Assert-NoDebugOnlyPayload {
 function Assert-InstallerStagePayload {
     param(
         [Parameter(Mandatory = $true)][string]$StageDir,
-        [Parameter(Mandatory = $true)][string]$Runtime
+        [Parameter(Mandatory = $true)][string]$Runtime,
+        [string]$ExpectedAppVersion = ""
     )
 
     $appExe = Join-Path $StageDir "nLink.exe"
@@ -167,7 +188,13 @@ function Assert-InstallerStagePayload {
         throw "Installer staging appsettings.json not found: $appSettings"
     }
 
-    Assert-BridgeBundleRuntime -BridgeDir (Join-Path (Join-Path $StageDir "bridge") $Runtime)
+    Assert-BridgeBundleRuntime -BridgeDir (Join-Path (Join-Path $StageDir "bridge") $Runtime) -ExpectedAppVersion $ExpectedAppVersion
+    $tunaDir = Join-Path (Join-Path $StageDir "tuna") $Runtime
+    if (-not (Test-Path (Join-Path $tunaDir "nlink-tuna-sidecar.exe")) -or
+        -not (Test-Path (Join-Path $tunaDir "tuna-sidecar-manifest.json"))) {
+        throw "Installer staging Tuna sidecar runtime not found or incomplete: $tunaDir"
+    }
+
     Assert-NoDebugOnlyPayload -StageDir $StageDir
 }
 
@@ -425,11 +452,11 @@ if ($LASTEXITCODE -ne 0) {
     exit $LASTEXITCODE
 }
 
-Assert-BridgeBundleRuntime -BridgeDir $bridgeBundleAbs
+Assert-BridgeBundleRuntime -BridgeDir $bridgeBundleAbs -ExpectedAppVersion $resolvedVersion
 
 $installerStageAbs = $canonicalPortableOutAbs
-Assert-InstallerStagePayload -StageDir $installerStageAbs -Runtime $Runtime
-& $verifyPackageManifestPath -StageDir $installerStageAbs -ManifestPath $packageManifestPath
+Assert-InstallerStagePayload -StageDir $installerStageAbs -Runtime $Runtime -ExpectedAppVersion $resolvedVersion
+& $verifyPackageManifestPath -StageDir $installerStageAbs -ManifestPath $packageManifestPath -ExpectedAppVersion $resolvedVersion
 
 $isccPath = Resolve-IsccPath
 if (-not $isccPath) {
@@ -448,7 +475,7 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 # Packaging validation step: inspect staging folder used for installer packaging.
-Assert-BridgeBundleRuntime -BridgeDir (Join-Path (Join-Path $installerStageAbs "bridge") $Runtime)
+Assert-BridgeBundleRuntime -BridgeDir (Join-Path (Join-Path $installerStageAbs "bridge") $Runtime) -ExpectedAppVersion $resolvedVersion
 $installerExeAbs = Join-Path $installerOutAbs ("nLink-Setup-win-x64-{0}.exe" -f $resolvedVersion)
 if ($LocalOnly) {
     $releasePublish = $null
@@ -479,18 +506,22 @@ if ($releasePublish) {
 
 $bridgeRootAbs = Join-Path $installerStageAbs "bridge"
 $bridgeRidAbs = Join-Path $bridgeRootAbs $Runtime
-$nodeModulesAbs = Join-Path $bridgeRidAbs "node_modules"
+$bridgeScriptAbs = Join-Path $bridgeRidAbs "index.js"
+$bridgeNodeAbs = Join-Path $bridgeRidAbs "node.exe"
 
 $totalSizeBytes = Get-DirectorySizeBytes -RootDir $installerStageAbs
 $bridgeSizeBytes = Get-DirectorySizeBytes -RootDir $bridgeRootAbs
-$nodeModulesSizeBytes = Get-DirectorySizeBytes -RootDir $nodeModulesAbs
+$bridgeScriptSizeBytes = Get-PathSizeBytes -Path $bridgeScriptAbs
+$bridgeNodeSizeBytes = Get-PathSizeBytes -Path $bridgeNodeAbs
 
 Write-Host "[nLink] Size summary (installer staging):" -ForegroundColor Cyan
 Write-Host ("  optimize for: {0}" -f $OptimizeFor)
 Write-Host ("  single-file compression: {0}" -f ($(if ($singleFileCompressionEnabled) { 1 } else { 0 })))
 Write-Host ("  total output size: {0} ({1} bytes)" -f (Format-Size $totalSizeBytes), $totalSizeBytes)
 Write-Host ("  bridge folder size: {0} ({1} bytes)" -f (Format-Size $bridgeSizeBytes), $bridgeSizeBytes)
-Write-Host ("  bridge/{0}/node_modules size: {1} ({2} bytes)" -f $Runtime, (Format-Size $nodeModulesSizeBytes), $nodeModulesSizeBytes)
+Write-Host ("  bridge/{0}/index.js size: {1} ({2} bytes)" -f $Runtime, (Format-Size $bridgeScriptSizeBytes), $bridgeScriptSizeBytes)
+Write-Host ("  bridge/{0}/node.exe size: {1} ({2} bytes)" -f $Runtime, (Format-Size $bridgeNodeSizeBytes), $bridgeNodeSizeBytes)
+Write-Host ("  bridge/{0}/node_modules shipped: 0" -f $Runtime)
 
 $packageSizeSummaryPath = Join-Path $installerOutAbs "package-size-summary.txt"
 Write-PackageSizeSummary `

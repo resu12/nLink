@@ -53,6 +53,41 @@ public interface IHostReadySignalingTransport
     Task WaitUntilHostReadyAsync(CancellationToken ct);
 }
 
+public readonly record struct BridgeBootstrapReadinessSnapshot(
+    string Role,
+    long Generation,
+    string RunId,
+    bool ReadyEmitted,
+    bool ControlReady,
+    bool MediaReady,
+    bool BulkReady,
+    long LastReadyUtcMs,
+    long DeadlineUtcMs,
+    bool TerminalFailure,
+    string FailureReason,
+    string LastError)
+{
+    public static BridgeBootstrapReadinessSnapshot Unavailable(string role, string reason) =>
+        new(
+            string.IsNullOrWhiteSpace(role) ? "(unknown)" : role,
+            Generation: 0,
+            RunId: "(none)",
+            ReadyEmitted: false,
+            ControlReady: false,
+            MediaReady: false,
+            BulkReady: false,
+            LastReadyUtcMs: 0,
+            DeadlineUtcMs: 0,
+            TerminalFailure: !string.IsNullOrWhiteSpace(reason),
+            FailureReason: string.IsNullOrWhiteSpace(reason) ? "(none)" : reason,
+            LastError: "(none)");
+}
+
+public interface IBridgeBootstrapReadinessSignalingTransport
+{
+    BridgeBootstrapReadinessSnapshot GetBridgeBootstrapReadinessSnapshot();
+}
+
 public interface ILocalPeerAddressSignalingTransport
 {
     string LocalPeerAddress { get; }
@@ -63,6 +98,137 @@ public interface ISessionSecuritySignalingTransport
     event EventHandler<TransportSessionSecurityStateChangedEventArgs>? SessionSecurityStateChanged;
 
     SessionSecurityState CurrentSessionSecurityState { get; }
+}
+
+public interface ITransportAccelerationStatus
+{
+    event EventHandler<TransportAccelerationStateChangedEventArgs>? TransportAccelerationStateChanged;
+
+    bool IsTransportAccelerationActive { get; }
+
+    bool ShouldUseFileTransferV6ForAcceleration { get; }
+
+    string TransportAccelerationStatusReason { get; }
+
+    TransportAccelerationPendingFileTransfer? PendingAccelerationFileTransfer => null;
+}
+
+public interface ITransportAccelerationControl
+{
+    Task RequestAccelerationNegotiationAsync(string reason, CancellationToken ct);
+
+    Task StopAccelerationAsync(string reason, CancellationToken ct);
+}
+
+public enum SessionRecoveryContractKind
+{
+    RuntimeUnlockActivation = 0,
+}
+
+public enum SessionRecoveryContractState
+{
+    RecoveryPending = 0,
+    RecoverySettled = 1,
+    RetryQueued = 2,
+    RetryDispatching = 3,
+    RetryDispatched = 4,
+    RetryObserved = 5,
+    Completed = 6,
+    Failed = 7,
+}
+
+public sealed record SessionRecoveryContractSnapshot(
+    string SessionId,
+    string? TransferId,
+    long ContractGeneration,
+    long OfferGeneration,
+    SessionRecoveryContractKind Kind,
+    SessionRecoveryContractState State,
+    string RetryReason,
+    string RecoveryReason,
+    DateTimeOffset CreatedUtc,
+    DateTimeOffset RetryDeadlineUtc,
+    DateTimeOffset LivenessDeferralDeadlineUtc,
+    bool RecoveryPending,
+    bool RecoverySettled,
+    bool RetryRequired,
+    bool RetryDispatching,
+    bool RetryDispatched,
+    bool RetryObserved,
+    bool QueuedBehindActiveNegotiation,
+    bool RetryAuthorityPending,
+    bool RetryAuthorityGranted,
+    bool ObservedSendPending,
+    DateTimeOffset ObservedSendDeadlineUtc,
+    string? AuthorizedObservedLane,
+    string? AuthorityFailureReason,
+    int AuthorityAttempt,
+    long RuntimeUnlockTransactionGeneration = 0,
+    long RuntimeUnlockTransactionOfferGeneration = 0,
+    string RuntimeUnlockTransactionState = "none",
+    bool RuntimeUnlockPeerProofObserved = false,
+    bool RuntimeUnlockRouteCommitPending = false,
+    bool RuntimeUnlockRouteCommitted = false,
+    string? RuntimeUnlockTransactionFailureReason = null,
+    string? RuntimeUnlockPathProbeId = null,
+    string RuntimeUnlockPathProbeState = "none",
+    string RuntimeUnlockPathProbeTransport = "unknown",
+    long RuntimeUnlockPathProbeAckedUtcMs = 0,
+    string? RuntimeUnlockPathProbeFailureReason = null,
+    long RuntimeUnlockTunaPathLeaseGeneration = 0,
+    string RuntimeUnlockTunaPathLeaseState = "none",
+    string? RuntimeUnlockTunaPathLeaseListenerRunId = null,
+    bool RuntimeUnlockTunaPathLeaseCurrent = false,
+    string? RuntimeUnlockTunaPathLeaseFailureReason = null);
+
+public interface ISessionRecoveryStateContract
+{
+    bool TryGetActiveSessionRecoveryContract(string sessionId, out SessionRecoveryContractSnapshot snapshot);
+}
+
+public interface ISessionLivenessSignalingTransport
+{
+    event EventHandler<SessionLivenessProofEventArgs>? SessionLivenessProofReceived;
+
+    Task SendSessionHeartbeatAsync(SessionHeartbeatMessage message, CancellationToken ct);
+}
+
+public sealed record SessionHeartbeatMessage(
+    string SessionId,
+    long Generation,
+    long Sequence,
+    long SentUtcMs,
+    string Role);
+
+public sealed class SessionLivenessProofEventArgs : EventArgs
+{
+    public SessionLivenessProofEventArgs(
+        string sessionId,
+        long generation,
+        long sequence,
+        long observedUtcMs,
+        string proofKind,
+        string lane)
+    {
+        SessionId = string.IsNullOrWhiteSpace(sessionId) ? string.Empty : sessionId.Trim();
+        Generation = generation;
+        Sequence = sequence;
+        ObservedUtcMs = observedUtcMs;
+        ProofKind = string.IsNullOrWhiteSpace(proofKind) ? "unknown" : proofKind.Trim();
+        Lane = string.IsNullOrWhiteSpace(lane) ? "unknown" : lane.Trim();
+    }
+
+    public string SessionId { get; }
+
+    public long Generation { get; }
+
+    public long Sequence { get; }
+
+    public long ObservedUtcMs { get; }
+
+    public string ProofKind { get; }
+
+    public string Lane { get; }
 }
 
 public sealed class IncomingJoinRequestEventArgs : EventArgs
@@ -203,4 +369,30 @@ public sealed class TransportSessionSecurityStateChangedEventArgs : EventArgs
     }
 
     public SessionSecurityState State { get; }
+}
+
+// Display correlation only. This identity grants no route, runtime, or Screen authority.
+public sealed record TransportAccelerationPendingFileTransfer(
+    string SessionId,
+    string TransferId,
+    long TransactionGeneration,
+    long OfferGeneration);
+
+public sealed class TransportAccelerationStateChangedEventArgs : EventArgs
+{
+    public TransportAccelerationStateChangedEventArgs(
+        bool isActive,
+        string reason,
+        TransportAccelerationPendingFileTransfer? pendingFileTransfer = null)
+    {
+        IsActive = isActive;
+        Reason = string.IsNullOrWhiteSpace(reason) ? "unknown" : reason.Trim();
+        PendingFileTransfer = pendingFileTransfer;
+    }
+
+    public bool IsActive { get; }
+
+    public string Reason { get; }
+
+    public TransportAccelerationPendingFileTransfer? PendingFileTransfer { get; }
 }

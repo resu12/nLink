@@ -1,6 +1,7 @@
 using System.IO;
 using System.Runtime.CompilerServices;
 using NLink.App.Configuration;
+using NLink.Core.Configuration;
 using NLink.Core.SessionConnect;
 
 namespace NLink.SmokeTests.TestUtilities;
@@ -30,6 +31,11 @@ internal static class LegacyInviteSigningTestBootstrap
         if (string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable(AppFeatureFlags.AllowInsecureUnboundPublicInvitesEnvVar)))
         {
             Environment.SetEnvironmentVariable(AppFeatureFlags.AllowInsecureUnboundPublicInvitesEnvVar, "1");
+        }
+
+        if (string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable(ReleaseOverridePolicy.UnsafeDeveloperModeEnvVar)))
+        {
+            Environment.SetEnvironmentVariable(ReleaseOverridePolicy.UnsafeDeveloperModeEnvVar, "1");
         }
     }
 }

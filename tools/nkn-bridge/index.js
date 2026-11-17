@@ -38,8 +38,10 @@ const DEFAULT_SUBSCRIBE_DURATION = 1440;
 const DEFAULT_CONNECT_READY_TIMEOUT_MS = 12000;
 const MIN_CONNECT_FALLBACK_DELAY_MS = 1000;
 const MAX_CONNECT_FALLBACK_DELAY_MS = DEFAULT_CONNECT_READY_TIMEOUT_MS;
+const CONNECT_FALLBACK_CLIENT_CLOSE_TIMEOUT_MS = 750;
 const DEFAULT_NUM_SUBCLIENTS = 4;
 const DEFAULT_MEDIA_NUM_SUBCLIENTS = 8;
+const DEFAULT_BULK_NUM_SUBCLIENTS = 4;
 const MIN_NUM_SUBCLIENTS = 1;
 const MAX_NUM_SUBCLIENTS = 16;
 const OWNER_PID_CHECK_INTERVAL_MS = 2000;
@@ -68,8 +70,9 @@ const BULK_QUEUE_CONGESTED_AGE_MS = 250;
 const BULK_QUEUE_SEVERE_MESSAGES = 192;
 const BULK_QUEUE_SEVERE_BYTES = 12 * 1024 * 1024;
 const BULK_QUEUE_SEVERE_AGE_MS = 1000;
-const BULK_QUEUE_TRANSIENT_RETRY_MAX_ATTEMPTS = 4;
-const BULK_QUEUE_TRANSIENT_RETRY_DELAY_MS = 150;
+const BULK_QUEUE_TRANSIENT_RETRY_MAX_ATTEMPTS = 32;
+const BULK_QUEUE_TRANSIENT_BACKOFF_INITIAL_MS = 100;
+const BULK_QUEUE_TRANSIENT_BACKOFF_MAX_MS = 750;
 const DEFAULT_BULK_SEND_CONCURRENCY = 4;
 const MIN_BULK_SEND_CONCURRENCY = 1;
 const MAX_BULK_SEND_CONCURRENCY = 8;
@@ -80,7 +83,6 @@ const BULK_SEND_MODE_SINGLE = 'single';
 const BULK_SEND_MODE_REDUNDANT2 = 'redundant2';
 const DEFAULT_RPC_SERVERS = [
   'https://mainnet-rpc-node-0001.nkn.org/mainnet/api/wallet',
-  'https://seed.nkn.org:30003',
   'http://seed.nkn.org:30003'
 ];
 const SUPPORTED_CHANNELS = ['control', 'media', 'bulk'];
@@ -164,7 +166,7 @@ const state = {
   bulkClientIdentifier: '',
   controlNumSubClients: DEFAULT_NUM_SUBCLIENTS,
   mediaNumSubClients: DEFAULT_MEDIA_NUM_SUBCLIENTS,
-  bulkNumSubClients: DEFAULT_NUM_SUBCLIENTS,
+  bulkNumSubClients: DEFAULT_BULK_NUM_SUBCLIENTS,
   connectId: '',
   connectAttemptId: 0,
   preflightProgressEnabled: false,
@@ -190,6 +192,9 @@ const state = {
   bulkSendMode: DEFAULT_BULK_SEND_MODE,
   bulkRoundRobinCursor: 0,
   bulkQueueClearedSinceLast: 0,
+  bulkTransientNotReadyUntilMs: 0,
+  bulkTransientNotReadyBackoffMs: 0,
+  bulkTransientNotReadyTimer: null,
   lastEmittedBulkQueueStateKey: '',
   lastEmittedBulkQueueStateAt: 0,
   controlSendQueue: [],
@@ -891,6 +896,8 @@ function createBridgeBulkSendSummaryWindow() {
     workerIdleSlotSamples: 0,
     workerSaturatedSampleCount: 0,
     drainWakeCount: 0,
+    transientNotReadyCount: 0,
+    transientNotReadyBackoffMaxMs: 0,
     sendModeFanoutFrames: 0,
     sendModeRoundRobinFrames: 0,
     sendModeSingleFrames: 0,
@@ -1051,6 +1058,8 @@ function emitBridgeControlSendSummary() {
     payload_bytes_sent: window.payloadBytesSent,
     payload_bytes_per_second: Math.round(window.payloadBytesSent / (BRIDGE_CONTROL_SEND_SAMPLE_WINDOW_MS / 1000)),
     send_failures: window.sendFailures,
+    transient_not_ready_count: window.transientNotReadyCount,
+    transient_not_ready_backoff_max_ms: window.transientNotReadyBackoffMaxMs,
     queue_clears: window.queueClears,
     queue_depth: state.controlSendQueue.length,
     queued_bytes: state.controlQueuedBytes,
@@ -1202,6 +1211,7 @@ function emitBridgeTransportHealthSummary() {
     media_subclients: state.mediaNumSubClients,
     bulk_subclients: state.bulkNumSubClients,
     bulk_send_concurrency: state.bulkSendConcurrency,
+    bulk_send_mode: getBulkSendMode(),
     control_messages_received_since_last: window.controlMessagesReceivedSinceLast,
     media_messages_received_since_last: window.mediaMessagesReceivedSinceLast,
     bulk_messages_received_since_last: window.bulkMessagesReceivedSinceLast,
@@ -1433,7 +1443,9 @@ function trackSelectedRpc(rpc, stage) {
 
   state.selectedRpc = normalizedRpc;
   state.selectedRpcKey = computeStableKey(normalizedRpc);
-  state.selectedRpcStage = stage === 'fallback' ? 'fallback' : 'initial';
+  state.selectedRpcStage = typeof stage === 'string' && stage.length > 0
+    ? stage
+    : 'initial';
 }
 
 function normalizeSubClientCount(value, fallback = DEFAULT_NUM_SUBCLIENTS) {
@@ -1477,6 +1489,23 @@ function getConfiguredBulkSendMode() {
 
 function getBulkSendMode() {
   return normalizeBulkSendMode(state.bulkSendMode || getConfiguredBulkSendMode());
+}
+
+async function handleSetBulkSendPolicy(command) {
+  const previousMode = getBulkSendMode();
+  const previousConcurrency = getEffectiveBulkSendConcurrency();
+  const nextMode = normalizeBulkSendMode(command.mode || command.bulkSendMode || previousMode);
+  const nextConcurrency = normalizeBulkSendConcurrency(
+    command.concurrency ?? command.bulkSendConcurrency,
+    previousConcurrency);
+
+  state.bulkSendMode = nextMode;
+  state.bulkSendConcurrency = nextConcurrency;
+  state.bulkRoundRobinCursor = 0;
+  emitBulkQueueState(true);
+  logStderr(
+    `Bulk send policy updated ` +
+    `(mode=${nextMode}, concurrency=${nextConcurrency}, previous_mode=${previousMode}, previous_concurrency=${previousConcurrency})`);
 }
 
 function clearControlSendQueue(reason) {
@@ -1576,7 +1605,8 @@ function resolveSubClientTopology(command) {
   const controlCount = normalizeSubClientCount(command.numSubClients, DEFAULT_NUM_SUBCLIENTS);
   const mediaFallback = hasControlOverride ? controlCount : DEFAULT_MEDIA_NUM_SUBCLIENTS;
   const mediaCount = normalizeSubClientCount(command.mediaNumSubClients, mediaFallback);
-  const bulkCount = normalizeSubClientCount(command.bulkNumSubClients, controlCount);
+  const bulkFallback = hasControlOverride ? controlCount : DEFAULT_BULK_NUM_SUBCLIENTS;
+  const bulkCount = normalizeSubClientCount(command.bulkNumSubClients, bulkFallback);
   const bulkSendConcurrency = normalizeBulkSendConcurrency(command.bulkSendConcurrency, DEFAULT_BULK_SEND_CONCURRENCY);
   return {
     control: controlCount,
@@ -1941,20 +1971,56 @@ function scheduleBulkSendRetry(item, error) {
   }
 
   item.transientRetryAttempt = nextAttempt;
+  state.bulkSendQueue.unshift(item);
+  state.bulkQueuedBytes += item.payload.length;
+  markBulkTransientNotReady(nextAttempt, error);
+  emitBulkQueueState(true);
+  return true;
+}
+
+function markBulkTransientNotReady(attempt, error) {
+  const previousBackoff = Math.max(0, Number(state.bulkTransientNotReadyBackoffMs) || 0);
+  const delayMs = previousBackoff > 0
+    ? Math.min(BULK_QUEUE_TRANSIENT_BACKOFF_MAX_MS, previousBackoff * 2)
+    : BULK_QUEUE_TRANSIENT_BACKOFF_INITIAL_MS;
+  const untilMs = Date.now() + delayMs;
+  state.bulkTransientNotReadyBackoffMs = delayMs;
+  state.bulkTransientNotReadyUntilMs = Math.max(state.bulkTransientNotReadyUntilMs, untilMs);
+  state.bridgeBulkSendSummaryWindow.transientNotReadyCount += 1;
+  state.bridgeBulkSendSummaryWindow.transientNotReadyBackoffMaxMs = Math.max(
+    state.bridgeBulkSendSummaryWindow.transientNotReadyBackoffMaxMs,
+    delayMs);
   logStderr(
-    `Bulk queue transient send retry scheduled ` +
-    `(attempt=${nextAttempt}, delay_ms=${BULK_QUEUE_TRANSIENT_RETRY_DELAY_MS}, reason=${safeErrorMessage(error)})`);
-  setTimeout(() => {
+    `Bulk queue transient not-ready backoff scheduled ` +
+    `(attempt=${attempt}, delay_ms=${delayMs}, reason=${safeErrorMessage(error)})`);
+  emitJson({
+    event: 'bulk_transient_not_ready',
+    attempt,
+    backoff_ms: delayMs,
+    queue_depth: state.bulkSendQueue.length,
+    in_flight: Math.max(0, state.bulkQueueInFlight)
+  });
+  scheduleBulkTransientNotReadyDrain();
+}
+
+function scheduleBulkTransientNotReadyDrain() {
+  if (state.bulkTransientNotReadyTimer || state.shuttingDown) {
+    return;
+  }
+
+  const delayMs = Math.max(1, state.bulkTransientNotReadyUntilMs - Date.now());
+  state.bulkTransientNotReadyTimer = setTimeout(() => {
+    state.bulkTransientNotReadyTimer = null;
     if (state.shuttingDown) {
       return;
     }
 
-    state.bulkSendQueue.unshift(item);
-    state.bulkQueuedBytes += item.payload.length;
     emitBulkQueueState(true);
     scheduleBulkQueueDrain();
-  }, BULK_QUEUE_TRANSIENT_RETRY_DELAY_MS);
-  return true;
+  }, delayMs);
+  if (state.bulkTransientNotReadyTimer && typeof state.bulkTransientNotReadyTimer.unref === 'function') {
+    state.bulkTransientNotReadyTimer.unref();
+  }
 }
 
 function recordBulkInFlightSnapshot() {
@@ -1994,6 +2060,8 @@ function buildBulkQueueState() {
     inFlightBytes: Math.max(0, state.bulkQueueInFlightBytes),
     configuredConcurrency: state.bulkSendConcurrency,
     effectiveConcurrency: getEffectiveBulkSendConcurrency(),
+    transientNotReady: state.bulkTransientNotReadyUntilMs > Date.now(),
+    transientNotReadyRemainingMs: Math.max(0, state.bulkTransientNotReadyUntilMs - Date.now()),
     congested,
     severe,
     clearedSinceLast: state.bulkQueueClearedSinceLast
@@ -2010,6 +2078,7 @@ function emitBulkQueueState(force = false) {
     snapshot.inFlightBytes,
     snapshot.configuredConcurrency,
     snapshot.effectiveConcurrency,
+    snapshot.transientNotReady ? 1 : 0,
     snapshot.congested ? 1 : 0,
     snapshot.severe ? 1 : 0,
     snapshot.clearedSinceLast
@@ -2037,6 +2106,12 @@ function clearBulkSendQueue(reason) {
 
   state.bulkSendQueue = [];
   state.bulkQueuedBytes = 0;
+  state.bulkTransientNotReadyUntilMs = 0;
+  state.bulkTransientNotReadyBackoffMs = 0;
+  if (state.bulkTransientNotReadyTimer) {
+    clearTimeout(state.bulkTransientNotReadyTimer);
+    state.bulkTransientNotReadyTimer = null;
+  }
   logStderr(`Bulk queue cleared (${reason})`);
   emitBulkQueueState(true);
 }
@@ -2076,6 +2151,12 @@ function scheduleBulkQueueDrain() {
   }
 
   state.bridgeBulkSendSummaryWindow.drainWakeCount += 1;
+  if (state.bulkTransientNotReadyUntilMs > Date.now()) {
+    scheduleBulkTransientNotReadyDrain();
+    emitBulkQueueState(true);
+    return;
+  }
+
   while (state.bulkSendQueue.length > 0 &&
       state.bulkQueueInFlight < getEffectiveBulkSendConcurrency() &&
       !state.shuttingDown) {
@@ -2112,6 +2193,8 @@ async function sendBulkQueueItem(item) {
     bulkSendStartedUtcMs - queueDequeuedUtcMs);
   try {
     await sendBulkPayload(item.destination, item.payload);
+    state.bulkTransientNotReadyUntilMs = 0;
+    state.bulkTransientNotReadyBackoffMs = 0;
     state.bridgeBulkSendSummaryWindow.framesSent += 1;
     state.bridgeBulkSendSummaryWindow.payloadBytesSent += item.payload.length;
     state.bridgeTransportHealthSummaryWindow.framesSentSinceLast += 1;
@@ -2157,14 +2240,36 @@ function decodeSeed(seedHex, seedBase64) {
 }
 
 function parseRpcCandidates(seedRpc) {
-  if (typeof seedRpc === 'string' && seedRpc.trim().length > 0) {
-    return seedRpc
+  const candidates = typeof seedRpc === 'string' && seedRpc.trim().length > 0
+    ? seedRpc
       .split(/[;,]/g)
       .map((x) => x.trim())
-      .filter((x) => x.length > 0);
+      .filter((x) => x.length > 0)
+    : [...DEFAULT_RPC_SERVERS];
+
+  const normalized = [];
+  const seen = new Set();
+  for (const candidate of candidates) {
+    const rpc = normalizeRpcCandidate(candidate);
+    const key = rpc.toLowerCase();
+    if (seen.has(key)) {
+      continue;
+    }
+
+    seen.add(key);
+    normalized.push(rpc);
   }
 
-  return [...DEFAULT_RPC_SERVERS];
+  return normalized;
+}
+
+function normalizeRpcCandidate(candidate) {
+  const rpc = typeof candidate === 'string' ? candidate.trim() : '';
+  if (/^https:\/\/seed\.nkn\.org:30003\/?$/i.test(rpc)) {
+    return 'http://seed.nkn.org:30003';
+  }
+
+  return rpc;
 }
 
 function rotateCandidates(candidates) {
@@ -2175,6 +2280,53 @@ function rotateCandidates(candidates) {
   const offset = rpcCandidateCursor % candidates.length;
   rpcCandidateCursor = (rpcCandidateCursor + 1) % candidates.length;
   return [...candidates.slice(offset), ...candidates.slice(0, offset)];
+}
+
+function buildRpcBootstrapCandidates(seedRpc) {
+  const rpcCandidates = rotateCandidates(parseRpcCandidates(seedRpc));
+  const bootstrapCandidates = [];
+
+  for (let i = 0; i < rpcCandidates.length; i += 1) {
+    const rpc = rpcCandidates[i];
+    const plainStage = i === 0 ? 'initial' : 'fallback';
+    bootstrapCandidates.push({ rpc, tls: false, stage: plainStage });
+    bootstrapCandidates.push({ rpc, tls: true, stage: 'tls_fallback' });
+  }
+
+  return bootstrapCandidates;
+}
+
+function normalizeRpcBootstrapCandidate(candidate, fallbackStage = 'fallback') {
+  if (typeof candidate === 'string') {
+    return { rpc: normalizeRpcCandidate(candidate), tls: false, stage: fallbackStage };
+  }
+
+  if (!candidate || typeof candidate.rpc !== 'string') {
+    return { rpc: '', tls: false, stage: fallbackStage };
+  }
+
+  return {
+    rpc: normalizeRpcCandidate(candidate.rpc),
+    tls: Boolean(candidate.tls),
+    stage: typeof candidate.stage === 'string' && candidate.stage.length > 0
+      ? candidate.stage
+      : fallbackStage
+  };
+}
+
+function resolveConnectFallbackDelayMs(command) {
+  const preflightDelay = command && command.preflightRpcEnabled
+    ? Number(command.preflightTimeoutMs)
+    : NaN;
+  const requestedDelay = Number.isFinite(Number(command && command.fallbackDelayMs))
+    ? Number(command.fallbackDelayMs)
+    : preflightDelay;
+
+  return clampNumber(
+    requestedDelay,
+    DEFAULT_CONNECT_READY_TIMEOUT_MS,
+    MIN_CONNECT_FALLBACK_DELAY_MS,
+    MAX_CONNECT_FALLBACK_DELAY_MS);
 }
 
 function toBufferFromBase64(payloadBase64) {
@@ -2428,9 +2580,11 @@ function attachClientHandlers(client, channel) {
     }
   }
 
+  let messageHandlerRegistered = false;
   if (typeof client.onMessage === 'function') {
     try {
       client.onMessage(onMessage);
+      messageHandlerRegistered = true;
     } catch (error) {
       logStderr(`onMessage hook failed: ${safeErrorMessage(error)}`);
     }
@@ -2468,7 +2622,9 @@ function attachClientHandlers(client, channel) {
   if (typeof client.on === 'function') {
     try { client.on('connect', onReady); } catch {}
     try { client.on('ready', onReady); } catch {}
-    try { client.on('message', onMessage); } catch {}
+    if (!messageHandlerRegistered) {
+      try { client.on('message', onMessage); } catch {}
+    }
     try { client.on('disconnect', () => onDisconnected('Disconnected')); } catch {}
     try { client.on('close', () => onDisconnected('Closed')); } catch {}
     try { client.on('error', (e) => logStderr(`Client error: ${safeErrorMessage(e)}`)); } catch {}
@@ -2479,7 +2635,7 @@ function attachClientHandlers(client, channel) {
   // which causes a false-ready race ("client not ready" on subscribe/publish).
 }
 
-async function closeSingleClient(client) {
+async function closeSingleClient(client, closeTimeoutMs = 0) {
   if (!client) {
     return;
   }
@@ -2490,7 +2646,20 @@ async function closeSingleClient(client) {
       try {
         const result = client[fn]();
         if (result && typeof result.then === 'function') {
-          await result;
+          if (closeTimeoutMs > 0) {
+            let timedOut = false;
+            await Promise.race([
+              result,
+              delay(closeTimeoutMs).then(() => {
+                timedOut = true;
+              })
+            ]);
+            if (timedOut) {
+              logStderr(`Client ${fn} timed out during bootstrap fallback close after ${closeTimeoutMs}ms`);
+            }
+          } else {
+            await result;
+          }
         }
         return;
       } catch (error) {
@@ -2500,7 +2669,7 @@ async function closeSingleClient(client) {
   }
 }
 
-async function closeClient() {
+async function closeClient(closeTimeoutMs = 0) {
   const controlClient = state.controlClient;
   const mediaClient = state.mediaClient;
   const bulkClient = state.bulkClient;
@@ -2517,7 +2686,7 @@ async function closeClient() {
   state.bulkClientIdentifier = '';
   state.controlNumSubClients = DEFAULT_NUM_SUBCLIENTS;
   state.mediaNumSubClients = DEFAULT_MEDIA_NUM_SUBCLIENTS;
-  state.bulkNumSubClients = DEFAULT_NUM_SUBCLIENTS;
+  state.bulkNumSubClients = DEFAULT_BULK_NUM_SUBCLIENTS;
   state.bulkSendConcurrency = DEFAULT_BULK_SEND_CONCURRENCY;
   state.bulkSendMode = getConfiguredBulkSendMode();
   state.bulkRoundRobinCursor = 0;
@@ -2529,12 +2698,12 @@ async function closeClient() {
   clearScreenShareQueue('close_client');
   clearBulkSendQueue('close_client');
 
-  await closeSingleClient(controlClient);
+  await closeSingleClient(controlClient, closeTimeoutMs);
   if (mediaClient && mediaClient !== controlClient) {
-    await closeSingleClient(mediaClient);
+    await closeSingleClient(mediaClient, closeTimeoutMs);
   }
   if (bulkClient && bulkClient !== controlClient && bulkClient !== mediaClient) {
-    await closeSingleClient(bulkClient);
+    await closeSingleClient(bulkClient, closeTimeoutMs);
   }
 }
 
@@ -2562,8 +2731,8 @@ async function handleConnect(command) {
     reconnectIntervalMin: 1000,
     reconnectIntervalMax: 16000,
     responseTimeout: 5000,
-    // Do not force WSS in the desktop bridge. Some predecessor nodes do not support
-    // WSS, and forcing tls=true causes bootstrap failures on otherwise healthy networks.
+    // Start with the historical plain-websocket path, then fall back to WSS per RPC
+    // candidate when setup bootstrap evidence shows the plain path is blocked.
     tls: false
   };
 
@@ -2575,12 +2744,14 @@ async function handleConnect(command) {
     ? command.identifier.trim()
     : '';
 
-  const rpcCandidates = rotateCandidates(parseRpcCandidates(command.seedRpc));
+  const rpcCandidates = buildRpcBootstrapCandidates(command.seedRpc);
   if (rpcCandidates.length > 0) {
+    const initialCandidate = normalizeRpcBootstrapCandidate(rpcCandidates[0], 'initial');
     // Keep both keys for compatibility with SDK versions/docs naming differences.
-    baseOptions.rpcServerAddr = rpcCandidates[0];
-    baseOptions.seedRPCServerAddr = rpcCandidates[0];
-    trackSelectedRpc(baseOptions.rpcServerAddr, 'initial');
+    baseOptions.rpcServerAddr = initialCandidate.rpc;
+    baseOptions.seedRPCServerAddr = initialCandidate.rpc;
+    baseOptions.tls = initialCandidate.tls;
+    trackSelectedRpc(baseOptions.rpcServerAddr, initialCandidate.stage);
   }
 
   if (state.preflightProgressEnabled) {
@@ -2597,13 +2768,14 @@ async function handleConnect(command) {
         event: 'rpc_selected',
         connectId: state.connectId || null,
         rpc: baseOptions.rpcServerAddr,
-        stage: 'initial',
+        stage: rpcCandidates.length > 0 ? normalizeRpcBootstrapCandidate(rpcCandidates[0], 'initial').stage : 'initial',
+        tls: baseOptions.tls ? 1 : 0,
         ts: Date.now()
       });
     }
   }
 
-  logStderr(`Creating NKN clients (rpc=${baseOptions.rpcServerAddr || 'default'}, control_subclients=${subClientTopology.control}, media_subclients=${subClientTopology.media}, bulk_subclients=${subClientTopology.bulk}, bulk_send_concurrency=${subClientTopology.bulkSendConcurrency}, bulk_send_mode=${state.bulkSendMode})`);
+  logStderr(`Creating NKN clients (rpc=${baseOptions.rpcServerAddr || 'default'}, tls=${baseOptions.tls ? 1 : 0}, control_subclients=${subClientTopology.control}, media_subclients=${subClientTopology.media}, bulk_subclients=${subClientTopology.bulk}, bulk_send_concurrency=${subClientTopology.bulkSendConcurrency}, bulk_send_mode=${state.bulkSendMode})`);
   const ClientCtor = nkn.MultiClient || nkn.Client;
   if (typeof ClientCtor !== 'function') {
     throw new Error('NKN Client constructor not found in SDK.');
@@ -2642,17 +2814,13 @@ async function handleConnect(command) {
   if (rpcCandidates.length > 1) {
     const connectAttemptId = Date.now() + Math.random();
     state.connectAttemptId = connectAttemptId;
-    const fallbackDelayMs = clampNumber(
-      command.fallbackDelayMs,
-      DEFAULT_CONNECT_READY_TIMEOUT_MS,
-      MIN_CONNECT_FALLBACK_DELAY_MS,
-      MAX_CONNECT_FALLBACK_DELAY_MS);
+    const fallbackDelayMs = resolveConnectFallbackDelayMs(command);
     tryFallbackRpcCandidates(connectAttemptId, command, rpcCandidates.slice(1), fallbackDelayMs);
   }
 }
 
 async function tryFallbackRpcCandidates(connectAttemptId, originalCommand, remainingRpcCandidates, fallbackDelayMs = DEFAULT_CONNECT_READY_TIMEOUT_MS) {
-  for (const rpc of remainingRpcCandidates) {
+  for (const rawCandidate of remainingRpcCandidates) {
     await delay(fallbackDelayMs);
 
     if (state.shuttingDown) {
@@ -2668,18 +2836,26 @@ async function tryFallbackRpcCandidates(connectAttemptId, originalCommand, remai
     }
 
     try {
-      logStderr(`Retrying NKN client bootstrap with alternate rpc=${rpc}`);
+      const bootstrapCandidate = normalizeRpcBootstrapCandidate(rawCandidate, 'fallback');
+      const rpc = bootstrapCandidate.rpc;
+      if (!rpc) {
+        continue;
+      }
+
+      logStderr(`Retrying NKN client bootstrap with alternate rpc=${rpc}; tls=${bootstrapCandidate.tls ? 1 : 0}; stage=${bootstrapCandidate.stage}`);
       state.bridgeTransportHealthSummaryWindow.rpcFallbackAttemptCountSinceLast += 1;
       if (state.preflightProgressEnabled) {
         emitJson({
           event: 'rpc_fallback_attempt',
           connectId: state.connectId || null,
           rpc,
+          stage: bootstrapCandidate.stage,
+          tls: bootstrapCandidate.tls ? 1 : 0,
           fallbackDelayMs,
           ts: Date.now()
         });
       }
-      await closeClient();
+      await closeClient(CONNECT_FALLBACK_CLIENT_CLOSE_TIMEOUT_MS);
       state.connectAttemptId = connectAttemptId;
       state.connectId = typeof originalCommand.connectId === 'string' ? originalCommand.connectId : '';
       state.preflightProgressEnabled = Boolean(originalCommand.preflightRpcEnabled);
@@ -2698,11 +2874,11 @@ async function tryFallbackRpcCandidates(connectAttemptId, originalCommand, remai
         reconnectIntervalMin: 1000,
         reconnectIntervalMax: 16000,
         responseTimeout: 5000,
-        tls: false,
+        tls: bootstrapCandidate.tls,
         rpcServerAddr: rpc,
         seedRPCServerAddr: rpc
       };
-      trackSelectedRpc(rpc, 'fallback');
+      trackSelectedRpc(rpc, bootstrapCandidate.stage);
 
       if (seed) {
         baseOptions.seed = seed;
@@ -2748,7 +2924,8 @@ async function tryFallbackRpcCandidates(connectAttemptId, originalCommand, remai
           event: 'rpc_selected',
           connectId: state.connectId || null,
           rpc,
-          stage: 'fallback',
+          stage: bootstrapCandidate.stage,
+          tls: bootstrapCandidate.tls ? 1 : 0,
           ts: Date.now()
         });
       }
@@ -3008,6 +3185,9 @@ async function dispatchCommand(message) {
     case 'setScreenSharePolicy':
       await handleSetScreenSharePolicy(message);
       return true;
+    case 'setBulkSendPolicy':
+      await handleSetBulkSendPolicy(message);
+      return true;
     case 'hello':
       await handleHello(message);
       return false;
@@ -3177,9 +3357,8 @@ function scheduleStdinProcessing() {
     })
     .finally(() => {
       stdinProcessing = false;
-      if (stdinBuffer.length > 0) {
-        scheduleStdinProcessing();
-      }
+      // A partial frame must wait for the next data event. The drain loop
+      // already consumes input that arrives while a command is awaited.
     });
 }
 

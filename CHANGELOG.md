@@ -1,5 +1,72 @@
 # Changelog
 
+## [0.7.0 hotfix revision 2] - Unreleased
+
+### Fixed
+
+- Unlocking Tuna in an idle approved session now uses the existing session handshake for screen-only and combined file/screen permissions, without requiring a transfer or screen-sharing session to start first. File-only preparation and coordinator-owned file route activation remain separate.
+- Idle Tuna can re-establish after a completed or canceled transfer. Delayed stops, first-send failures, stale answers and queued ACKs are fenced to the current session and unlock attempt without granting file-route authority.
+- Stale handshake failures no longer clear a retained approved session's envelope or keys. Response receipt and timeout handling are serialized without bypassing authentication, expiry or replay checks.
+- Listener startup, readiness, cap-stop and delayed telemetry effects are bound to the current listener/session lifetime so retired callbacks cannot overwrite a successor's state or accounting. FileTransferCoordinator remains the file-route authority.
+- Locking or disabling Tuna closes the current usage record once, preserving observed payments and completed summaries. An accounting-write failure is reported without blocking the authorized stop or claiming a durable save. Rejected incoming streams remain diagnostic-only and do not make a healthy listener ineligible for lock/disable.
+- The session Tuna icon retains its session-state color during active or paused file transfers instead of being overridden by the transfer-specific route presentation.
+- Pending wallet unlocks are invalidated when the wallet is locked, unlinked or replaced; a late validation/save cannot restore the previous wallet's unlock. Canceled or timed-out wallet verification terminates and reaps its child process.
+- Helper address, Copy/Share actions and QR output stay unavailable until the full verified helper address is ready; “Preparing helper address…” replaces the briefly visible short address.
+- Options -> Wallet feedback stays below the scrollable content, so validation results remain visible without scrolling back to the top.
+- The screen-sharing recovery-keyframe regression safely polls bitmap width across concurrent bitmap replacement/disposal without changing its assertion or timeout.
+
+### Release identity
+
+- App version remains `0.7.0`; proposed separate tag: `v0.7.0-hotfix.2`. Both published releases, their assets and checksums remain unchanged.
+- [Hotfix revision 2 review metadata](docs/releases/0.7.0-hotfix.2.md) records the scope and remaining release gates. This candidate is not yet published or live-validated.
+- The latest local unsigned portable/installer is built from `ba507366`. Packaging checks passed; the consolidated focused lifecycle/authentication selection passed 172/172 before packaging. Earlier failures remain historical, and no CI, live-session or installer-lifecycle qualification is claimed for these bytes.
+
+## [0.7.0 hotfix revision 1] - 2026-11-15
+
+### Fixed
+
+- Screen-sharing encoder startup no longer waits for the sink-writer input-buffer probe before using the persistent software transform. This addresses the observed blank Helpee preview and missing Helper display caused by a blocked probe finalization; existing encode failure handling and sink-writer fallback remain intact.
+
+### Release identity
+
+- [Published as `v0.7.0-hotfix.1`](https://github.com/resu12/nLink/releases/tag/v0.7.0-hotfix.1) from `d235dcf1`, using CI #103's exact portable, installer and checksums under an explicit unsigned-artifact exception. App version remains `0.7.0`; the original release and downloads are unchanged.
+- [Hotfix release notes](docs/releases/0.7.0-hotfix.1.md) distinguish retained local regressions, final-portable observations and isolated same-version installer validation. Public downloads were verified against their own checksum file.
+
+## [0.7.0] - 2026-11-15
+
+### Added
+
+- Experimental NKN Tuna acceleration research artifacts, sidecar tooling, and opt-in manual benchmark coverage.
+- Options -> Wallet includes a visible `Tuna (experimental)` section for local wallet status, balance validation, address copy, session unlock, spending caps, and unlinking.
+- Safe `wallet-status` validation mode in the Tuna sidecar unlocks a linked wallet for one balance check and exits without starting a paid listener or spending NKN.
+- Phase 3 benchmark artifacts and acceptance gates compare current NKN and Tuna for file, screen, and reconnect behavior.
+- Route-aware file-transfer protocol guardrails, hard-priority lifecycle/liveness handling, controlled V6 fallback support, and paid Tuna route gate tooling.
+
+### Changed
+
+- Release version sources and packaging defaults now resolve to `0.7.0`.
+- Released from `3a031df8` with the exact portable, installer and checksums validated in CI #102. Historical correctness and performance results retain their original source/payload scope.
+- Packaging now rejects stale bridge manifests whose `appVersion` does not match `VERSION`, so bridge bundles must be regenerated after version bumps.
+- Tuna remains default-off and explicitly opt-in through advanced Options or developer controls; a linked or funded wallet does not change runtime transport behavior by itself.
+- Diagnostics copy/export redaction now covers Tuna wallet paths, wallet addresses, password-like fields, seeds, and private-key material.
+- File transfer route selection is explicit: regular NKN uses V4, active file Tuna uses V4, controlled post-Tuna fallback uses one-shot V6, and diagnostic regular-NKN V6 requires unsafe developer/test opt-in.
+- Obsolete V5 data frames and legacy active `file_tuna_v6` route tokens are rejected instead of treated as release-compatible paths.
+
+### Fixed
+
+- Tuna negotiation is bound to the approved, verified nLink session and silently falls back to the current NKN transport on address, session, nonce, version, expiry, lane, or sidecar mismatches.
+- Sidecar and benchmark failure handling was tightened so disconnects and listener shutdowns mark acceleration unavailable without ending the approved nLink session.
+- Active file Tuna uses V4. Disabling Tuna during a live transfer moves that same transfer to controlled V6 fallback over regular NKN; explicit reactivation can return it to Tuna V4. After successful final fallback completion, the next transfer resolves from current transport state rather than stale fallback state.
+- File-transfer progress presentation uses peer-comparable accepted progress and bounded smoothing, rather than locally queued bytes or predicted future delivery.
+- Tuna startup status and fish pulsing share the connection-state presentation; an attempt is not displayed as proof of active delivery.
+- Listener retries no longer supersede an in-flight Tuna lane start. The October 15 seven-scenario GUI gate on `cf8ea296` passed helper-to-helpee payer handoff, repeated Tuna/fallback activation, and a subsequent Tuna transfer with strict delivery, integrity, and coordinator-route proof.
+
+### Packaging
+
+- Windows installer and portable release assets for `0.7.0` are [published](https://github.com/resu12/nLink/releases/tag/v0.7.0) with `SHA256SUMS.txt`; public downloads and SHA-256 checksums were verified.
+- The Tuna sidecar verifier is bundled under `tuna/win-x64/` so Options -> Wallet validation works in packaged builds while runtime acceleration remains default-off.
+- Public Windows artifacts are unsigned for this release as an accepted exception.
+
 ## [0.6.2] - 2026-05-01
 
 ### Added

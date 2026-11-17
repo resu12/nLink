@@ -46,6 +46,7 @@ public sealed partial class SessionRuntime
             EnsureSessionSecurityTransport(nextTransport);
             sessionCts = linkedCts;
             transport = nextTransport;
+            CaptureBridgeBootstrapReadinessSnapshot(nextTransport);
             role = SessionRuntimeRole.Helper;
             helperConnectOrigin = HelperConnectOrigin.Listener;
             helperShouldReturnToListenerWaiting = true;
@@ -80,7 +81,7 @@ public sealed partial class SessionRuntime
             _ = RunHostAsync(nextTransport, linkedCts.Token);
             if (nextTransport is IHostReadySignalingTransport hostReadyTransport)
             {
-                await hostReadyTransport.WaitUntilHostReadyAsync(linkedCts.Token).ConfigureAwait(false);
+                await WaitUntilHostReadyOrBridgeBootstrapFailureAsync(nextTransport, hostReadyTransport, linkedCts.Token).ConfigureAwait(false);
             }
 
             hostReady = true;

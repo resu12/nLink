@@ -5,6 +5,7 @@ using System.Text;
 using System.Text.Json;
 using System.Threading.Channels;
 using NLink.Core;
+using NLink.Core.Configuration;
 using NLink.Core.FileTransfer;
 using NLink.Core.Logging;
 using NLink.Core.RemoteControl;
@@ -15,8 +16,97 @@ using NLink.Core.SessionSecurity;
 namespace NLink.Infra.Nkn;
 
 #pragma warning disable CS0067
-public sealed partial class NknSignalingTransport : ISignalingTransport, IAddressTargetSignalingTransport, IInviteTargetSignalingTransport, IAddressHostSignalingTransport, ILocalPeerAddressSignalingTransport, IHelpRequestSignalingTransport, ISessionSecuritySignalingTransport, IRemoteControlCapabilityProvider, IRemoteControlSignalingTransport, IScreenShareSignalingTransport, IScreenShareCursorOverlayCapabilityProvider, IScreenShareTransportBackpressureProbe, IScreenShareTransportPolicyController, IFileTransferSignalingTransport, IFileTransferChunkBudgetProvider, IFileTransferProtocolCapabilities, IFileTransferTransportProfileProvider, IAuthoritativeConnectedAddressSource
+public sealed partial class NknSignalingTransport : ISignalingTransport, IAddressTargetSignalingTransport, IInviteTargetSignalingTransport, IAddressHostSignalingTransport, IHostReadySignalingTransport, IBridgeBootstrapReadinessSignalingTransport, ILocalPeerAddressSignalingTransport, IHelpRequestSignalingTransport, ISessionSecuritySignalingTransport, ISessionLivenessSignalingTransport, ISessionRecoveryStateContract, ITransportAccelerationStatus, ITransportAccelerationControl, IRemoteControlCapabilityProvider, IRemoteControlSignalingTransport, IScreenShareSignalingTransport, IScreenShareCursorOverlayCapabilityProvider, IScreenShareTransportBackpressureProbe, IScreenShareTransportPolicyController, IFileTransferSignalingTransport, IFileTransferSessionContextProvider, IFileTransferChunkBudgetProvider, IFileTransferProtocolCapabilities, IFileTransferRouteStatus, IFileTransferTransportProfileProvider, IFileTransferControlPlaneDeliveryTransport, IFileTransferV6TransportEpochObserver, IFileTransferReceiveRecoveryController, IFileTransferBridgeRecoveryExecutionBridge, IFileTransferTerminalObserver, IFileTransferRegularV4ControlFeedbackPressureObserver, IFileTransferRegularV4FrontierRepairPressureInstallBridge, IFileTransferRouteTransitionBridge, IFileTransferRegularV4FrontierRepairSettlementObserver, IFileTransferPostTunaFallbackControlPlanePressureObserver, IFileTransferRouteCompletionObserver, IFileTransferRouteHintObserver, IFileTransferInitialTunaReadinessProvider, IRuntimeUnlockRouteCommitProofProvider, IRuntimeUnlockPeerPreCommitAnswerAcceptanceObserver, IRuntimeUnlockPreCommitProbeLaunchObserver, IRuntimeUnlockRetryDispatchAuthorityBridge, IRuntimeUnlockInitialActivationReceiveRecoveryHoldBridge, IAuthoritativeConnectedAddressSource
 {
+    private readonly record struct FileTransferV6TransportEpochKey(
+        string SessionId,
+        string TransferId,
+        FileTransferDirection Direction,
+        long TransportEpoch);
+
+    private readonly record struct FileTransferV6TransportEpochScopeKey(
+        string SessionId,
+        string TransferId,
+        FileTransferDirection Direction);
+
+    private sealed class FileTransferV6RegularNknEpochScopeState
+    {
+        public FileTransferV6TransportEpochSnapshot? LatestSnapshot { get; set; }
+
+        public FileTransferV6TransportEpochSnapshot? CurrentRecoveredBoundary { get; set; }
+
+        public long LastRecoveryBoundaryGeneration { get; set; }
+    }
+
+    internal readonly record struct FileTransferV6TransportEpochDiagnostics(
+        long StartedCount,
+        long NormalToTunaActivationStartedCount,
+        long RecoveredCount,
+        long NormalToTunaActivationRecoveredCount,
+        long WaitingCount,
+        long TerminalCount,
+        long UnresolvedCount);
+
+    private sealed record FileTransferV6PendingHandoffIntent(
+        string SessionId,
+        string Reason,
+        FileTransferTransportHandoffKind HandoffKind,
+        FileTransferTransportKind TargetTransport,
+        DateTimeOffset RecordedUtc,
+        RuntimeUnlockRouteCommitSnapshot? RuntimeUnlockPreCommitProbeSnapshot = null);
+
+    private sealed record FileTransferFallbackV6BootstrapTrigger(
+        string SessionId,
+        string TransferId,
+        FileTransferDirection Direction,
+        long PendingProofGeneration,
+        long FallbackEpoch,
+        long TransportEpoch,
+        long BootstrapGeneration,
+        string FrameFingerprint,
+        IFileTransferDataSession DataSession,
+        long DataSessionGeneration,
+        FileTransferRouteHint RouteHint);
+
+    private readonly record struct FileTransferRouteHintKey(
+        string SessionId,
+        string TransferId,
+        FileTransferDirection Direction);
+
+    private readonly record struct FileTransferRuntimeUnlockAuthorityRequirement(
+        string TransferId,
+        FileTransferDirection Direction,
+        int RoutePublicationGeneration);
+
+    private readonly record struct FileTransferRouteHint(
+        FileTransferRoute Route,
+        string Token,
+        int ProtocolVersion,
+        string SessionId,
+        FileTransferDirection Direction,
+        int LiveRouteEpoch,
+        string Source,
+        bool RuntimeUnlockAdmissionGranted,
+        string RuntimeUnlockAdmissionReason,
+        string FallbackLegState,
+        bool FallbackLegCanSendData,
+        long FallbackLegGeneration,
+        string? FallbackCheckpointRequestId,
+        int FallbackCheckpointGeneration,
+        long FallbackTransportEpoch,
+        int FallbackBridgeRecoveryGeneration,
+        int RoutePublicationGeneration,
+        int RuntimeGeneration,
+        int TerminalGeneration,
+        long PublicationLegGeneration,
+        int? RouteCommitGeneration,
+        string TargetRouteToken,
+        int TargetProtocolVersion,
+        FileTransferTransportKind TargetTransport,
+        string RoutePublicationActionKind,
+        string CoordinatorDecisionReason,
+        DateTimeOffset RecordedUtc);
+
     private sealed class RecoveryBurstLease
     {
         public string SessionId { get; init; } = string.Empty;
@@ -33,6 +123,7 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
     private static readonly TimeSpan AckWaitTimeout = TimeSpan.FromSeconds(2);
     private static readonly TimeSpan PendingJoinTimeout = TimeSpan.FromSeconds(6);
     private static readonly TimeSpan ControlInputReceiveLogWindow = TimeSpan.FromSeconds(1);
+    private static readonly TimeSpan ExpectedControlReplayDuplicateSummaryWindow = TimeSpan.FromSeconds(10);
     private const int ControlInputReceiveLogBurst = 5;
     // Transport-local abuse bounds. Hard payload-size ceilings still also exist
     // below this layer in the bridge/session envelope/screen-share codecs.
@@ -49,10 +140,13 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
         TimeSpan.FromMilliseconds(80),
         TimeSpan.FromMilliseconds(220),
     };
+    private static readonly TimeSpan ControlPlaneLifecycleCopyTimeout = TimeSpan.FromMilliseconds(750);
     private static readonly TimeSpan ScreenShareOutboundGateWaitBudget = TimeSpan.FromMilliseconds(25);
     private const int FileTransferMaxBridgePayloadBytes = 64 * 1024;
     internal const int FileTransferDataSessionMaxQueuedFrames = 512;
     internal const long FileTransferDataSessionMaxQueuedBytes = 32L * 1024L * 1024L;
+    internal const int FileTransferDataSessionMaxPriorityControlFrames = 64;
+    internal const long FileTransferDataSessionMaxPriorityControlBytes = 256L * 1024L;
     private const int ScreenShareLaneMaxMessages = 32;
     private const int ScreenShareLaneMaxBytes = 768 * 1024;
     private const int ScreenShareLaneCongestionDepthThreshold = 12;
@@ -62,10 +156,16 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
     private static readonly TimeSpan ScreenShareControlBootstrapKeyframeRetryDelay = TimeSpan.FromMilliseconds(80);
     private static readonly TimeSpan ScreenShareControlBootstrapFollowerRetryDelay = TimeSpan.FromMilliseconds(140);
     private static readonly TimeSpan ScreenShareLaneRecentDropWindow = TimeSpan.FromSeconds(3);
+    private static readonly TimeSpan FileTransferFallbackUnprovenProbeDelay = TimeSpan.FromSeconds(3);
+    private static readonly TimeSpan FileTransferCancelEchoMinInterval = TimeSpan.FromMilliseconds(750);
+    private static readonly TimeSpan FileTransferCompleteEchoMinInterval = TimeSpan.FromMilliseconds(750);
+    private static readonly TimeSpan FileTransferControlReceiveStallRecoveryBroadcastCooldown = TimeSpan.FromSeconds(30);
+    private static readonly TimeSpan RuntimeUnlockRetryAuthorityPeerProofFreshness = TimeSpan.FromSeconds(12);
 
     private readonly NknTransportOptions options;
     private readonly NknIdentity identity;
     private readonly INknClient client;
+    private readonly RealNknClientAdapter? regularV4PressureAdapter;
     private readonly IInviteTokenValidator inviteTokenValidator;
     private readonly IInviteValidationThrottle inviteValidationThrottle;
     private readonly ISessionHandshakeReplayCache handshakeReplayCache;
@@ -74,7 +174,10 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
     private readonly ConcurrentDictionary<string, PendingAckWait> pendingAcks = new(StringComparer.Ordinal);
     private readonly SemaphoreSlim outboundSendGate = new(1, 1);
     private readonly SemaphoreSlim screenShareMediaSendGate = new(1, 1);
+    private readonly object sessionLivenessProofGate = new();
     private string? outboundSendGateOwnerForDiagnostics;
+    private string? latestSessionLivenessProofSessionId;
+    private long latestSessionLivenessProofUtcMs;
     private readonly object controlOutboundQueueGate = new();
     private readonly object screenShareOutboundQueueGate = new();
     private readonly object screenShareControlFallbackGate = new();
@@ -87,6 +190,7 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
     private readonly Queue<(long UtcTicks, int DroppedFrames)> screenShareLaneRecentDropWindow = new();
     private readonly object gate = new();
     private readonly object controlSecureStateGate = new();
+    private readonly object expectedControlReplayDuplicateLogGate = new();
     private readonly ScreenShareVideoFrameReassembler secureScreenShareFrameReassembler = new();
     private readonly SessionReplayWindow inboundChatReplayWindow = new();
     private readonly SessionReplayWindow inboundControlReplayWindow = new();
@@ -98,9 +202,31 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
         windowSize: FileTransferInboundReplayWindowSize,
         maxForwardAdvance: FileTransferInboundReplayMaxForwardAdvance);
     private readonly Dictionary<string, FileTransferTransportState> fileTransferStates = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, ExpectedControlReplayDuplicateSuppressionState> expectedControlReplayDuplicateSuppressions = new(StringComparer.Ordinal);
     private readonly Dictionary<string, FileTransferTerminalTombstone> fileTransferTerminalTombstones = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, DateTimeOffset> fileTransferCancelEchoLastSent = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, DateTimeOffset> fileTransferCompleteEchoLastSent = new(StringComparer.Ordinal);
     private readonly Dictionary<string, TransportFileTransferDataSession> fileTransferDataSessions = new(StringComparer.Ordinal);
+    private long fileTransferDataSessionNextGeneration;
+    private readonly Dictionary<FileTransferRouteHintKey, FileTransferRouteHint> fileTransferRouteHints = new();
+    private readonly Dictionary<FileTransferRouteHintKey, FileTransferRoutePublicationAuthority> fileTransferRoutePublicationAuthorities = new();
+    private readonly Dictionary<string, PostTunaFallbackHandoffEvidence> fileTransferPostTunaFallbackHandoffEvidence = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, FileTransferRuntimeUnlockAuthorityRequirement> fileTransferRuntimeUnlockAuthorityRequirements = new(StringComparer.Ordinal);
+    private int fileTransferRoutePublicationAuthorityForTestsGeneration;
     private readonly HashSet<string> fileTransferDataSessionRemoteOpenSuppressed = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, FileTransferV6PendingHandoffIntent> pendingFileTransferV6HandoffsBySession = new(StringComparer.Ordinal);
+    private readonly object fileTransferFallbackProofGate = new();
+    private readonly object fileTransferV6TransportEpochGate = new();
+    private readonly Dictionary<FileTransferV6TransportEpochKey, FileTransferV6TransportEpochSnapshot> unresolvedFileTransferV6TransportEpochs = new();
+    private readonly Dictionary<FileTransferV6TransportEpochScopeKey, FileTransferV6RegularNknEpochScopeState> fileTransferV6RegularNknEpochScopes = new();
+    private long observedFileTransferV6TransportEpochStartedCount;
+    private long observedFileTransferV6NormalToTunaActivationStartedCount;
+    private long observedFileTransferV6TransportEpochRecoveredCount;
+    private long observedFileTransferV6NormalToTunaActivationRecoveredCount;
+    private long observedFileTransferV6TransportEpochWaitingCount;
+    private long observedFileTransferV6TransportEpochTerminalCount;
+    private long fileTransferControlReceiveStallRecoveryBroadcastLastTick;
+    private long bridgeReceiveStallLivenessProofSequence;
     private readonly SortedDictionary<long, InboundFileTransferDispatchWork> pendingInboundFileTransferControlDispatch = new();
     private readonly NknLifecycleChannel lifecycleChannel;
     private readonly NknSecureControlChannel controlChannel;
@@ -108,6 +234,8 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
     private readonly NknFileTransferChannel fileTransferChannel;
     private readonly NknEnvelopeRouter envelopeRouter;
     private readonly ControlOutboundQueue controlOutboundQueue;
+    private readonly NknTunaAccelerationOptions tunaAccelerationOptions;
+    private readonly INknAccelerationLane? accelerationLane;
     private const bool LocalRemoteControlSupported = true;
     private const bool LocalScreenShareCursorOverlaySupported = true;
     private const int ScreenShareInboundReplayWindowSize = 4096;
@@ -115,9 +243,22 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
     private const int FileTransferInboundReplayWindowSize = 32768;
     private const long FileTransferInboundReplayMaxForwardAdvance = 131072;
 
-    public bool SupportsFileTransferV4Streaming => true;
+    public bool SupportsFileTransferV6Streaming => true;
 
     public FileTransferTransportProfileKind FileTransferTransportProfileKind => FileTransferTransportProfileKind.ConservativeNknStartup;
+
+    private sealed class ExpectedControlReplayDuplicateSuppressionState
+    {
+        public DateTimeOffset WindowStartedUtc { get; set; }
+
+        public long SuppressedCount { get; set; }
+
+        public long LastSequence { get; set; }
+
+        public string LastMessageId { get; set; } = string.Empty;
+
+        public string LastSource { get; set; } = string.Empty;
+    }
 
     private string? currentEnvelopeCode;
     private string? remoteEndpoint;
@@ -136,6 +277,31 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
     private bool remoteSupportsScreenShareCursorOverlay;
     private RemoteControlSessionState transportRemoteControlState = RemoteControlSessionState.Default;
     private SessionSecurityState currentSessionSecurityState = SessionSecurityState.Empty;
+    private bool fileTransferFallbackProofPending;
+    private string fileTransferFallbackProofReason = "none";
+    private string? fileTransferFallbackProofSessionId;
+    private NknAccelerationLaneKind fileTransferFallbackProofLanes;
+    private long fileTransferFallbackProofGeneration;
+    private bool fileTransferFallbackProofProbeScheduled;
+    private bool fileTransferFallbackBulkProofObserved;
+    private bool fileTransferFallbackControlProofObserved;
+    private FileTransferFallbackV6BootstrapTrigger?
+        fileTransferFallbackV6BootstrapTrigger;
+    private bool fileTransferFallbackV6BootstrapTriggerReadyLogged;
+    private readonly HashSet<string> fileTransferFallbackV6ProofBootstrapObservationKeys =
+        new(StringComparer.Ordinal);
+    private string? fileTransferFallbackProofTransferId;
+    private FileTransferDirection? fileTransferFallbackProofDirection;
+    private string? fileTransferFallbackProofRouteToken;
+    private int fileTransferFallbackProofProtocolVersion;
+    private int fileTransferFallbackProofLiveRouteEpoch;
+    private int fileTransferFallbackProofLegGeneration;
+    private int fileTransferFallbackProofBridgeRecoveryGeneration;
+    private long fileTransferFallbackProofTransportEpoch;
+    private string? fileTransferFallbackProofCheckpointRequestId;
+    private string? fileTransferFallbackProofAuthorityReason;
+    private RuntimeUnlockRouteCommitSnapshot? fileTransferFallbackProofPreCommitSnapshot;
+    private int bridgeReceiveStallRecoveryActive;
     private SessionId? activeApprovedSessionId;
     private PeerAddress? activeApprovedHelperAddress;
     private LinkedListNode<QueuedControlEnvelope>? queuedLowPriorityMouseMoveNode;
@@ -175,7 +341,17 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
     private long inboundFileTransferDispatchGeneration;
     private bool inboundFileTransferControlDispatchActive;
     private Task inboundFileTransferLifecycleDispatchTail = Task.CompletedTask;
+    private TaskCompletionSource<bool> inboundFileTransferDispatchReset =
+        new(TaskCreationOptions.RunContinuationsAsynchronously);
     private TaskCompletionSource<bool> hostReadyTcs = CreateHostReadyTcs();
+    private long hostReadyGeneration;
+    private string hostReadyRole = "(none)";
+    private string hostReadyFailureReason = "(none)";
+    private string hostReadyLastError = "(none)";
+    private long hostReadyLastReadyUtcMs;
+    private long hostReadyDeadlineUtcMs;
+    private int hostReadyTerminalFailure;
+    private int hostReadyEmitted;
     private readonly IBridgeScreenShareQueueCapability? bridgeScreenShareQueueCapability;
     private long screenShareBridgePolicyGeneration;
     private long screenShareBridgePolicyNextGeneration;
@@ -188,6 +364,9 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
         options = NknTransportOptions.Load();
         identity = NknIdentityStore.LoadOrCreate(options);
         client = new RealNknClientAdapter(identity, options);
+        regularV4PressureAdapter = (RealNknClientAdapter)client;
+        tunaAccelerationOptions = BindTunaDialerIdentity(NknTunaAccelerationOptions.Load(), identity, options);
+        accelerationLane = CreateAccelerationLane(tunaAccelerationOptions);
         inviteTokenValidator = InviteTokenServiceFactory.CreateInviteTokenValidator();
         inviteValidationThrottle = InviteTokenServiceFactory.CreateInviteValidationThrottle();
         handshakeReplayCache = new InMemorySessionHandshakeReplayCache();
@@ -211,11 +390,79 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
         Log($"Initialized | {SensitiveDataRedactor.FormatStructuredFields(" | ", ("address", identity.Address), ("identifier", identity.Identifier))}");
     }
 
+    internal static NknSignalingTransport CreateWithTunaAcceleration(
+        NknTunaAccelerationOptions tunaAccelerationOptions,
+        INknTunaListenerSidecarSupervisor? listenerSupervisor)
+    {
+        var options = NknTransportOptions.Load();
+        var identity = NknIdentityStore.LoadOrCreate(options);
+        var client = new RealNknClientAdapter(identity, options);
+        var effectiveOptions = BindTunaDialerIdentity(tunaAccelerationOptions, identity, options);
+        var accelerationLane = CreateAccelerationLane(effectiveOptions, listenerSupervisor);
+        var transport = new NknSignalingTransport(client, options, identity, effectiveOptions, accelerationLane);
+        NknRuntimeDiagnostics.SetIdentity(
+            address: identity.Address,
+            identifier: identity.Identifier,
+            keyPath: options.KeyPath,
+            seedRpc: options.SeedRpc);
+        Log($"Initialized | {SensitiveDataRedactor.FormatStructuredFields(" | ", ("address", identity.Address), ("identifier", identity.Identifier))}");
+        return transport;
+    }
+
+    private static NknTunaAccelerationOptions BindTunaDialerIdentity(
+        NknTunaAccelerationOptions? tunaOptions,
+        NknIdentity identity,
+        NknTransportOptions transportOptions)
+    {
+        var effectiveOptions = tunaOptions ?? NknTunaAccelerationOptions.Disabled;
+        return effectiveOptions.Enabled
+            ? effectiveOptions.WithDialerIdentity(identity.Identifier, TryReadDialerSeedBase64(transportOptions.KeyPath))
+            : effectiveOptions;
+    }
+
+    private static string? TryReadDialerSeedBase64(string keyPath)
+    {
+        try
+        {
+            return NknIdentityStore.ReadSeedBase64ForConnect(keyPath);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            LocalOperationalLog.Warn("NKN.Tuna", $"event=tuna_dialer_identity_seed_unavailable; error={ex.GetType().Name}");
+            return null;
+        }
+    }
+
     internal NknSignalingTransport(INknClient client, NknTransportOptions options, NknIdentity identity)
+        : this(client, options, identity, NknTunaAccelerationOptions.Disabled, accelerationLane: null)
+    {
+    }
+
+    internal NknSignalingTransport(
+        INknClient client,
+        NknTransportOptions options,
+        NknIdentity identity,
+        NknTunaAccelerationOptions tunaAccelerationOptions,
+        INknAccelerationLane? accelerationLane)
+        : this(client, options, identity, tunaAccelerationOptions, accelerationLane, regularV4PressureAdapterForTests: null)
+    {
+    }
+
+    internal NknSignalingTransport(
+        INknClient client,
+        NknTransportOptions options,
+        NknIdentity identity,
+        NknTunaAccelerationOptions tunaAccelerationOptions,
+        INknAccelerationLane? accelerationLane,
+        RealNknClientAdapter? regularV4PressureAdapterForTests)
     {
         this.client = client ?? throw new ArgumentNullException(nameof(client));
+        // Offline joined tests can supply the real pressure backend without replacing byte transport.
+        regularV4PressureAdapter = client as RealNknClientAdapter ?? regularV4PressureAdapterForTests;
         this.options = options ?? throw new ArgumentNullException(nameof(options));
         this.identity = identity ?? throw new ArgumentNullException(nameof(identity));
+        this.tunaAccelerationOptions = tunaAccelerationOptions ?? NknTunaAccelerationOptions.Disabled;
+        this.accelerationLane = accelerationLane;
         inviteTokenValidator = InviteTokenServiceFactory.CreateInviteTokenValidator();
         inviteValidationThrottle = InviteTokenServiceFactory.CreateInviteValidationThrottle();
         handshakeReplayCache = new InMemorySessionHandshakeReplayCache();
@@ -245,6 +492,8 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
 
     public event EventHandler? Disconnected;
     public event EventHandler<TransportSessionSecurityStateChangedEventArgs>? SessionSecurityStateChanged;
+    public event EventHandler<SessionLivenessProofEventArgs>? SessionLivenessProofReceived;
+    public event EventHandler<TransportAccelerationStateChangedEventArgs>? TransportAccelerationStateChanged;
 
     public event EventHandler? RemoteSessionEnded;
     public event EventHandler<RemoteControlRequestReceivedEventArgs>? RemoteControlRequestReceived;
@@ -262,8 +511,44 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
     public event EventHandler<FileTransferCancelReceivedEventArgs>? FileTransferCancelReceived;
     public event EventHandler<FileTransferErrorReceivedEventArgs>? FileTransferErrorReceived;
     public event EventHandler<FileTransferCompleteReceivedEventArgs>? FileTransferCompleteReceived;
+    public event EventHandler<FileTransferPauseControlReceivedEventArgs>? FileTransferPauseControlReceived;
+    public event EventHandler<FileTransferHeartbeatReceivedEventArgs>? FileTransferHeartbeatReceived;
+    public event EventHandler<FileTransferTransportEpochReceivedEventArgs>? FileTransferTransportEpochReceived;
+    public event EventHandler<FileTransferTransportProbeReceivedEventArgs>? FileTransferTransportProbeReceived;
+    public event EventHandler<FileTransferRepairProofReceivedEventArgs>? FileTransferRepairProofReceived;
+    public event EventHandler<FileTransferFallbackTailYieldProofReceivedEventArgs>? FileTransferFallbackTailYieldProofReceived;
 
     internal event EventHandler<BridgeLifecycleEvent>? BridgeLifecycle;
+    private event EventHandler<FileTransferBridgeRecoveryEvaluationRequestedEventArgs>?
+        FileTransferBridgeRecoveryEvaluationRequested;
+    private event EventHandler<FileTransferReceiveRecoveryProofObservedEventArgs>?
+        FileTransferReceiveRecoveryProofObserved;
+    private event EventHandler<
+        FileTransferReceiveRecoveryPeerReachabilityObservedEventArgs>?
+        FileTransferReceiveRecoveryPeerReachabilityObserved;
+
+    event EventHandler<FileTransferBridgeRecoveryEvaluationRequestedEventArgs>?
+        IFileTransferBridgeRecoveryExecutionBridge.BridgeRecoveryEvaluationRequested
+    {
+        add => FileTransferBridgeRecoveryEvaluationRequested += value;
+        remove => FileTransferBridgeRecoveryEvaluationRequested -= value;
+    }
+
+    event EventHandler<FileTransferReceiveRecoveryProofObservedEventArgs>?
+        IFileTransferBridgeRecoveryExecutionBridge.ReceiveRecoveryProofObserved
+    {
+        add => FileTransferReceiveRecoveryProofObserved += value;
+        remove => FileTransferReceiveRecoveryProofObserved -= value;
+    }
+
+    event EventHandler<
+        FileTransferReceiveRecoveryPeerReachabilityObservedEventArgs>?
+        IFileTransferBridgeRecoveryExecutionBridge
+            .ReceiveRecoveryPeerReachabilityObserved
+    {
+        add => FileTransferReceiveRecoveryPeerReachabilityObserved += value;
+        remove => FileTransferReceiveRecoveryPeerReachabilityObserved -= value;
+    }
     public event EventHandler<ScreenShareFrameCompletedEventArgs>? ScreenShareFrameCompleted;
     public event EventHandler? ScreenShareStopped;
     public event EventHandler<ScreenSharePressureStateReceivedEventArgs>? ScreenSharePressureStateReceived;
@@ -277,6 +562,136 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
         client is IAuthoritativeConnectedAddressSource authoritativeConnectedAddressSource &&
         authoritativeConnectedAddressSource.HasAuthoritativeConnectedAddress;
     public SessionSecurityState CurrentSessionSecurityState => currentSessionSecurityState;
+    public string? CurrentFileTransferSessionId => currentSessionSecurityState.SessionId?.Value;
+    public bool IsTransportAccelerationActive => IsTransportAccelerationPublishedActive();
+    public bool ShouldUseFileTransferV6ForAcceleration => ShouldUseFileTransferV6ForAccelerationCore();
+    public bool IsFileTunaActiveForRouteSelection =>
+        HasActiveFileTunaV4FileTransferRouteHint(currentSessionSecurityState.SessionId?.Value);
+    public bool IsPostTunaFileFallbackActiveForRouteSelection => IsFileTransferUsingRegularNknFallbackForCurrentSession();
+    public bool IsDiagnosticRegularNknV6RouteEnabled => IsDiagnosticRegularNknV6RouteEnabledCore();
+    public string TransportAccelerationStatusReason
+    {
+        get
+        {
+            lock (accelerationGate)
+            {
+                return transportAccelerationStatusReason;
+            }
+        }
+    }
+
+    private TransportAccelerationPendingFileTransfer? pendingAccelerationFileTransfer;
+
+    public TransportAccelerationPendingFileTransfer? PendingAccelerationFileTransfer
+    {
+        get
+        {
+            lock (accelerationGate)
+            {
+                return pendingAccelerationFileTransfer;
+            }
+        }
+    }
+
+    private void RaiseSessionLivenessProof(
+        string? sessionId,
+        long generation,
+        long sequence,
+        string proofKind,
+        string lane)
+    {
+        var normalizedSessionId = string.IsNullOrWhiteSpace(sessionId) ? null : sessionId.Trim();
+        if (string.IsNullOrWhiteSpace(normalizedSessionId))
+        {
+            return;
+        }
+
+        var currentSessionId = currentSessionSecurityState.SessionId?.Value;
+        if (string.IsNullOrWhiteSpace(currentSessionId) ||
+            !string.Equals(normalizedSessionId, currentSessionId, StringComparison.Ordinal))
+        {
+            return;
+        }
+
+        var normalizedProofKind = string.IsNullOrWhiteSpace(proofKind) ? "unknown" : proofKind.Trim();
+        var normalizedLane = string.IsNullOrWhiteSpace(lane) ? "unknown" : lane.Trim();
+        var observedUtcMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+        lock (sessionLivenessProofGate)
+        {
+            latestSessionLivenessProofSessionId = normalizedSessionId;
+            latestSessionLivenessProofUtcMs = observedUtcMs;
+        }
+
+        LocalOperationalLog.Info(
+            "SessionSecurity",
+            $"event=session_liveness_proof_received; transport=nkn; session_id={SanitizeLogToken(normalizedSessionId)}; generation={generation}; sequence={sequence}; proof_kind={normalizedProofKind}; lane={normalizedLane}; observed_utc_ms={observedUtcMs}");
+        SessionLivenessProofReceived?.Invoke(
+            this,
+            new SessionLivenessProofEventArgs(
+                normalizedSessionId,
+                generation,
+                sequence,
+                observedUtcMs,
+                normalizedProofKind,
+                normalizedLane));
+    }
+
+    internal void SeedSessionLivenessProofForTests(string sessionId, long observedUtcMs)
+    {
+        if (string.IsNullOrWhiteSpace(sessionId))
+        {
+            return;
+        }
+
+        lock (sessionLivenessProofGate)
+        {
+            latestSessionLivenessProofSessionId = sessionId.Trim();
+            latestSessionLivenessProofUtcMs = observedUtcMs;
+        }
+    }
+
+    private bool HasRecentSessionLivenessProofForRuntimeUnlockAuthority(string? sessionId)
+    {
+        if (string.IsNullOrWhiteSpace(sessionId))
+        {
+            return false;
+        }
+
+        var normalizedSessionId = sessionId.Trim();
+        var nowMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+        var freshness = RuntimeUnlockRetryAuthorityPeerProofFreshnessOverrideForTests ??
+                        RuntimeUnlockRetryAuthorityPeerProofFreshness;
+        lock (sessionLivenessProofGate)
+        {
+            return latestSessionLivenessProofUtcMs > 0 &&
+                   string.Equals(latestSessionLivenessProofSessionId, normalizedSessionId, StringComparison.Ordinal) &&
+                   nowMs - latestSessionLivenessProofUtcMs <=
+                   (long)freshness.TotalMilliseconds;
+        }
+    }
+
+    private static bool IsDiagnosticRegularNknV6RouteEnabledCore()
+    {
+        var value = ReleaseOverridePolicy.ReadUnsafeEnvironmentVariable(
+            "NLINK_FILETRANSFER_DIAGNOSTIC_REGULAR_NKN_V6",
+            category: "filetransfer_diagnostic");
+        return string.Equals(value, "1", StringComparison.OrdinalIgnoreCase) ||
+               string.Equals(value, "true", StringComparison.OrdinalIgnoreCase) ||
+               string.Equals(value, "yes", StringComparison.OrdinalIgnoreCase) ||
+               string.Equals(value, "on", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool IsDiagnosticFileTunaV4RouteEnabledCore()
+    {
+        var value = ReleaseOverridePolicy.ReadUnsafeEnvironmentVariable(
+            "NLINK_FILETRANSFER_DIAGNOSTIC_FILE_TUNA_V4",
+            category: "filetransfer_diagnostic");
+        return string.Equals(value, "1", StringComparison.OrdinalIgnoreCase) ||
+               string.Equals(value, "true", StringComparison.OrdinalIgnoreCase) ||
+               string.Equals(value, "yes", StringComparison.OrdinalIgnoreCase) ||
+               string.Equals(value, "on", StringComparison.OrdinalIgnoreCase);
+    }
+
     public bool CanSendSessionEnd => !disposed && !string.IsNullOrWhiteSpace(currentEnvelopeCode) && !string.IsNullOrWhiteSpace(remoteEndpoint);
     public bool CanSendPendingJoinCancel
     {
@@ -409,6 +824,56 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
         return readyTask.WaitAsync(ct);
     }
 
+    public BridgeBootstrapReadinessSnapshot GetBridgeBootstrapReadinessSnapshot()
+    {
+        lock (hostReadyGate)
+        {
+            var generation = hostReadyGeneration;
+            var role = string.IsNullOrWhiteSpace(hostReadyRole) ? "(none)" : hostReadyRole;
+            var failureReason = string.IsNullOrWhiteSpace(hostReadyFailureReason) ? "(none)" : hostReadyFailureReason;
+            var lastError = string.IsNullOrWhiteSpace(hostReadyLastError) ? "(none)" : hostReadyLastError;
+            var terminalFailure = hostReadyTerminalFailure != 0;
+            var readyEmitted = hostReadyEmitted != 0;
+            var controlReady = readyEmitted;
+            var mediaReady = readyEmitted;
+            var bulkReady = readyEmitted;
+            if (!readyEmitted && client is RealNknClientAdapter realClient)
+            {
+                var health = realClient.GetBridgeBootstrapHealthSnapshot();
+                controlReady = health.ControlReady;
+                mediaReady = health.MediaReady;
+                bulkReady = health.BulkReady;
+                if (!terminalFailure && health.TerminalFailure)
+                {
+                    // Health samples are setup-only evidence. Promote repeated no-ready
+                    // bridge connect failures so SessionRuntime can rehost before the
+                    // GUI invite bootstrap times out.
+                    terminalFailure = true;
+                    failureReason = health.FailureReason;
+                    lastError =
+                        $"health_age_ms={health.HealthSummaryAgeMs}; ready_emitted={(health.ReadyEmitted ? 1 : 0)}; " +
+                        $"control_ready={(health.ControlReady ? 1 : 0)}; media_ready={(health.MediaReady ? 1 : 0)}; bulk_ready={(health.BulkReady ? 1 : 0)}; " +
+                        $"disconnect_signals={health.DisconnectSignalCount}; connect_failed={health.ConnectFailedCountSinceLast}; ws_errors={health.WsErrorCountSinceLast}; " +
+                        $"rpc_fallback={health.RpcFallbackAttemptCountSinceLast}; unready_failure_samples={health.UnreadyFailureSampleCount}; last_error={SanitizeLogToken(health.LastError)}";
+                }
+            }
+
+            return new BridgeBootstrapReadinessSnapshot(
+                Role: role,
+                Generation: generation,
+                RunId: identity.Identifier,
+                ReadyEmitted: readyEmitted,
+                ControlReady: controlReady,
+                MediaReady: mediaReady,
+                BulkReady: bulkReady,
+                LastReadyUtcMs: hostReadyLastReadyUtcMs,
+                DeadlineUtcMs: hostReadyDeadlineUtcMs,
+                TerminalFailure: terminalFailure,
+                FailureReason: failureReason,
+                LastError: lastError);
+        }
+    }
+
     private enum ControlOutboundLane
     {
         High = 0,
@@ -461,10 +926,20 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
         return new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
     }
 
-    private void ResetHostReady()
+    private void ResetHostReady(string role = "address_native_host", TimeSpan? deadline = null)
     {
         lock (hostReadyGate)
         {
+            hostReadyGeneration++;
+            hostReadyRole = string.IsNullOrWhiteSpace(role) ? "address_native_host" : role;
+            hostReadyFailureReason = "(none)";
+            hostReadyLastError = "(none)";
+            hostReadyLastReadyUtcMs = 0;
+            hostReadyDeadlineUtcMs = deadline.HasValue && deadline.Value > TimeSpan.Zero
+                ? DateTimeOffset.UtcNow.Add(deadline.Value).ToUnixTimeMilliseconds()
+                : 0;
+            hostReadyTerminalFailure = 0;
+            hostReadyEmitted = 0;
             hostReadyTcs = CreateHostReadyTcs();
         }
     }
@@ -473,6 +948,11 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
     {
         lock (hostReadyGate)
         {
+            hostReadyEmitted = 1;
+            hostReadyTerminalFailure = 0;
+            hostReadyFailureReason = "(none)";
+            hostReadyLastError = "(none)";
+            hostReadyLastReadyUtcMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
             hostReadyTcs.TrySetResult(true);
         }
     }
@@ -481,14 +961,24 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
     {
         lock (hostReadyGate)
         {
+            if (hostReadyEmitted == 0)
+            {
+                hostReadyTerminalFailure = 1;
+                hostReadyFailureReason = "cancelled_before_ready";
+                hostReadyLastError = "OperationCanceledException";
+            }
+
             hostReadyTcs.TrySetCanceled();
         }
     }
 
-    private void TryFailHostReady(Exception ex)
+    private void TryFailHostReady(Exception ex, string reason = "host_ready_failed")
     {
         lock (hostReadyGate)
         {
+            hostReadyTerminalFailure = 1;
+            hostReadyFailureReason = string.IsNullOrWhiteSpace(reason) ? "host_ready_failed" : reason;
+            hostReadyLastError = ex.GetType().Name + ": " + SanitizeLogToken(ex.Message);
             hostReadyTcs.TrySetException(ex);
         }
     }
@@ -501,6 +991,10 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
         }
 
         disposed = true;
+        RetireFallbackListenerPreparation();
+        RetireSessionPreparationExecution();
+        CancelRuntimeUnlockRetryPhysicalSendScope("dispose");
+        InvalidateInboundRuntimeUnlockDialLifecycleForSessionChange("dispose");
         TryCancelHostReady();
 
         // Avoid treating normal cleanup as a disconnection.
@@ -509,8 +1003,15 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
         if (client is RealNknClientAdapter realClient)
         {
             realClient.BridgeLifecycle -= OnBridgeLifecycle;
+            realClient.BridgeRecoveryEvaluationRequested -= OnBridgeRecoveryEvaluationRequested;
+        }
+        if (accelerationLane is not null)
+        {
+            accelerationLane.MessageReceived -= OnAccelerationMessageReceived;
+            accelerationLane.StateChanged -= OnAccelerationStateChanged;
         }
 
+        CompleteTunaFallbackProof("dispose");
         try
         {
             CleanupAsync()
@@ -529,6 +1030,7 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
         }
 
         DisposeEphemeralKeyState();
+        accelerationLane?.Dispose();
         client.Dispose();
         Log("Disposed");
     }
@@ -546,15 +1048,22 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
     {
         ThrowIfDisposed();
 
-        if (ct.IsCancellationRequested)
+        if (!TryParseScreenSharePayload(payload.Span, out var messageType, out var messageSessionId))
         {
-            await Task.FromCanceled(ct);
+            if (ct.IsCancellationRequested)
+            {
+                await Task.FromCanceled(ct);
+                return;
+            }
+
+            LogScreenShareRejected("send", "payload_invalid", sessionId: null);
             return;
         }
 
-        if (!TryParseScreenSharePayload(payload.Span, out var messageType, out var messageSessionId))
+        var isStopPayload = string.Equals(messageType, "stop", StringComparison.Ordinal);
+        if (ct.IsCancellationRequested && !isStopPayload)
         {
-            LogScreenShareRejected("send", "payload_invalid", sessionId: null);
+            await Task.FromCanceled(ct);
             return;
         }
 
@@ -564,7 +1073,6 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
             return;
         }
 
-        var isStopPayload = string.Equals(messageType, "stop", StringComparison.Ordinal);
         var destination = isStopPayload ? remoteEndpoint : remoteMediaEndpoint;
         if (string.IsNullOrWhiteSpace(destination))
         {
@@ -588,8 +1096,19 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
             LocalOperationalLog.Info(
                 "ScreenShareTransport",
                 $"event=screenshare_stop_send_requested; session_id={messageSessionId}; payload_len={payload.Length}");
-            await SendScreenShareStopEnvelopeAsync(destination, envelope, ct).ConfigureAwait(false);
             SendScreenShareStopEnvelopeRetriesFireAndForget(destination, envelope, messageSessionId);
+            try
+            {
+                await SendScreenShareStopEnvelopeAsync(destination, envelope, CancellationToken.None).ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                NknRuntimeDiagnostics.SetLastError(ex);
+                LocalOperationalLog.Warn(
+                    "ScreenShareTransport",
+                    $"event=screenshare_stop_initial_send_failed_retries_armed; session_id={messageSessionId ?? "(none)"}; msg_id={envelope.MessageId}; ex={ex.GetType().Name}");
+                Log($"SendScreenSharePayloadAsync initial stop envelope send failed; retries armed (msg_id={envelope.MessageId}, ex={ex.GetType().Name})");
+            }
         }
         else
         {
@@ -819,7 +1338,19 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
         try
         {
             NknRuntimeDiagnostics.SetOutboundLaneInFlight("screenshare", 1);
+            if (await TrySendAcceleratedEnvelopeAsync(MsgType.ScreenShareFrame, NknBridgeChannel.Media, payload, ct).ConfigureAwait(false))
+            {
+                Interlocked.Increment(ref screenShareMessagesSent);
+                Interlocked.Add(ref screenSharePayloadBytesSent, payload.Length);
+                NknRuntimeDiagnostics.IncrementScreenShareMessagesSent();
+                NknRuntimeDiagnostics.AddScreenSharePayloadBytesSent(payload.Length);
+                NknRuntimeDiagnostics.AddOutboundLaneSent("screenshare", payload.Length);
+                NknRuntimeDiagnostics.IncrementMediaPlaneFramesSent();
+                return;
+            }
+
             await client.SendMediaAsync(destination, payload, ct).ConfigureAwait(false);
+            RecordTunaFallbackNknFrameSent(MsgType.ScreenShareFrame, NknBridgeChannel.Media, payload.Length);
             Interlocked.Increment(ref screenShareMessagesSent);
             Interlocked.Add(ref screenSharePayloadBytesSent, payload.Length);
             NknRuntimeDiagnostics.IncrementScreenShareMessagesSent();
@@ -998,7 +1529,19 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
                 }
 
                 NknRuntimeDiagnostics.SetOutboundLaneInFlight("screenshare", 1);
+                if (await TrySendAcceleratedEnvelopeAsync(MsgType.ScreenShareFrame, NknBridgeChannel.Media, next.Payload, CancellationToken.None).ConfigureAwait(false))
+                {
+                    Interlocked.Increment(ref screenShareMessagesSent);
+                    Interlocked.Add(ref screenSharePayloadBytesSent, next.Payload.Length);
+                    NknRuntimeDiagnostics.IncrementScreenShareMessagesSent();
+                    NknRuntimeDiagnostics.AddScreenSharePayloadBytesSent(next.Payload.Length);
+                    NknRuntimeDiagnostics.AddOutboundLaneSent("screenshare", next.Payload.Length);
+                    next.Completion.TrySetResult();
+                    continue;
+                }
+
                 await client.SendMediaAsync(next.Destination, next.Payload, CancellationToken.None).ConfigureAwait(false);
+                RecordTunaFallbackNknFrameSent(MsgType.ScreenShareFrame, NknBridgeChannel.Media, next.Payload.Length);
                 Interlocked.Increment(ref screenShareMessagesSent);
                 Interlocked.Add(ref screenSharePayloadBytesSent, next.Payload.Length);
                 NknRuntimeDiagnostics.IncrementScreenShareMessagesSent();
@@ -1774,8 +2317,23 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
     private async Task SendScreenShareStopEnvelopeAsync(string destination, Envelope envelope, CancellationToken ct)
     {
         FlushLowPriorityControlOutboundQueue("screenshare_stop");
-        var payload = EnvelopeCodec.Serialize(envelope);
-        await SendScreenShareTransportPayloadAsync(destination, payload, waitForOutboundGate: true, ct).ConfigureAwait(false);
+        await SendLifecycleEnvelopeAsync(
+                new LifecycleDeliveryOptions(
+                    MessageType: MsgType.ScreenShareStop,
+                    RequestId: null,
+                    ControlDestination: destination,
+                    BulkDestination: remoteBulkEndpoint,
+                    LogCategory: "ScreenShareTransport",
+                    LogEvent: "screenshare_stop_redundant_sent",
+                    AllowBulkDuplicate: true,
+                    IgnoreCallerCancellation: true,
+                    AcceptancePolicy: LifecycleDeliveryAcceptancePolicy.AnyAccepted,
+                    UseControlAckRetry: false,
+                    PeerCopyAttempts: 1,
+                    ThrowOnFailure: true),
+                envelope,
+                ct)
+            .ConfigureAwait(false);
     }
 
     private void SendScreenShareStopEnvelopeRetriesFireAndForget(string destination, Envelope envelope, string? sessionId)
@@ -1823,6 +2381,476 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
         });
     }
 
+    private async Task<LifecycleDeliveryResult> SendLifecycleEnvelopeAsync(
+        LifecycleDeliveryOptions options,
+        Envelope envelope,
+        CancellationToken ct,
+        PendingAckWait? registeredAck = null)
+        => await SendLifecycleEnvelopeAsync(options, new LifecycleEnvelopeSet(envelope, null), ct, registeredAck).ConfigureAwait(false);
+
+    private async Task<LifecycleDeliveryResult> SendLifecycleEnvelopeAsync(
+        LifecycleDeliveryOptions options,
+        LifecycleEnvelopeSet envelopes,
+        CancellationToken ct,
+        PendingAckWait? registeredAck = null)
+    {
+        var callerCt = options.IgnoreCallerCancellation
+            ? CancellationToken.None
+            : ct;
+        using var drainCancellation = options.DrainChildrenOnCompletion
+            ? CancellationTokenSource.CreateLinkedTokenSource(callerCt)
+            : null;
+        var effectiveCt = drainCancellation?.Token ?? callerCt;
+        var controlEnvelope = envelopes.ControlEnvelope;
+        var bulkEnvelope = envelopes.BulkEnvelope ?? envelopes.ControlEnvelope;
+        var controlQueueTask = SendLifecycleControlQueueCopyAsync(options, controlEnvelope, effectiveCt);
+        Task<LifecycleCopySendResult>? controlAckTask = null;
+        if (options.UseControlAckRetry)
+        {
+            controlAckTask = SendLifecycleControlAckCopyAsync(options, controlEnvelope, effectiveCt, registeredAck);
+        }
+
+        var controlCopyTask = SendLifecyclePeerCopyAttemptsAsync(
+            options.ControlDestination,
+            controlEnvelope,
+            useBulkLane: false,
+            lanePrefix: "control_copy",
+            options,
+            effectiveCt);
+
+        Task<LifecycleCopySendResult>? bulkCopyTask = null;
+        if (options.AllowBulkDuplicate && !string.IsNullOrWhiteSpace(options.BulkDestination))
+        {
+            bulkCopyTask = SendLifecyclePeerCopyAttemptsAsync(
+                options.BulkDestination,
+                bulkEnvelope,
+                useBulkLane: true,
+                lanePrefix: "bulk_copy",
+                options,
+                effectiveCt);
+        }
+
+        if (options.PhysicalCompletionObserver is { } observePhysicalCompletion)
+        {
+            var children = new List<Task> { controlQueueTask, controlCopyTask };
+            if (controlAckTask is not null) { children.Add(controlAckTask); }
+            if (bulkCopyTask is not null) { children.Add(bulkCopyTask); }
+            observePhysicalCompletion(Task.WhenAll(children));
+        }
+
+        try
+        {
+        LifecycleCopySendResult controlQueueResult;
+        LifecycleCopySendResult controlAckResult;
+        LifecycleCopySendResult controlCopyResult;
+        LifecycleCopySendResult bulkCopyResult;
+        if (options.AcceptancePolicy == LifecycleDeliveryAcceptancePolicy.PeerVisibleRequired)
+        {
+            controlCopyResult = await controlCopyTask.ConfigureAwait(false);
+            bulkCopyResult = bulkCopyTask is null
+                ? new LifecycleCopySendResult("bulk_copy", false, null)
+                : await bulkCopyTask.ConfigureAwait(false);
+
+            controlAckResult = controlAckTask is null
+                ? new LifecycleCopySendResult("control_ack", false, null)
+                : await WaitForLifecycleBoundedCopyResultAsync(
+                        controlAckTask,
+                        options,
+                        "control_ack",
+                        effectiveCt)
+                    .ConfigureAwait(false);
+
+            controlQueueResult = await WaitForLifecycleBoundedCopyResultAsync(
+                    controlQueueTask,
+                    options,
+                    "control_queue",
+                    effectiveCt)
+                .ConfigureAwait(false);
+        }
+        else
+        {
+            controlQueueResult = await controlQueueTask.ConfigureAwait(false);
+            controlAckResult = controlAckTask is null
+                ? new LifecycleCopySendResult("control_ack", false, null)
+                : await controlAckTask.ConfigureAwait(false);
+            controlCopyResult = await controlCopyTask.ConfigureAwait(false);
+            bulkCopyResult = bulkCopyTask is null
+                ? new LifecycleCopySendResult("bulk_copy", false, null)
+                : await bulkCopyTask.ConfigureAwait(false);
+        }
+
+        var peerVisibleAny = controlAckResult.Succeeded || controlCopyResult.Succeeded || bulkCopyResult.Succeeded;
+        var acceptedAny = options.AcceptancePolicy == LifecycleDeliveryAcceptancePolicy.PeerVisibleRequired
+            ? peerVisibleAny
+            : controlQueueResult.Succeeded || peerVisibleAny;
+        var result = new LifecycleDeliveryResult(
+            options.MessageType,
+            options.RequestId,
+            controlEnvelope.MessageId,
+            controlQueueResult.Succeeded,
+            controlAckResult.Succeeded,
+            controlCopyResult.Succeeded,
+            bulkCopyResult.Succeeded,
+            peerVisibleAny,
+            acceptedAny,
+            FormatLifecycleErrorName(controlQueueResult.Error),
+            FormatLifecycleErrorName(controlAckResult.Error),
+            FormatLifecycleErrorName(controlCopyResult.Error),
+            FormatLifecycleErrorName(bulkCopyResult.Error),
+            controlCopyResult.Lane,
+            bulkCopyResult.Lane);
+
+        LocalOperationalLog.Info(
+            options.LogCategory,
+            $"event={options.LogEvent}; transport=nkn; message_type={MapControlPlaneLifecycleMessageType(options.MessageType)}; request_id={SanitizeLogToken(options.RequestId ?? "(none)")}; msg_id={controlEnvelope.MessageId}; control_queue={(result.ControlQueue ? 1 : 0)}; control_ack={(result.ControlAck ? 1 : 0)}; control_copy={(result.ControlCopy ? 1 : 0)}; bulk_copy={(result.BulkCopy ? 1 : 0)}; peer_copy_any={(result.PeerVisibleAny ? 1 : 0)}; peer_visible_any={(result.PeerVisibleAny ? 1 : 0)}; accepted_any={(result.AcceptedAny ? 1 : 0)}; control_queue_error={result.ControlQueueErrorName}; control_ack_error={result.ControlAckErrorName}; control_copy_error={result.ControlCopyErrorName}; bulk_copy_error={result.BulkCopyErrorName}");
+
+        if (!result.AcceptedAny && options.ThrowOnFailure)
+        {
+            throw controlQueueResult.Error ??
+                  controlAckResult.Error ??
+                  controlCopyResult.Error ??
+                  bulkCopyResult.Error ??
+                  new InvalidOperationException($"{MapControlPlaneLifecycleMessageType(options.MessageType)} send failed on all lifecycle lanes.");
+        }
+
+        return result;
+        }
+        finally
+        {
+            if (drainCancellation is not null)
+            {
+                drainCancellation.Cancel();
+                var children = new List<Task>
+                {
+                    controlQueueTask,
+                    controlCopyTask,
+                };
+                if (controlAckTask is not null)
+                {
+                    children.Add(controlAckTask);
+                }
+                if (bulkCopyTask is not null)
+                {
+                    children.Add(bulkCopyTask);
+                }
+
+                try
+                {
+                    await Task.WhenAll(children).ConfigureAwait(false);
+                }
+                catch
+                {
+                    foreach (var child in children)
+                    {
+                        _ = child.Exception;
+                    }
+                }
+            }
+        }
+    }
+
+    private async Task<LifecycleCopySendResult> WaitForLifecycleBoundedCopyResultAsync(
+        Task<LifecycleCopySendResult> copyTask,
+        LifecycleDeliveryOptions options,
+        string lane,
+        CancellationToken ct)
+    {
+        if (copyTask.IsCompleted)
+        {
+            return await copyTask.ConfigureAwait(false);
+        }
+
+        var copyTimeout = ResolveLifecycleCopyTimeout(options);
+        Task delayTask;
+        try
+        {
+            delayTask = Task.Delay(copyTimeout, ct);
+            if (await Task.WhenAny(copyTask, delayTask).ConfigureAwait(false) == copyTask)
+            {
+                return await copyTask.ConfigureAwait(false);
+            }
+        }
+        catch (OperationCanceledException ex)
+        {
+            return new LifecycleCopySendResult(lane, false, ex);
+        }
+
+        LocalOperationalLog.Warn(
+            lane == "control_queue" ? "SessionSecurity" : options.LogCategory,
+            $"event={options.LogEvent}_{lane}_bounded_wait_expired; transport=nkn; message_type={MapControlPlaneLifecycleMessageType(options.MessageType)}; timeout_ms={(int)copyTimeout.TotalMilliseconds}");
+        return new LifecycleCopySendResult(lane, false, new TimeoutException());
+    }
+
+    private async Task<LifecycleCopySendResult> SendLifecycleControlQueueCopyAsync(
+        LifecycleDeliveryOptions options,
+        Envelope envelope,
+        CancellationToken ct)
+    {
+        var succeeded = false;
+        try
+        {
+            if (options.OfflinePublicationDelay is null &&
+                TryCreateLifecyclePreSendValidationFailure(options, "control_queue") is { } validationFailure)
+                return validationFailure;
+            using var selected = options.OfflinePublicationDelay is { } delay
+                ? CancellationTokenSource.CreateLinkedTokenSource(ct, delay.Lifetime) : null;
+            var copyCt = selected?.Token ?? ct;
+            if (options.OfflinePublicationDelay is { } pending)
+            {
+                await pending.BeforeCopyAsync("control_queue", null, copyCt).ConfigureAwait(false);
+                // Run the existing validator once, immediately before the delayed dispatch.
+                if (TryCreateLifecyclePreSendValidationFailure(options, "control_queue") is { } delayedFailure)
+                    return delayedFailure;
+            }
+            var queued = await QueueControlEnvelopeAsync(options.ControlDestination, envelope, ControlOutboundLane.High, copyCt).ConfigureAwait(false);
+            succeeded = queued;
+            return new LifecycleCopySendResult("control_queue", queued, null);
+        }
+        catch (Exception ex)
+        {
+            LocalOperationalLog.Warn(
+                "SessionSecurity",
+                $"event=control_plane_lifecycle_control_queue_failed; transport=nkn; message_type={MapControlPlaneLifecycleMessageType(options.MessageType)}; error={ex.GetType().Name}");
+            return new LifecycleCopySendResult("control_queue", false, ex);
+        }
+        finally { options.OfflinePublicationDelay?.CopyFinished("control_queue", succeeded); }
+    }
+
+    private async Task<LifecycleCopySendResult> SendLifecycleControlAckCopyAsync(
+        LifecycleDeliveryOptions options,
+        Envelope envelope,
+        CancellationToken ct,
+        PendingAckWait? registeredAck)
+    {
+        if (TryCreateLifecyclePreSendValidationFailure(options, "control_ack") is { } validationFailure)
+        {
+            return validationFailure;
+        }
+
+        try
+        {
+            await SendEnvelopeWithAckRetryAsync(
+                options.ControlDestination, envelope, ct,
+                registeredAck: registeredAck).ConfigureAwait(false);
+            return new LifecycleCopySendResult("control_ack", true, null);
+        }
+        catch (Exception ex)
+        {
+            LocalOperationalLog.Warn(
+                options.LogCategory,
+                $"event={options.LogEvent}_control_ack_failed; transport=nkn; message_type={MapControlPlaneLifecycleMessageType(options.MessageType)}; error={ex.GetType().Name}");
+            return new LifecycleCopySendResult("control_ack", false, ex);
+        }
+    }
+
+    private async Task<LifecycleCopySendResult> SendLifecyclePeerCopyAttemptsAsync(
+        string destination,
+        Envelope envelope,
+        bool useBulkLane,
+        string lanePrefix,
+        LifecycleDeliveryOptions options,
+        CancellationToken ct)
+    {
+        var attempts = Math.Max(1, options.PeerCopyAttempts);
+        LifecycleCopySendResult lastResult = new(lanePrefix, false, null);
+        for (var attempt = 1; attempt <= attempts; attempt++)
+        {
+            var lane = attempt == 1 ? lanePrefix : $"{lanePrefix}_retry_{attempt - 1}";
+            lastResult = await SendLifecycleCopyAsync(
+                    destination,
+                    envelope,
+                    useBulkLane,
+                    lane,
+                    options,
+                    ct)
+                .ConfigureAwait(false);
+            if (lastResult.Succeeded)
+            {
+                return lastResult;
+            }
+        }
+
+        return lastResult;
+    }
+
+    private async Task<LifecycleCopySendResult> SendLifecycleCopyAsync(
+        string destination,
+        Envelope envelope,
+        bool useBulkLane,
+        string lane,
+        LifecycleDeliveryOptions options,
+        CancellationToken ct)
+    {
+        var succeeded = false;
+        try
+        {
+            if (options.OfflinePublicationDelay is null &&
+                TryCreateLifecyclePreSendValidationFailure(options, lane) is { } validationFailure)
+                return validationFailure;
+            var copyTimeout = ResolveLifecycleCopyTimeout(options);
+            using var copyCts = options.OfflinePublicationDelay is { } delay
+                ? CancellationTokenSource.CreateLinkedTokenSource(ct, delay.Lifetime)
+                : CancellationTokenSource.CreateLinkedTokenSource(ct);
+            var timeoutStarted = options.OfflinePublicationDelay is null ? 0 : Stopwatch.GetTimestamp();
+            copyCts.CancelAfter(copyTimeout);
+            if (options.OfflinePublicationDelay is { } pending)
+            {
+                await pending.BeforeCopyAsync(lane, timeoutStarted, copyCts.Token).ConfigureAwait(false);
+                if (TryCreateLifecyclePreSendValidationFailure(options, lane) is { } delayedFailure)
+                    return delayedFailure;
+            }
+
+            if (useBulkLane)
+            {
+                await SendBulkEnvelopeAsync(destination, envelope, copyCts.Token).ConfigureAwait(false);
+            }
+            else
+            {
+                await SendEnvelopeAsync(destination, envelope, copyCts.Token).ConfigureAwait(false);
+            }
+
+            succeeded = true;
+            return new LifecycleCopySendResult(lane, true, null);
+        }
+        catch (Exception ex)
+        {
+            LocalOperationalLog.Warn(
+                options.LogCategory,
+                $"event={options.LogEvent}_{lane}_failed; transport=nkn; message_type={MapControlPlaneLifecycleMessageType(options.MessageType)}; error={ex.GetType().Name}");
+            return new LifecycleCopySendResult(lane, false, ex);
+        }
+        finally { options.OfflinePublicationDelay?.CopyFinished(lane, succeeded); }
+    }
+
+    private LifecycleCopySendResult? TryCreateLifecyclePreSendValidationFailure(
+        LifecycleDeliveryOptions options,
+        string lane)
+    {
+        if (options.PreSendValidator is null)
+        {
+            return null;
+        }
+
+        try
+        {
+            if (options.PreSendValidator())
+            {
+                return null;
+            }
+        }
+        catch (Exception ex)
+        {
+            LocalOperationalLog.Warn(
+                options.LogCategory,
+                $"event={options.LogEvent}_{lane}_pre_send_validation_exception; transport=nkn; message_type={MapControlPlaneLifecycleMessageType(options.MessageType)}; error={ex.GetType().Name}");
+            return new LifecycleCopySendResult(lane, false, ex);
+        }
+
+        LocalOperationalLog.Warn(
+            options.LogCategory,
+            $"event={options.LogEvent}_{lane}_pre_send_validation_failed; transport=nkn; message_type={MapControlPlaneLifecycleMessageType(options.MessageType)}");
+        return new LifecycleCopySendResult(lane, false, new LifecyclePreSendValidationException());
+    }
+
+    private static TimeSpan ResolveLifecycleCopyTimeout(LifecycleDeliveryOptions options)
+        => options.CopyTimeout is { } timeout && timeout > TimeSpan.Zero
+            ? timeout
+            : ControlPlaneLifecycleCopyTimeout;
+
+    private static string FormatLifecycleErrorName(Exception? error)
+        => error?.GetType().Name ?? "(none)";
+
+    private static string MapControlPlaneLifecycleMessageType(MsgType messageType)
+        => messageType switch
+        {
+            MsgType.ControlRequest => "control_request",
+            MsgType.ControlResponse => "control_response",
+            MsgType.ControlStart => "control_start",
+            MsgType.ControlStop => "control_stop",
+            MsgType.ScreenShareStop => "screenshare_stop",
+            MsgType.SessionEnd => "session_end",
+            MsgType.FileTransferCancel => "file_transfer_cancel",
+            MsgType.TransportAccelerationOffer => "transport_acceleration_offer",
+            MsgType.TransportAccelerationAnswer => "transport_acceleration_answer",
+            MsgType.TransportAccelerationAnswerAck => "transport_acceleration_answer_ack",
+            MsgType.SessionPreparationOffer => "session_preparation_offer",
+            MsgType.SessionPreparationAnswer => "session_preparation_answer",
+            MsgType.SessionPreparationAnswerAck => "session_preparation_answer_ack",
+            _ => messageType.ToString(),
+        };
+
+    private LifecycleDeliveryOptions CreateRemoteControlLifecycleDeliveryOptions(
+        MsgType messageType,
+        string? requestId,
+        string controlDestination)
+        => new(
+            MessageType: messageType,
+            RequestId: requestId,
+            ControlDestination: controlDestination,
+            BulkDestination: remoteBulkEndpoint,
+            LogCategory: "RemoteControl",
+            LogEvent: "remote_control_lifecycle_redundant_sent",
+            AllowBulkDuplicate: true,
+            IgnoreCallerCancellation: false,
+            AcceptancePolicy: LifecycleDeliveryAcceptancePolicy.AnyAccepted,
+            UseControlAckRetry: false,
+            PeerCopyAttempts: 1,
+            ThrowOnFailure: true);
+
+    private enum LifecycleDeliveryAcceptancePolicy
+    {
+        AnyAccepted,
+        PeerVisibleRequired,
+    }
+
+    private readonly record struct LifecycleDeliveryOptions(
+        MsgType MessageType,
+        string? RequestId,
+        string ControlDestination,
+        string? BulkDestination,
+        string LogCategory,
+        string LogEvent,
+        bool AllowBulkDuplicate,
+        bool IgnoreCallerCancellation,
+        LifecycleDeliveryAcceptancePolicy AcceptancePolicy,
+        bool UseControlAckRetry,
+        int PeerCopyAttempts,
+        bool ThrowOnFailure,
+        TimeSpan? CopyTimeout = null,
+        Func<bool>? PreSendValidator = null,
+        bool DrainChildrenOnCompletion = false,
+        IOfflinePublicationDelay? OfflinePublicationDelay = null,
+        Action<Task>? PhysicalCompletionObserver = null);
+
+    private sealed class LifecyclePreSendValidationException : Exception
+    {
+        public LifecyclePreSendValidationException()
+            : base("pre_send_validation_failed")
+        {
+        }
+    }
+
+    private readonly record struct LifecycleEnvelopeSet(
+        Envelope ControlEnvelope,
+        Envelope? BulkEnvelope);
+
+    private readonly record struct LifecycleDeliveryResult(
+        MsgType MessageType,
+        string? RequestId,
+        string MessageId,
+        bool ControlQueue,
+        bool ControlAck,
+        bool ControlCopy,
+        bool BulkCopy,
+        bool PeerVisibleAny,
+        bool AcceptedAny,
+        string ControlQueueErrorName,
+        string ControlAckErrorName,
+        string ControlCopyErrorName,
+        string BulkCopyErrorName,
+        string ControlCopyLane,
+        string BulkCopyLane);
+
 
     public async Task SendControlRequestAsync(ControlRequestMessageV1 message, CancellationToken ct)
     {
@@ -1855,7 +2883,11 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
             message.RequestId,
             RemoteControlPayloadCodec.Serialize(message));
         var envelope = CreateEnvelope(envelopeCode, MsgType.ControlRequest, payload, replyTo: null);
-        await QueueControlEnvelopeAsync(remoteEndpoint, envelope, ControlOutboundLane.High, ct).ConfigureAwait(false);
+        await SendLifecycleEnvelopeAsync(
+                CreateRemoteControlLifecycleDeliveryOptions(MsgType.ControlRequest, message.RequestId, remoteEndpoint),
+                envelope,
+                ct)
+            .ConfigureAwait(false);
         Log($"SendControlRequestAsync sent ControlRequest (msg_id={envelope.MessageId}, request_id_len={message.RequestId.Length})");
     }
 
@@ -1890,7 +2922,11 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
             message.RequestId,
             RemoteControlPayloadCodec.Serialize(message));
         var envelope = CreateEnvelope(envelopeCode, MsgType.ControlResponse, payload, replyTo: null);
-        await QueueControlEnvelopeAsync(remoteEndpoint, envelope, ControlOutboundLane.High, ct).ConfigureAwait(false);
+        await SendLifecycleEnvelopeAsync(
+                CreateRemoteControlLifecycleDeliveryOptions(MsgType.ControlResponse, message.RequestId, remoteEndpoint),
+                envelope,
+                ct)
+            .ConfigureAwait(false);
         Log($"SendControlResponseAsync sent ControlResponse (msg_id={envelope.MessageId}, request_id_len={message.RequestId.Length}, decision={message.Decision})");
     }
 
@@ -1925,7 +2961,11 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
             message.RequestId,
             RemoteControlPayloadCodec.Serialize(message));
         var envelope = CreateEnvelope(envelopeCode, MsgType.ControlStart, payload, replyTo: null);
-        await QueueControlEnvelopeAsync(remoteEndpoint, envelope, ControlOutboundLane.High, ct).ConfigureAwait(false);
+        await SendLifecycleEnvelopeAsync(
+                CreateRemoteControlLifecycleDeliveryOptions(MsgType.ControlStart, message.RequestId, remoteEndpoint),
+                envelope,
+                ct)
+            .ConfigureAwait(false);
         Log($"SendControlStartAsync sent ControlStart (msg_id={envelope.MessageId}, request_id_len={message.RequestId.Length})");
     }
 
@@ -1961,7 +3001,11 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
             RemoteControlPayloadCodec.Serialize(message));
         var envelope = CreateEnvelope(envelopeCode, MsgType.ControlStop, payload, replyTo: null);
         FlushLowPriorityControlOutboundQueue("control_stop");
-        await QueueControlEnvelopeAsync(remoteEndpoint, envelope, ControlOutboundLane.High, ct).ConfigureAwait(false);
+        await SendLifecycleEnvelopeAsync(
+                CreateRemoteControlLifecycleDeliveryOptions(MsgType.ControlStop, message.RequestId, remoteEndpoint),
+                envelope,
+                ct)
+            .ConfigureAwait(false);
         Log($"SendControlStopAsync sent ControlStop (msg_id={envelope.MessageId}, request_id_len={message.RequestId.Length}, has_reason={message.Reason is not null})");
     }
 
@@ -2134,14 +3178,16 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
         ControlOutboundLane lane,
         CancellationToken ct,
         bool isLowPriorityMouseMove = false,
-        bool isLowPriorityScreenShareCursorState = false)
+        bool isLowPriorityScreenShareCursorState = false,
+        IdleSessionOfferBinding? idleAnswer = null)
         => controlOutboundQueue.QueueEnvelopeAsync(
             destination,
             envelope,
             lane,
             ct,
             isLowPriorityMouseMove,
-            isLowPriorityScreenShareCursorState);
+            isLowPriorityScreenShareCursorState,
+            idleAnswer);
 
     private void FlushLowPriorityControlOutboundQueue(string reason)
         => controlOutboundQueue.FlushLowPriority(reason);
@@ -2168,20 +3214,434 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
         if (client is RealNknClientAdapter realClient)
         {
             realClient.BridgeLifecycle += OnBridgeLifecycle;
+            realClient.BridgeRecoveryEvaluationRequested += OnBridgeRecoveryEvaluationRequested;
+        }
+        if (accelerationLane is not null)
+        {
+            accelerationLane.MessageReceived += OnAccelerationMessageReceived;
+            accelerationLane.StateChanged += OnAccelerationStateChanged;
         }
     }
 
     private void OnBridgeLifecycle(object? sender, BridgeLifecycleEvent e)
+        => OnBridgeLifecycleCore(e, compatibilityAlreadyPublished: false);
+
+    private void OnBridgeLifecycleCore(
+        BridgeLifecycleEvent e,
+        bool compatibilityAlreadyPublished)
     {
+        void PublishCompatibilityLifecycle(BridgeLifecycleEvent lifecycle)
+        {
+            if (!compatibilityAlreadyPublished)
+            {
+                BridgeLifecycle?.Invoke(this, lifecycle);
+            }
+        }
+
+        if (e.Kind == BridgeLifecycleEventKind.QueueCleared)
+        {
+            HandleRuntimeUnlockOfferQueueCleared(e);
+        }
+
+        if ((e.Kind is
+                BridgeLifecycleEventKind.ReceiveStallRecoveryStarted or
+                BridgeLifecycleEventKind.ReceiveStallRecoveryCompleted or
+                BridgeLifecycleEventKind.ReceiveStallRecoveryReceiveResumed or
+                BridgeLifecycleEventKind.ReceiveStallRecoveryExhausted) &&
+            e.RecoveryExecutionCommand is null)
+        {
+            LocalOperationalLog.Info(
+                "NKN.Tuna",
+                $"event=filetransfer_bridge_recovery_lifecycle_diagnostic_only; lifecycle={e.Kind.ToString().ToLowerInvariant()}; reason=bridge_recovery_execution_command_missing");
+            PublishCompatibilityLifecycle(e);
+            return;
+        }
+
+        if (e.RecoveryExecutionCommand is { } executionCommand &&
+            (e.Kind is
+                BridgeLifecycleEventKind.ReceiveStallRecoveryStarted or
+                BridgeLifecycleEventKind.ReceiveStallRecoveryCompleted or
+                BridgeLifecycleEventKind.ReceiveStallRecoveryReceiveResumed or
+                BridgeLifecycleEventKind.ReceiveStallRecoveryExhausted))
+        {
+            var current =
+                IsFileTransferBridgeRecoveryLifecycleCurrent(
+                    e.Kind,
+                    executionCommand);
+            LocalOperationalLog.Info(
+                "NKN.Tuna",
+                $"event=filetransfer_bridge_recovery_lifecycle_diagnostic_only; lifecycle={e.Kind.ToString().ToLowerInvariant()}; reason={(current ? "coordinator_operation_receipt_or_proof_required" : "bridge_recovery_execution_command_not_current")}; bridge_decision_generation={executionCommand.Decision.BridgeDecisionGeneration}");
+            if (current &&
+                e.Kind ==
+                    BridgeLifecycleEventKind
+                        .ReceiveStallRecoveryReceiveResumed &&
+                e.Pid is > 0 &&
+                e.SubmissionEpoch > 0 &&
+                e.ProcessEpoch > 0 &&
+                e.ProcessSpawnTicks > 0 &&
+                !string.IsNullOrWhiteSpace(e.PeerReachabilityIdentity))
+            {
+                var observedUtcMs =
+                    DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+                var heartbeatIdentity =
+                    $"bridge_peer_receive:{e.PeerReachabilityIdentity}:{e.ProcessEpoch}:{e.SubmissionEpoch}:{e.TotalMessagesReceivedSinceLast}:{e.ControlMessagesReceivedSinceLast}:{e.BulkMessagesReceivedSinceLast}";
+                var receiveResumedIdentity =
+                    $"receive_resumed:{executionCommand.Decision.BridgeDecisionGeneration}:{e.ProcessEpoch}:{e.SubmissionEpoch}:{observedUtcMs}";
+                var observation =
+                    new FileTransferReceiveRecoveryPeerReachabilityObservation(
+                        executionCommand,
+                        e.SubmissionEpoch,
+                        e.ProcessEpoch,
+                        e.Pid.Value,
+                        e.ProcessSpawnTicks,
+                        heartbeatIdentity,
+                        receiveResumedIdentity,
+                        observedUtcMs,
+                        "authenticated_expected_source_receive_resumed");
+                LocalOperationalLog.Info(
+                    "NKN.Tuna",
+                    $"event=filetransfer_receive_recovery_peer_reachability_observed; session_id={SanitizeLogToken(executionCommand.Decision.RuntimeOwner.SessionId)}; transfer_id={SanitizeLogToken(executionCommand.Decision.RuntimeOwner.TransferId)}; direction={executionCommand.Decision.RuntimeOwner.Direction.ToString().ToLowerInvariant()}; bridge_decision_generation={executionCommand.Decision.BridgeDecisionGeneration}; recovery_liveness_lease_generation={executionCommand.RecoveryLivenessLease?.LeaseGeneration ?? 0}; submission_epoch={e.SubmissionEpoch}; process_epoch={e.ProcessEpoch}; process_id={e.Pid.Value}; process_spawn_ticks={e.ProcessSpawnTicks}; heartbeat_identity={SanitizeLogToken(heartbeatIdentity)}; receive_resumed_identity={SanitizeLogToken(receiveResumedIdentity)}; observed_utc_ms={observedUtcMs}; decision_reason=authenticated_expected_source_receive_resumed");
+                FileTransferReceiveRecoveryPeerReachabilityObserved?.Invoke(
+                    this,
+                    new FileTransferReceiveRecoveryPeerReachabilityObservedEventArgs(
+                        observation));
+            }
+            if (current && e.Kind == BridgeLifecycleEventKind.ReceiveStallRecoveryReceiveResumed)
+            {
+                ObserveRuntimeUnlockRetryPostFallbackReceiveResumed(executionCommand);
+            }
+            PublishCompatibilityLifecycle(e);
+            return;
+        }
+
+        if (e.Kind == BridgeLifecycleEventKind.ReceiveStallRecoveryStarted)
+        {
+            Volatile.Write(ref bridgeReceiveStallRecoveryActive, 1);
+            var recoveryReason = string.IsNullOrWhiteSpace(e.ExitReasonText) ? "receive_stall_recovery" : e.ExitReasonText;
+            var sessionId = currentSessionSecurityState.SessionId?.Value;
+            _ = InterruptRuntimeUnlockOfferForBridgeRecovery(
+                "offer_interrupted_by_bridge_recovery",
+                recoveryReason,
+                "receive_stall_recovery_started");
+            var sessionLivenessReceiveRecovery = IsSessionLivenessReceiveRecoveryReason(recoveryReason);
+            if (ShouldSuppressFileTransferTransportRecoveredForTunaActivationPause(
+                    "receive_stall_recovery_started",
+                    out _))
+            {
+                return;
+            }
+
+            if (sessionLivenessReceiveRecovery)
+            {
+                LocalOperationalLog.Info(
+                    "NKN.Tuna",
+                    $"event=filetransfer_session_liveness_receive_recovery_availability_preserved; session_id={SanitizeLogToken(sessionId ?? "none")}; transfer_id=(unknown); direction=unknown; reason={SanitizeLogToken(recoveryReason)}; trigger=receive_stall_recovery_started");
+            }
+            else if (ShouldUseFileTransferV6EpochForRegularNknRecovery(sessionId))
+            {
+                var handoffKind = FileTransferTransportHandoffKind.RegularNknRecovery;
+                var markProofPending = true;
+                if (TryGetUnresolvedFileTransferV6TransportEpochForCurrentSession(out var unresolvedEpoch) &&
+                    unresolvedEpoch.TargetTransport == FileTransferTransportKind.RegularNkn &&
+                    unresolvedEpoch.HandoffKind == FileTransferTransportHandoffKind.TunaToNormalFallback)
+                {
+                    handoffKind = FileTransferTransportHandoffKind.TunaToNormalFallback;
+                    markProofPending = false;
+                    LocalOperationalLog.Info(
+                        "NKN.Tuna",
+                        $"event=filetransfer_receive_stall_recovery_preserved_tuna_fallback_epoch; session_id={SanitizeLogToken(unresolvedEpoch.SessionId)}; transfer_id={SanitizeLogToken(unresolvedEpoch.TransferId)}; direction={unresolvedEpoch.Direction.ToString().ToLowerInvariant()}; transport_epoch={unresolvedEpoch.TransportEpoch}; reason={SanitizeLogToken(recoveryReason)}");
+                }
+
+                if (markProofPending)
+                {
+                    MarkFileTransferFallbackNknProofPending(
+                        reason: recoveryReason,
+                        sessionId: sessionId,
+                        lanes: NknAccelerationLaneKind.File);
+                }
+
+                var deferResumeUntilRecoveryCompletes = ShouldDeferPostTunaFallbackReceiveStallRecoveryStart(
+                    recoveryReason,
+                    sessionId,
+                    handoffKind);
+                if (deferResumeUntilRecoveryCompletes)
+                {
+                    LocalOperationalLog.Info(
+                        "NKN.Tuna",
+                        $"event=filetransfer_post_tuna_fallback_receive_recovery_start_handoff_deferred; session_id={SanitizeLogToken(sessionId ?? "none")}; reason={SanitizeLogToken(recoveryReason)}; handoff_kind={handoffKind.ToString().ToLowerInvariant()}; trigger=receive_stall_recovery_started");
+                }
+
+                SetFileTransferDataSessionsAvailability(
+                    isAvailable: false,
+                    reason: "receive_stall_recovery",
+                    requiresResumeRequest: !deferResumeUntilRecoveryCompletes,
+                    handoffKind: deferResumeUntilRecoveryCompletes ? FileTransferTransportHandoffKind.None : handoffKind,
+                    targetTransport: FileTransferTransportKind.RegularNkn);
+            }
+            else
+            {
+                LocalOperationalLog.Info(
+                    "NKN.Tuna",
+                    $"event=filetransfer_regular_nkn_receive_recovery_no_epoch; session_id={SanitizeLogToken(sessionId ?? "none")}; reason={SanitizeLogToken(recoveryReason)}; trigger=bridge_receive_stall_recovery_started");
+                SetFileTransferDataSessionsAvailability(
+                    isAvailable: false,
+                    reason: "receive_stall_recovery",
+                    requiresResumeRequest: false,
+                    handoffKind: FileTransferTransportHandoffKind.None,
+                    targetTransport: FileTransferTransportKind.RegularNkn);
+            }
+        }
+
         if (e.Kind == BridgeLifecycleEventKind.Ready)
+        {
+            if (ShouldDeferBridgeProcessReadyUntilReceiveStallRecoveryCompletes(e))
+            {
+                var sessionId = SanitizeLogToken(currentSessionSecurityState.SessionId?.Value ?? "none");
+                LocalOperationalLog.Info(
+                    "NKN.Tuna",
+                    $"event=filetransfer_bridge_ready_deferred_until_receive_stall_recovery_completed; session_id={sessionId}; proof_pending={(IsFileTransferFallbackNknProofPending() ? 1 : 0)}; start_mode={e.StartMode?.ToString().ToLowerInvariant() ?? "none"}");
+            }
+            else
+            {
+                HandleFileTransferBridgeRecovered(
+                    runtimeUnlockTrigger: "bridge_ready",
+                    recoveredReason: "bridge_ready",
+                    pendingLogEvent: "filetransfer_fallback_nkn_ready_unproven",
+                    pendingLogReason: "bridge_ready_waiting_for_receive_proof",
+                    probeTrigger: "bridge_ready_unproven");
+            }
+        }
+
+        if (e.Kind == BridgeLifecycleEventKind.ReceiveStallRecoveryCompleted)
+        {
+            // The exact execution receipt is the coordinator lifecycle boundary.
+            // Command-tagged compatibility lifecycle telemetry must not retire the
+            // lease before Core has accepted that receipt.
+            Volatile.Write(ref bridgeReceiveStallRecoveryActive, 0);
+            HandleFileTransferBridgeRecovered(
+                runtimeUnlockTrigger: "receive_stall_recovery_completed",
+                recoveredReason: "receive_stall_recovery_completed",
+                pendingLogEvent: "filetransfer_fallback_nkn_recovery_completed_unproven",
+                pendingLogReason: "receive_stall_recovery_completed_waiting_for_receive_proof",
+                probeTrigger: "receive_stall_recovery_completed_unproven");
+        }
+
+        if (e.Kind == BridgeLifecycleEventKind.ReceiveStallRecoveryReceiveResumed)
+        {
+            RaiseBridgeReceiveStallSessionLivenessProof(e);
+            Volatile.Write(ref bridgeReceiveStallRecoveryActive, 0);
+            ScheduleRuntimeUnlockRetryAfterRecoveryIfArmed("receive_resumed");
+            HandleFileTransferBridgeRecovered(
+                runtimeUnlockTrigger: "receive_resumed",
+                recoveredReason: "receive_resumed",
+                pendingLogEvent: "filetransfer_fallback_nkn_receive_resumed_unproven",
+                pendingLogReason: "waiting_for_file_transfer_bulk_receive_proof",
+                probeTrigger: "receive_resumed_unproven");
+        }
+
+        if (e.Kind == BridgeLifecycleEventKind.ReceiveStallRecoveryExhausted)
+        {
+            Volatile.Write(ref bridgeReceiveStallRecoveryActive, 0);
+            var sessionId = SanitizeLogToken(currentSessionSecurityState.SessionId?.Value ?? "none");
+            var reason = string.IsNullOrWhiteSpace(e.ExitReasonText)
+                ? "control_receive_stalled_max_restarts"
+                : SanitizeLogToken(e.ExitReasonText);
+            InterruptRuntimeUnlockOfferForBridgeRecovery(
+                "offer_interrupted_by_bridge_recovery",
+                reason,
+                "receive_stall_recovery_exhausted");
+            if (HasActiveFileTransferDataSessionsForRecovery())
+            {
+                if (ShouldSuppressFileTransferControlReceiveStallRecoveryBroadcast(
+                        reason,
+                        out var suppressReason,
+                        out var cooldownRemainingMs))
+                {
+                    LocalOperationalLog.Info(
+                        "NKN.Tuna",
+                        $"event=filetransfer_control_receive_stall_recovery_broadcast_suppressed; session_id={sessionId}; reason={reason}; suppress_reason={suppressReason}; cooldown_remaining_ms={cooldownRemainingMs}");
+                    return;
+                }
+
+                MarkFileTransferControlReceiveStallRecoveryBroadcasted();
+                LocalOperationalLog.Warn(
+                    "NKN.Tuna",
+                    $"event=filetransfer_control_receive_stall_recovery_broadcast; session_id={sessionId}; reason={reason}; action=regular_nkn_recovery_epoch");
+                MarkFileTransferFallbackNknProofPending(
+                    reason: reason,
+                    sessionId: currentSessionSecurityState.SessionId?.Value,
+                    lanes: NknAccelerationLaneKind.File);
+                SetFileTransferDataSessionsAvailability(
+                    isAvailable: true,
+                    reason: reason,
+                    requiresResumeRequest: true,
+                    handoffKind: FileTransferTransportHandoffKind.RegularNknRecovery,
+                    targetTransport: FileTransferTransportKind.RegularNkn);
+                ScheduleFileTransferFallbackNknProbeIfPending("receive_stall_recovery_exhausted");
+                if (IsRuntimeUnlockActivationRecoveryFailure(reason))
+                {
+                    LocalOperationalLog.Warn(
+                        "NKN.Tuna",
+                        $"event=filetransfer_activation_recovery_exhausted_session_disconnect_suppressed; session_id={sessionId}; reason={reason}; active_file_transfer_session=1");
+                    PublishCompatibilityLifecycle(
+                        e with
+                        {
+                            Kind = BridgeLifecycleEventKind.ReceiveStallRecoveryDeferred,
+                            ExitReasonText = $"reason=runtime_unlock_recovery_exhausted:stall={reason}:connect=core_filetransfer_request"
+                        });
+                    return;
+                }
+
+                PublishCompatibilityLifecycle(e);
+                return;
+            }
+
+            LocalOperationalLog.Warn(
+                "NKN.Tuna",
+                $"event=filetransfer_control_receive_stall_terminal_broadcast; session_id={sessionId}; reason={reason}");
+            SetFileTransferDataSessionsAvailability(
+                isAvailable: false,
+                reason: reason,
+                requiresResumeRequest: false,
+                handoffKind: FileTransferTransportHandoffKind.RegularNknRecovery,
+                targetTransport: FileTransferTransportKind.RegularNkn);
+        }
+
+        PublishCompatibilityLifecycle(e);
+    }
+
+    private bool IsFileTransferBridgeRecoveryLifecycleCurrent(
+        BridgeLifecycleEventKind lifecycleKind,
+        FileTransferBridgeRecoveryExecutionCommand command)
+        => client is RealNknClientAdapter realClient &&
+           realClient.IsFileTransferBridgeRecoveryLifecycleCurrent(
+               lifecycleKind,
+               command);
+
+    private void OnBridgeRecoveryEvaluationRequested(
+        object? sender,
+        FileTransferBridgeRecoveryEvaluationRequestedEventArgs e)
+    {
+        if (e.Request.IsDefault)
+        {
+            return;
+        }
+
+        FileTransferBridgeRecoveryEvaluationRequested?.Invoke(this, e);
+    }
+
+    private bool ShouldDeferBridgeProcessReadyUntilReceiveStallRecoveryCompletes(BridgeLifecycleEvent e)
+    {
+        if (Volatile.Read(ref bridgeReceiveStallRecoveryActive) == 0)
+        {
+            return false;
+        }
+
+        // Ready with a start mode is emitted by the local bridge hello/pong path.
+        // During receive-stall recovery that only proves the child process is alive;
+        // NKN control/bulk clients may still be reconnecting and cannot yet carry
+        // post-Tuna fallback checkpoint/frontier proof.
+        return e.StartMode.HasValue;
+    }
+
+    private void HandleFileTransferBridgeRecovered(
+        string runtimeUnlockTrigger,
+        string recoveredReason,
+        string pendingLogEvent,
+        string pendingLogReason,
+        string probeTrigger)
+    {
+        ScheduleRuntimeUnlockRetryAfterRecoveryIfArmed(runtimeUnlockTrigger);
+        if (IsFileTransferFallbackNknProofPending())
+        {
+            var sessionId = SanitizeLogToken(currentSessionSecurityState.SessionId?.Value ?? "none");
+            LocalOperationalLog.Info(
+                "NKN.Tuna",
+                $"event={pendingLogEvent}; session_id={sessionId}; reason={pendingLogReason}");
+            SetFileTransferDataSessionsAvailability(
+                isAvailable: false,
+                reason: "transport_recovered_unproven",
+                requiresResumeRequest: true,
+                handoffKind: FileTransferTransportHandoffKind.RegularNknRecovery,
+                targetTransport: FileTransferTransportKind.RegularNkn);
+            ScheduleFileTransferFallbackNknProbeIfPending(probeTrigger);
+            return;
+        }
+
+        if (!ShouldSuppressFileTransferTransportRecoveredForTunaActivationPause(recoveredReason, out _))
         {
             SetFileTransferDataSessionsAvailability(
                 isAvailable: true,
                 reason: "transport_recovered",
-                requiresResumeRequest: true);
+                requiresResumeRequest: false,
+                handoffKind: FileTransferTransportHandoffKind.None,
+                targetTransport: FileTransferTransportKind.RegularNkn);
+        }
+    }
+
+    private void RaiseBridgeReceiveStallSessionLivenessProof(BridgeLifecycleEvent e)
+    {
+        if (e.TotalMessagesReceivedSinceLast <= 0)
+        {
+            return;
         }
 
-        BridgeLifecycle?.Invoke(this, e);
+        var sessionId = currentSessionSecurityState.SessionId?.Value;
+        if (string.IsNullOrWhiteSpace(sessionId))
+        {
+            return;
+        }
+
+        var lane =
+            e.ControlMessagesReceivedSinceLast > 0 ? "bridge_control" :
+            e.BulkMessagesReceivedSinceLast > 0 ? "bridge_bulk" :
+            e.MediaMessagesReceivedSinceLast > 0 ? "bridge_media" :
+            "bridge";
+        RaiseSessionLivenessProof(
+            sessionId,
+            generation: 0,
+            Interlocked.Increment(ref bridgeReceiveStallLivenessProofSequence),
+            "bridge_receive_stall_recovery_receive_resumed",
+            lane);
+    }
+
+    private static bool IsRuntimeUnlockActivationRecoveryFailure(string reason)
+        => !string.IsNullOrWhiteSpace(reason) &&
+           (reason.Contains("tuna_activation_offer_send_timeout", StringComparison.OrdinalIgnoreCase) ||
+            reason.Contains("runtime_unlock_retry_authority_offer_blocked", StringComparison.OrdinalIgnoreCase));
+
+    private static bool IsPostTunaFallbackReceiveStallRecoveryReason(string? reason)
+        => !string.IsNullOrWhiteSpace(reason) &&
+           reason.Trim().StartsWith("post_tuna_fallback", StringComparison.OrdinalIgnoreCase);
+
+    private bool ShouldDeferPostTunaFallbackReceiveStallRecoveryStart(
+        string? reason,
+        string? sessionId,
+        FileTransferTransportHandoffKind handoffKind)
+    {
+        if (IsPostTunaFallbackReceiveStallRecoveryReason(reason) ||
+            handoffKind == FileTransferTransportHandoffKind.TunaToNormalFallback ||
+            IsFileTransferFallbackNknProofPending())
+        {
+            return true;
+        }
+
+        var normalizedSessionId = string.IsNullOrWhiteSpace(sessionId)
+            ? currentSessionSecurityState.SessionId?.Value
+            : sessionId.Trim();
+        if (string.IsNullOrWhiteSpace(normalizedSessionId))
+        {
+            return false;
+        }
+
+        lock (accelerationGate)
+        {
+            return TryGetCurrentTunaFallbackProofStateUnsafe(normalizedSessionId, out var state) &&
+                   (state.Lanes & NknAccelerationLaneKind.File) == NknAccelerationLaneKind.File &&
+                   state.FileState is TunaFallbackLaneState.Pending or
+                       TunaFallbackLaneState.WaitingForRegularNkn or
+                       TunaFallbackLaneState.MediaReady;
+        }
     }
 
     private void OnSecureScreenShareFrameReady(object? sender, ScreenShareVideoFrameReadyEventArgs e)
@@ -2194,6 +3654,7 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
 
         try
         {
+            MarkScreenTunaHandoffFrameApplied(e);
             var metrics = secureScreenShareFrameReassembler.GetMetricsSnapshot();
             NknRuntimeDiagnostics.SetMediaPlaneFramesDroppedForFreshness(metrics.FramesDropped);
             ScreenShareFrameCompleted?.Invoke(
@@ -2247,7 +3708,9 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
         SetFileTransferDataSessionsAvailability(
             isAvailable: false,
             reason: "transport_disconnected",
-            requiresResumeRequest: true);
+            requiresResumeRequest: true,
+            handoffKind: FileTransferTransportHandoffKind.RegularNknRecovery,
+            targetTransport: FileTransferTransportKind.RegularNkn);
         NknRuntimeDiagnostics.SetLastError("nkn_client_disconnected");
         UpdateSessionSecurityState(currentSessionSecurityState.Invalidate("transport_disconnected"));
         Log("Client disconnected");
@@ -2556,6 +4019,12 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
             return false;
         }
 
+        RaiseSessionLivenessProof(
+            securePayload.Metadata.SessionId.Value,
+            generation: 0,
+            securePayload.Metadata.Sequence,
+            "chat_message",
+            "control");
         return true;
     }
 }

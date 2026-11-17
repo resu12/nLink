@@ -1,0 +1,407 @@
+[
+  {
+    "Path": "src/nLink.App/Services/SessionRuntime.cs",
+    "Event": "file_transfer_inbound_terminal",
+    "Arguments": "inbound.SessionId, inbound.TransferId"
+  },
+  {
+    "Path": "src/nLink.Core/FileTransfer/SessionFileTransferService.cs",
+    "Event": "filetransfer_fallback_frontier_repair_authority_granted",
+    "Arguments": "sessionId, transferId"
+  },
+  {
+    "Path": "src/nLink.Core/FileTransfer/SessionFileTransferService.cs",
+    "Event": "filetransfer_fallback_frontier_repair_authority_rejected",
+    "Arguments": "sessionId, transferId"
+  },
+  {
+    "Path": "src/nLink.Core/FileTransfer/SessionFileTransferService.cs",
+    "Event": "filetransfer_fallback_frontier_repair_dispatched",
+    "Arguments": "sessionId, transferId"
+  },
+  {
+    "Path": "src/nLink.Core/FileTransfer/SessionFileTransferService.cs",
+    "Event": "filetransfer_fallback_frontier_repair_progress_observed",
+    "Arguments": "sessionId, transferId"
+  },
+  {
+    "Path": "src/nLink.Core/FileTransfer/SessionFileTransferService.cs",
+    "Event": "filetransfer_fallback_frontier_repair_stalled",
+    "Arguments": "sessionId, transferId"
+  },
+  {
+    "Path": "src/nLink.Core/FileTransfer/SessionFileTransferService.cs",
+    "Event": "filetransfer_control_plane_delivery_observed",
+    "Arguments": "request.Frame.SessionId, request.Frame.TransferId"
+  },
+  {
+    "Path": "src/nLink.Core/FileTransfer/SessionFileTransferService.cs",
+    "Event": "filetransfer_live_route_epoch_terminal",
+    "Arguments": "sessionId, transferId"
+  },
+  {
+    "Path": "src/nLink.Core/FileTransfer/SessionFileTransferService.cs",
+    "Event": "filetransfer_terminalized_by_session_end",
+    "Arguments": "outbound.SessionId, outbound.TransferId"
+  },
+  {
+    "Path": "src/nLink.Core/FileTransfer/SessionFileTransferService.cs",
+    "Event": "filetransfer_terminalized_by_session_end",
+    "Arguments": "inbound.SessionId, inbound.TransferId"
+  },
+  {
+    "Path": "src/nLink.Core/FileTransfer/SessionFileTransferService.FallbackFrontierAuthority.cs",
+    "Event": "filetransfer_v6_frontier_request_receive_dispatch_coalesced",
+    "Arguments": "contract.Authority.SessionId, contract.Authority.TransferId"
+  },
+  {
+    "Path": "src/nLink.Core/FileTransfer/SessionFileTransferService.FallbackFrontierAuthority.cs",
+    "Event": "filetransfer_fallback_frontier_repair_authority_rejected",
+    "Arguments": "context.SessionId, context.TransferId"
+  },
+  {
+    "Path": "src/nLink.Core/FileTransfer/SessionFileTransferService.FallbackFrontierAuthority.cs",
+    "Event": "filetransfer_v6_frontier_request_receive_dispatch_coalesced",
+    "Arguments": "contract.Authority.SessionId, contract.Authority.TransferId"
+  },
+  {
+    "Path": "src/nLink.Core/FileTransfer/SessionFileTransferService.FallbackFrontierAuthority.cs",
+    "Event": "filetransfer_v6_post_tuna_fallback_frontier_rescue_requested",
+    "Arguments": "contract.Authority.SessionId, contract.Authority.TransferId"
+  },
+  {
+    "Path": "src/nLink.Core/FileTransfer/SessionFileTransferService.FallbackFrontierAuthority.cs",
+    "Event": "filetransfer_v6_frontier_request_failed",
+    "Arguments": "contract.Authority.SessionId, contract.Authority.TransferId"
+  },
+  {
+    "Path": "src/nLink.Core/FileTransfer/SessionFileTransferService.FallbackFrontierAuthority.cs",
+    "Event": "filetransfer_v6_frontier_request_sent",
+    "Arguments": "contract.Authority.SessionId, contract.Authority.TransferId"
+  },
+  {
+    "Path": "src/nLink.Core/FileTransfer/SessionFileTransferService.FallbackFrontierAuthority.cs",
+    "Event": "filetransfer_fallback_frontier_repair_progress_observed",
+    "Arguments": "authority.SessionId, authority.TransferId"
+  },
+  {
+    "Path": "src/nLink.Core/FileTransfer/SessionFileTransferService.FallbackFrontierAuthority.cs",
+    "Event": "filetransfer_v6_frontier_request_advanced_remote_frontier",
+    "Arguments": "authority.SessionId, authority.TransferId"
+  },
+  {
+    "Path": "src/nLink.Core/FileTransfer/SessionFileTransferService.FallbackFrontierAuthority.cs",
+    "Event": "filetransfer_v6_frontier_request_receive_dispatch_rejected",
+    "Arguments": "context.SessionId, context.TransferId"
+  },
+  {
+    "Path": "src/nLink.Core/FileTransfer/SessionFileTransferService.FallbackFrontierAuthority.cs",
+    "Event": "filetransfer_v6_frontier_request_receive_dispatch_coalesced",
+    "Arguments": "authority.SessionId, authority.TransferId"
+  },
+  {
+    "Path": "src/nLink.Core/FileTransfer/SessionFileTransferService.FallbackFrontierAuthority.cs",
+    "Event": "filetransfer_v6_frontier_request_receive_dispatched",
+    "Arguments": "authority.SessionId, authority.TransferId"
+  },
+  {
+    "Path": "src/nLink.Core/FileTransfer/SessionFileTransferService.FallbackFrontierAuthority.cs",
+    "Event": "filetransfer_fallback_frontier_repair_progress_observed",
+    "Arguments": "authority.SessionId, authority.TransferId"
+  },
+  {
+    "Path": "src/nLink.Core/FileTransfer/SessionFileTransferService.FallbackFrontierAuthority.cs",
+    "Event": "filetransfer_fallback_frontier_repair_dispatched",
+    "Arguments": "authority.SessionId, authority.TransferId"
+  },
+  {
+    "Path": "src/nLink.Core/FileTransfer/SessionFileTransferService.FallbackFrontierAuthority.cs",
+    "Event": "filetransfer_fallback_frontier_repair_retry_dispatched",
+    "Arguments": "authority.SessionId, authority.TransferId"
+  },
+  {
+    "Path": "src/nLink.Core/FileTransfer/SessionFileTransferService.FallbackFrontierAuthority.cs",
+    "Event": "filetransfer_fallback_frontier_repair_stalled",
+    "Arguments": "authority.SessionId, authority.TransferId"
+  },
+  {
+    "Path": "src/nLink.Core/FileTransfer/SessionFileTransferService.FallbackFrontierAuthority.cs",
+    "Event": "filetransfer_fallback_frontier_repair_dispatch_duplicate_ignored",
+    "Arguments": "contract.Authority.SessionId, contract.Authority.TransferId"
+  },
+  {
+    "Path": "src/nLink.Core/FileTransfer/SessionFileTransferService.FallbackFrontierAuthority.cs",
+    "Event": "filetransfer_fallback_frontier_repair_settlement_duplicate_ignored",
+    "Arguments": "authority.SessionId, authority.TransferId"
+  },
+  {
+    "Path": "src/nLink.Core/FileTransfer/SessionFileTransferService.FallbackFrontierAuthority.cs",
+    "Event": "filetransfer_fallback_frontier_repair_contract_settled",
+    "Arguments": "authority.SessionId, authority.TransferId"
+  },
+  {
+    "Path": "src/nLink.Core/FileTransfer/SessionFileTransferService.FallbackFrontierAuthority.cs",
+    "Event": "filetransfer_fallback_frontier_repair_authority_granted",
+    "Arguments": "authority.SessionId, authority.TransferId"
+  },
+  {
+    "Path": "src/nLink.Core/FileTransfer/SessionFileTransferService.PullTransferSession.cs",
+    "Event": "filetransfer_v6_frontier_repair_requested",
+    "Arguments": "context.SessionId, context.TransferId"
+  },
+  {
+    "Path": "src/nLink.Core/FileTransfer/SessionFileTransferService.PullTransferSession.cs",
+    "Event": "filetransfer_data_session_recreated",
+    "Arguments": "context.SessionId, context.TransferId"
+  },
+  {
+    "Path": "src/nLink.Core/FileTransfer/SessionFileTransferService.PullTransferSessionV4.cs",
+    "Event": "filetransfer_v6_frontier_request_receive_dispatch_rejected",
+    "Arguments": "install.RuntimeOwner.SessionId, install.RuntimeOwner.TransferId"
+  },
+  {
+    "Path": "src/nLink.Core/FileTransfer/SessionFileTransferService.PullTransferSessionV4.cs",
+    "Event": "filetransfer_v6_frontier_repair_requested",
+    "Arguments": "context.SessionId, context.TransferId"
+  },
+  {
+    "Path": "src/nLink.Core/FileTransfer/SessionFileTransferService.PullTransferSessionV4.cs",
+    "Event": "filetransfer_v6_frontier_request_advanced_remote_frontier",
+    "Arguments": "context.SessionId, context.TransferId"
+  },
+  {
+    "Path": "src/nLink.Core/FileTransfer/SessionFileTransferService.PullTransferSessionV4.cs",
+    "Event": "filetransfer_fallback_frontier_repair_successor_dispatch_handoff_decided",
+    "Arguments": "successorAuthority.SessionId, successorAuthority.TransferId"
+  },
+  {
+    "Path": "src/nLink.Core/FileTransfer/SessionFileTransferService.PullTransferSessionV4.cs",
+    "Event": "filetransfer_v4_pause_state_sent",
+    "Arguments": "state.SessionId, state.TransferId"
+  },
+  {
+    "Path": "src/nLink.Core/FileTransfer/SessionFileTransferService.PullTransferSessionV4.cs",
+    "Event": "filetransfer_v4_pause_state_send_failed",
+    "Arguments": "context.SessionId, context.TransferId"
+  },
+  {
+    "Path": "src/nLink.Core/FileTransfer/SessionFileTransferService.PullTransferSessionV4.cs",
+    "Event": "filetransfer_v4_pause_state_send_failed",
+    "Arguments": "context.SessionId, context.TransferId"
+  },
+  {
+    "Path": "src/nLink.Core/FileTransfer/SessionFileTransferService.PullTransferSessionV4.cs",
+    "Event": "filetransfer_v4_peer_state_received",
+    "Arguments": "context.SessionId, context.TransferId"
+  },
+  {
+    "Path": "src/nLink.Core/FileTransfer/SessionFileTransferService.PullTransferSessionV4.cs",
+    "Event": "filetransfer_v4_peer_state_received",
+    "Arguments": "context.SessionId, context.TransferId"
+  },
+  {
+    "Path": "src/nLink.Core/FileTransfer/SessionFileTransferService.PullTransferSessionV4.cs",
+    "Event": "filetransfer_v4_peer_state_received",
+    "Arguments": "context.SessionId, context.TransferId"
+  },
+  {
+    "Path": "src/nLink.Core/FileTransfer/SessionFileTransferService.PullTransferSessionV4.cs",
+    "Event": "filetransfer_v4_sparse_write_committed",
+    "Arguments": "context.SessionId, context.TransferId"
+  },
+  {
+    "Path": "src/nLink.Core/FileTransfer/SessionFileTransferService.PullTransferSessionV4.cs",
+    "Event": "filetransfer_v6_frontier_repair_applied",
+    "Arguments": "context.SessionId, context.TransferId"
+  },
+  {
+    "Path": "src/nLink.Core/FileTransfer/SessionFileTransferService.PullTransferSessionV4.cs",
+    "Event": "filetransfer_v4_state_sent",
+    "Arguments": "state.SessionId, state.TransferId"
+  },
+  {
+    "Path": "src/nLink.Core/FileTransfer/SessionFileTransferService.PullTransferSessionV4.cs",
+    "Event": "filetransfer_v6_frontier_repair_still_missing",
+    "Arguments": "context.SessionId, context.TransferId"
+  },
+  {
+    "Path": "src/nLink.Core/FileTransfer/SessionFileTransferService.PullTransferSessionV6.cs",
+    "Event": "filetransfer_v6_frontier_request_duplicate_ignored",
+    "Arguments": "context.SessionId, context.TransferId"
+  },
+  {
+    "Path": "src/nLink.Core/FileTransfer/SessionFileTransferService.PullTransferSessionV6.cs",
+    "Event": "filetransfer_v6_frontier_request_ignored_obsolete",
+    "Arguments": "context.SessionId, context.TransferId"
+  },
+  {
+    "Path": "src/nLink.Core/FileTransfer/SessionFileTransferService.PullTransferSessionV6.cs",
+    "Event": "filetransfer_v6_frontier_request_advanced_remote_frontier",
+    "Arguments": "context.SessionId, context.TransferId"
+  },
+  {
+    "Path": "src/nLink.Core/FileTransfer/SessionFileTransferService.PullTransferSessionV6.cs",
+    "Event": "filetransfer_v6_frontier_request_received",
+    "Arguments": "context.SessionId, context.TransferId"
+  },
+  {
+    "Path": "src/nLink.Core/FileTransfer/SessionFileTransferService.PullTransferSessionV6.cs",
+    "Event": "{eventName}",
+    "Arguments": "receiveInstall is null ? context.SessionId : receiveInstall.RuntimeOwner.SessionId, receiveInstall is null ? context.TransferId : receiveInstall.RuntimeOwner.TransferId"
+  },
+  {
+    "Path": "src/nLink.Core/FileTransfer/SessionFileTransferService.PullTransferSessionV6.cs",
+    "Event": "filetransfer_v6_frontier_request_preempted_normal_pipeline",
+    "Arguments": "context.SessionId, context.TransferId"
+  },
+  {
+    "Path": "src/nLink.Core/FileTransfer/SessionFileTransferService.PullTransferSessionV6.cs",
+    "Event": "filetransfer_v6_receiver_state_frontier_preempted_normal_pipeline",
+    "Arguments": "context.SessionId, context.TransferId"
+  },
+  {
+    "Path": "src/nLink.Core/FileTransfer/SessionFileTransferService.PullTransferSessionV6.cs",
+    "Event": "filetransfer_v6_frontier_resend_gate_bypassed",
+    "Arguments": "context.SessionId, context.TransferId"
+  },
+  {
+    "Path": "src/nLink.Core/FileTransfer/SessionFileTransferService.PullTransferSessionV6.cs",
+    "Event": "filetransfer_fallback_frontier_repair_late_send_completion_ignored",
+    "Arguments": "context.SessionId, context.TransferId"
+  },
+  {
+    "Path": "src/nLink.Core/FileTransfer/SessionFileTransferService.PullTransferSessionV6.cs",
+    "Event": "filetransfer_v6_receiver_state_ignored",
+    "Arguments": "context.SessionId, context.TransferId"
+  },
+  {
+    "Path": "src/nLink.Core/FileTransfer/SessionFileTransferService.PullTransferSessionV6.cs",
+    "Event": "filetransfer_fallback_frontier_repair_batch_rejected",
+    "Arguments": "context.SessionId, context.TransferId"
+  },
+  {
+    "Path": "src/nLink.Core/FileTransfer/SessionFileTransferService.PullTransferSessionV6.cs",
+    "Event": "filetransfer_v6_sparse_write_committed",
+    "Arguments": "context.SessionId, context.TransferId"
+  },
+  {
+    "Path": "src/nLink.Core/FileTransfer/SessionFileTransferService.PullTransferSessionV6.cs",
+    "Event": "filetransfer_v6_fallback_frontier_repair_progress_state_forced",
+    "Arguments": "progressReceipt.Authority.SessionId, progressReceipt.Authority.TransferId"
+  },
+  {
+    "Path": "src/nLink.Core/FileTransfer/SessionFileTransferService.PullTransferSessionV6.cs",
+    "Event": "filetransfer_v6_receiver_state_sent",
+    "Arguments": "state.SessionId, state.TransferId"
+  },
+  {
+    "Path": "src/nLink.Core/FileTransfer/SessionFileTransferService.PullTransferSessionV6.cs",
+    "Event": "filetransfer_v6_receiver_state_coalesced",
+    "Arguments": "context.SessionId, context.TransferId"
+  },
+  {
+    "Path": "src/nLink.Core/FileTransfer/SessionFileTransferService.PullTransferSessionV6.cs",
+    "Event": "filetransfer_v6_receiver_state_coalesced",
+    "Arguments": "context.SessionId, context.TransferId"
+  },
+  {
+    "Path": "src/nLink.Core/FileTransfer/SessionFileTransferService.PullTransferSessionV6.cs",
+    "Event": "filetransfer_v6_receiver_state_deferred",
+    "Arguments": "sessionId, transferId"
+  },
+  {
+    "Path": "src/nLink.Core/FileTransfer/SessionFileTransferService.PullTransferSessionV6.cs",
+    "Event": "filetransfer_fallback_frontier_repair_authority_rejected",
+    "Arguments": "context.SessionId, context.TransferId"
+  },
+  {
+    "Path": "src/nLink.Core/FileTransfer/SessionFileTransferService.PullTransferSessionV6.cs",
+    "Event": "filetransfer_v6_frontier_request_coalesced",
+    "Arguments": "context.SessionId, context.TransferId"
+  },
+  {
+    "Path": "src/nLink.Core/FileTransfer/SessionFileTransferService.PullTransferSessionV6.cs",
+    "Event": "filetransfer_v6_frontier_request_sent",
+    "Arguments": "context.SessionId, context.TransferId"
+  },
+  {
+    "Path": "src/nLink.Core/FileTransfer/SessionFileTransferService.PullTransferSessionV6.cs",
+    "Event": "filetransfer_v6_frontier_request_failed",
+    "Arguments": "context.SessionId, context.TransferId"
+  },
+  {
+    "Path": "src/nLink.Core/FileTransfer/SessionFileTransferService.PullTransferSessionV6.cs",
+    "Event": "{eventName}",
+    "Arguments": "context.SessionId, context.TransferId"
+  },
+  {
+    "Path": "src/nLink.Core/FileTransfer/SessionFileTransferService.PullTransferSessionV6.cs",
+    "Event": "{eventName}",
+    "Arguments": "context.SessionId, context.TransferId"
+  },
+  {
+    "Path": "src/nLink.Core/FileTransfer/SessionFileTransferService.PullTransferSessionV6.cs",
+    "Event": "filetransfer_v6_receiver_state_received",
+    "Arguments": "context.SessionId, context.TransferId"
+  },
+  {
+    "Path": "src/nLink.Core/FileTransfer/SessionFileTransferService.PullTransferSessionV6.cs",
+    "Event": "filetransfer_fallback_frontier_repair_authority_rejected",
+    "Arguments": "context.SessionId, context.TransferId"
+  },
+  {
+    "Path": "src/nLink.Core/FileTransfer/SessionFileTransferService.PullTransferSessionV6.cs",
+    "Event": "filetransfer_v6_frontier_request_deferred",
+    "Arguments": "context.SessionId, context.TransferId"
+  },
+  {
+    "Path": "src/nLink.Core/FileTransfer/SessionFileTransferService.PullTransferSessionV6.cs",
+    "Event": "filetransfer_v6_frontier_stall_grace_recheck_decided",
+    "Arguments": "wake.SessionId, wake.TransferId"
+  },
+  {
+    "Path": "src/nLink.Core/FileTransfer/SessionFileTransferService.PullTransferSessionV6.cs",
+    "Event": "filetransfer_v6_frontier_recent_progress_grace_deferred",
+    "Arguments": "wake.SessionId, wake.TransferId"
+  },
+  {
+    "Path": "src/nLink.Core/FileTransfer/SessionFileTransferService.PullTransferSessionV6.cs",
+    "Event": "filetransfer_v6_frontier_recent_progress_grace_recheck_decided",
+    "Arguments": "wake.SessionId, wake.TransferId"
+  },
+  {
+    "Path": "src/nLink.Core/FileTransfer/SessionFileTransferService.TransportEpochV6.cs",
+    "Event": "filetransfer_fallback_frontier_repair_proof_rejected",
+    "Arguments": "context.SessionId, context.TransferId"
+  },
+  {
+    "Path": "src/nLink.Core/FileTransfer/SessionFileTransferService.TransportEpochV6.cs",
+    "Event": "filetransfer_fallback_frontier_repair_proof_rejected",
+    "Arguments": "context.SessionId, context.TransferId"
+  },
+  {
+    "Path": "src/nLink.Infra.Nkn/NknSignalingTransport.FileTransferTransportChannel.cs",
+    "Event": "filetransfer_v6_frontier_request_receive_dispatch_rejected",
+    "Arguments": "request.SessionId, request.TransferId"
+  },
+  {
+    "Path": "src/nLink.Infra.Nkn/NknSignalingTransport.FileTransferTransportChannel.cs",
+    "Event": "filetransfer_data_session_recreated",
+    "Arguments": "normalizedSessionId, normalizedTransferId"
+  },
+  {
+    "Path": "src/nLink.Infra.Nkn/NknSignalingTransport.FileTransferTransportChannel.cs",
+    "Event": "filetransfer_data_session_recreated",
+    "Arguments": "frame.SessionId, frame.TransferId"
+  },
+  {
+    "Path": "src/nLink.Infra.Nkn/NknSignalingTransport.FileTransferTransportChannel.cs",
+    "Event": "filetransfer_data_session_removed",
+    "Arguments": "session.SessionId, session.TransferId"
+  },
+  {
+    "Path": "src/nLink.Infra.Nkn/NknSignalingTransport.FileTransferTransportChannel.cs",
+    "Event": "filetransfer_v6_frontier_request_transport_{outcome}",
+    "Arguments": "request.SessionId, request.TransferId"
+  }
+]

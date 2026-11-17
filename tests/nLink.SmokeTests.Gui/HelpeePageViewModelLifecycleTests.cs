@@ -1,3 +1,4 @@
+using System.Reflection;
 using NLink.App.Services;
 using NLink.App.Services.ScreenCapture;
 using NLink.App.ViewModels;
@@ -97,7 +98,7 @@ public sealed class HelpeePageViewModelLifecycleTests : CoreSmokeTestsBase
 
     [Trait("Category", "Smoke")]
     [Fact]
-    public void HelpeePageViewModel_EndSession_ReturnsToWaitingScreenImmediately()
+    public async Task HelpeePageViewModel_EndSession_ReturnsToWaitingScreenImmediately()
     {
         var transportConfig = CreateDevLocalTestConfig();
         using var helpeeRuntime = new SessionRuntime(() => new DevLocalTransport());
@@ -106,62 +107,77 @@ public sealed class HelpeePageViewModelLifecycleTests : CoreSmokeTestsBase
             transportConfig,
             helpeeRuntime);
 
-        SetPrivateField(helpee, "connectionState", "Connected");
-        SetPrivateField(helpee, "wasConnected", true);
-        SetPrivateField(helpee, "effectivePhase", SessionUiPhase.Connected);
-        SetPrivateField(helpee, "isChatInputEnabled", true);
-        SetPrivateField(helpeeRuntime, "state", SessionRuntimeState.Connected);
-        SetPrivateField(helpeeRuntime, "transportState", TransportState.Connected);
-        SetPrivateField(
-            helpeeRuntime,
-            "currentFlowSnapshot",
-            helpeeRuntime.FlowSnapshot with
-            {
-                Phase = SessionFlowPhase.ActiveSession,
-                UiPhase = SessionUiPhase.Connected,
-                Role = SessionRuntimeRole.Helpee,
-                RuntimeState = SessionRuntimeState.Connected,
-                TransportState = TransportState.Connected,
-                ApprovalActive = true,
-                DisplayStatusText = "Connected",
-                DisplayConnectionState = "Connected",
-            });
-        InvokePrivateMethod(helpee, "UpdateUiFromSnapshot");
-        Assert.True(helpee.CanEndSession);
-        Assert.True(helpee.EndSessionCommand.CanExecute(null));
+        await WaitUntilAsync(
+            () => helpeeRuntime.State == SessionRuntimeState.Waiting && helpeeRuntime.CurrentLocalPeerAddress is not null,
+            TimeSpan.FromSeconds(3));
 
-        helpee.EndSessionCommand.Execute(null);
+        // Observe the immediate UI before disconnect or listener restart can advance it.
+        var gate = (SemaphoreSlim)GetPrivateField(helpeeRuntime, "lifecycleGate")!;
+        using var gateTimeout = new CancellationTokenSource(TimeSpan.FromSeconds(3));
+        await gate.WaitAsync(gateTimeout.Token);
+        try
+        {
+            SetPrivateField(helpee, "connectionState", "Connected");
+            SetPrivateField(helpee, "wasConnected", true);
+            SetPrivateField(helpee, "effectivePhase", SessionUiPhase.Connected);
+            SetPrivateField(helpee, "isChatInputEnabled", true);
+            SetPrivateField(helpeeRuntime, "state", SessionRuntimeState.Connected);
+            SetPrivateField(helpeeRuntime, "transportState", TransportState.Connected);
+            SetPrivateField(
+                helpeeRuntime,
+                "currentFlowSnapshot",
+                helpeeRuntime.FlowSnapshot with
+                {
+                    Phase = SessionFlowPhase.ActiveSession,
+                    UiPhase = SessionUiPhase.Connected,
+                    Role = SessionRuntimeRole.Helpee,
+                    RuntimeState = SessionRuntimeState.Connected,
+                    TransportState = TransportState.Connected,
+                    ApprovalActive = true,
+                    DisplayStatusText = "Connected",
+                    DisplayConnectionState = "Connected",
+                });
+            InvokePrivateMethod(helpee, "UpdateUiFromSnapshot");
+            Assert.True(helpee.CanEndSession);
+            Assert.True(helpee.EndSessionCommand.CanExecute(null));
 
-        Assert.False(helpee.IsConnectedView);
-        Assert.True(helpee.ShowWaitingPanel);
-        Assert.False(helpee.ShowConnectedPanel);
+            helpee.EndSessionCommand.Execute(null);
 
-        Assert.Contains(helpee.EffectivePhase, new[] { SessionUiPhase.Waiting, SessionUiPhase.Idle });
-        Assert.False(helpee.IsConnectedView);
-        Assert.True(helpee.ShowWaitingPanel);
-        Assert.False(helpee.IsChatInputEnabled);
-        Assert.False(helpee.CanEndSession);
+            Assert.False(helpee.IsConnectedView);
+            Assert.True(helpee.ShowWaitingPanel);
+            Assert.False(helpee.ShowConnectedPanel);
 
-        SetPrivateField(helpee, "localEndCommandInFlight", false);
-        SetPrivateField(
-            helpeeRuntime,
-            "currentFlowSnapshot",
-            helpeeRuntime.FlowSnapshot with
-            {
-                Phase = SessionFlowPhase.ActiveSession,
-                UiPhase = SessionUiPhase.Connected,
-                RuntimeState = SessionRuntimeState.Connected,
-                TransportState = TransportState.Connected,
-                ApprovalActive = true,
-                ShouldSuppressConnectedControls = false,
-                DisplayStatusText = "Connected",
-                DisplayConnectionState = "Connected",
-            });
+            Assert.Contains(helpee.EffectivePhase, new[] { SessionUiPhase.Waiting, SessionUiPhase.Idle });
+            Assert.False(helpee.IsConnectedView);
+            Assert.True(helpee.ShowWaitingPanel);
+            Assert.False(helpee.IsChatInputEnabled);
+            Assert.False(helpee.CanEndSession);
 
-        InvokePrivateMethod(helpee, "UpdateUiFromSnapshot");
+            SetPrivateField(helpee, "localEndCommandInFlight", false);
+            SetPrivateField(
+                helpeeRuntime,
+                "currentFlowSnapshot",
+                helpeeRuntime.FlowSnapshot with
+                {
+                    Phase = SessionFlowPhase.ActiveSession,
+                    UiPhase = SessionUiPhase.Connected,
+                    RuntimeState = SessionRuntimeState.Connected,
+                    TransportState = TransportState.Connected,
+                    ApprovalActive = true,
+                    ShouldSuppressConnectedControls = false,
+                    DisplayStatusText = "Connected",
+                    DisplayConnectionState = "Connected",
+                });
 
-        Assert.False(helpee.CanEndSession);
-        Assert.False(helpee.EndSessionCommand.CanExecute(null));
+            InvokePrivateMethod(helpee, "UpdateUiFromSnapshot");
+
+            Assert.False(helpee.CanEndSession);
+            Assert.False(helpee.EndSessionCommand.CanExecute(null));
+        }
+        finally
+        {
+            gate.Release();
+        }
     }
 
     [Trait("Category", "Smoke")]
@@ -549,6 +565,334 @@ public sealed class HelpeePageViewModelLifecycleTests : CoreSmokeTestsBase
         Assert.Equal("The other side ended the session.", helpee.HeaderStatusText);
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    [Trait("Category", "Smoke")]
+    public async Task HelpeePageViewModel_PostTerminalRestart_IsBlockedOnlyForWindowClose(bool closing)
+    {
+        var createdTransports = 0;
+        using var runtime = new SessionRuntime(() =>
+        {
+            Interlocked.Increment(ref createdTransports);
+            return new ScriptedSignalingTransport(onHostByAddressAsync: _ => Task.CompletedTask);
+        });
+        using var helpee = new HelpeePageViewModel(static () => { }, CreateNknTestConfig(), runtime);
+        await WaitUntilAsync(() => runtime.State == SessionRuntimeState.Waiting, TimeSpan.FromSeconds(3));
+
+        if (closing)
+        {
+            await helpee.PrepareForWindowCloseAsync();
+        }
+
+        var generation = Assert.IsType<long>(GetPrivateField(helpee, "inviteBootstrapGeneration"));
+        var flow = runtime.FlowSnapshot with
+        {
+            TerminalKind = SessionTerminalKind.PeerEnded,
+            PostTerminalAction = SessionFlowPostTerminalAction.ReturnToWaiting,
+            TerminalStatusText = "The other side ended the session."
+        };
+        InvokePrivateMethod(helpee, "TryApplyPostTerminalAction", flow);
+
+        Assert.Equal(generation + (closing ? 0 : 1),
+            Assert.IsType<long>(GetPrivateField(helpee, "inviteBootstrapGeneration")));
+        if (!closing)
+        {
+            await WaitUntilAsync(() => Volatile.Read(ref createdTransports) == 2, TimeSpan.FromSeconds(3));
+        }
+        Assert.Equal(closing ? 1 : 2, Volatile.Read(ref createdTransports));
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public async Task HelpeePageViewModel_QueuedHosting_DoesNotStartAfterWindowClose()
+    {
+        var createdTransports = 0;
+        using var runtime = new SessionRuntime(() =>
+        {
+            Interlocked.Increment(ref createdTransports);
+            return new ScriptedSignalingTransport(onHostByAddressAsync: _ => Task.CompletedTask);
+        });
+        using var helpee = new HelpeePageViewModel(static () => { }, CreateNknTestConfig(), runtime);
+        await WaitUntilAsync(() => runtime.State == SessionRuntimeState.Waiting, TimeSpan.FromSeconds(3));
+
+        var gate = Assert.IsType<SemaphoreSlim>(GetPrivateField(runtime, "lifecycleGate"));
+        await gate.WaitAsync();
+        Task hosting;
+        Task closing;
+        try
+        {
+            hosting = Assert.IsAssignableFrom<Task>(InvokePrivateMethod(helpee, "StartHostingAsync"));
+            Assert.False(hosting.IsCompleted);
+            closing = helpee.PrepareForWindowCloseAsync();
+        }
+        finally
+        {
+            gate.Release();
+        }
+
+        await Task.WhenAll(hosting, closing).WaitAsync(TimeSpan.FromSeconds(3));
+        Assert.Equal(1, Volatile.Read(ref createdTransports));
+        Assert.Equal(SessionRuntimeState.Idle, runtime.State);
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public void HelpeePageViewModel_FailedBootstrap_ReplacesStaleInvitePreparationStatus()
+    {
+        using var runtime = new SessionRuntime(() => new DevLocalTransport());
+        using var helpee = new HelpeePageViewModel(cancelAction: static () => { }, CreateDevLocalTestConfig(), runtime);
+
+        InvokePrivateMethod(helpee, "UpdateShareInviteText", "stale-invite-token");
+        InvokePrivateMethod(helpee, "UpdateShareInviteStatusText", "Preparing invite…");
+        Assert.True(helpee.HasShareInvite);
+
+        SetPrivateField(runtime, "role", SessionRuntimeRole.Helpee);
+        SetPrivateField(runtime, "state", SessionRuntimeState.Failed);
+        SetPrivateField(runtime, "transportState", TransportState.Failed);
+        SetPrivateField(runtime, "statusText", "Could not start the connection system");
+        SetPrivateField(
+            runtime,
+            "currentFlowSnapshot",
+            runtime.FlowSnapshot with
+            {
+                Phase = SessionFlowPhase.Failed,
+                UiPhase = SessionUiPhase.Failed,
+                Role = SessionRuntimeRole.Helpee,
+                RuntimeState = SessionRuntimeState.Failed,
+                TransportState = TransportState.Failed,
+                LastEndOrigin = SessionFlowEndOrigin.Failed,
+                ShouldSuppressConnectedControls = true,
+                TerminalKind = SessionTerminalKind.Failed,
+                TerminalStatusText = "Could not start the connection system",
+                FailureTitle = "Connection failed",
+                FailureMessage = "The session ended due to a connection problem.",
+                FailureActionText = "Retry",
+                ShouldClearConversationUi = true,
+                StatusText = "Could not start the connection system",
+                DisplayStatusText = "Connection failed",
+                DisplayConnectionState = "Failed",
+                ShowRetryAction = true,
+            });
+
+        InvokePrivateMethod(helpee, "SyncFromRuntime");
+
+        Assert.Equal("Connection failed", helpee.HeaderStatusText);
+        Assert.Equal("Could not start the connection system", helpee.ShareInviteStatusText);
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public void HelpeePageViewModel_NknDefaultInviteBootstrapTimeout_CoversBridgePreflightWindow()
+    {
+        using var runtime = new SessionRuntime(() => new NeverReadyHelpeeHostTransport("helpee.nkn.timeout.default"));
+        using var helpee = new HelpeePageViewModel(
+            cancelAction: static () => { },
+            CreateNknTestConfig(),
+            runtime);
+
+        var timeout = Assert.IsType<TimeSpan>(typeof(HelpeePageViewModel)
+            .GetField("inviteBootstrapTimeout", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .GetValue(helpee));
+
+        Assert.True(timeout >= TimeSpan.FromSeconds(60), $"timeout={timeout}");
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public async Task HelpeePageViewModel_HostReadyTimeout_ReplacesPreparingInviteStatus()
+    {
+        using var runtime = new SessionRuntime(() => new NeverReadyHelpeeHostTransport("helpee.never.ready"));
+        using var helpee = new HelpeePageViewModel(
+            cancelAction: static () => { },
+            CreateDevLocalTestConfig(),
+            runtime,
+            inviteBootstrapTimeout: TimeSpan.FromMilliseconds(75));
+        var helperIdentity = new PeerAddress("nlink-helper.bootstrap.timeout");
+
+        helpee.SetVerifiedInviteHelperIdentity(
+            helperIdentity,
+            helperTargetAddress: helperIdentity,
+            refreshInvite: true,
+            normalizedInputOverride: helperIdentity.Value);
+
+        try
+        {
+            await WaitUntilAsync(
+                () => runtime.State == SessionRuntimeState.Failed &&
+                      string.Equals(helpee.ShareInviteStatusText, "Could not prepare invite. Refresh invite and try again.", StringComparison.Ordinal),
+                TimeSpan.FromSeconds(3));
+        }
+        catch (TimeoutException ex)
+        {
+            throw new TimeoutException(
+                $"state={runtime.State}; transport_state={runtime.TransportLifecycleState}; status={runtime.StatusText}; invite_status={helpee.ShareInviteStatusText}; has_invite={helpee.HasShareInvite}; connection_state={helpee.ConnectionState}",
+                ex);
+        }
+
+        Assert.False(helpee.HasShareInvite);
+        Assert.False(helpee.RequestHelpCommand.CanExecute(null));
+        Assert.Equal("Failed", helpee.ConnectionState);
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public async Task HelpeePageViewModel_BridgeBootstrapNotReady_RehostsBeforeVisibleFailure()
+    {
+        var createdTransports = 0;
+        var hostCalls = 0;
+        using var runtime = new SessionRuntime(() =>
+        {
+            var attempt = Interlocked.Increment(ref createdTransports);
+            return new BootstrapRetryHelpeeHostTransport(
+                $"helpee.bootstrap.retry.{attempt}",
+                failBeforeReady: attempt == 1,
+                onHostCall: () => Interlocked.Increment(ref hostCalls));
+        });
+        using var helpee = new HelpeePageViewModel(
+            cancelAction: static () => { },
+            CreateDevLocalTestConfig(),
+            runtime,
+            inviteBootstrapTimeout: TimeSpan.FromSeconds(5));
+
+        try
+        {
+            await WaitUntilAsync(
+                () => Volatile.Read(ref hostCalls) >= 2 &&
+                      runtime.State == SessionRuntimeState.Waiting &&
+                      runtime.CurrentLocalPeerAddress is not null,
+                TimeSpan.FromSeconds(3));
+        }
+        catch (TimeoutException ex)
+        {
+            throw new TimeoutException(
+                $"created_transports={Volatile.Read(ref createdTransports)}; host_calls={Volatile.Read(ref hostCalls)}; state={runtime.State}; transport_state={runtime.TransportLifecycleState}; status={runtime.StatusText}; connection_state={helpee.ConnectionState}; invite_status={helpee.ShareInviteStatusText}",
+                ex);
+        }
+
+        Assert.NotEqual("Failed", helpee.ConnectionState);
+        Assert.DoesNotContain("Could not prepare invite", helpee.ShareInviteStatusText, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public async Task HelpeePageViewModel_BridgeBootstrapNotReady_RetriesWithinNknInviteWindow()
+    {
+        var createdTransports = 0;
+        var hostCalls = 0;
+        using var runtime = new SessionRuntime(() =>
+        {
+            var attempt = Interlocked.Increment(ref createdTransports);
+            return new BootstrapRetryHelpeeHostTransport(
+                $"helpee.bootstrap.window.{attempt}",
+                failBeforeReady: attempt <= 4,
+                onHostCall: () => Interlocked.Increment(ref hostCalls));
+        });
+        using var helpee = new HelpeePageViewModel(
+            cancelAction: static () => { },
+            CreateNknTestConfig(),
+            runtime,
+            inviteBootstrapTimeout: TimeSpan.FromSeconds(10));
+
+        try
+        {
+            await WaitUntilAsync(
+                () => Volatile.Read(ref hostCalls) >= 5 &&
+                      runtime.State == SessionRuntimeState.Waiting &&
+                      runtime.CurrentLocalPeerAddress is not null,
+                TimeSpan.FromSeconds(8));
+        }
+        catch (TimeoutException ex)
+        {
+            throw new TimeoutException(
+                $"created_transports={Volatile.Read(ref createdTransports)}; host_calls={Volatile.Read(ref hostCalls)}; state={runtime.State}; transport_state={runtime.TransportLifecycleState}; status={runtime.StatusText}; connection_state={helpee.ConnectionState}; invite_status={helpee.ShareInviteStatusText}",
+                ex);
+        }
+
+        Assert.NotEqual("Failed", helpee.ConnectionState);
+        Assert.DoesNotContain("Could not prepare invite", helpee.ShareInviteStatusText, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public async Task HelpeePageViewModel_HostReadyTimeoutBeforeBridgeReady_RetriesWithinNknInviteWindow()
+    {
+        var createdTransports = 0;
+        var hostCalls = 0;
+        using var runtime = new SessionRuntime(() =>
+        {
+            var attempt = Interlocked.Increment(ref createdTransports);
+            return new BootstrapRetryHelpeeHostTransport(
+                $"helpee.bootstrap.timeout.window.{attempt}",
+                failBeforeReady: attempt <= 4,
+                onHostCall: () => Interlocked.Increment(ref hostCalls),
+                failAsHostReadyTimeout: true);
+        });
+        using var helpee = new HelpeePageViewModel(
+            cancelAction: static () => { },
+            CreateNknTestConfig(),
+            runtime,
+            inviteBootstrapTimeout: TimeSpan.FromSeconds(10));
+
+        try
+        {
+            await WaitUntilAsync(
+                () => Volatile.Read(ref hostCalls) >= 5 &&
+                      runtime.State == SessionRuntimeState.Waiting &&
+                      runtime.CurrentLocalPeerAddress is not null,
+                TimeSpan.FromSeconds(8));
+        }
+        catch (TimeoutException ex)
+        {
+            throw new TimeoutException(
+                $"created_transports={Volatile.Read(ref createdTransports)}; host_calls={Volatile.Read(ref hostCalls)}; state={runtime.State}; transport_state={runtime.TransportLifecycleState}; status={runtime.StatusText}; connection_state={helpee.ConnectionState}; invite_status={helpee.ShareInviteStatusText}",
+                ex);
+        }
+
+        Assert.NotEqual("Failed", helpee.ConnectionState);
+        Assert.DoesNotContain("Could not prepare invite", helpee.ShareInviteStatusText, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public async Task HelpeePageViewModel_TransportUnavailableBeforeBridgeReady_SurfacesRetryablePreflightFailure()
+    {
+        var createdTransports = 0;
+        var hostCalls = 0;
+        using var runtime = new SessionRuntime(() =>
+        {
+            var attempt = Interlocked.Increment(ref createdTransports);
+            return new BootstrapRetryHelpeeHostTransport(
+                $"helpee.bootstrap.transport-unavailable.window.{attempt}",
+                failBeforeReady: attempt <= 2,
+                onHostCall: () => Interlocked.Increment(ref hostCalls),
+                failAsTransportUnavailable: true);
+        });
+        using var helpee = new HelpeePageViewModel(
+            cancelAction: static () => { },
+            CreateNknTestConfig(),
+            runtime,
+            inviteBootstrapTimeout: TimeSpan.FromSeconds(10));
+
+        try
+        {
+            await WaitUntilAsync(
+                () => runtime.State == SessionRuntimeState.Failed &&
+                      string.Equals(helpee.ShareInviteStatusText, "Could not prepare invite. Refresh invite and try again.", StringComparison.Ordinal),
+                TimeSpan.FromSeconds(3));
+        }
+        catch (TimeoutException ex)
+        {
+            throw new TimeoutException(
+                $"created_transports={Volatile.Read(ref createdTransports)}; host_calls={Volatile.Read(ref hostCalls)}; state={runtime.State}; transport_state={runtime.TransportLifecycleState}; status={runtime.StatusText}; connection_state={helpee.ConnectionState}; invite_status={helpee.ShareInviteStatusText}",
+                ex);
+        }
+
+        Assert.Equal(1, Volatile.Read(ref hostCalls));
+        Assert.False(helpee.HasShareInvite);
+        Assert.Equal("Failed", helpee.ConnectionState);
+    }
+
     [Trait("Category", "Smoke")]
     [Fact]
     public void HelpeePageViewModel_IncomingApproval_ClearsStalePeerEndedHeaderNotice()
@@ -793,6 +1137,160 @@ public sealed class HelpeePageViewModelLifecycleTests : CoreSmokeTestsBase
             emojiSequence,
             fallbackCode,
             SessionVerificationCodeDerivation.SourceHandshakeTranscriptV1);
+    }
+
+    private sealed class BootstrapRetryHelpeeHostTransport :
+        ISignalingTransport,
+        IAddressHostSignalingTransport,
+        IHostReadySignalingTransport,
+        IBridgeBootstrapReadinessSignalingTransport,
+        ILocalPeerAddressSignalingTransport,
+        ISessionSecuritySignalingTransport
+    {
+        private readonly TaskCompletionSource<bool> hostReadyTcs = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private readonly bool failBeforeReady;
+        private readonly Action onHostCall;
+        private readonly bool failAsHostReadyTimeout;
+        private readonly bool failAsTransportUnavailable;
+        private int bootstrapFailed;
+        private SessionSecurityState currentSessionSecurityState = SessionSecurityState.Empty;
+
+        public BootstrapRetryHelpeeHostTransport(
+            string localPeerAddress,
+            bool failBeforeReady,
+            Action onHostCall,
+            bool failAsHostReadyTimeout = false,
+            bool failAsTransportUnavailable = false)
+        {
+            LocalPeerAddress = localPeerAddress;
+            this.failBeforeReady = failBeforeReady;
+            this.onHostCall = onHostCall;
+            this.failAsHostReadyTimeout = failAsHostReadyTimeout;
+            this.failAsTransportUnavailable = failAsTransportUnavailable;
+        }
+
+        public string LocalPeerAddress { get; }
+        public event EventHandler<IncomingJoinRequestEventArgs>? IncomingJoinRequest;
+        public event EventHandler<TransportSessionKeyReadyEventArgs>? SessionKeyReady;
+        public event EventHandler<TransportChatMessageEventArgs>? ChatMessageReceived;
+        public event EventHandler? Approved;
+        public event EventHandler? Rejected;
+        public event EventHandler? Disconnected;
+        public event EventHandler<TransportSessionSecurityStateChangedEventArgs>? SessionSecurityStateChanged;
+        public SessionSecurityState CurrentSessionSecurityState => currentSessionSecurityState;
+
+        public Task HostByAddressAsync(CancellationToken ct)
+        {
+            onHostCall();
+            if (failBeforeReady)
+            {
+                Volatile.Write(ref bootstrapFailed, 1);
+                if (failAsTransportUnavailable)
+                {
+                    NknRuntimeDiagnostics.SetLastError("transport_unavailable");
+                    throw new InvalidOperationException("transport_unavailable");
+                }
+
+                if (failAsHostReadyTimeout)
+                {
+                    NknRuntimeDiagnostics.SetLastError("ConnectToNodeTimeoutError: host_ready_connect_failed");
+                    throw new TimeoutException("ConnectToNodeTimeoutError: host_ready_connect_failed");
+                }
+
+                NknRuntimeDiagnostics.SetLastError(
+                    "nkn_bridge_bootstrap_not_ready: role=helpee; reason=bridge_transport_connect_failed_before_ready");
+                throw new InvalidOperationException(
+                    "nkn_bridge_bootstrap_not_ready: role=helpee; reason=bridge_transport_connect_failed_before_ready");
+            }
+
+            currentSessionSecurityState = SessionSecurityState.CreateHelpeeWaiting(new PeerAddress(LocalPeerAddress));
+            SessionSecurityStateChanged?.Invoke(this, new TransportSessionSecurityStateChangedEventArgs(currentSessionSecurityState));
+            hostReadyTcs.TrySetResult(true);
+            return Task.Delay(Timeout.Infinite, ct);
+        }
+
+        public Task WaitUntilHostReadyAsync(CancellationToken ct) => hostReadyTcs.Task.WaitAsync(ct);
+
+        public BridgeBootstrapReadinessSnapshot GetBridgeBootstrapReadinessSnapshot()
+            => Volatile.Read(ref bootstrapFailed) == 0
+                ? new(
+                    Role: "helpee_test_host",
+                    Generation: 1,
+                    RunId: LocalPeerAddress,
+                    ReadyEmitted: !failBeforeReady,
+                    ControlReady: !failBeforeReady,
+                    MediaReady: !failBeforeReady,
+                    BulkReady: !failBeforeReady,
+                    LastReadyUtcMs: failBeforeReady ? 0 : 1,
+                    DeadlineUtcMs: 0,
+                    TerminalFailure: false,
+                    FailureReason: "(none)",
+                    LastError: "(none)")
+                : new(
+                    Role: "helpee_test_host",
+                    Generation: 1,
+                    RunId: LocalPeerAddress,
+                    ReadyEmitted: false,
+                    ControlReady: false,
+                    MediaReady: false,
+                    BulkReady: false,
+                    LastReadyUtcMs: 0,
+                    DeadlineUtcMs: 0,
+                    TerminalFailure: true,
+                    FailureReason: failAsTransportUnavailable ? "transport_unavailable" : failAsHostReadyTimeout ? "host_ready_connect_failed" : "bridge_transport_connect_failed_before_ready",
+                    LastError: failAsTransportUnavailable ? "(none)" : failAsHostReadyTimeout ? "ConnectToNodeTimeoutError" : "connect EACCES");
+
+        public Task SendChatMessageAsync(ReadOnlyMemory<byte> payload, CancellationToken ct) => Task.CompletedTask;
+
+        public void Dispose()
+        {
+        }
+    }
+
+    private sealed class NeverReadyHelpeeHostTransport :
+        ISignalingTransport,
+        IAddressHostSignalingTransport,
+        IHostReadySignalingTransport,
+        IBridgeBootstrapReadinessSignalingTransport,
+        ILocalPeerAddressSignalingTransport
+    {
+        public NeverReadyHelpeeHostTransport(string localPeerAddress)
+        {
+            LocalPeerAddress = localPeerAddress;
+        }
+
+        public string LocalPeerAddress { get; }
+        public event EventHandler<IncomingJoinRequestEventArgs>? IncomingJoinRequest;
+        public event EventHandler<TransportSessionKeyReadyEventArgs>? SessionKeyReady;
+        public event EventHandler<TransportChatMessageEventArgs>? ChatMessageReceived;
+        public event EventHandler? Approved;
+        public event EventHandler? Rejected;
+        public event EventHandler? Disconnected;
+
+        public Task HostByAddressAsync(CancellationToken ct) => Task.Delay(Timeout.Infinite, ct);
+
+        public Task WaitUntilHostReadyAsync(CancellationToken ct) => Task.Delay(Timeout.Infinite, ct);
+
+        public BridgeBootstrapReadinessSnapshot GetBridgeBootstrapReadinessSnapshot()
+            => new(
+                Role: "helpee_test_host",
+                Generation: 1,
+                RunId: "helpee-never-ready-test",
+                ReadyEmitted: false,
+                ControlReady: false,
+                MediaReady: false,
+                BulkReady: false,
+                LastReadyUtcMs: 0,
+                DeadlineUtcMs: 0,
+                TerminalFailure: true,
+                FailureReason: "bridge_never_ready",
+                LastError: "(none)");
+
+        public Task SendChatMessageAsync(ReadOnlyMemory<byte> payload, CancellationToken ct) => Task.CompletedTask;
+
+        public void Dispose()
+        {
+        }
     }
 
     private sealed class AuthoritativeAddressSuppressedHelpeeTransport :

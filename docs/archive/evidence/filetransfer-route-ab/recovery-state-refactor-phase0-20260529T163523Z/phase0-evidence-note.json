@@ -1,0 +1,14 @@
+{
+  "phase": "recovery-state-refactor-phase0",
+  "created_utc": "2026-05-29T16:35:23Z",
+  "head": "67c157dc",
+  "canonical_scenario": "regular-v4-live-activation-off-on-off-128mb",
+  "canonical_payload": "128MiB",
+  "locked_evidence_roots": [
+    "artifacts/filetransfer-route-ab/stability-proof-20260529T-regular-cycle-128mib-immediate-off-after-epoch/regular-activation-cycle",
+    "artifacts/filetransfer-route-ab/stability-proof-20260529T-regular-cycle-128mib-adopt-fallback-epoch/regular-activation-cycle"
+  ],
+  "current_failure_class": "runtime_unlock_recovery_coordination",
+  "runtime_behavior_changed": false,
+  "summary": "Phase 0 adds evidence classification and skipped recovery-state contract tests only. It does not change route selection, Tuna activation, fallback recovery, bridge recovery, liveness behavior, or throughput."
+}

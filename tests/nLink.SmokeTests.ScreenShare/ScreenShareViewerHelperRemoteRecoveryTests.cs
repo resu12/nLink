@@ -1279,7 +1279,7 @@ public sealed class ScreenShareViewerHelperRemoteRecoveryTests : ScreenShareView
 
             vm.OnOwnedEncodedFrame("h264", new byte[] { 51 }, capturedTsUtcMs: 0, isKeyFrame: true, streamEpoch: 19, frameId: 1);
             await WaitUntilAsync(
-                () => vm.CurrentFrame is Bitmap recovered && recovered.PixelSize.Width == 51 && vm.IsIdleForDiagnostics,
+                () => CurrentFrameWidthEqualsSafely(vm, 51) && vm.IsIdleForDiagnostics,
                 TimeSpan.FromSeconds(2));
 
             var metrics = vm.GetMetricsSnapshot();
@@ -1742,11 +1742,7 @@ private async Task ScreenShareViewer_HelperRemote_SequentialPFrames_StayLiveWith
         {
             using var vm = new ScreenShareViewerViewModel(
                 decodeFrame: _ => throw new InvalidOperationException("jpeg should not be used"),
-                postToUiAsync: action =>
-                {
-                    action();
-                    return Task.CompletedTask;
-                },
+                postToUiAsync: null,
                 h264Decoder: new FakeH264BitmapDecoder(),
                 logRole: "helper_remote");
             var staleDropCount = 0;

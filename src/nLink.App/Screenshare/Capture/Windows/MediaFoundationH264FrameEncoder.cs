@@ -809,16 +809,9 @@ internal sealed partial class MediaFoundationH264FrameEncoder : IWindowsH264Fram
         WindowsH264EncodeProfile encodeProfile,
         WindowsH264EncodeOptions options)
     {
-        var sampleDurationHns = ComputeSampleDurationHns(encodeProfile.TargetFramesPerSecond);
-        var bufferLength = checked(encodeProfile.Width * encodeProfile.Height * 3 / 2);
-        var preferredStrategy = EnsureInputBufferStrategy(
-            encodeProfile.Width,
-            encodeProfile.Height,
-            encodeProfile.TargetFramesPerSecond,
-            bufferLength,
-            sampleDurationHns);
-
-        foreach (var strategy in EnumerateStrategyAttempts(preferredStrategy))
+        // The software transform validates its own input. Do not gate it on the
+        // sink-writer probe: MP4 finalization can block before any live frame is encoded.
+        foreach (var strategy in EnumerateStrategyAttempts(RawInputBufferStrategy.CpuMemoryBufferNv12))
         {
             IMFTransform? encoderTransform = null;
             IMFDXGIDeviceManager? deviceManager = null;

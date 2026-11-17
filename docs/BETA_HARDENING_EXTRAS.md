@@ -84,12 +84,12 @@ Artifact:
 ### Hang capture (UI freeze watchdog + manual report)
 
 - UI heartbeat watchdog runs every 1s and captures a hang report if the UI heartbeat is missed for the configured threshold (default: 8s).
-- Manual capture is available from the Diagnostics page via `Save Hang Report`.
+- Manual capture is available from Options -> Diagnostics via `Save Hang Report`.
 - Hang reports are saved under:
   - `%LOCALAPPDATA%\nLink\artifacts\hang\hang-<timestamp>\`
 
 Manual verification:
-1. Open Diagnostics page and click `Save Hang Report`.
+1. Open Options -> Diagnostics and click `Save Hang Report`.
 2. Confirm a new `hang-<timestamp>` folder is created.
 3. Verify the folder contains `summary.txt`, `diagnostics-snapshot.txt`, `log-tail.txt`, `resource-snapshot.txt`, and `screenshare-evidence.txt`.
 

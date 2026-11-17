@@ -16,6 +16,19 @@ Run the release smoke lane:
 powershell -ExecutionPolicy Bypass -File .\tools\Test-Lanes.ps1 -Lane Smoke -Configuration Release
 ```
 
+Run deterministic Core and file-transfer contract lanes:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\tools\Test-Lanes.ps1 -Lane CoreContract,FileTransferContract,FileTransferAcceptanceFake -Configuration Release
+```
+
+Run all retained file-transfer analyzer contracts, or one shard while iterating:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\tools\Test-Lanes.ps1 -Lane FileTransferAnalyzer -Configuration Release
+powershell -ExecutionPolicy Bypass -File .\tools\Test-Lanes.ps1 -Lane FileTransferAnalyzerRuntimeUnlock -Configuration Release
+```
+
 Run optional GUI smoke in an interactive Windows session:
 
 ```powershell
@@ -24,6 +37,8 @@ powershell -ExecutionPolicy Bypass -File .\tools\Test-Lanes.ps1 -Lane GuiSmoke -
 
 ## Lane Matrix
 
+`Core -Configuration Release` (including `NonGui` and `All`) runs ordinary Core tests and diagnostic rejection guards in Release, then runs only `RequiredConfiguration=Debug` offline fault-profile fixtures in Debug. The guards remain enabled; no diagnostic positives are silently skipped. With `-NoBuild`, build the Core test project in both configurations first. Direct `dotnet test -c Release` calls need `--filter "RequiredConfiguration!=Debug"` and the corresponding Debug fixture run for equivalent coverage.
+
 | Lane | Target | Use |
 |---|---|---|
 | `Core` | `tests\nLink.SmokeTests.Core` | Core runtime, security, diagnostics, reliability, file transfer, bridge lifecycle. |
@@ -31,7 +46,21 @@ powershell -ExecutionPolicy Bypass -File .\tools\Test-Lanes.ps1 -Lane GuiSmoke -
 | `ScreenShare` | `tests\nLink.SmokeTests.ScreenShare` | Screen-share runtime, analyzers, receive path, H264, recovery, soak-adjacent tests. |
 | `RemoteControl` | `tests\nLink.SmokeTests.RemoteControl` | Remote-control reducer, display mapping, input guards, transport priority tests. |
 | `Contracts` | `tests\nLink.SmokeTests.Contracts` | Contract freeze and architecture guardrails. |
-| `Smoke` | Sequential domain-project filter `Category=Smoke` | Release smoke compatibility lane across all domain projects. |
+| `CoreContract` | Core `Category=Smoke` compatibility subset excluding file-transfer contract, analyzer, and fake-acceptance ownership | Deterministic Core contract coverage. |
+| `FileTransferContract` | Four isolated file-transfer contract sublanes | Complete coordinator/Core/Infra/fake-NKN contract sweep without shared-log interference. |
+| `FileTransferCoordinatorContract` | `FileTransferCoordinatorTests` | Coordinator authority and state-machine contracts. |
+| `FileTransferInfraContract` | `NknAccelerationTransportTests` | Infra acceleration, retry, settlement, and bridge contracts. |
+| `FileTransferNknTransportContract` | `NknFileTransferTransportTests` | Fake-NKN file-transfer transport contracts. |
+| `FileTransferCoreRuntimeContract` | Session runtime/retry classes plus `SparseWorkerHandoff` and `FallbackTailChurn` suites | Core lock, bridge-event, sparse-worker handoff, and fallback-tail pairing contracts. |
+| `FileTransferAnalyzer` | Five retained-analyzer shards | Complete deterministic file-transfer analyzer contract sweep. |
+| `FileTransferAnalyzerAuthority` | `OpsSuite=RetainedAuthorityProof` | Retained authority and rejected-effect isolation analyzer shard. |
+| `FileTransferAnalyzerRouteLaw` | `OpsSuite=RetainedRouteLaw` | Route-law analyzer shard. |
+| `FileTransferAnalyzerFallback` | `OpsSuite=RetainedFallback` | Fallback analyzer shard. |
+| `FileTransferAnalyzerRuntimeUnlock` | `OpsSuite=RetainedRuntimeUnlock` | Runtime-unlock and retry proof-chain analyzer shard. |
+| `FileTransferAnalyzerV4Transport` | `OpsSuite=RetainedV4Transport` | V4 transport and efficiency analyzer shard. |
+| `FileTransferEvidenceIntegrity` | `FileTransferEvidenceSuite=OperationalLogIntegrity` | Operational-log integrity and evidence-provenance contracts. |
+| `FileTransferAcceptanceFake` | File-transfer script, fake acceptance, provenance, and harness `OpsSuite` filters | Deterministic wrapper and artifact-contract coverage without GUI/network execution. |
+| `Smoke` | Non-Core domain-project filter `Category=Smoke` | Release smoke compatibility lane; deterministic Core coverage is owned by explicit contract lanes. |
 | `NonGui` | `Core`, `ScreenShare`, `RemoteControl`, and `Contracts` lanes | Beta readiness non-Gui domain gate. |
 | `GuiSmoke` | Gui project filter `Category=GuiSmoke` | Interactive Windows GUI smoke; the script sets `NLINK_RUN_GUI_SMOKE=1`. |
 | `ContractFreeze` | Contracts project filter `Category=ContractFreeze` | Contract approval/update lane. |
@@ -40,6 +69,29 @@ powershell -ExecutionPolicy Bypass -File .\tools\Test-Lanes.ps1 -Lane GuiSmoke -
 | `All` | All five domain projects | Full domain test sweep without relying on the old monolith project. |
 
 The old performance category is not an active lane. Reintroduce it only with real performance tests and update this file, CI, and architecture guardrails together.
+
+`Category=Smoke` remains on some Core methods as compatibility metadata, but it is not the scheduling authority. Use the explicit lanes above. Live file-transfer GUI/NKN validation remains scenario-based through `Run-FileTransferRouteAcceptance.ps1`; run only the targeted failing scenario after rebuilding the portable package. The complete Phase 5 live matrix is a pre-release gate, not part of deterministic CI.
+
+## File-transfer audit disposition
+
+- **Required:** coordinator, Core, Infra, fake-NKN transport, retained-analyzer, harness, provenance, and fake-acceptance contracts remain scheduled in named deterministic lanes.
+- **Redundant:** no active test was removed solely for equivalent or slow coverage; no deletion candidate had sufficient proof of identical boundaries.
+- **Obsolete:** ten already-skipped Infra tests for the pre-coordinator retry-dispatch grantor were removed because their authority path is unreachable and their stated replacement contracts are active.
+- **Misclassified:** deterministic Core file-transfer tests are no longer scheduled through the compatibility `Smoke` lane; analyzer suites are independently selectable by proof domain.
+- **Expensive but valid:** live GUI/NKN route scenarios remain narrowly targeted during remediation, while the complete Phase 5 matrix remains a pre-release gate.
+
+### v0.7.0 bounded release qualification
+
+Automatic Core-batch continuation is stopped. The following two optional positive-report tests are explicitly deferred for this release, not passed, skipped, disabled, or removed from the normal lanes:
+
+- `FileTransferPublicationUseConsumerTests.PublicationPositiveIntegration_PrimarySelectsSeededOfflineFailure`
+- `FileTransferPublicationUseConsumerTests.PublicationPersistence_RealAdoptedFailurePersistsWithoutChangingPrimaryOutcome`
+
+Their retained Core-083 failures request two-activation analysis for a non-cycle fixture, leaving no eligible primary publication witness. Receipt/source hashes and snapshot parity remain valid, and the original runtime-proof rejection is preserved. Residual risk is unavailable optional diagnostic companion reporting. Original-receipt identity, tamper rejection, source provenance, and optional-report non-interference remain mandatory; no other failing test is deferred by this decision.
+
+The October 15 strict seven-scenario GUI gate on runtime source `cf8ea296` passed correctness, including helper-to-helpee payer handoff and the required `regular-v4-live-activation-off-on-off-256mb` target: actual authenticated Tuna payload delivery in both activations, SHA integrity, both terminal GUIs, and coordinator-published `regular_nkn_v4_fast -> file_tuna_v4 -> post_tuna_fallback_v6 -> file_tuna_v4 -> post_tuna_fallback_v6`. Neither SHA nor fallback completion substitutes for the second Tuna publication or delivery proof. Offline security closeout binds all 10 required Tuna delivery stages; separate performance FAIL/WARN results remain retained. See [ReleaseRunbook.md](ReleaseRunbook.md#current-qualification-update-2026-10-15) for exact-payload provenance and remaining sign-off. This result does not implicitly pass every optional Core batch or erase historical failures.
+
+For a new affected runtime path, use focused regressions and applicable retained mandatory coverage, a reviewed clean checkpoint, a freshly rebuilt portable package, and escalated live preflights before a targeted rerun. Do not bypass a failed preflight. Reserve one broad mandatory regression gate and the complete GUI matrix for a stable candidate; retain still-applicable completed evidence rather than repeating unrelated batches. Remaining unqualified coverage is not implicitly accepted. After two focused fix-and-validation iterations without closing a blocker, stop patch expansion and review the first implicated authority-to-delivery boundary.
 
 For screenshare-specific validation and support capture decisions, use `docs/screenshare-operability.md` and `tools\ScreenShare-Ops.ps1` before reaching for live soak or retained Track B evidence directly.
 

@@ -1,3 +1,5 @@
+using NLink.Core.FileTransfer;
+
 namespace NLink.Infra.Nkn;
 
 internal enum BridgeLifecycleEventKind
@@ -5,6 +7,12 @@ internal enum BridgeLifecycleEventKind
     Spawned,
     Ready,
     Exited,
+    ReceiveStallRecoveryStarted,
+    ReceiveStallRecoveryCompleted,
+    ReceiveStallRecoveryReceiveResumed,
+    ReceiveStallRecoveryExhausted,
+    ReceiveStallRecoveryDeferred,
+    QueueCleared,
 }
 
 internal enum BridgeStartMode
@@ -30,7 +38,19 @@ internal readonly record struct BridgeLifecycleEvent(
     double? UptimeMs,
     int? ExitCode,
     BridgeExitReasonKind? ExitReasonKind,
-    string ExitReasonText);
+    string ExitReasonText,
+    string? QueueLane = null,
+    long QueueClears = 0,
+    long ClearedSinceLast = 0,
+    long TotalMessagesReceivedSinceLast = 0,
+    long ControlMessagesReceivedSinceLast = 0,
+    long MediaMessagesReceivedSinceLast = 0,
+    long BulkMessagesReceivedSinceLast = 0,
+    FileTransferBridgeRecoveryExecutionCommand? RecoveryExecutionCommand = null,
+    long SubmissionEpoch = 0,
+    long ProcessEpoch = 0,
+    long ProcessSpawnTicks = 0,
+    string? PeerReachabilityIdentity = null);
 
 internal readonly record struct BridgeExitClassification(
     BridgeExitReasonKind ReasonKind,

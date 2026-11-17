@@ -3,18 +3,29 @@
 The default release baseline is the main solution:
 
 ```powershell
-dotnet test -c Release --no-restore -m:1 -p:UseSharedCompilation=false --verbosity minimal
+dotnet test -c Release --no-restore -m:1 -nr:false -p:UseSharedCompilation=false --verbosity minimal
 ```
 
 Use project-level runs when diagnosing a focused change:
 
 | Project | Lane | Protects | Typical command |
 | --- | --- | --- | --- |
-| `nLink.SmokeTests.Contracts` | Contracts | public contracts, golden snapshots, test architecture | `dotnet test tests\nLink.SmokeTests.Contracts\nLink.SmokeTests.Contracts.csproj -c Release --no-restore -m:1 -p:UseSharedCompilation=false --verbosity minimal` |
-| `nLink.SmokeTests.Core` | Core | runtime lifecycle, authorization, file transfer, diagnostics, bridge policy | `dotnet test tests\nLink.SmokeTests.Core\nLink.SmokeTests.Core.csproj -c Release --no-restore -m:1 -p:UseSharedCompilation=false --verbosity minimal` |
-| `nLink.SmokeTests.Gui` | GUI | Avalonia view-models, command bindings, headless UI behavior | `dotnet test tests\nLink.SmokeTests.Gui\nLink.SmokeTests.Gui.csproj -c Release --no-restore -m:1 -p:UseSharedCompilation=false --verbosity minimal` |
-| `nLink.SmokeTests.ScreenShare` | ScreenShare | capture, encode/decode, transport pressure, recovery | `dotnet test tests\nLink.SmokeTests.ScreenShare\nLink.SmokeTests.ScreenShare.csproj -c Release --no-restore -m:1 -p:UseSharedCompilation=false --verbosity minimal` |
-| `nLink.SmokeTests.RemoteControl` | RemoteControl | input guard, reducer, transport priority, display mapping | `dotnet test tests\nLink.SmokeTests.RemoteControl\nLink.SmokeTests.RemoteControl.csproj -c Release --no-restore -m:1 -p:UseSharedCompilation=false --verbosity minimal` |
+| `nLink.SmokeTests.Contracts` | Contracts | public contracts, golden snapshots, test architecture | `dotnet test tests\nLink.SmokeTests.Contracts\nLink.SmokeTests.Contracts.csproj -c Release --no-restore -m:1 -nr:false -p:UseSharedCompilation=false --verbosity minimal` |
+| `nLink.SmokeTests.Core` | Core | runtime lifecycle, authorization, file transfer, diagnostics, bridge policy | `dotnet test tests\nLink.SmokeTests.Core\nLink.SmokeTests.Core.csproj -c Release --no-restore -m:1 -nr:false -p:UseSharedCompilation=false --verbosity minimal` |
+| `nLink.SmokeTests.Gui` | GUI | Avalonia view-models, command bindings, headless UI behavior | `dotnet test tests\nLink.SmokeTests.Gui\nLink.SmokeTests.Gui.csproj -c Release --no-restore -m:1 -nr:false -p:UseSharedCompilation=false --verbosity minimal` |
+| `nLink.SmokeTests.ScreenShare` | ScreenShare | capture, encode/decode, transport pressure, recovery | `dotnet test tests\nLink.SmokeTests.ScreenShare\nLink.SmokeTests.ScreenShare.csproj -c Release --no-restore -m:1 -nr:false -p:UseSharedCompilation=false --verbosity minimal` |
+| `nLink.SmokeTests.RemoteControl` | RemoteControl | input guard, reducer, transport priority, display mapping | `dotnet test tests\nLink.SmokeTests.RemoteControl\nLink.SmokeTests.RemoteControl.csproj -c Release --no-restore -m:1 -nr:false -p:UseSharedCompilation=false --verbosity minimal` |
+
+On Windows, prefer the lock-safe command shape in `docs\build-test-lock-avoidance.md`: build once, run repeated opt-in cells with `--no-build --no-restore`, and run `dotnet build-server shutdown` after long batches.
+
+Use `tools\Test-Lanes.ps1` as the scheduling authority for deterministic release subsets. Core file-transfer tests are split into runtime contracts, five independently runnable analyzer shards, and fake acceptance/wrapper contracts:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\tools\Test-Lanes.ps1 -Lane CoreContract,FileTransferContract,FileTransferAcceptanceFake -Configuration Release
+powershell -ExecutionPolicy Bypass -File .\tools\Test-Lanes.ps1 -Lane FileTransferAnalyzer -Configuration Release
+```
+
+The compatibility `Smoke` lane no longer runs the Core project. Historical Core `Category=Smoke` traits remain metadata; do not use a raw category filter as a substitute for the named lanes.
 
 The latest Phase 4 release baseline was:
 
@@ -41,6 +52,8 @@ Run an opt-in project explicitly, for example:
 ```powershell
 dotnet test tests\nLink.OptInTests.GuiSmoke\nLink.OptInTests.GuiSmoke.csproj -c Release
 ```
+
+Paid Tuna GUI file-transfer automation is additionally gated by `NLINK_RUN_TUNA_GUI_FILETRANSFER=1` and wallet credentials. Prefer the wrapper in `docs\file-transfer-soak.md` / `tools\Run-FileTransferTunaGuiSmoke.ps1` so artifacts stay under `artifacts\gui-smoke\`.
 
 Do not move opt-in projects back into the default solution baseline unless they are deterministic, non-interactive, and environment-independent.
 

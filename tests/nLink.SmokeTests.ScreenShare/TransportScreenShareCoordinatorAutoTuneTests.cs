@@ -21,10 +21,89 @@ namespace NLink.SmokeTests;
 
 [Collection(AvaloniaHeadlessUiCollection.Name)]
 [Trait("Area", "ScreenShare")]
-public sealed class TransportScreenShareCoordinatorAutoTuneTests : ScreenShareCoordinatorTestBase, IClassFixture<ScreenShareCoordinatorFixture>
+public sealed class TransportScreenShareCoordinatorAutoTuneTests : ScreenShareCoordinatorTestBase, IClassFixture<ScreenShareCoordinatorFixture>, IDisposable
 {
+    private readonly EnvironmentOverride defaultCaptureFpsOverride;
+    private readonly EnvironmentOverride defaultTransportFpsOverride;
+    private readonly EnvironmentOverride defaultScaleOverride;
+    private readonly EnvironmentOverride defaultQualityProfileOverride;
+
     public TransportScreenShareCoordinatorAutoTuneTests(ScreenShareCoordinatorFixture fixture) : base(fixture)
     {
+        defaultCaptureFpsOverride = new EnvironmentOverride(
+            ScreenShareQualitySettings.ScreenShareMaxFpsVariable,
+            "15");
+        defaultTransportFpsOverride = new EnvironmentOverride(
+            ScreenShareQualitySettings.ScreenShareTransportMaxFpsVariable,
+            "8");
+        defaultScaleOverride = new EnvironmentOverride(
+            ScreenShareQualitySettings.ScreenShareScaleVariable,
+            "1");
+        defaultQualityProfileOverride = new EnvironmentOverride(
+            ScreenShareQualitySettings.ScreenShareQualityProfileVariable,
+            FeatureFlags.ScreenShareQualityProfileNormal);
+    }
+
+    public void Dispose()
+    {
+        defaultQualityProfileOverride.Dispose();
+        defaultScaleOverride.Dispose();
+        defaultTransportFpsOverride.Dispose();
+        defaultCaptureFpsOverride.Dispose();
+    }
+
+[Fact]
+    [Trait("Category", "Smoke")]
+    public void TransportScreenShareCoordinator_NormalProfile_AllowsHighQualitySenderTarget15()
+    {
+        using var profileOverride = new EnvironmentOverride(
+            ScreenShareQualitySettings.ScreenShareQualityProfileVariable,
+            FeatureFlags.ScreenShareQualityProfileNormal);
+        using var transportFpsOverride = new EnvironmentOverride(
+            ScreenShareQualitySettings.ScreenShareTransportMaxFpsVariable,
+            "15");
+
+        var method = typeof(TransportScreenShareCoordinator).GetMethod(
+            "ResolveSenderTargetFramesPerSecond",
+            BindingFlags.Static | BindingFlags.NonPublic);
+        Assert.NotNull(method);
+
+        var target = (int)method!.Invoke(
+            null,
+            [ScreenShareSenderFreshnessMode.Normal, FeatureFlags.ScreenShareTransportMaxFps, false])!;
+
+        Assert.Equal(15, target);
+    }
+
+[Fact]
+    [Trait("Category", "Smoke")]
+    public void TransportScreenShareCoordinator_TunaQualityProfile_AllowsNormalSenderTarget15()
+    {
+        using var profileOverride = new EnvironmentOverride(
+            ScreenShareQualitySettings.ScreenShareQualityProfileVariable,
+            FeatureFlags.ScreenShareQualityProfileTunaQuality);
+        using var transportFpsOverride = new EnvironmentOverride(
+            ScreenShareQualitySettings.ScreenShareTransportMaxFpsVariable,
+            "15");
+
+        var method = typeof(TransportScreenShareCoordinator).GetMethod(
+            "ResolveSenderTargetFramesPerSecond",
+            BindingFlags.Static | BindingFlags.NonPublic);
+        Assert.NotNull(method);
+
+        var normalTarget = (int)method!.Invoke(
+            null,
+            [ScreenShareSenderFreshnessMode.Normal, FeatureFlags.ScreenShareTransportMaxFps, false])!;
+        var reducedTarget = (int)method.Invoke(
+            null,
+            [ScreenShareSenderFreshnessMode.Reduced, FeatureFlags.ScreenShareTransportMaxFps, false])!;
+        var catchUpTarget = (int)method.Invoke(
+            null,
+            [ScreenShareSenderFreshnessMode.CatchUp, FeatureFlags.ScreenShareTransportMaxFps, false])!;
+
+        Assert.Equal(15, normalTarget);
+        Assert.Equal(5, reducedTarget);
+        Assert.Equal(3, catchUpTarget);
     }
 
 [Fact]

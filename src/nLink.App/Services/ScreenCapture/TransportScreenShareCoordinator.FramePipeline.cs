@@ -65,6 +65,7 @@ internal sealed partial class TransportScreenShareCoordinator
                 ScreenShareVideoStreamConfigV1? stampedConfigToSend = null;
                 string? configSendReason = null;
                 int configSendAttempt = 0;
+                var pendingStreamConfigMissingResend = false;
                 lock (gate)
                 {
                     if (streamConfigForFrame is not null)
@@ -73,8 +74,22 @@ internal sealed partial class TransportScreenShareCoordinator
                         bootstrapStreamConfig = stampedConfigToSend;
                         bootstrapStreamConfigEpoch = e.StreamEpoch;
                         bootstrapStreamConfigSendCount = 1;
+                        streamConfigMissingResendPending = false;
                         configSendReason = "initial";
                         configSendAttempt = bootstrapStreamConfigSendCount;
+                    }
+                    else if (bootstrapStreamConfig is not null &&
+                             bootstrapStreamConfigEpoch == e.StreamEpoch &&
+                             e.IsKeyFrame &&
+                             streamConfigMissingResendPending)
+                    {
+                        bootstrapStreamConfigSendCount++;
+                        streamConfigMissingCachedResendCount++;
+                        stampedConfigToSend = bootstrapStreamConfig;
+                        streamConfigMissingResendPending = false;
+                        configSendReason = "stream_config_missing_recovery";
+                        configSendAttempt = bootstrapStreamConfigSendCount;
+                        pendingStreamConfigMissingResend = true;
                     }
                     else if (bootstrapStreamConfig is not null &&
                              bootstrapStreamConfigEpoch == e.StreamEpoch &&
@@ -84,6 +99,16 @@ internal sealed partial class TransportScreenShareCoordinator
                         bootstrapStreamConfigSendCount++;
                         stampedConfigToSend = bootstrapStreamConfig;
                         configSendReason = "bootstrap_redundant";
+                        configSendAttempt = bootstrapStreamConfigSendCount;
+                    }
+                    else if (bootstrapStreamConfig is not null &&
+                             bootstrapStreamConfigEpoch == e.StreamEpoch &&
+                             e.IsKeyFrame &&
+                             IsHelperVisibleProofMissingForEpoch_NoLock(e.StreamEpoch))
+                    {
+                        bootstrapStreamConfigSendCount++;
+                        stampedConfigToSend = bootstrapStreamConfig;
+                        configSendReason = "keyframe_until_visible_baseline";
                         configSendAttempt = bootstrapStreamConfigSendCount;
                     }
                 }
@@ -96,7 +121,7 @@ internal sealed partial class TransportScreenShareCoordinator
                         .ConfigureAwait(false);
                     LocalOperationalLog.Info(
                         "ScreenShareTransport",
-                        $"event=screenshare_video_stream_config_sent; session_id={currentSessionId}; stream_epoch={Math.Max(0, stampedConfigToSend.StreamEpoch)}; attempt={configSendAttempt}; reason={configSendReason}; is_keyframe={(e.IsKeyFrame ? 1 : 0)}; config_bytes={stampedConfigToSend.DecoderConfigData?.Length ?? 0}");
+                        $"event=screenshare_video_stream_config_sent; session_id={currentSessionId}; stream_epoch={Math.Max(0, stampedConfigToSend.StreamEpoch)}; attempt={configSendAttempt}; reason={configSendReason}; is_keyframe={(e.IsKeyFrame ? 1 : 0)}; pending_stream_config_missing={(pendingStreamConfigMissingResend ? 1 : 0)}; config_bytes={stampedConfigToSend.DecoderConfigData?.Length ?? 0}");
                     streamConfigForFrame = null;
                 }
             }
@@ -121,6 +146,31 @@ internal sealed partial class TransportScreenShareCoordinator
             if (heldForRecoveryOwnerPending || heldForRecoveryOwnerAwaitingAck || heldForRecoverySettle)
             {
                 return;
+            }
+
+            if (e.IsKeyFrame)
+            {
+                long rebindGenerationToLog = 0;
+                string rebindReasonToLog = string.Empty;
+                lock (gate)
+                {
+                    if (transportRebindPendingGeneration > 0)
+                    {
+                        rebindGenerationToLog = transportRebindPendingGeneration;
+                        rebindReasonToLog = transportRebindReason;
+                        transportRebindPendingGeneration = 0;
+                    }
+                }
+
+                if (rebindGenerationToLog > 0)
+                {
+                    LocalOperationalLog.Info(
+                        "ScreenShareTransport",
+                        $"event=screenshare_transport_rebind_keyframe_sent; direction=outbound; session_id={currentSessionId}; stream_epoch={e.StreamEpoch}; reason={(string.IsNullOrWhiteSpace(rebindReasonToLog) ? "transport_rebind" : rebindReasonToLog)}; rebind_generation={rebindGenerationToLog}");
+                    LocalOperationalLog.Info(
+                        "ScreenShareTransport",
+                        $"event=screenshare_tuna_handoff_keyframe_forced; direction=outbound; session_id={currentSessionId}; stream_epoch={e.StreamEpoch}; reason={(string.IsNullOrWhiteSpace(rebindReasonToLog) ? "transport_rebind" : rebindReasonToLog)}; rebind_generation={rebindGenerationToLog}");
+                }
             }
 
             await currentPipeline.EnqueueFrameAsync(
@@ -363,6 +413,25 @@ internal sealed partial class TransportScreenShareCoordinator
                 DisplayInfoRevision = effectiveDisplayInfoRevision,
             };
         }
+    }
+
+    private bool IsHelperVisibleProofMissingForEpoch_NoLock(long streamEpoch)
+    {
+        if (streamEpoch <= 0)
+        {
+            return false;
+        }
+
+        if (helperCurrentEpochStateStreamEpoch > 0 &&
+            helperCurrentEpochStateStreamEpoch != streamEpoch)
+        {
+            return false;
+        }
+
+        return helperCurrentEpochApplyCount <= 0 &&
+               helperVisibleHeadFrameId < 0 &&
+               helperAppliedHeadFrameId < 0 &&
+               !helperSteadyVisibleProgressActive;
     }
 
     private static ScreenShareTransportPayloadizationPolicy DetermineTransportPayloadizationPolicy(

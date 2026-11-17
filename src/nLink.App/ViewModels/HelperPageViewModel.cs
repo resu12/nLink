@@ -38,6 +38,8 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
     private static readonly TimeSpan EndSessionAfterControlStopGuard = TimeSpan.FromMilliseconds(500);
     private static readonly TimeSpan RemoteControlSnapshotKeepAliveInterval = TimeSpan.FromMilliseconds(250);
     private static readonly TimeSpan PeerEndedNoticeDuration = TimeSpan.FromSeconds(4);
+    private const int FileTransferUiRefreshMinIntervalMs = 125;
+    private const int FileTransferUiRefreshCoalescedLogThreshold = 8;
     private static readonly Regex AttemptLabelRegex = new(@"\s*\(?attempt\s+\d+(?:,\s*next retry in \d+s)?\)?", RegexOptions.IgnoreCase | RegexOptions.Compiled);
     private static readonly bool RemoteControlDebugPanelEnabled =
 #if DEBUG
@@ -73,10 +75,16 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
     private Bitmap? helperBootstrapQrBitmap;
     private string lastChatPanelStateLog = string.Empty;
     private long chatSendAttemptCounter;
+    private int fileTransferUiRefreshScheduled;
+    private int fileTransferUiRefreshPendingCount;
+    private int fileTransferUiRefreshUrgent;
+    private long lastFileTransferUiRefreshUtcMs;
 
     private string codeInput = string.Empty;
     private string statusText = string.Empty;
     private string connectionState = "Idle";
+    private bool isTunaActive;
+    private string tunaStatusReason = "inactive";
     private string chatDraft = string.Empty;
     private string failureTitle = string.Empty;
     private string failureMessage = string.Empty;
@@ -230,6 +238,7 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
 
         sessionRuntime.FlowSnapshotChanged += OnFlowSnapshotChanged;
         sessionRuntime.SessionSecurityStateChanged += OnSessionSecurityStateChanged;
+        sessionRuntime.TransportAccelerationStateChanged += OnTransportAccelerationStateChanged;
         sessionRuntime.TransientStatusChanged += OnTransientStatusChanged;
         sessionRuntime.Approved += OnApproved;
         sessionRuntime.Rejected += OnRejected;
@@ -298,6 +307,7 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
         }
         ApplySessionBannerPolicy();
         UpdateUiFromSnapshot();
+        SyncTunaActiveFromRuntime();
         BeginBootstrapHelperIdentityResolution();
         if (!IsStartupBlocked)
         {
@@ -417,9 +427,6 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
             : HasAuthoritativeHelperRequestTargetAddress
                 ? HelperRequestTargetAddress
             : null;
-    private PeerAddress? HelperIdentityForDisplay =>
-        HelperRequestTargetAddress ??
-        (bootstrapHelperIdentityIsAuthoritative ? bootstrapHelperIdentity : null);
     private bool IsNknTransport =>
         string.Equals(transportConfig.Key, "NKN", StringComparison.OrdinalIgnoreCase);
     private bool RequiresHelperIdentityBootstrap =>
@@ -430,7 +437,7 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
 
     public string HelperIdentityBootstrapWatermarkText =>
         string.IsNullOrWhiteSpace(HelperIdentityBootstrapText)
-            ? "Please wait..."
+            ? "Preparing helper address…"
             : "Helper address unavailable";
 
     public string HelperIdentityBootstrapHintText =>
@@ -722,6 +729,18 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
                             : "Session ended",
                     _ => !string.IsNullOrWhiteSpace(StatusText) ? StatusText : "Ready",
                 });
+
+    public bool IsTunaActive
+    {
+        get => isTunaActive;
+        private set => SetProperty(ref isTunaActive, value);
+    }
+
+    public string TunaStatusReason
+    {
+        get => tunaStatusReason;
+        private set => SetProperty(ref tunaStatusReason, string.IsNullOrWhiteSpace(value) ? "inactive" : value.Trim());
+    }
 
     public SessionUiPhase EffectivePhase
     {
@@ -1020,6 +1039,7 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
 
         sessionRuntime.FlowSnapshotChanged -= OnFlowSnapshotChanged;
         sessionRuntime.SessionSecurityStateChanged -= OnSessionSecurityStateChanged;
+        sessionRuntime.TransportAccelerationStateChanged -= OnTransportAccelerationStateChanged;
         sessionRuntime.TransientStatusChanged -= OnTransientStatusChanged;
         sessionRuntime.Approved -= OnApproved;
         sessionRuntime.Rejected -= OnRejected;
@@ -1053,10 +1073,12 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
             statusPresenter.Dispose();
         }
         sessionRuntime.SetReliabilityAttempt(null);
+        var windowCloseAlreadyRequested =
+            Interlocked.CompareExchange(ref windowCloseDisconnectStarted, 0, 0) != 0;
         var skipDisconnectForListenerRecovery =
             helperListenerReturnToWaitingRequested &&
-            Interlocked.CompareExchange(ref windowCloseDisconnectStarted, 0, 0) == 0;
-        if (!skipDisconnectForListenerRecovery)
+            !windowCloseAlreadyRequested;
+        if (!skipDisconnectForListenerRecovery && !windowCloseAlreadyRequested)
         {
             RunBoundedSynchronousCleanup(() => sessionRuntime.DisconnectAsync(), DisposeOperationTimeout);
         }
@@ -2651,9 +2673,7 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
                         : null));
         }
 
-        return HelperIdentityForDisplay is { } helperIdentityForDisplay
-            ? helperIdentityForDisplay.Value
-            : string.Empty;
+        return string.Empty;
     }
 
     private string GetHelperBootstrapShareValue()
@@ -2696,7 +2716,7 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
             await UiThreadDispatch.RunAsync(() =>
             {
                 RefreshAutomaticIdentityRecoveryWarning();
-                // Keep the first stable helper identity visible through pre-connected UI states.
+                // Cache the stable identity for binding; only the runtime target address is shareable.
                 if (bootstrapHelperIdentity is null && resolved is not null)
                 {
                     bootstrapHelperIdentity = resolved;
@@ -2858,6 +2878,18 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
             var (errorCode, errorHint) = GetReliabilityError();
             LogReliability(SessionReliabilityStage.Disconnected, errorCode, errorHint);
             SyncFromRuntime();
+            if (sessionRuntime.LastDisconnectWasRemoteEnd)
+            {
+                ShowPeerEndedNotice("The other person ended the session.");
+                IsChatInputEnabled = false;
+                CanSendFiles = false;
+                CanEndSession = false;
+                ShowChatNotice = false;
+                LocalOperationalLog.Info(
+                    "HelperUi",
+                    $"event=helper_remote_session_end_notice_latched; source=disconnected; last_remote={(sessionRuntime.LastDisconnectWasRemoteEnd ? 1 : 0)}; header={SanitizeForLog(HeaderStatusText)}; phase={EffectivePhase}; runtime_state={sessionRuntime.State}; chat_input={(IsChatInputEnabled ? 1 : 0)}");
+            }
+
             NotifyDisconnectedUiAffordancesChanged();
         });
     }
@@ -2871,7 +2903,17 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
 
         _ = UiThreadDispatch.RunAsync(() =>
         {
+            ClearRemoteScreenShareFrame();
+            IsConnecting = false;
             SyncFromRuntime();
+            ShowPeerEndedNotice("The other person ended the session.");
+            IsChatInputEnabled = false;
+            CanSendFiles = false;
+            CanEndSession = false;
+            ShowChatNotice = false;
+            LocalOperationalLog.Info(
+                "HelperUi",
+                $"event=helper_remote_session_end_notice_latched; source=remote_session_ended; last_remote={(sessionRuntime.LastDisconnectWasRemoteEnd ? 1 : 0)}; header={SanitizeForLog(HeaderStatusText)}; phase={EffectivePhase}; runtime_state={sessionRuntime.State}; chat_input={(IsChatInputEnabled ? 1 : 0)}");
             NotifyDisconnectedUiAffordancesChanged();
         });
     }
@@ -2913,7 +2955,85 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
             return;
         }
 
-        _ = UiThreadDispatch.RunAsync(() => UpdateUiFromSnapshot("file_transfer_changed"));
+        ScheduleFileTransferUiRefresh(e as SessionFileTransferSnapshotChangedEventArgs);
+    }
+
+    private void ScheduleFileTransferUiRefresh(SessionFileTransferSnapshotChangedEventArgs? e)
+    {
+        if (disposed)
+        {
+            return;
+        }
+
+        Interlocked.Increment(ref fileTransferUiRefreshPendingCount);
+        if (IsUrgentFileTransferSnapshot(e?.Snapshot))
+        {
+            Volatile.Write(ref fileTransferUiRefreshUrgent, 1);
+        }
+
+        if (Interlocked.CompareExchange(ref fileTransferUiRefreshScheduled, 1, 0) != 0)
+        {
+            return;
+        }
+
+        _ = RunFileTransferUiRefreshLoopAsync();
+    }
+
+    private async Task RunFileTransferUiRefreshLoopAsync()
+    {
+        try
+        {
+            while (!disposed)
+            {
+                var urgent = Interlocked.Exchange(ref fileTransferUiRefreshUrgent, 0) != 0;
+                if (!urgent)
+                {
+                    var elapsedMs = Environment.TickCount64 - Volatile.Read(ref lastFileTransferUiRefreshUtcMs);
+                    var delayMs = FileTransferUiRefreshMinIntervalMs - Math.Max(0, elapsedMs);
+                    if (delayMs > 0)
+                    {
+                        await Task.Delay((int)delayMs).ConfigureAwait(false);
+                    }
+                }
+
+                var coalescedCount = Interlocked.Exchange(ref fileTransferUiRefreshPendingCount, 0);
+                if (coalescedCount > 0)
+                {
+                    await UiThreadDispatch.RunAsync(() =>
+                    {
+                        if (disposed)
+                        {
+                            return;
+                        }
+
+                        // Read current service state on dispatch, not an event captured before queuing.
+                        UpdateUiFromSnapshot(coalescedCount > 1 ? "file_transfer_changed_coalesced" : "file_transfer_changed");
+                    }).ConfigureAwait(false);
+                    Volatile.Write(ref lastFileTransferUiRefreshUtcMs, Environment.TickCount64);
+                    if (coalescedCount >= FileTransferUiRefreshCoalescedLogThreshold)
+                    {
+                        LocalOperationalLog.Info(
+                            "HelperUi",
+                            $"event=file_transfer_ui_refresh_coalesced; role=Helper; coalesced_count={coalescedCount}; min_interval_ms={FileTransferUiRefreshMinIntervalMs}");
+                    }
+                }
+
+                if (Volatile.Read(ref fileTransferUiRefreshPendingCount) == 0)
+                {
+                    Interlocked.Exchange(ref fileTransferUiRefreshScheduled, 0);
+                    if (Volatile.Read(ref fileTransferUiRefreshPendingCount) == 0 ||
+                        Interlocked.CompareExchange(ref fileTransferUiRefreshScheduled, 1, 0) != 0)
+                    {
+                        return;
+                    }
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            Interlocked.Exchange(ref fileTransferUiRefreshScheduled, 0);
+            LocalOperationalLog.Warn("HelperUi", $"event=file_transfer_ui_refresh_failed; role=Helper; error={ex.GetType().Name}");
+        }
     }
 
     private void OnRemoteControlStateChanged(object? sender, EventArgs e)
@@ -2971,6 +3091,28 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
         }
 
         _ = UiThreadDispatch.RunAsync(SyncFromRuntime);
+    }
+
+    private void OnTransportAccelerationStateChanged(object? sender, EventArgs e)
+    {
+        if (disposed)
+        {
+            return;
+        }
+
+        _ = UiThreadDispatch.RunAsync(SyncTunaActiveFromRuntime);
+    }
+
+    private void SyncTunaActiveFromRuntime()
+    {
+        var status = sessionRuntime.TransportAccelerationPresentation;
+        var projection = TunaHeaderStateProjector.FromSnapshot(
+            sessionRuntime.FileTransferSnapshot,
+            status.IsActive,
+            status.Reason,
+            status.PendingFileTransfer);
+        IsTunaActive = projection.IsActive;
+        TunaStatusReason = projection.StatusReason;
     }
 
     private void OnHelperListenerBootstrapSnapshotChanged(object? sender, EventArgs e)
@@ -3848,6 +3990,24 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
         UpdateUiFromSnapshot("refresh");
     }
 
+    private static bool IsUrgentFileTransferSnapshot(SessionFileTransferSnapshot? snapshot)
+        => IsUrgentFileTransferItem(snapshot?.Inbound) ||
+           IsUrgentFileTransferItem(snapshot?.Outbound);
+
+    private static bool IsUrgentFileTransferItem(FileTransferTransferSnapshot? snapshot)
+        => snapshot is not null &&
+           (snapshot.IsTerminal ||
+            snapshot.State is FileTransferTransferState.Offering
+                or FileTransferTransferState.AwaitingAcceptance
+                or FileTransferTransferState.PendingDecision
+                or FileTransferTransferState.AwaitingMetadata
+                or FileTransferTransferState.PreparingMetadata
+                or FileTransferTransferState.AwaitingStart
+                or FileTransferTransferState.AwaitingCompletion
+                or FileTransferTransferState.Verifying ||
+            snapshot.IsPaused ||
+            snapshot.IsPeerPaused);
+
     private void UpdateUiFromSnapshot(string source)
     {
         bool nextChatEnabled;
@@ -3926,6 +4086,7 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
         CanSendFiles = nextCanSendFiles;
         CanEndSession = nextCanEndSession;
         CanOpenDiagnostics = nextCanOpenDiagnostics;
+        SyncTunaActiveFromRuntime();
 
         RefreshCommandStates();
         LogCurrentChatPanelState(source);

@@ -7,7 +7,7 @@
 #endif
 
 #ifndef AppVersion
-  #define AppVersion "0.6.2"
+  #define AppVersion "0.7.0"
 #endif
 
 #define MyAppName "nLink"
@@ -43,6 +43,7 @@ Name: "desktopicon"; Description: "Create a desktop shortcut"; Flags: unchecked
 
 [InstallDelete]
 Type: filesandordirs; Name: "{app}\bridge"
+Type: filesandordirs; Name: "{app}\tuna"
 
 [Files]
 Source: "{#SourceDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs; Excludes: "bridge\*"

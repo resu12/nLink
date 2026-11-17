@@ -1,4 +1,6 @@
 using System.IO;
+using Microsoft.Win32.SafeHandles;
+using NLink.Core.SessionSecurity;
 
 namespace NLink.Core.FileTransfer;
 
@@ -10,6 +12,8 @@ public delegate Task<FileTransferReceiveDestination> FileTransferWriteDestinatio
 
 public sealed class FileTransferReceiveDestination : IDisposable, IAsyncDisposable
 {
+    private readonly FileTransferReceiveDestination original;
+    private FileTransferWriteHandle? guardHandle;
     private readonly Func<CancellationToken, Task>? finalizeAsync;
     private readonly Action? dispose;
     private readonly Func<ValueTask>? disposeAsync;
@@ -23,6 +27,7 @@ public sealed class FileTransferReceiveDestination : IDisposable, IAsyncDisposab
         string? finalPath = null,
         string? safeFileName = null)
     {
+        original = this;
         Stream = stream ?? throw new ArgumentNullException(nameof(stream));
         this.finalizeAsync = finalizeAsync;
         this.dispose = dispose;
@@ -46,6 +51,20 @@ public sealed class FileTransferReceiveDestination : IDisposable, IAsyncDisposab
 
     public static FileTransferReceiveDestination FromStream(Stream stream)
         => new(stream);
+
+    internal static FileTransferReceiveDestination FromGuardOwnedHandle(FileTransferWriteHandle handle)
+        => new(handle.Stream, handle.FinalizeAsync, handle.Dispose, handle.DisposeAsync,
+            handle.Plan.FinalPath, handle.Plan.SafeFileName) { guardHandle = handle };
+
+    internal bool HasGuardOwnedHandle => ReferenceEquals(original, this) && guardHandle is not null;
+
+    internal SafeFileHandle? TryTakeFinalizedNativeRead()
+        => HasGuardOwnedHandle && finalized ? guardHandle!.TryTakeFinalizedWindowsRead() : null;
+
+    internal void ReleaseFinalizedNativeRead()
+    {
+        if (HasGuardOwnedHandle && finalized) guardHandle!.ReleaseFinalizedWindowsRead();
+    }
 
     public async Task FinalizeAsync(CancellationToken ct)
     {
@@ -153,6 +172,42 @@ public sealed record FileTransferIncomingOffer(
     long FileSizeBytes,
     string? Sha256Base64);
 
+internal sealed record FileTransferReceiveRecoveryObservationSnapshot(
+    string SessionId,
+    string TransferId,
+    FileTransferDirection Direction,
+    string RouteToken,
+    int ProtocolVersion,
+    int LiveRouteEpoch,
+    int RuntimeGeneration,
+    int TerminalGeneration,
+    int TransferLegGeneration,
+    long TransportEpoch,
+    int BridgeRecoveryGeneration,
+    int RoutePublicationGeneration,
+    int? RouteCommitGeneration,
+    string? CheckpointRequestId,
+    string DataSessionIdentity,
+    long DataSessionGeneration,
+    long ObservationGeneration,
+    string Source,
+    string Reason,
+    DateTimeOffset ObservedUtc)
+{
+    internal FileTransferReceiveRecoveryHealthEvaluationEvidence?
+        HealthEvaluationEvidence
+    {
+        get;
+        init;
+    }
+
+    internal FileTransferReceiveRecoveryObservation? CoordinatorObservation
+    {
+        get;
+        init;
+    }
+}
+
 public sealed record FileTransferTransferSnapshot(
     string SessionId,
     string TransferId,
@@ -175,8 +230,20 @@ public sealed record FileTransferTransferSnapshot(
     bool IsPaused = false,
     string? PauseReason = null,
     bool IsPeerPaused = false,
-    string? PeerPauseReason = null)
+    string? PeerPauseReason = null,
+    string? RouteToken = null,
+    int? ProtocolVersion = null)
 {
+    internal FileTransferReceiveRecoveryObservationSnapshot?
+        ReceiveRecoveryObservation { get; init; }
+
+    // Display-only receiver projection using the active reporting contract, not
+    // proof that a report has reached the peer. Raw progress counters stay intact.
+    public long? PeerComparableProgressBytes { get; init; }
+
+    // Display-only projection of the service's Tuna activation pause guard.
+    public bool IsPauseBlockedByTransport { get; init; }
+
     public bool IsTerminal
         => State is FileTransferTransferState.Completed or
             FileTransferTransferState.Declined or
@@ -184,9 +251,15 @@ public sealed record FileTransferTransferSnapshot(
             FileTransferTransferState.Failed;
 
     public long ProgressBytes
-        => Direction == FileTransferDirection.Outbound
-            ? Math.Max(0L, BytesAcceptedForTransport ?? BytesTransferred)
-            : Math.Max(0L, BytesTransferred);
+    {
+        get
+        {
+            var visible = Direction == FileTransferDirection.Outbound
+                ? BytesAcknowledgedByReceiver ?? BytesTransferred
+                : BytesAcceptedForTransport ?? BytesTransferred;
+            return Math.Clamp(visible, 0L, Math.Max(0L, FileSizeBytes));
+        }
+    }
 
     public double ProgressFraction
         => FileSizeBytes <= 0

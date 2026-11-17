@@ -131,7 +131,7 @@ internal static class ResourceBenchmarkRunner
             idleHostingWindowEndUtc = await CaptureGcStabilizedCheckpointAsync("idle_hosting_end", resourceSampler, samples, output, ct);
 
             await output.WriteLineAsync("[resources] connecting helper");
-            await RunConnectApproveAsync(pair.Helpee, pair.Helper, ct);
+            await RunConnectApproveAsync(pair.Helpee, pair.Helper, pair.HelperInviteBindingAddress, ct);
             await DelayAndSamplePhaseAsync("idle_connected", TimeSpan.FromSeconds(options.ConnectedIdleSeconds), output, ct);
 
             await output.WriteLineAsync("[resources] disconnecting");
@@ -207,10 +207,10 @@ internal static class ResourceBenchmarkRunner
         for (var i = 1; i <= options.Cycles; i++)
         {
             ct.ThrowIfCancellationRequested();
-            var ok = await TryRunCycleAsync(pair.Helpee, pair.Helper, ct);
+            var ok = await TryRunCycleAsync(pair.Helpee, pair.Helper, pair.HelperInviteBindingAddress, ct);
             if (!ok)
             {
-                // continue collecting checkpoints; metrics/failures reflect instability
+                throw new InvalidOperationException($"Leak check cycle {i} of {options.Cycles} failed; resource qualification requires every session cycle to succeed.");
             }
 
             if (checkpoints.Contains(i))
@@ -230,7 +230,7 @@ internal static class ResourceBenchmarkRunner
         samples.Add(resourceSampler.Capture());
 
         var summary = ResourceSummaryBuilder.BuildSummary(samples);
-        var notes = new List<string> { $"checkpoints={string.Join(",", checkpoints)}", $"samples={samples.Count}" };
+        var notes = new List<string> { $"checkpoints={string.Join(",", checkpoints)}", $"samples={samples.Count}", $"cycles_succeeded={options.Cycles}" };
         var leakFail = EvaluateLeakGrowth(samples, options.LeakGrowthFailPercent, notes);
         ActiveRuntimeCounters.ResetForTests();
         return new ResourceRunResult(samples, summary, notes, leakFail);
@@ -300,7 +300,7 @@ internal static class ResourceBenchmarkRunner
         }
     }
 
-    private static async Task<bool> TryRunCycleAsync(SessionRuntime helpee, SessionRuntime helper, CancellationToken ct)
+    internal static async Task<bool> TryRunCycleAsync(SessionRuntime helpee, SessionRuntime helper, PeerAddress? boundHelperAddress, CancellationToken ct)
     {
         using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
         cts.CancelAfter(CycleTimeout);
@@ -318,7 +318,7 @@ internal static class ResourceBenchmarkRunner
         try
         {
             await helpee.StartHelpeeAsync(cts.Token);
-            var (inviteToken, invite) = CreateInviteForTarget(GetHostedAddressOrThrow(helpee));
+            var (inviteToken, invite) = CreateInviteForTarget(GetHostedAddressOrThrow(helpee), boundHelperAddress);
             await helper.StartHelperAsync(inviteToken, invite, cts.Token);
             await incomingJoin.Task.WaitAsync(TimeSpan.FromSeconds(10), cts.Token);
             await helpee.ApproveAsync(cts.Token);
@@ -344,7 +344,7 @@ internal static class ResourceBenchmarkRunner
         }
     }
 
-    private static async Task RunConnectApproveAsync(SessionRuntime helpee, SessionRuntime helper, CancellationToken ct)
+    private static async Task RunConnectApproveAsync(SessionRuntime helpee, SessionRuntime helper, PeerAddress? boundHelperAddress, CancellationToken ct)
     {
         using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
         cts.CancelAfter(CycleTimeout);
@@ -360,7 +360,7 @@ internal static class ResourceBenchmarkRunner
         helpee.StateChanged += helpeeStateChanged;
         try
         {
-            var (inviteToken, invite) = CreateInviteForTarget(GetHostedAddressOrThrow(helpee));
+            var (inviteToken, invite) = CreateInviteForTarget(GetHostedAddressOrThrow(helpee), boundHelperAddress);
             await helper.StartHelperAsync(inviteToken, invite, cts.Token);
             await incomingJoin.Task.WaitAsync(TimeSpan.FromSeconds(10), cts.Token);
             await helpee.ApproveAsync(cts.Token);
@@ -418,7 +418,7 @@ internal static class ResourceBenchmarkRunner
         throw new InvalidOperationException("Active helpee transport did not expose a local peer address.");
     }
 
-    private static (string Token, ValidatedInviteV1 Invite) CreateInviteForTarget(PeerAddress targetAddress)
+    private static (string Token, ValidatedInviteV1 Invite) CreateInviteForTarget(PeerAddress targetAddress, PeerAddress? boundHelperAddress)
     {
         var nowUtc = DateTimeOffset.UtcNow;
         var factory = InviteTokenServiceFactory.CreateInviteTokenFactory();
@@ -428,7 +428,8 @@ internal static class ResourceBenchmarkRunner
                 TargetAddress: targetAddress,
                 SessionId: new SessionId($"sess_resource_{Guid.NewGuid():N}"),
                 Capabilities: InviteCapabilities.Chat | InviteCapabilities.ScreenShare | InviteCapabilities.RemoteControl | InviteCapabilities.FileTransfer,
-                Lifetime: TimeSpan.FromMinutes(5)),
+                Lifetime: TimeSpan.FromMinutes(5),
+                BoundHelperAddress: boundHelperAddress),
             nowUtc);
         if (!create.IsSuccess || string.IsNullOrWhiteSpace(create.Token))
         {
@@ -448,9 +449,13 @@ internal static class ResourceBenchmarkRunner
     private static BenchmarkSessionPair CreateSessionPair(ResourceRunnerOptions options, ITransportTelemetrySink sink, int cycleSeed)
     {
         var reusePolicy = new BridgeReusePolicy(options.BridgeReuseMode, TimeSpan.FromSeconds(60));
+        var helperDevLocalAddress = options.Transport == "devlocal"
+            ? new PeerAddress(BuildDevLocalPeerAddress("helper", cycleSeed))
+            : (PeerAddress?)null;
         return new BenchmarkSessionPair(
             new SessionRuntime(CreateTransportFactory(options.Transport, "helpee", cycleSeed), watchdogOptions: null, watchdogDelayAsync: null, telemetrySink: sink, bridgeReusePolicy: reusePolicy),
-            new SessionRuntime(CreateTransportFactory(options.Transport, "helper", cycleSeed), watchdogOptions: null, watchdogDelayAsync: null, telemetrySink: sink, bridgeReusePolicy: reusePolicy));
+            new SessionRuntime(CreateTransportFactory(options.Transport, "helper", cycleSeed), watchdogOptions: null, watchdogDelayAsync: null, telemetrySink: sink, bridgeReusePolicy: reusePolicy),
+            helperDevLocalAddress);
     }
 
     private static Func<ISignalingTransport> CreateTransportFactory(string transport, string roleLabel, int cycleIndex)
@@ -458,9 +463,12 @@ internal static class ResourceBenchmarkRunner
         return transport switch
         {
             "nkn" => () => CreateNknBenchmarkTransport(roleLabel, cycleIndex),
-            _ => static () => new DevLocalTransport(),
+            _ => () => new DevLocalTransport(roleLabel == "helper" ? BuildDevLocalPeerAddress(roleLabel, cycleIndex) : null),
         };
     }
+
+    private static string BuildDevLocalPeerAddress(string roleLabel, int cycleIndex)
+        => $"resource.devlocal.{roleLabel}.{cycleIndex:D4}";
 
     private static ISignalingTransport CreateNknBenchmarkTransport(string roleLabel, int cycleIndex)
     {
@@ -770,13 +778,15 @@ internal static class ResourceBenchmarkRunner
 
     private sealed class BenchmarkSessionPair : IDisposable
     {
-        public BenchmarkSessionPair(SessionRuntime helpee, SessionRuntime helper)
+        public BenchmarkSessionPair(SessionRuntime helpee, SessionRuntime helper, PeerAddress? helperInviteBindingAddress)
         {
             Helpee = helpee;
             Helper = helper;
+            HelperInviteBindingAddress = helperInviteBindingAddress;
         }
         public SessionRuntime Helpee { get; }
         public SessionRuntime Helper { get; }
+        public PeerAddress? HelperInviteBindingAddress { get; }
         public void Dispose() { Helper.Dispose(); Helpee.Dispose(); }
     }
 }

@@ -31,6 +31,8 @@ internal static class FileTransferSoakRunner
     private const string DefaultMode = LocalFastMode;
     private const int DefaultSeed = 1_313_625_684;
     private const int DefaultCycleTimeoutSeconds = 120;
+    private static int logSliceMarkerSequence;
+    internal static Func<string, string, bool>? LogSliceMarkerWriteOverrideForTests { get; set; }
     private static readonly TimeSpan MixedScreenShareWarmup = TimeSpan.FromSeconds(3);
     private static readonly long[] DefaultPayloadSizes = [1L * 1024 * 1024, 16L * 1024 * 1024, 64L * 1024 * 1024];
     private static readonly JsonSerializerOptions JsonOptions = new()
@@ -123,7 +125,7 @@ internal static class FileTransferSoakRunner
         FileTransferSoakAggregate Aggregate,
         FileTransferSoakCycleResult[] Cycles);
 
-    private readonly record struct LogSliceSnapshot(string Path, long Length);
+    private readonly record struct LogSliceSnapshot(string Marker);
 
     public static async Task<int> RunAsync(string[] args, TextWriter output, TextWriter error, CancellationToken ct)
     {
@@ -144,7 +146,8 @@ internal static class FileTransferSoakRunner
         Directory.CreateDirectory(artifactDir);
 
         var runId = $"filetransfer_soak_run_{startedUtc:yyyyMMddHHmmss}_{Environment.ProcessId}";
-        var initialLogSnapshot = CaptureLogSnapshot();
+        var logSliceMarker = CreateLogSliceMarker();
+        var initialLogSnapshot = CaptureLogSnapshot(logSliceMarker);
         var cycleResults = new List<FileTransferSoakCycleResult>(options.Cycles);
         var runFailure = string.Empty;
 
@@ -157,11 +160,12 @@ internal static class FileTransferSoakRunner
         await output.WriteLineAsync($"  Impairment profile: {options.ImpairmentProfile}").ConfigureAwait(false);
         await output.WriteLineAsync($"  Payload efficiency profile: {options.PayloadEfficiencyProfile}").ConfigureAwait(false);
         await output.WriteLineAsync($"  Artifact dir: {artifactDir}").ConfigureAwait(false);
+        WriteLogSliceMarker("started", logSliceMarker);
         LocalOperationalLog.Info(
             "FileTransferSoak",
             $"event=filetransfer_local_soak_started; run_id={runId}; mode={options.Mode}; cycles={options.Cycles}; payload_sizes={string.Join(",", options.PayloadSizes)}; direction={options.Direction}; seed={options.Seed}; impairment_profile={options.ImpairmentProfile}; payload_efficiency_profile={options.PayloadEfficiencyProfile}; artifact_dir={artifactDir}");
 
-        var payloadEfficiencyRestore = SetPayloadEfficiencyProfileEnvironment(options);
+        var payloadEfficiencyRestore = SetPayloadEfficiencyProfileEnvironment(options, artifactDir);
         try
         {
             for (var cycleIndex = 0; cycleIndex < options.Cycles; cycleIndex++)
@@ -206,7 +210,14 @@ internal static class FileTransferSoakRunner
             RestorePayloadEfficiencyProfileEnvironment(payloadEfficiencyRestore);
         }
 
-        var logSlice = ReadLogSlice(initialLogSnapshot);
+        WriteLogSliceMarker("ended", logSliceMarker);
+        var logSliceComplete = TryReadLogSlice(initialLogSnapshot, out var logSlice);
+        if (!logSliceComplete)
+        {
+            runFailure = string.IsNullOrWhiteSpace(runFailure)
+                ? "retained_log_marker_pair_missing"
+                : $"{runFailure}; retained_log_marker_pair_missing";
+        }
         var logSlicePath = Path.Combine(artifactDir, "filetransfer-retained-log-slice.log");
         await File.WriteAllTextAsync(logSlicePath, logSlice, Encoding.UTF8, CancellationToken.None).ConfigureAwait(false);
 
@@ -436,24 +447,32 @@ internal static class FileTransferSoakRunner
         return true;
     }
 
-    private static (string? Profile, string? AllowScreenShare, string? UnsafeDeveloperMode) SetPayloadEfficiencyProfileEnvironment(FileTransferSoakRunnerOptions options)
+    private static (string? Profile, string? AllowScreenShare, string? UnsafeDeveloperMode, string? InboundRoot) SetPayloadEfficiencyProfileEnvironment(
+        FileTransferSoakRunnerOptions options,
+        string artifactDir)
     {
         var previousProfile = Environment.GetEnvironmentVariable(FileTransferPayloadEfficiencyProfile.EnvironmentVariableName);
         var previousAllowScreenShare = Environment.GetEnvironmentVariable(FileTransferPayloadEfficiencyProfile.AllowScreenShareEnvironmentVariableName);
         var previousUnsafeDeveloperMode = Environment.GetEnvironmentVariable(ReleaseOverridePolicy.UnsafeDeveloperModeEnvVar);
+        var previousInboundRoot = Environment.GetEnvironmentVariable("NLINK_FILE_TRANSFER_TEST_INBOUND_ROOT");
+        var inboundRoot = Path.Combine(artifactDir, "received");
+        Directory.CreateDirectory(inboundRoot);
 
         Environment.SetEnvironmentVariable(ReleaseOverridePolicy.UnsafeDeveloperModeEnvVar, "1");
         Environment.SetEnvironmentVariable(FileTransferPayloadEfficiencyProfile.EnvironmentVariableName, options.PayloadEfficiencyProfile);
         Environment.SetEnvironmentVariable(FileTransferPayloadEfficiencyProfile.AllowScreenShareEnvironmentVariableName, null);
+        Environment.SetEnvironmentVariable("NLINK_FILE_TRANSFER_TEST_INBOUND_ROOT", inboundRoot);
 
-        return (previousProfile, previousAllowScreenShare, previousUnsafeDeveloperMode);
+        return (previousProfile, previousAllowScreenShare, previousUnsafeDeveloperMode, previousInboundRoot);
     }
 
-    private static void RestorePayloadEfficiencyProfileEnvironment((string? Profile, string? AllowScreenShare, string? UnsafeDeveloperMode) restore)
+    private static void RestorePayloadEfficiencyProfileEnvironment(
+        (string? Profile, string? AllowScreenShare, string? UnsafeDeveloperMode, string? InboundRoot) restore)
     {
         Environment.SetEnvironmentVariable(FileTransferPayloadEfficiencyProfile.EnvironmentVariableName, restore.Profile);
         Environment.SetEnvironmentVariable(FileTransferPayloadEfficiencyProfile.AllowScreenShareEnvironmentVariableName, restore.AllowScreenShare);
         Environment.SetEnvironmentVariable(ReleaseOverridePolicy.UnsafeDeveloperModeEnvVar, restore.UnsafeDeveloperMode);
+        Environment.SetEnvironmentVariable("NLINK_FILE_TRANSFER_TEST_INBOUND_ROOT", restore.InboundRoot);
     }
 
     private static bool TryParsePayloadSize(string value, out long size)
@@ -654,7 +673,7 @@ internal static class FileTransferSoakRunner
 
         if (!options.KeepReceivedFiles && !string.IsNullOrWhiteSpace(savedPath))
         {
-            TryDeleteTransferDirectory(savedPath);
+            TryDeleteReceivedFile(savedPath);
         }
 
         if (completed && integrityOk)
@@ -845,7 +864,7 @@ internal static class FileTransferSoakRunner
     {
         if (!completed)
         {
-            return $"terminal_not_completed sender={outbound?.State.ToString() ?? "(none)"} receiver={inbound?.State.ToString() ?? "(none)"} sender_error={outbound?.ErrorCode ?? "(none)"} receiver_error={inbound?.ErrorCode ?? "(none)"}";
+            return $"terminal_not_completed sender={outbound?.State.ToString() ?? "(none)"} receiver={inbound?.State.ToString() ?? "(none)"} sender_error={outbound?.ErrorCode ?? "(none)"} receiver_error={inbound?.ErrorCode ?? "(none)"} sender_status={NormalizeDiagnosticValue(outbound?.StatusMessage)} receiver_status={NormalizeDiagnosticValue(inbound?.StatusMessage)}";
         }
 
         if (integrityOk)
@@ -870,6 +889,11 @@ internal static class FileTransferSoakRunner
 
         return "integrity_unknown";
     }
+
+    private static string NormalizeDiagnosticValue(string? value)
+        => string.IsNullOrWhiteSpace(value)
+            ? "(none)"
+            : value.Replace('\r', ' ').Replace('\n', ' ').Replace(';', ',').Trim();
 
     private static DevLocalImpairmentMetricsSnapshot CombineImpairmentMetrics(
         DevLocalImpairmentMetricsSnapshot first,
@@ -907,9 +931,11 @@ internal static class FileTransferSoakRunner
         var screenShareFramesEmitted = cycles.Sum(static c => c.ScreenShareFramesEmitted);
         var screenShareMediaFramesDelayed = cycles.Sum(static c => c.ScreenShareMediaFramesDelayed);
         var screenShareMediaFramesDropped = cycles.Sum(static c => c.ScreenShareMediaFramesDropped);
-        var dataProtocolVersion = logMetrics.V4NegotiatedCount > 0 || logMetrics.V4ChunkBatchFrameCount > 0
-            ? FileTransferProtocol.ProtocolVersionV4
-            : 0;
+        var dataProtocolVersion = logMetrics.DataProtocolVersion > 0
+            ? logMetrics.DataProtocolVersion
+            : logMetrics.V4ChunkBatchFrameCount > 0
+                ? FileTransferProtocol.ProtocolVersionV4
+                : 0;
         var hardLogFailure = logMetrics.PayloadRejectedCount > 0 ||
                              logMetrics.DecodeFailureCount > 0 ||
                              logMetrics.MessageRejectedCount > 0 ||
@@ -1126,33 +1152,57 @@ internal static class FileTransferSoakRunner
             startedUtc.ToString("yyyyMMdd-HHmmss", CultureInfo.InvariantCulture));
     }
 
-    private static LogSliceSnapshot CaptureLogSnapshot()
+    private static string CreateLogSliceMarker()
     {
-        var path = LocalOperationalLog.LogFilePath;
-        if (!File.Exists(path))
-        {
-            return new LogSliceSnapshot(path, 0);
-        }
-
-        return new LogSliceSnapshot(path, new FileInfo(path).Length);
+        var sequence = unchecked((uint)Interlocked.Increment(ref logSliceMarkerSequence));
+        var tick = unchecked((uint)Environment.TickCount64);
+        return $"soak-{Environment.ProcessId:x8}-{sequence:x8}-{tick:x8}";
     }
 
-    private static string ReadLogSlice(LogSliceSnapshot snapshot)
+    private static void WriteLogSliceMarker(string lifecycle, string marker)
     {
-        if (!File.Exists(snapshot.Path))
+        if (LogSliceMarkerWriteOverrideForTests?.Invoke(lifecycle, marker) == false)
         {
-            return string.Empty;
+            return;
         }
 
-        using var stream = new FileStream(snapshot.Path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
-        if (snapshot.Length > 0 && snapshot.Length < stream.Length)
-        {
-            stream.Seek(snapshot.Length, SeekOrigin.Begin);
-        }
-
-        using var reader = new StreamReader(stream, Encoding.UTF8);
-        return reader.ReadToEnd();
+        LocalOperationalLog.Info(
+            "FileTransferSoak",
+            $"event=filetransfer_local_soak_slice_{lifecycle}; slice_marker={marker}");
     }
+
+    private static LogSliceSnapshot CaptureLogSnapshot(string marker)
+        => new(marker);
+
+    private static bool TryReadLogSlice(LogSliceSnapshot snapshot, out string slice)
+        => TryReadMarkedLogSlice(snapshot, out slice);
+
+    internal static string ReadLogSliceForTests(string path, long length, string marker)
+    {
+        _ = length;
+        var logger = new RollingFileLogger(path);
+        if (logger.TryReadRetainedSlice(
+                BuildLogSliceStartToken(marker),
+                BuildLogSliceEndToken(marker),
+                out var slice))
+        {
+            return slice;
+        }
+
+        return string.Empty;
+    }
+
+    private static bool TryReadMarkedLogSlice(LogSliceSnapshot snapshot, out string slice)
+        => LocalOperationalLog.TryReadRetainedSlice(
+            BuildLogSliceStartToken(snapshot.Marker),
+            BuildLogSliceEndToken(snapshot.Marker),
+            out slice);
+
+    private static string BuildLogSliceStartToken(string marker)
+        => $"event=filetransfer_local_soak_slice_started; slice_marker={marker}";
+
+    private static string BuildLogSliceEndToken(string marker)
+        => $"event=filetransfer_local_soak_slice_ended; slice_marker={marker}";
 
     private static LogMetrics ExtractLogMetrics(string logText)
     {
@@ -1160,15 +1210,28 @@ internal static class FileTransferSoakRunner
         using var reader = new StringReader(logText);
         while (reader.ReadLine() is { } line)
         {
-            if (line.Contains("event=filetransfer_v4_negotiated", StringComparison.Ordinal))
+            if (line.Contains("protocol_version=6", StringComparison.Ordinal) ||
+                line.Contains("event=filetransfer_v6_negotiated", StringComparison.Ordinal) ||
+                line.Contains("event=filetransfer_v6_sender_started", StringComparison.Ordinal) ||
+                line.Contains("event=filetransfer_v6_receiver_started", StringComparison.Ordinal))
             {
-                metrics.V4NegotiatedCount++;
+                metrics.DataProtocolVersion = Math.Max(metrics.DataProtocolVersion, FileTransferProtocol.ProtocolVersionV6);
             }
+            else if (line.Contains("protocol_version=4", StringComparison.Ordinal) ||
+                     line.Contains("event=filetransfer_v4_negotiated", StringComparison.Ordinal) ||
+                     line.Contains("event=filetransfer_v4_sender_started", StringComparison.Ordinal) ||
+                     line.Contains("event=filetransfer_v4_receiver_started", StringComparison.Ordinal))
+            {
+                metrics.DataProtocolVersion = Math.Max(metrics.DataProtocolVersion, FileTransferProtocol.ProtocolVersionV4);
+            }
+
             if (line.Contains("event=filetransfer_v4_chunk_batch_sent", StringComparison.Ordinal))
             {
                 metrics.V4ChunkBatchFrameCount++;
             }
-            if (line.Contains("event=filetransfer_v4_mixed_enabled", StringComparison.Ordinal))
+            if (line.Contains("event=filetransfer_v4_mixed_screenshare_enabled", StringComparison.Ordinal) ||
+                line.Contains("event=filetransfer_v4_mixed_enabled", StringComparison.Ordinal) ||
+                line.Contains("event=filetransfer_v6_mixed_enabled", StringComparison.Ordinal))
             {
                 metrics.V4MixedEnabledCount++;
             }
@@ -1235,19 +1298,37 @@ internal static class FileTransferSoakRunner
         return Convert.ToBase64String(await SHA256.HashDataAsync(stream, ct).ConfigureAwait(false));
     }
 
-    private static void TryDeleteTransferDirectory(string savedPath)
+    internal static void TryDeleteReceivedFileForTests(string savedPath)
+        => TryDeleteReceivedFile(savedPath);
+
+    private static void TryDeleteReceivedFile(string savedPath)
     {
         try
         {
-            var directory = Path.GetDirectoryName(savedPath);
-            if (!string.IsNullOrWhiteSpace(directory) && Directory.Exists(directory))
+            if (string.IsNullOrWhiteSpace(savedPath))
             {
-                Directory.Delete(directory, recursive: true);
+                return;
+            }
+
+            var fullPath = Path.GetFullPath(savedPath);
+            if (Directory.Exists(fullPath))
+            {
+                LocalOperationalLog.Warn(
+                    "FileTransferSoak",
+                    $"event=filetransfer_local_soak_cleanup_skipped; reason=path_is_directory; path={fullPath}");
+                return;
+            }
+
+            if (File.Exists(fullPath))
+            {
+                File.Delete(fullPath);
             }
         }
-        catch
+        catch (Exception ex)
         {
-            // Soak cleanup is best-effort; the artifact records the saved path.
+            LocalOperationalLog.Warn(
+                "FileTransferSoak",
+                $"event=filetransfer_local_soak_cleanup_failed; reason={ex.GetType().Name}");
         }
     }
 
@@ -1277,7 +1358,7 @@ internal static class FileTransferSoakRunner
 
     private sealed class LogMetrics
     {
-        public int V4NegotiatedCount { get; set; }
+        public int DataProtocolVersion { get; set; }
         public int V4ChunkBatchFrameCount { get; set; }
         public int V4MixedEnabledCount { get; set; }
         public int ReorderEventCount { get; set; }

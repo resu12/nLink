@@ -52,6 +52,78 @@ public sealed class BridgeConnectionLifecycleTests : SessionRuntimeConnectionTes
         Environment.SetEnvironmentVariable(ReleaseOverridePolicy.UnsafeDeveloperModeEnvVar, previousUnsafeDeveloperMode);
     }
 
+    [Fact]
+    [Trait("Category", "Smoke")]
+    [Trait("FileTransferInfraSuite", "RuntimeUnlockRetryDispatch")]
+    public async Task BridgeSubmissionPriorityGate_InstalledRetryAdvancesAheadOfQueuedBulk()
+    {
+        var gate = new BridgeSubmissionPriorityGate();
+        using var holder = await gate.EnterAsync(
+            priority: false,
+            CancellationToken.None);
+        var order = new ConcurrentQueue<string>();
+
+        var normal = Task.Run(async () =>
+        {
+            using var lease = await gate.EnterAsync(
+                priority: false,
+                CancellationToken.None);
+            order.Enqueue("normal");
+        });
+        await WaitUntilAsync(
+            () => gate.GetStateForTests().NormalWaiters == 1,
+            TimeSpan.FromSeconds(2));
+
+        var priority = Task.Run(async () =>
+        {
+            using var lease = await gate.EnterAsync(
+                priority: true,
+                CancellationToken.None);
+            order.Enqueue("priority");
+        });
+        await WaitUntilAsync(
+            () => gate.GetStateForTests().PriorityWaiters == 1,
+            TimeSpan.FromSeconds(2));
+
+        holder.Dispose();
+        await Task.WhenAll(priority, normal).WaitAsync(TimeSpan.FromSeconds(2));
+
+        Assert.Equal(["priority", "normal"], order.ToArray());
+        Assert.Equal(
+            (Held: false, PriorityWaiters: 0, NormalWaiters: 0),
+            gate.GetStateForTests());
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    [Trait("FileTransferInfraSuite", "RuntimeUnlockRetryDispatch")]
+    public async Task BridgeSubmissionPriorityGate_CanceledPriorityDoesNotBlockNormalSubmission()
+    {
+        var gate = new BridgeSubmissionPriorityGate();
+        using var holder = await gate.EnterAsync(
+            priority: false,
+            CancellationToken.None);
+        using var canceled = new CancellationTokenSource();
+        var priority = gate.EnterAsync(priority: true, canceled.Token);
+        var normal = gate.EnterAsync(
+            priority: false,
+            CancellationToken.None);
+        await WaitUntilAsync(
+            () =>
+            {
+                var state = gate.GetStateForTests();
+                return state.PriorityWaiters == 1 &&
+                       state.NormalWaiters == 1;
+            },
+            TimeSpan.FromSeconds(2));
+
+        canceled.Cancel();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(
+            async () => await priority);
+        holder.Dispose();
+        using var normalLease = await normal.WaitAsync(TimeSpan.FromSeconds(2));
+    }
+
     [Trait("Category", "LegacySmoke")]
     [Fact]
     public async Task Bridge_Startup_HealthCheck()
@@ -82,13 +154,16 @@ public sealed class BridgeConnectionLifecycleTests : SessionRuntimeConnectionTes
             var identity = new NknIdentity("smoke-bridge", "smoke-bridge.fake");
             using var adapter = new RealNknClientAdapter(identity, options);
             using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+            var bootstrapStartedUtc = DateTimeOffset.UtcNow;
             await adapter.StartBridgeAsync(cts.Token);
             Assert.True(adapter.IsBridgeProcessRunning);
-            await adapter.PingBridgeAsync(cts.Token);
-            var snapshotAfterPing = NknRuntimeDiagnostics.Snapshot();
-            Assert.True(snapshotAfterPing.BridgePid > 0);
-            Assert.False(string.IsNullOrWhiteSpace(snapshotAfterPing.NodeVersion));
-            Assert.True(snapshotAfterPing.BridgeLastPongUtcTicks > 0);
+            var unavailable = await Assert.ThrowsAsync<FileTransferDataSessionSubmissionUnavailableException>(
+                () => adapter.PingBridgeAsync(cts.Token));
+            Assert.Equal(FileTransferDataSessionSubmissionUnavailableReason.SubmissionEpochNotReady, unavailable.Reason);
+            var snapshotAfterBootstrap = NknRuntimeDiagnostics.Snapshot();
+            Assert.True(snapshotAfterBootstrap.BridgePid > 0);
+            Assert.False(string.IsNullOrWhiteSpace(snapshotAfterBootstrap.NodeVersion));
+            Assert.True(snapshotAfterBootstrap.BridgeLastPongUtcTicks >= bootstrapStartedUtc.Ticks);
             await adapter.DisconnectAsync();
             await WaitUntilAsync(() => !adapter.IsBridgeProcessRunning, TimeSpan.FromSeconds(2));
             var snapshotAfterShutdown = NknRuntimeDiagnostics.Snapshot();
@@ -682,7 +757,7 @@ public sealed class BridgeConnectionLifecycleTests : SessionRuntimeConnectionTes
             return;
         }
 
-        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(12));
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(20));
         using var process = new Process
         {
             StartInfo = new ProcessStartInfo
@@ -811,7 +886,8 @@ public sealed class BridgeConnectionLifecycleTests : SessionRuntimeConnectionTes
         };
         process.StartInfo.ArgumentList.Add(bridgePath);
         process.StartInfo.Environment["NLINK_BRIDGE_FAKE_NKN_RUNTIME"] = "1";
-        process.StartInfo.Environment["NLINK_BRIDGE_FAKE_BULK_SEND_CLIENT_NOT_READY_COUNT"] = "1";
+        process.StartInfo.Environment["NLINK_BRIDGE_FAKE_BULK_SEND_CLIENT_NOT_READY_COUNT"] = "12";
+        process.StartInfo.Environment["NLINK_NKN_BULK_SEND_MODE"] = "fanout";
 
         var stdoutLines = new ConcurrentQueue<string>();
         var stderrLines = new ConcurrentQueue<string>();
@@ -855,9 +931,14 @@ public sealed class BridgeConnectionLifecycleTests : SessionRuntimeConnectionTes
 
             await WaitUntilAsync(
                 () => TryGetMaxJsonLong(stdoutLines, "bridge_bulk_send_summary", "frames_sent") >= 1,
-                TimeSpan.FromSeconds(4));
+                TimeSpan.FromSeconds(15));
             Assert.Equal(0, TryGetMaxJsonLong(stdoutLines, "bridge_bulk_send_summary", "send_failures"));
-            Assert.Contains(stderrLines, line => line.Contains("Bulk queue transient send retry scheduled", StringComparison.Ordinal));
+            Assert.True(
+                stderrLines.Count(line => line.Contains("Bulk queue transient not-ready backoff scheduled", StringComparison.Ordinal)) >= 12,
+                "Expected bridge bulk transient backoff budget to cover a multi-second client-not-ready window.");
+            Assert.True(
+                TryGetMaxJsonLong(stdoutLines, "bulk_transient_not_ready", "attempt") >= 1,
+                "Expected transient client-not-ready failures to be reported separately from terminal send failures.");
 
             await writer.WriteJsonLineAsync("{\"cmd\":\"shutdown\",\"id\":\"shutdown\"}", cts.Token);
             await WaitUntilAsync(() => process.HasExited, TimeSpan.FromSeconds(2));
@@ -883,13 +964,38 @@ public sealed class BridgeConnectionLifecycleTests : SessionRuntimeConnectionTes
 
     [Trait("Category", "LegacySmoke")]
     [Fact]
-    public void Bridge_Source_DefaultBulkSendMode_IsFanout()
+    public void Bridge_Source_DefaultBulkSendMode_IsLegacyFanoutPath()
+    {
+        var bridgePath = FindFileUpwards(Path.Combine("tools", "nkn-bridge", "index.js"));
+        Assert.True(bridgePath is not null && File.Exists(bridgePath), "Bridge script not found.");
+
+        AssertLegacyFanoutDefaults(File.ReadAllText(bridgePath), "source bridge");
+
+        var bundledBridgePath = FindFileUpwards(Path.Combine("artifacts", "bridge", "win-x64", "index.js"));
+        if (bundledBridgePath is not null && File.Exists(bundledBridgePath))
+        {
+            AssertLegacyFanoutDefaults(File.ReadAllText(bundledBridgePath), "bundled bridge artifact");
+        }
+
+        static void AssertLegacyFanoutDefaults(string bridgeScript, string label)
+        {
+            Assert.Contains("const DEFAULT_BULK_NUM_SUBCLIENTS = 4;", bridgeScript, StringComparison.Ordinal);
+            Assert.Contains("const DEFAULT_BULK_SEND_CONCURRENCY = 4;", bridgeScript, StringComparison.Ordinal);
+            Assert.Contains("const DEFAULT_BULK_SEND_MODE = 'fanout';", bridgeScript, StringComparison.Ordinal);
+        }
+    }
+
+    [Trait("Category", "LegacySmoke")]
+    [Fact]
+    public void Bridge_Source_DefaultRpcCandidates_DoNotUseTlsOnSeedPort30003()
     {
         var bridgePath = FindFileUpwards(Path.Combine("tools", "nkn-bridge", "index.js"));
         Assert.True(bridgePath is not null && File.Exists(bridgePath), "Bridge script not found.");
 
         var bridgeScript = File.ReadAllText(bridgePath);
-        Assert.Contains("const DEFAULT_BULK_SEND_MODE = 'fanout';", bridgeScript, StringComparison.Ordinal);
+        Assert.DoesNotContain("'https://seed.nkn.org:30003'", bridgeScript, StringComparison.Ordinal);
+        Assert.Contains("'http://seed.nkn.org:30003'", bridgeScript, StringComparison.Ordinal);
+        Assert.Contains("return 'http://seed.nkn.org:30003';", bridgeScript, StringComparison.Ordinal);
     }
 
     [Trait("Category", "LegacySmoke")]
@@ -1073,6 +1179,157 @@ public sealed class BridgeConnectionLifecycleTests : SessionRuntimeConnectionTes
     }
 
     [Fact]
+    public void RealNknClientAdapter_RuntimeUnlockBulkQueueProofBlocker_RejectsBackloggedQueue()
+    {
+        var tempDir = Path.Combine(Path.GetTempPath(), "nlink-runtime-unlock-bulk-proof", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(tempDir);
+        try
+        {
+            var options = LoadNknOptionsWithOverrides(Path.Combine(tempDir, "id.json"), "runtime-unlock-bulk-proof");
+            var identity = NknIdentityStore.LoadOrCreate(options);
+            using var adapter = new RealNknClientAdapter(identity, options);
+            var nowTick = Stopwatch.GetTimestamp();
+
+            SetPrivateField(adapter, "lastBridgeTransportHealthSummaryTick", nowTick);
+            SetPrivateField(adapter, "lastBridgeTransportHealthReadyEmitted", 1);
+            SetPrivateField(adapter, "lastBridgeTransportHealthControlReady", 1);
+            SetPrivateField(adapter, "lastBridgeTransportHealthBulkReady", 1);
+            SetPrivateField(adapter, "lastBridgeTransportHealthDisconnectSignalCount", 0L);
+            SetPrivateField(
+                adapter,
+                "bulkQueueState",
+                new BridgeBulkQueueState(
+                    QueueDepth: 8,
+                    QueuedBytes: 512 * 1024,
+                    OldestQueuedAgeMs: 2_000,
+                    InFlight: true,
+                    InFlightCount: 4,
+                    InFlightBytes: 128 * 1024,
+                    ConfiguredConcurrency: 4,
+                    EffectiveConcurrency: 4,
+                    ClearedSinceLast: 0,
+                    IsCongested: true,
+                    IsSevere: false));
+
+            Assert.True(adapter.TryGetRuntimeUnlockBulkQueueObservedProofBlocker(out var blockedReason));
+            Assert.Equal("bulk_queue_congested", blockedReason);
+
+            SetPrivateField(
+                adapter,
+                "bulkQueueState",
+                new BridgeBulkQueueState(
+                    QueueDepth: 0,
+                    QueuedBytes: 0,
+                    OldestQueuedAgeMs: 0,
+                    InFlight: false,
+                    InFlightCount: 0,
+                    InFlightBytes: 0,
+                    ConfiguredConcurrency: 4,
+                    EffectiveConcurrency: 4,
+                    ClearedSinceLast: 0,
+                    IsCongested: false,
+                    IsSevere: false));
+
+            Assert.False(adapter.TryGetRuntimeUnlockBulkQueueObservedProofBlocker(out var clearReason));
+            Assert.Equal(string.Empty, clearReason);
+        }
+        finally
+        {
+            try
+            {
+                CleanupDirectoryIfExists(tempDir);
+            }
+            catch
+            {
+            }
+        }
+    }
+
+    [Trait("Category", "LegacySmoke")]
+    [Fact]
+    public async Task RealNknClientAdapter_FileTransferBulkAdaptation_PromotesSinglePathWhenBridgeDemandExceedsSentCapacity()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var bundleDir = TryFindBridgeBundleDirectory();
+        if (bundleDir is null)
+        {
+            return;
+        }
+
+        var nodePath = Path.Combine(bundleDir, "node.exe");
+        if (!File.Exists(nodePath))
+        {
+            return;
+        }
+
+        var tempDir = Path.Combine(Path.GetTempPath(), "nlink-mock-bridge-bulk-adaptation", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(tempDir);
+        var bridgePath = Path.Combine(tempDir, "mock-bridge-bulk-adaptation.js");
+        WriteBridgeScriptWithManifest(bridgePath, BuildMockBridgeScriptWithCustomConnect(connectBehaviorJs: @"
+    emit({ event:'ok', id: msg.id ?? null, cmd:'connect' });
+    setTimeout(() => emit({ event:'ready', protocol:2, channels:['control','media','bulk'], address:'bulk-adaptation.addr', controlAddress:'bulk-adaptation.addr', mediaAddress:'bulk-adaptation-media.addr', bulkAddress:'bulk-adaptation-bulk.addr', connectId: msg.connectId ?? null }), 20);
+    return;
+    "));
+        var prevNodePath = Environment.GetEnvironmentVariable("NLINK_NKN_NODE_PATH");
+        var prevBridgePath = Environment.GetEnvironmentVariable("NLINK_NKN_BRIDGE_PATH");
+        var prevAutoBulkAdaptation = Environment.GetEnvironmentVariable("NLINK_NKN_FILE_TRANSFER_AUTO_BULK_ADAPTATION");
+        var prevBulkTargetBps = Environment.GetEnvironmentVariable("NLINK_NKN_FILE_TRANSFER_BULK_TARGET_BPS");
+        var prevBulkAdaptationCooldown = Environment.GetEnvironmentVariable("NLINK_NKN_FILE_TRANSFER_BULK_ADAPTATION_COOLDOWN_MS");
+        try
+        {
+            Environment.SetEnvironmentVariable("NLINK_NKN_NODE_PATH", nodePath);
+            Environment.SetEnvironmentVariable("NLINK_NKN_BRIDGE_PATH", bridgePath);
+            Environment.SetEnvironmentVariable("NLINK_NKN_FILE_TRANSFER_AUTO_BULK_ADAPTATION", "true");
+            Environment.SetEnvironmentVariable("NLINK_NKN_FILE_TRANSFER_BULK_TARGET_BPS", "1500000");
+            Environment.SetEnvironmentVariable("NLINK_NKN_FILE_TRANSFER_BULK_ADAPTATION_COOLDOWN_MS", "5000");
+            var options = LoadNknOptionsWithOverrides(Path.Combine(tempDir, "id.json"), "mock-bulk-adaptation");
+            var identity = NknIdentityStore.LoadOrCreate(options);
+            using var adapter = new RealNknClientAdapter(identity, options);
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(20));
+            await adapter.ConnectAsync(cts.Token);
+
+            var baselineLength = LocalOperationalLog.GetRecentLogText().Length;
+            adapter.RegisterActiveFileTransferDataSession("transfer-bulk-adaptation");
+            var lowCapacitySummary =
+                "{\"event\":\"bridge_bulk_send_summary\",\"frames_sent\":16,\"frames_enqueued\":24,\"payload_bytes_sent\":800000,\"payload_bytes_per_second\":800000,\"payload_bytes_enqueued\":3000000,\"payload_bytes_enqueued_per_second\":3000000,\"send_failures\":0,\"queue_clears\":0,\"queue_depth\":0,\"queued_bytes\":0,\"oldest_queued_age_ms\":0,\"in_flight\":0,\"in_flight_bytes\":0,\"configured_concurrency\":2,\"effective_concurrency\":2,\"send_mode\":\"single\",\"sample_window_ms\":2000}";
+            adapter.HandleStdoutJsonLineForTests(lowCapacitySummary);
+            adapter.HandleStdoutJsonLineForTests(lowCapacitySummary);
+
+            await WaitUntilAsync(
+                () =>
+                {
+                    var logText = GetRecentLogTextSince(baselineLength);
+                    return logText.Contains("event=nkn_bridge_bulk_send_policy_adaptation_applied", StringComparison.Ordinal) &&
+                           logText.Contains("mode=round_robin", StringComparison.Ordinal) &&
+                           logText.Contains("concurrency=4", StringComparison.Ordinal);
+                },
+                TimeSpan.FromSeconds(3));
+
+            adapter.UnregisterActiveFileTransferDataSession("transfer-bulk-adaptation");
+            await adapter.DisconnectAsync();
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("NLINK_NKN_NODE_PATH", prevNodePath);
+            Environment.SetEnvironmentVariable("NLINK_NKN_BRIDGE_PATH", prevBridgePath);
+            Environment.SetEnvironmentVariable("NLINK_NKN_FILE_TRANSFER_AUTO_BULK_ADAPTATION", prevAutoBulkAdaptation);
+            Environment.SetEnvironmentVariable("NLINK_NKN_FILE_TRANSFER_BULK_TARGET_BPS", prevBulkTargetBps);
+            Environment.SetEnvironmentVariable("NLINK_NKN_FILE_TRANSFER_BULK_ADAPTATION_COOLDOWN_MS", prevBulkAdaptationCooldown);
+            try
+            {
+                CleanupDirectoryIfExists(tempDir);
+            }
+            catch
+            {
+            }
+        }
+    }
+
+    [Fact]
     public void NknTransportOptions_ParsesSubClientTopologyOverrides()
     {
         var tempDir = Path.Combine(Path.GetTempPath(), "nlink-nkn-topology-options", Guid.NewGuid().ToString("N"));
@@ -1085,6 +1342,9 @@ public sealed class BridgeConnectionLifecycleTests : SessionRuntimeConnectionTes
         var prevReceiveStallFastRecovery = Environment.GetEnvironmentVariable("NLINK_NKN_RECEIVE_STALL_FILETRANSFER_FAST_RECOVERY");
         var prevControlOnlyStallRecovery = Environment.GetEnvironmentVariable("NLINK_NKN_CONTROL_ONLY_STALL_RECOVERY");
         var prevReceiveStallFallbackDelay = Environment.GetEnvironmentVariable("NLINK_NKN_RECEIVE_STALL_RECOVERY_FALLBACK_DELAY_MS");
+        var prevAutoBulkAdaptation = Environment.GetEnvironmentVariable("NLINK_NKN_FILE_TRANSFER_AUTO_BULK_ADAPTATION");
+        var prevBulkTargetBps = Environment.GetEnvironmentVariable("NLINK_NKN_FILE_TRANSFER_BULK_TARGET_BPS");
+        var prevBulkAdaptationCooldown = Environment.GetEnvironmentVariable("NLINK_NKN_FILE_TRANSFER_BULK_ADAPTATION_COOLDOWN_MS");
 
         try
         {
@@ -1096,14 +1356,20 @@ public sealed class BridgeConnectionLifecycleTests : SessionRuntimeConnectionTes
             Environment.SetEnvironmentVariable("NLINK_NKN_RECEIVE_STALL_FILETRANSFER_FAST_RECOVERY", null);
             Environment.SetEnvironmentVariable("NLINK_NKN_CONTROL_ONLY_STALL_RECOVERY", null);
             Environment.SetEnvironmentVariable("NLINK_NKN_RECEIVE_STALL_RECOVERY_FALLBACK_DELAY_MS", null);
+            Environment.SetEnvironmentVariable("NLINK_NKN_FILE_TRANSFER_AUTO_BULK_ADAPTATION", null);
+            Environment.SetEnvironmentVariable("NLINK_NKN_FILE_TRANSFER_BULK_TARGET_BPS", null);
+            Environment.SetEnvironmentVariable("NLINK_NKN_FILE_TRANSFER_BULK_ADAPTATION_COOLDOWN_MS", null);
             var defaults = LoadNknOptionsWithOverrides(Path.Combine(tempDir, "default.json"), "topology-default");
             Assert.Equal(4, defaults.NumSubClients);
             Assert.Equal(8, defaults.MediaNumSubClients);
             Assert.Equal(4, defaults.BulkNumSubClients);
             Assert.Equal(4, defaults.BulkSendConcurrency);
+            Assert.True(defaults.FileTransferAutoBulkAdaptationEnabled);
+            Assert.Equal(1_500_000, defaults.FileTransferBulkTargetBytesPerSecond);
+            Assert.Equal(20_000, defaults.FileTransferBulkAdaptationCooldownMs);
             Assert.True(defaults.ReceiveStallRecoveryEnabled);
             Assert.True(defaults.ReceiveStallFileTransferFastRecoveryEnabled);
-            Assert.False(defaults.ReceiveStallControlOnlyRecoveryEnabled);
+            Assert.True(defaults.ReceiveStallControlOnlyRecoveryEnabled);
             Assert.Equal(3000, defaults.ReceiveStallRecoveryFallbackDelayMs);
             Assert.False(defaults.HasSubClientTopologyOverride);
             Assert.False(defaults.ShouldSendSubClientTopology);
@@ -1127,11 +1393,17 @@ public sealed class BridgeConnectionLifecycleTests : SessionRuntimeConnectionTes
             Environment.SetEnvironmentVariable("NLINK_NKN_RECEIVE_STALL_FILETRANSFER_FAST_RECOVERY", "false");
             Environment.SetEnvironmentVariable("NLINK_NKN_CONTROL_ONLY_STALL_RECOVERY", "true");
             Environment.SetEnvironmentVariable("NLINK_NKN_RECEIVE_STALL_RECOVERY_FALLBACK_DELAY_MS", "99");
+            Environment.SetEnvironmentVariable("NLINK_NKN_FILE_TRANSFER_AUTO_BULK_ADAPTATION", "false");
+            Environment.SetEnvironmentVariable("NLINK_NKN_FILE_TRANSFER_BULK_TARGET_BPS", "128000");
+            Environment.SetEnvironmentVariable("NLINK_NKN_FILE_TRANSFER_BULK_ADAPTATION_COOLDOWN_MS", "1");
             var clamped = LoadNknOptionsWithOverrides(Path.Combine(tempDir, "clamped.json"), "topology-clamped");
             Assert.Equal(1, clamped.NumSubClients);
             Assert.Equal(16, clamped.MediaNumSubClients);
             Assert.Equal(16, clamped.BulkNumSubClients);
             Assert.Equal(8, clamped.BulkSendConcurrency);
+            Assert.False(clamped.FileTransferAutoBulkAdaptationEnabled);
+            Assert.Equal(256_000, clamped.FileTransferBulkTargetBytesPerSecond);
+            Assert.Equal(5_000, clamped.FileTransferBulkAdaptationCooldownMs);
             Assert.False(clamped.ReceiveStallRecoveryEnabled);
             Assert.False(clamped.ReceiveStallFileTransferFastRecoveryEnabled);
             Assert.True(clamped.ReceiveStallControlOnlyRecoveryEnabled);
@@ -1148,6 +1420,9 @@ public sealed class BridgeConnectionLifecycleTests : SessionRuntimeConnectionTes
             Environment.SetEnvironmentVariable("NLINK_NKN_RECEIVE_STALL_FILETRANSFER_FAST_RECOVERY", prevReceiveStallFastRecovery);
             Environment.SetEnvironmentVariable("NLINK_NKN_CONTROL_ONLY_STALL_RECOVERY", prevControlOnlyStallRecovery);
             Environment.SetEnvironmentVariable("NLINK_NKN_RECEIVE_STALL_RECOVERY_FALLBACK_DELAY_MS", prevReceiveStallFallbackDelay);
+            Environment.SetEnvironmentVariable("NLINK_NKN_FILE_TRANSFER_AUTO_BULK_ADAPTATION", prevAutoBulkAdaptation);
+            Environment.SetEnvironmentVariable("NLINK_NKN_FILE_TRANSFER_BULK_TARGET_BPS", prevBulkTargetBps);
+            Environment.SetEnvironmentVariable("NLINK_NKN_FILE_TRANSFER_BULK_ADAPTATION_COOLDOWN_MS", prevBulkAdaptationCooldown);
             try
             {
                 CleanupDirectoryIfExists(tempDir);
@@ -1206,7 +1481,7 @@ public sealed class BridgeConnectionLifecycleTests : SessionRuntimeConnectionTes
 
             await WaitUntilAsync(
                 () => File.Exists(countFile) && int.TryParse(File.ReadAllText(countFile).Trim(), out var count) && count >= 2,
-                TimeSpan.FromSeconds(5));
+                TimeSpan.FromSeconds(15));
 
             await adapter.DisconnectAsync();
         }
@@ -1227,7 +1502,7 @@ public sealed class BridgeConnectionLifecycleTests : SessionRuntimeConnectionTes
 
     [Trait("Category", "LegacySmoke")]
     [Fact]
-    public async Task Bridge_ReceiveStallRecovery_ReconnectsAfterFileTransferBulkReceiveStall()
+    public async Task Bridge_ReceiveStallRecovery_DoesNotReconnectForFileTransferBulkSilenceWhenControlFresh()
     {
         if (!OperatingSystem.IsWindows())
         {
@@ -1246,10 +1521,10 @@ public sealed class BridgeConnectionLifecycleTests : SessionRuntimeConnectionTes
             return;
         }
 
-        var tempDir = Path.Combine(Path.GetTempPath(), "nlink-mock-bridge-bulk-receive-stall", Guid.NewGuid().ToString("N"));
+        var tempDir = Path.Combine(Path.GetTempPath(), "nlink-mock-bridge-bulk-fresh-control", Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(tempDir);
         var countFile = Path.Combine(tempDir, "connect-count.txt");
-        var bridgePath = Path.Combine(tempDir, "mock-bridge-bulk-receive-stall.js");
+        var bridgePath = Path.Combine(tempDir, "mock-bridge-bulk-fresh-control.js");
         WriteBridgeScriptWithManifest(
             bridgePath,
             BuildReceiveStallRecoveryMockBridgeScript(
@@ -1271,22 +1546,29 @@ public sealed class BridgeConnectionLifecycleTests : SessionRuntimeConnectionTes
             Environment.SetEnvironmentVariable("NLINK_NKN_RECEIVE_STALL_RECOVERY", null);
             Environment.SetEnvironmentVariable("NLINK_NKN_RECEIVE_STALL_FILETRANSFER_FAST_RECOVERY", null);
             var keyPath = Path.Combine(tempDir, "identity.json");
-            WriteIdentityFile(keyPath, "bulk-receive-stall-recovery");
+            WriteIdentityFile(keyPath, "bulk-fresh-control");
             var seedBackend = new FakeProtectedSeedBackend();
             seedBackend.SaveSeed(keyPath, RandomNumberGenerator.GetBytes(32));
             using var seedBackendOverride = NknSecretStore.OverrideBackendForTests(seedBackend);
-            var options = LoadNknOptionsWithOverrides(keyPath, "bulk-receive-stall-recovery");
-            var identity = new NknIdentity("bulk-receive-stall-recovery", "bulk-receive-stall-recovery.fake");
+            var options = LoadNknOptionsWithOverrides(keyPath, "bulk-fresh-control");
+            var identity = new NknIdentity("bulk-fresh-control", "bulk-fresh-control.fake");
             using var adapter = new RealNknClientAdapter(identity, options);
-            adapter.RegisterActiveFileTransferDataSession("transfer-bulk-stall");
+            adapter.RegisterActiveFileTransferDataSession("transfer-bulk-fresh-control");
+            var logBaseline = LocalOperationalLog.GetRecentLogText().Length;
             using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
             await adapter.ConnectAsync(cts.Token);
 
             await WaitUntilAsync(
-                () => File.Exists(countFile) && int.TryParse(File.ReadAllText(countFile).Trim(), out var count) && count >= 2,
+                () => GetRecentLogTextSince(logBaseline).Contains("event=filetransfer_v4_receive_liveness_summary", StringComparison.Ordinal),
                 TimeSpan.FromSeconds(5));
+            await Task.Delay(750, cts.Token);
 
-            adapter.UnregisterActiveFileTransferDataSession("transfer-bulk-stall");
+            Assert.True(File.Exists(countFile));
+            Assert.True(int.TryParse(File.ReadAllText(countFile).Trim(), out var count));
+            Assert.Equal(1, count);
+            Assert.DoesNotContain("event=nkn_bridge_receive_stall_detected", GetRecentLogTextSince(logBaseline), StringComparison.Ordinal);
+
+            adapter.UnregisterActiveFileTransferDataSession("transfer-bulk-fresh-control");
             await adapter.DisconnectAsync();
         }
         finally
@@ -1295,6 +1577,1171 @@ public sealed class BridgeConnectionLifecycleTests : SessionRuntimeConnectionTes
             Environment.SetEnvironmentVariable("NLINK_NKN_BRIDGE_PATH", prevBridgePath);
             Environment.SetEnvironmentVariable("NLINK_NKN_RECEIVE_STALL_RECOVERY", prevRecovery);
             Environment.SetEnvironmentVariable("NLINK_NKN_RECEIVE_STALL_FILETRANSFER_FAST_RECOVERY", prevFastRecovery);
+            try
+            {
+                CleanupDirectoryIfExists(tempDir);
+            }
+            catch
+            {
+            }
+        }
+    }
+
+    [Trait("Category", "LegacySmoke")]
+    [Fact]
+    public async Task Bridge_ReceiveStallRecovery_BulkStallRequestsCoordinatorWhenControlStale()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var bundleDir = TryFindBridgeBundleDirectory();
+        if (bundleDir is null)
+        {
+            return;
+        }
+
+        var nodePath = Path.Combine(bundleDir, "node.exe");
+        if (!File.Exists(nodePath))
+        {
+            return;
+        }
+
+        var tempDir = Path.Combine(Path.GetTempPath(), "nlink-mock-bridge-bulk-stale-control", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(tempDir);
+        var countFile = Path.Combine(tempDir, "connect-count.txt");
+        var bridgePath = Path.Combine(tempDir, "mock-bridge-bulk-stale-control.js");
+        WriteBridgeScriptWithManifest(
+            bridgePath,
+            BuildReceiveStallRecoveryMockBridgeScript(
+                countFile,
+                controlMessagesReceivedSinceLast: 0,
+                bulkMessagesReceivedSinceLast: 0,
+                totalMessagesReceivedSinceLast: 1,
+                controlLastReceivedAgeMs: 13_000,
+                bulkLastReceivedAgeMs: 7_000));
+        var prevNodePath = Environment.GetEnvironmentVariable("NLINK_NKN_NODE_PATH");
+        var prevBridgePath = Environment.GetEnvironmentVariable("NLINK_NKN_BRIDGE_PATH");
+        var prevRecovery = Environment.GetEnvironmentVariable("NLINK_NKN_RECEIVE_STALL_RECOVERY");
+        var prevFastRecovery = Environment.GetEnvironmentVariable("NLINK_NKN_RECEIVE_STALL_FILETRANSFER_FAST_RECOVERY");
+
+        try
+        {
+            Environment.SetEnvironmentVariable("NLINK_NKN_NODE_PATH", nodePath);
+            Environment.SetEnvironmentVariable("NLINK_NKN_BRIDGE_PATH", bridgePath);
+            Environment.SetEnvironmentVariable("NLINK_NKN_RECEIVE_STALL_RECOVERY", null);
+            Environment.SetEnvironmentVariable("NLINK_NKN_RECEIVE_STALL_FILETRANSFER_FAST_RECOVERY", null);
+            var keyPath = Path.Combine(tempDir, "identity.json");
+            WriteIdentityFile(keyPath, "bulk-stale-control");
+            var seedBackend = new FakeProtectedSeedBackend();
+            seedBackend.SaveSeed(keyPath, RandomNumberGenerator.GetBytes(32));
+            using var seedBackendOverride = NknSecretStore.OverrideBackendForTests(seedBackend);
+            var options = LoadNknOptionsWithOverrides(keyPath, "bulk-stale-control");
+            var identity = new NknIdentity("bulk-stale-control", "bulk-stale-control.fake");
+            using var adapter = new RealNknClientAdapter(identity, options);
+            var evaluations = new ConcurrentQueue<FileTransferBridgeRecoveryEvaluationRequest>();
+            adapter.BridgeRecoveryEvaluationRequested += (_, args) => evaluations.Enqueue(args.Request);
+            var logBaseline = GetOperationalLogLength();
+            adapter.RegisterActiveFileTransferDataSession("transfer-bulk-stale-control");
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+            await adapter.ConnectAsync(cts.Token);
+
+            await WaitUntilAsync(
+                () => evaluations.Any(e => e.ConsecutiveObservations >= 3),
+                TimeSpan.FromSeconds(5));
+
+            AssertReceiveStallEvaluationWithoutExecution(
+                adapter, evaluations, "transfer-bulk-stale-control", countFile, 0, 0);
+            var logText = ReadOperationalLogTail(logBaseline);
+            Assert.DoesNotContain("event=nkn_bridge_receive_stall_recovery_started", logText, StringComparison.Ordinal);
+            Assert.DoesNotContain("event=nkn_bridge_receive_stall_recovery_hard_restart", logText, StringComparison.Ordinal);
+            Assert.DoesNotContain("event=nkn_bridge_recovery_execution_started", logText, StringComparison.Ordinal);
+
+            adapter.UnregisterActiveFileTransferDataSession("transfer-bulk-stale-control");
+            await adapter.DisconnectAsync();
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("NLINK_NKN_NODE_PATH", prevNodePath);
+            Environment.SetEnvironmentVariable("NLINK_NKN_BRIDGE_PATH", prevBridgePath);
+            Environment.SetEnvironmentVariable("NLINK_NKN_RECEIVE_STALL_RECOVERY", prevRecovery);
+            Environment.SetEnvironmentVariable("NLINK_NKN_RECEIVE_STALL_FILETRANSFER_FAST_RECOVERY", prevFastRecovery);
+            try
+            {
+                CleanupDirectoryIfExists(tempDir);
+            }
+            catch
+            {
+            }
+        }
+    }
+
+    [Trait("Category", "LegacySmoke")]
+    [Fact]
+    public async Task Bridge_ReceiveStallRecovery_RuntimeFeedbackStallRequestsCoordinator()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var bundleDir = TryFindBridgeBundleDirectory();
+        if (bundleDir is null)
+        {
+            return;
+        }
+
+        var nodePath = Path.Combine(bundleDir, "node.exe");
+        if (!File.Exists(nodePath))
+        {
+            return;
+        }
+
+        var tempDir = Path.Combine(Path.GetTempPath(), "nlink-mock-bridge-v6-runtime-bulk-stale-control", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(tempDir);
+        var countFile = Path.Combine(tempDir, "connect-count.txt");
+        var bridgePath = Path.Combine(tempDir, "mock-bridge-v6-runtime-bulk-stale-control.js");
+        WriteBridgeScriptWithManifest(
+            bridgePath,
+            BuildReceiveStallRecoveryMockBridgeScript(
+                countFile,
+                controlMessagesReceivedSinceLast: 0,
+                bulkMessagesReceivedSinceLast: 0,
+                totalMessagesReceivedSinceLast: 1,
+                controlLastReceivedAgeMs: 9_000,
+                bulkLastReceivedAgeMs: 7_000));
+        var prevNodePath = Environment.GetEnvironmentVariable("NLINK_NKN_NODE_PATH");
+        var prevBridgePath = Environment.GetEnvironmentVariable("NLINK_NKN_BRIDGE_PATH");
+        var prevRecovery = Environment.GetEnvironmentVariable("NLINK_NKN_RECEIVE_STALL_RECOVERY");
+        var prevFastRecovery = Environment.GetEnvironmentVariable("NLINK_NKN_RECEIVE_STALL_FILETRANSFER_FAST_RECOVERY");
+
+        try
+        {
+            Environment.SetEnvironmentVariable("NLINK_NKN_NODE_PATH", nodePath);
+            Environment.SetEnvironmentVariable("NLINK_NKN_BRIDGE_PATH", bridgePath);
+            Environment.SetEnvironmentVariable("NLINK_NKN_RECEIVE_STALL_RECOVERY", null);
+            Environment.SetEnvironmentVariable("NLINK_NKN_RECEIVE_STALL_FILETRANSFER_FAST_RECOVERY", null);
+            var keyPath = Path.Combine(tempDir, "identity.json");
+            WriteIdentityFile(keyPath, "v6-runtime-bulk-stale-control");
+            var seedBackend = new FakeProtectedSeedBackend();
+            seedBackend.SaveSeed(keyPath, RandomNumberGenerator.GetBytes(32));
+            using var seedBackendOverride = NknSecretStore.OverrideBackendForTests(seedBackend);
+            var options = LoadNknOptionsWithOverrides(keyPath, "v6-runtime-bulk-stale-control");
+            var identity = new NknIdentity("v6-runtime-bulk-stale-control", "v6-runtime-bulk-stale-control.fake");
+            using var adapter = new RealNknClientAdapter(identity, options);
+            var evaluations = new ConcurrentQueue<FileTransferBridgeRecoveryEvaluationRequest>();
+            adapter.BridgeRecoveryEvaluationRequested += (_, args) => evaluations.Enqueue(args.Request);
+            var logBaseline = GetOperationalLogLength();
+            adapter.RegisterActiveFileTransferDataSession("transfer-v6-runtime-bulk-stale-control");
+            adapter.RegisterActiveFileTransferRuntime("transfer-v6-runtime-bulk-stale-control");
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+            await adapter.ConnectAsync(cts.Token);
+
+            await WaitUntilAsync(
+                () => evaluations.Any(e => e.ConsecutiveObservations >= 3),
+                TimeSpan.FromSeconds(5));
+
+            AssertReceiveStallEvaluationWithoutExecution(
+                adapter, evaluations, "transfer-v6-runtime-bulk-stale-control", countFile, 0, 0);
+            var logText = ReadOperationalLogTail(logBaseline);
+            Assert.DoesNotContain("event=nkn_bridge_receive_stall_recovery_started", logText, StringComparison.Ordinal);
+            Assert.DoesNotContain("event=nkn_bridge_receive_stall_recovery_hard_restart", logText, StringComparison.Ordinal);
+            Assert.DoesNotContain("event=nkn_bridge_recovery_execution_started", logText, StringComparison.Ordinal);
+
+            adapter.UnregisterActiveFileTransferRuntime("transfer-v6-runtime-bulk-stale-control");
+            adapter.UnregisterActiveFileTransferDataSession("transfer-v6-runtime-bulk-stale-control");
+            await adapter.DisconnectAsync();
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("NLINK_NKN_NODE_PATH", prevNodePath);
+            Environment.SetEnvironmentVariable("NLINK_NKN_BRIDGE_PATH", prevBridgePath);
+            Environment.SetEnvironmentVariable("NLINK_NKN_RECEIVE_STALL_RECOVERY", prevRecovery);
+            Environment.SetEnvironmentVariable("NLINK_NKN_RECEIVE_STALL_FILETRANSFER_FAST_RECOVERY", prevFastRecovery);
+            try
+            {
+                CleanupDirectoryIfExists(tempDir);
+            }
+            catch
+            {
+            }
+        }
+    }
+
+    [Trait("Category", "LegacySmoke")]
+    [Fact]
+    public async Task Bridge_ReceiveStallRecovery_ActiveRuntimeAllZeroRequestsCoordinatorAfterGraceExpires()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var bundleDir = TryFindBridgeBundleDirectory();
+        if (bundleDir is null)
+        {
+            return;
+        }
+
+        var nodePath = Path.Combine(bundleDir, "node.exe");
+        if (!File.Exists(nodePath))
+        {
+            return;
+        }
+
+        var tempDir = Path.Combine(Path.GetTempPath(), "nlink-mock-bridge-v6-runtime-protocol-liveness", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(tempDir);
+        var countFile = Path.Combine(tempDir, "connect-count.txt");
+        var bridgePath = Path.Combine(tempDir, "mock-bridge-v6-runtime-protocol-liveness.js");
+        WriteBridgeScriptWithManifest(
+            bridgePath,
+            BuildReceiveStallRecoveryMockBridgeScript(
+                countFile,
+                stallHealthSampleCount: 8));
+        var prevNodePath = Environment.GetEnvironmentVariable("NLINK_NKN_NODE_PATH");
+        var prevBridgePath = Environment.GetEnvironmentVariable("NLINK_NKN_BRIDGE_PATH");
+        var prevRecovery = Environment.GetEnvironmentVariable("NLINK_NKN_RECEIVE_STALL_RECOVERY");
+        var prevFastRecovery = Environment.GetEnvironmentVariable("NLINK_NKN_RECEIVE_STALL_FILETRANSFER_FAST_RECOVERY");
+        var prevControlOnlyRecovery = Environment.GetEnvironmentVariable("NLINK_NKN_CONTROL_ONLY_STALL_RECOVERY");
+
+        try
+        {
+            Environment.SetEnvironmentVariable("NLINK_NKN_NODE_PATH", nodePath);
+            Environment.SetEnvironmentVariable("NLINK_NKN_BRIDGE_PATH", bridgePath);
+            Environment.SetEnvironmentVariable("NLINK_NKN_RECEIVE_STALL_RECOVERY", null);
+            Environment.SetEnvironmentVariable("NLINK_NKN_RECEIVE_STALL_FILETRANSFER_FAST_RECOVERY", null);
+            Environment.SetEnvironmentVariable("NLINK_NKN_CONTROL_ONLY_STALL_RECOVERY", "0");
+            var keyPath = Path.Combine(tempDir, "identity.json");
+            WriteIdentityFile(keyPath, "v6-runtime-protocol-liveness");
+            var seedBackend = new FakeProtectedSeedBackend();
+            seedBackend.SaveSeed(keyPath, RandomNumberGenerator.GetBytes(32));
+            using var seedBackendOverride = NknSecretStore.OverrideBackendForTests(seedBackend);
+            var options = LoadNknOptionsWithOverrides(keyPath, "v6-runtime-protocol-liveness");
+            var identity = new NknIdentity("v6-runtime-protocol-liveness", "v6-runtime-protocol-liveness.fake");
+            using var adapter = new RealNknClientAdapter(identity, options);
+            adapter.RegisterActiveFileTransferDataSession("transfer-v6-runtime-protocol-liveness");
+            adapter.RegisterActiveFileTransferRuntime("transfer-v6-runtime-protocol-liveness");
+            var evaluations = new ConcurrentQueue<FileTransferBridgeRecoveryEvaluationRequest>();
+            adapter.BridgeRecoveryEvaluationRequested += (_, args) => evaluations.Enqueue(args.Request);
+            var logBaseline = GetOperationalLogLength();
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+            await adapter.ConnectAsync(cts.Token);
+
+            await WaitUntilAsync(
+                () => evaluations.Any(e => e.Reason == "all_channels_zero_receive" &&
+                                           e.ConsecutiveObservations >= 8),
+                TimeSpan.FromSeconds(15));
+
+            Assert.All(evaluations, e =>
+            {
+                Assert.Equal("transfer-v6-runtime-protocol-liveness", e.TransferId);
+                Assert.Equal(FileTransferBridgeRecoveryEvaluationKind.ReceiveStall, e.EvaluationKind);
+            });
+            var logText = ReadOperationalLogTail(logBaseline);
+            Assert.Contains("event=nkn_bridge_recovery_evaluation_requested;", logText, StringComparison.Ordinal);
+            Assert.DoesNotContain("event=nkn_bridge_receive_stall_recovery_started", logText, StringComparison.Ordinal);
+            Assert.DoesNotContain("event=nkn_bridge_recovery_execution_started", logText, StringComparison.Ordinal);
+            Assert.Null(GetPrivateField(adapter, "activeFileTransferBridgeRecoveryExecutionCommand"));
+            Assert.Equal(0, Assert.IsType<int>(GetPrivateField(adapter, "receiveStallRecoveryCount")));
+            Assert.Equal(0, Assert.IsType<int>(GetPrivateField(adapter, "receiveStallRecoveryInProgress")));
+            Assert.True(File.Exists(countFile));
+            Assert.True(int.TryParse(File.ReadAllText(countFile).Trim(), out var connectCount));
+            Assert.Equal(1, connectCount);
+
+            adapter.UnregisterActiveFileTransferRuntime("transfer-v6-runtime-protocol-liveness");
+            adapter.UnregisterActiveFileTransferDataSession("transfer-v6-runtime-protocol-liveness");
+            await adapter.DisconnectAsync();
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("NLINK_NKN_NODE_PATH", prevNodePath);
+            Environment.SetEnvironmentVariable("NLINK_NKN_BRIDGE_PATH", prevBridgePath);
+            Environment.SetEnvironmentVariable("NLINK_NKN_RECEIVE_STALL_RECOVERY", prevRecovery);
+            Environment.SetEnvironmentVariable("NLINK_NKN_RECEIVE_STALL_FILETRANSFER_FAST_RECOVERY", prevFastRecovery);
+            Environment.SetEnvironmentVariable("NLINK_NKN_CONTROL_ONLY_STALL_RECOVERY", prevControlOnlyRecovery);
+            try
+            {
+                CleanupDirectoryIfExists(tempDir);
+            }
+            catch
+            {
+            }
+        }
+    }
+
+    [Trait("Category", "LegacySmoke")]
+    [Fact]
+    public async Task Bridge_ReceiveStallRecovery_ClosingFileTransferResetsSuppressedZeroReceiveWindows()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var bundleDir = TryFindBridgeBundleDirectory();
+        if (bundleDir is null)
+        {
+            return;
+        }
+
+        var nodePath = Path.Combine(bundleDir, "node.exe");
+        if (!File.Exists(nodePath))
+        {
+            return;
+        }
+
+        var tempDir = Path.Combine(Path.GetTempPath(), "nlink-mock-bridge-v6-runtime-close-reset", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(tempDir);
+        var countFile = Path.Combine(tempDir, "connect-count.txt");
+        var bridgePath = Path.Combine(tempDir, "mock-bridge-v6-runtime-close-reset.js");
+        WriteBridgeScriptWithManifest(
+            bridgePath,
+            BuildReceiveStallRecoveryMockBridgeScript(
+                countFile,
+                stallHealthSampleCount: 4,
+                stallHealthSampleSpacingMs: 150));
+        var prevNodePath = Environment.GetEnvironmentVariable("NLINK_NKN_NODE_PATH");
+        var prevBridgePath = Environment.GetEnvironmentVariable("NLINK_NKN_BRIDGE_PATH");
+        var prevRecovery = Environment.GetEnvironmentVariable("NLINK_NKN_RECEIVE_STALL_RECOVERY");
+        var prevFastRecovery = Environment.GetEnvironmentVariable("NLINK_NKN_RECEIVE_STALL_FILETRANSFER_FAST_RECOVERY");
+        var prevControlOnlyRecovery = Environment.GetEnvironmentVariable("NLINK_NKN_CONTROL_ONLY_STALL_RECOVERY");
+
+        try
+        {
+            Environment.SetEnvironmentVariable("NLINK_NKN_NODE_PATH", nodePath);
+            Environment.SetEnvironmentVariable("NLINK_NKN_BRIDGE_PATH", bridgePath);
+            Environment.SetEnvironmentVariable("NLINK_NKN_RECEIVE_STALL_RECOVERY", null);
+            Environment.SetEnvironmentVariable("NLINK_NKN_RECEIVE_STALL_FILETRANSFER_FAST_RECOVERY", null);
+            Environment.SetEnvironmentVariable("NLINK_NKN_CONTROL_ONLY_STALL_RECOVERY", "0");
+            var keyPath = Path.Combine(tempDir, "identity.json");
+            WriteIdentityFile(keyPath, "v6-runtime-close-reset");
+            var seedBackend = new FakeProtectedSeedBackend();
+            seedBackend.SaveSeed(keyPath, RandomNumberGenerator.GetBytes(32));
+            using var seedBackendOverride = NknSecretStore.OverrideBackendForTests(seedBackend);
+            var options = LoadNknOptionsWithOverrides(keyPath, "v6-runtime-close-reset");
+            var identity = new NknIdentity("v6-runtime-close-reset", "v6-runtime-close-reset.fake");
+            using var adapter = new RealNknClientAdapter(identity, options);
+            adapter.RegisterActiveFileTransferDataSession("transfer-v6-runtime-close-reset");
+            adapter.RegisterActiveFileTransferRuntime("transfer-v6-runtime-close-reset");
+            var logBaseline = LocalOperationalLog.GetRecentLogText().Length;
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+            await adapter.ConnectAsync(cts.Token);
+
+            await WaitUntilAsync(
+                () => GetRecentLogTextSince(logBaseline).Contains("event=nkn_bridge_receive_stall_recovery_suppressed; reason=filetransfer_runtime_protocol_liveness", StringComparison.Ordinal),
+                TimeSpan.FromSeconds(5));
+
+            adapter.UnregisterActiveFileTransferRuntime("transfer-v6-runtime-close-reset");
+            adapter.UnregisterActiveFileTransferDataSession("transfer-v6-runtime-close-reset");
+            await Task.Delay(350, cts.Token);
+
+            Assert.True(File.Exists(countFile));
+            Assert.True(int.TryParse(File.ReadAllText(countFile).Trim(), out var connectCount));
+            Assert.Equal(1, connectCount);
+
+            await adapter.DisconnectAsync();
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("NLINK_NKN_NODE_PATH", prevNodePath);
+            Environment.SetEnvironmentVariable("NLINK_NKN_BRIDGE_PATH", prevBridgePath);
+            Environment.SetEnvironmentVariable("NLINK_NKN_RECEIVE_STALL_RECOVERY", prevRecovery);
+            Environment.SetEnvironmentVariable("NLINK_NKN_RECEIVE_STALL_FILETRANSFER_FAST_RECOVERY", prevFastRecovery);
+            Environment.SetEnvironmentVariable("NLINK_NKN_CONTROL_ONLY_STALL_RECOVERY", prevControlOnlyRecovery);
+            try
+            {
+                CleanupDirectoryIfExists(tempDir);
+            }
+            catch
+            {
+            }
+        }
+    }
+
+    [Trait("Category", "LegacySmoke")]
+    [Fact]
+    public async Task Bridge_ReceiveStallRecovery_SuppressesAutoReconnectForActiveFileTransferBeforeBulkProof()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var bundleDir = TryFindBridgeBundleDirectory();
+        if (bundleDir is null)
+        {
+            return;
+        }
+
+        var nodePath = Path.Combine(bundleDir, "node.exe");
+        if (!File.Exists(nodePath))
+        {
+            return;
+        }
+
+        var tempDir = Path.Combine(Path.GetTempPath(), "nlink-mock-bridge-v6-bulk-proof-after-reconnect", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(tempDir);
+        var countFile = Path.Combine(tempDir, "connect-count.txt");
+        var bridgePath = Path.Combine(tempDir, "mock-bridge-v6-bulk-proof-after-reconnect.js");
+        WriteBridgeScriptWithManifest(
+            bridgePath,
+            BuildReceiveStallRecoveryMockBridgeScript(
+                countFile,
+                controlMessagesReceivedSinceLast: 0,
+                bulkMessagesReceivedSinceLast: 0,
+                totalMessagesReceivedSinceLast: 0,
+                controlLastReceivedAgeMs: 9_000,
+                bulkLastReceivedAgeMs: 9_000,
+                postRecoveryControlMessagesReceivedSinceLast: 0,
+                postRecoveryBulkMessagesReceivedSinceLast: 12,
+                postRecoveryTotalMessagesReceivedSinceLast: 12,
+                postRecoveryControlLastReceivedAgeMs: 24_000,
+                postRecoveryBulkLastReceivedAgeMs: 100,
+                stallHealthSampleCount: 4,
+                rampStallBulkAgeForAllChannelRecovery: true));
+        var prevNodePath = Environment.GetEnvironmentVariable("NLINK_NKN_NODE_PATH");
+        var prevBridgePath = Environment.GetEnvironmentVariable("NLINK_NKN_BRIDGE_PATH");
+        var prevRecovery = Environment.GetEnvironmentVariable("NLINK_NKN_RECEIVE_STALL_RECOVERY");
+        var prevFastRecovery = Environment.GetEnvironmentVariable("NLINK_NKN_RECEIVE_STALL_FILETRANSFER_FAST_RECOVERY");
+
+        try
+        {
+            Environment.SetEnvironmentVariable("NLINK_NKN_NODE_PATH", nodePath);
+            Environment.SetEnvironmentVariable("NLINK_NKN_BRIDGE_PATH", bridgePath);
+            Environment.SetEnvironmentVariable("NLINK_NKN_RECEIVE_STALL_RECOVERY", null);
+            Environment.SetEnvironmentVariable("NLINK_NKN_RECEIVE_STALL_FILETRANSFER_FAST_RECOVERY", null);
+            var keyPath = Path.Combine(tempDir, "identity.json");
+            WriteIdentityFile(keyPath, "v6-bulk-proof-after-reconnect");
+            var seedBackend = new FakeProtectedSeedBackend();
+            seedBackend.SaveSeed(keyPath, RandomNumberGenerator.GetBytes(32));
+            using var seedBackendOverride = NknSecretStore.OverrideBackendForTests(seedBackend);
+            var options = LoadNknOptionsWithOverrides(keyPath, "v6-bulk-proof-after-reconnect");
+            var identity = new NknIdentity("v6-bulk-proof-after-reconnect", "v6-bulk-proof-after-reconnect.fake");
+            using var adapter = new RealNknClientAdapter(identity, options);
+            adapter.RegisterActiveFileTransferDataSession("transfer-v6-bulk-proof-after-reconnect");
+            adapter.RegisterActiveFileTransferRuntime("transfer-v6-bulk-proof-after-reconnect");
+            var logBaseline = GetOperationalLogLength();
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+            await adapter.ConnectAsync(cts.Token);
+
+            await WaitUntilAsync(
+                () => (ReadOperationalLogTail(logBaseline) + Environment.NewLine + LocalOperationalLog.GetRecentLogText()).Contains("event=nkn_bridge_receive_stall_recovery_suppressed; reason=filetransfer_bulk_probe_window", StringComparison.Ordinal),
+                TimeSpan.FromSeconds(5));
+            await Task.Delay(500, cts.Token);
+
+            var logText = ReadOperationalLogTail(logBaseline) + Environment.NewLine + LocalOperationalLog.GetRecentLogText();
+            Assert.Contains("event=nkn_bridge_receive_stall_recovery_suppressed; reason=filetransfer_bulk_probe_window", logText, StringComparison.Ordinal);
+            Assert.DoesNotContain("event=nkn_bridge_receive_stall_recovery_filetransfer_bulk_proof_accepted", logText, StringComparison.Ordinal);
+            Assert.DoesNotContain("event=nkn_bridge_receive_stall_recovery_receive_resumed", logText, StringComparison.Ordinal);
+            Assert.True(File.Exists(countFile));
+            Assert.True(int.TryParse(File.ReadAllText(countFile).Trim(), out var count));
+            Assert.Equal(1, count);
+
+            adapter.UnregisterActiveFileTransferRuntime("transfer-v6-bulk-proof-after-reconnect");
+            adapter.UnregisterActiveFileTransferDataSession("transfer-v6-bulk-proof-after-reconnect");
+            await adapter.DisconnectAsync();
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("NLINK_NKN_NODE_PATH", prevNodePath);
+            Environment.SetEnvironmentVariable("NLINK_NKN_BRIDGE_PATH", prevBridgePath);
+            Environment.SetEnvironmentVariable("NLINK_NKN_RECEIVE_STALL_RECOVERY", prevRecovery);
+            Environment.SetEnvironmentVariable("NLINK_NKN_RECEIVE_STALL_FILETRANSFER_FAST_RECOVERY", prevFastRecovery);
+            try
+            {
+                CleanupDirectoryIfExists(tempDir);
+            }
+            catch
+            {
+            }
+        }
+    }
+
+    [Trait("Category", "LegacySmoke")]
+    [Fact]
+    public async Task Bridge_ReceiveStallRecovery_SuppressesAllChannelRecoveryUntilBulkStaleRepeats()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var bundleDir = TryFindBridgeBundleDirectory();
+        if (bundleDir is null)
+        {
+            return;
+        }
+
+        var nodePath = Path.Combine(bundleDir, "node.exe");
+        if (!File.Exists(nodePath))
+        {
+            return;
+        }
+
+        var tempDir = Path.Combine(Path.GetTempPath(), "nlink-mock-bridge-all-zero-probe-window", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(tempDir);
+        var countFile = Path.Combine(tempDir, "connect-count.txt");
+        var bridgePath = Path.Combine(tempDir, "mock-bridge-all-zero-probe-window.js");
+        WriteBridgeScriptWithManifest(bridgePath, BuildReceiveStallRecoveryTransientAllZeroMockBridgeScript(countFile));
+        var prevNodePath = Environment.GetEnvironmentVariable("NLINK_NKN_NODE_PATH");
+        var prevBridgePath = Environment.GetEnvironmentVariable("NLINK_NKN_BRIDGE_PATH");
+        var prevRecovery = Environment.GetEnvironmentVariable("NLINK_NKN_RECEIVE_STALL_RECOVERY");
+        var prevFastRecovery = Environment.GetEnvironmentVariable("NLINK_NKN_RECEIVE_STALL_FILETRANSFER_FAST_RECOVERY");
+        var prevControlOnlyRecovery = Environment.GetEnvironmentVariable("NLINK_NKN_CONTROL_ONLY_STALL_RECOVERY");
+
+        try
+        {
+            Environment.SetEnvironmentVariable("NLINK_NKN_NODE_PATH", nodePath);
+            Environment.SetEnvironmentVariable("NLINK_NKN_BRIDGE_PATH", bridgePath);
+            Environment.SetEnvironmentVariable("NLINK_NKN_RECEIVE_STALL_RECOVERY", null);
+            Environment.SetEnvironmentVariable("NLINK_NKN_RECEIVE_STALL_FILETRANSFER_FAST_RECOVERY", null);
+            Environment.SetEnvironmentVariable("NLINK_NKN_CONTROL_ONLY_STALL_RECOVERY", "0");
+            var keyPath = Path.Combine(tempDir, "identity.json");
+            WriteIdentityFile(keyPath, "all-zero-probe-window");
+            var seedBackend = new FakeProtectedSeedBackend();
+            seedBackend.SaveSeed(keyPath, RandomNumberGenerator.GetBytes(32));
+            using var seedBackendOverride = NknSecretStore.OverrideBackendForTests(seedBackend);
+            var options = LoadNknOptionsWithOverrides(keyPath, "all-zero-probe-window");
+            var identity = new NknIdentity("all-zero-probe-window", "all-zero-probe-window.fake");
+            using var adapter = new RealNknClientAdapter(identity, options);
+            adapter.RegisterActiveFileTransferDataSession("transfer-all-zero-probe-window");
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+            await adapter.ConnectAsync(cts.Token);
+
+            await WaitUntilAsync(
+                () => LocalOperationalLog.GetRecentLogText().Contains("reason=filetransfer_bulk_probe_window", StringComparison.Ordinal),
+                TimeSpan.FromSeconds(5));
+            await Task.Delay(750, cts.Token);
+
+            Assert.True(File.Exists(countFile));
+            Assert.True(int.TryParse(File.ReadAllText(countFile).Trim(), out var count));
+            Assert.Equal(1, count);
+
+            adapter.UnregisterActiveFileTransferDataSession("transfer-all-zero-probe-window");
+            await adapter.DisconnectAsync();
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("NLINK_NKN_NODE_PATH", prevNodePath);
+            Environment.SetEnvironmentVariable("NLINK_NKN_BRIDGE_PATH", prevBridgePath);
+            Environment.SetEnvironmentVariable("NLINK_NKN_RECEIVE_STALL_RECOVERY", prevRecovery);
+            Environment.SetEnvironmentVariable("NLINK_NKN_RECEIVE_STALL_FILETRANSFER_FAST_RECOVERY", prevFastRecovery);
+            Environment.SetEnvironmentVariable("NLINK_NKN_CONTROL_ONLY_STALL_RECOVERY", prevControlOnlyRecovery);
+            try
+            {
+                CleanupDirectoryIfExists(tempDir);
+            }
+            catch
+            {
+            }
+        }
+    }
+
+    [Trait("Category", "LegacySmoke")]
+    [Fact]
+    public async Task Bridge_ReceiveStallRecovery_UnknownBulkLivenessRequestsCoordinatorWithoutRestart()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var bundleDir = TryFindBridgeBundleDirectory();
+        if (bundleDir is null)
+        {
+            return;
+        }
+
+        var nodePath = Path.Combine(bundleDir, "node.exe");
+        if (!File.Exists(nodePath))
+        {
+            return;
+        }
+
+        var tempDir = Path.Combine(Path.GetTempPath(), "nlink-mock-bridge-unknown-bulk-liveness", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(tempDir);
+        var countFile = Path.Combine(tempDir, "connect-count.txt");
+        var bridgePath = Path.Combine(tempDir, "mock-bridge-unknown-bulk-liveness.js");
+        WriteBridgeScriptWithManifest(
+            bridgePath,
+            BuildReceiveStallRecoveryMockBridgeScript(
+                countFile,
+                stallConnectCount: 1,
+                bulkLastReceivedAgeMs: -1,
+                stallHealthSampleCount: 8));
+        var prevNodePath = Environment.GetEnvironmentVariable("NLINK_NKN_NODE_PATH");
+        var prevBridgePath = Environment.GetEnvironmentVariable("NLINK_NKN_BRIDGE_PATH");
+        var prevRecovery = Environment.GetEnvironmentVariable("NLINK_NKN_RECEIVE_STALL_RECOVERY");
+        var prevFastRecovery = Environment.GetEnvironmentVariable("NLINK_NKN_RECEIVE_STALL_FILETRANSFER_FAST_RECOVERY");
+        var prevControlOnlyRecovery = Environment.GetEnvironmentVariable("NLINK_NKN_CONTROL_ONLY_STALL_RECOVERY");
+
+        try
+        {
+            Environment.SetEnvironmentVariable("NLINK_NKN_NODE_PATH", nodePath);
+            Environment.SetEnvironmentVariable("NLINK_NKN_BRIDGE_PATH", bridgePath);
+            Environment.SetEnvironmentVariable("NLINK_NKN_RECEIVE_STALL_RECOVERY", null);
+            Environment.SetEnvironmentVariable("NLINK_NKN_RECEIVE_STALL_FILETRANSFER_FAST_RECOVERY", null);
+            Environment.SetEnvironmentVariable("NLINK_NKN_CONTROL_ONLY_STALL_RECOVERY", "0");
+            var keyPath = Path.Combine(tempDir, "identity.json");
+            WriteIdentityFile(keyPath, "unknown-bulk-liveness");
+            var seedBackend = new FakeProtectedSeedBackend();
+            seedBackend.SaveSeed(keyPath, RandomNumberGenerator.GetBytes(32));
+            using var seedBackendOverride = NknSecretStore.OverrideBackendForTests(seedBackend);
+            var options = LoadNknOptionsWithOverrides(keyPath, "unknown-bulk-liveness");
+            var identity = new NknIdentity("unknown-bulk-liveness", "unknown-bulk-liveness.fake");
+            using var adapter = new RealNknClientAdapter(identity, options);
+            var evaluations = new ConcurrentQueue<FileTransferBridgeRecoveryEvaluationRequest>();
+            adapter.BridgeRecoveryEvaluationRequested += (_, args) => evaluations.Enqueue(args.Request);
+            var logBaseline = GetOperationalLogLength();
+            adapter.RegisterActiveFileTransferDataSession("transfer-unknown-bulk-liveness");
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(12));
+            await adapter.ConnectAsync(cts.Token);
+
+            await WaitUntilAsync(
+                () => evaluations.Any(e => e.ConsecutiveObservations >= 8),
+                TimeSpan.FromSeconds(8));
+
+            AssertReceiveStallEvaluationWithoutExecution(
+                adapter, evaluations, "transfer-unknown-bulk-liveness", countFile, 0, 0);
+            var logText = ReadOperationalLogTail(logBaseline);
+            Assert.DoesNotContain("event=nkn_bridge_receive_stall_recovery_started", logText, StringComparison.Ordinal);
+            Assert.DoesNotContain("event=nkn_bridge_receive_stall_recovery_hard_restart", logText, StringComparison.Ordinal);
+            Assert.DoesNotContain("event=nkn_bridge_recovery_execution_started", logText, StringComparison.Ordinal);
+            Assert.All(evaluations, e => Assert.Equal(-1L, e.BulkLastReceivedAgeMs));
+
+            adapter.UnregisterActiveFileTransferDataSession("transfer-unknown-bulk-liveness");
+            await adapter.DisconnectAsync();
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("NLINK_NKN_NODE_PATH", prevNodePath);
+            Environment.SetEnvironmentVariable("NLINK_NKN_BRIDGE_PATH", prevBridgePath);
+            Environment.SetEnvironmentVariable("NLINK_NKN_RECEIVE_STALL_RECOVERY", prevRecovery);
+            Environment.SetEnvironmentVariable("NLINK_NKN_RECEIVE_STALL_FILETRANSFER_FAST_RECOVERY", prevFastRecovery);
+            Environment.SetEnvironmentVariable("NLINK_NKN_CONTROL_ONLY_STALL_RECOVERY", prevControlOnlyRecovery);
+            try
+            {
+                CleanupDirectoryIfExists(tempDir);
+            }
+            catch
+            {
+            }
+        }
+    }
+
+    [Trait("Category", "LegacySmoke")]
+    [Fact]
+    public async Task Bridge_ReceiveStallRecovery_UnknownBulkLivenessWithoutActiveFileTransferDoesNotRequireBulkProof()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var bundleDir = TryFindBridgeBundleDirectory();
+        if (bundleDir is null)
+        {
+            return;
+        }
+
+        var nodePath = Path.Combine(bundleDir, "node.exe");
+        if (!File.Exists(nodePath))
+        {
+            return;
+        }
+
+        var tempDir = Path.Combine(Path.GetTempPath(), "nlink-mock-bridge-unknown-bulk-no-filetransfer", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(tempDir);
+        var countFile = Path.Combine(tempDir, "connect-count.txt");
+        var bridgePath = Path.Combine(tempDir, "mock-bridge-unknown-bulk-no-filetransfer.js");
+        WriteBridgeScriptWithManifest(
+            bridgePath,
+            BuildReceiveStallRecoveryMockBridgeScript(
+                countFile,
+                stallConnectCount: 1,
+                bulkLastReceivedAgeMs: -1,
+                stallHealthSampleCount: 4));
+        var prevNodePath = Environment.GetEnvironmentVariable("NLINK_NKN_NODE_PATH");
+        var prevBridgePath = Environment.GetEnvironmentVariable("NLINK_NKN_BRIDGE_PATH");
+        var prevRecovery = Environment.GetEnvironmentVariable("NLINK_NKN_RECEIVE_STALL_RECOVERY");
+        var prevFastRecovery = Environment.GetEnvironmentVariable("NLINK_NKN_RECEIVE_STALL_FILETRANSFER_FAST_RECOVERY");
+        var prevControlOnlyRecovery = Environment.GetEnvironmentVariable("NLINK_NKN_CONTROL_ONLY_STALL_RECOVERY");
+
+        try
+        {
+            Environment.SetEnvironmentVariable("NLINK_NKN_NODE_PATH", nodePath);
+            Environment.SetEnvironmentVariable("NLINK_NKN_BRIDGE_PATH", bridgePath);
+            Environment.SetEnvironmentVariable("NLINK_NKN_RECEIVE_STALL_RECOVERY", null);
+            Environment.SetEnvironmentVariable("NLINK_NKN_RECEIVE_STALL_FILETRANSFER_FAST_RECOVERY", null);
+            Environment.SetEnvironmentVariable("NLINK_NKN_CONTROL_ONLY_STALL_RECOVERY", "0");
+            var keyPath = Path.Combine(tempDir, "identity.json");
+            WriteIdentityFile(keyPath, "unknown-bulk-no-filetransfer");
+            var seedBackend = new FakeProtectedSeedBackend();
+            seedBackend.SaveSeed(keyPath, RandomNumberGenerator.GetBytes(32));
+            using var seedBackendOverride = NknSecretStore.OverrideBackendForTests(seedBackend);
+            var options = LoadNknOptionsWithOverrides(keyPath, "unknown-bulk-no-filetransfer");
+            var identity = new NknIdentity("unknown-bulk-no-filetransfer", "unknown-bulk-no-filetransfer.fake");
+            using var adapter = new RealNknClientAdapter(identity, options);
+            var logBaseline = LocalOperationalLog.GetRecentLogText().Length;
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(12));
+            await adapter.ConnectAsync(cts.Token);
+
+            await WaitUntilAsync(
+                () => File.Exists(countFile) && int.TryParse(File.ReadAllText(countFile).Trim(), out var count) && count >= 2,
+                TimeSpan.FromSeconds(8));
+            await WaitUntilAsync(
+                () => GetRecentLogTextSince(logBaseline).Contains("requires_bulk_proof=0", StringComparison.Ordinal),
+                TimeSpan.FromSeconds(8));
+
+            var logText = GetRecentLogTextSince(logBaseline);
+            Assert.Contains("event=nkn_bridge_receive_stall_recovery_completed;", logText, StringComparison.Ordinal);
+            Assert.Contains("requires_bulk_proof=0", logText, StringComparison.Ordinal);
+            Assert.Contains("bulk_last_received_age_ms=-1", logText, StringComparison.Ordinal);
+
+            await adapter.DisconnectAsync();
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("NLINK_NKN_NODE_PATH", prevNodePath);
+            Environment.SetEnvironmentVariable("NLINK_NKN_BRIDGE_PATH", prevBridgePath);
+            Environment.SetEnvironmentVariable("NLINK_NKN_RECEIVE_STALL_RECOVERY", prevRecovery);
+            Environment.SetEnvironmentVariable("NLINK_NKN_RECEIVE_STALL_FILETRANSFER_FAST_RECOVERY", prevFastRecovery);
+            Environment.SetEnvironmentVariable("NLINK_NKN_CONTROL_ONLY_STALL_RECOVERY", prevControlOnlyRecovery);
+            try
+            {
+                CleanupDirectoryIfExists(tempDir);
+            }
+            catch
+            {
+            }
+        }
+    }
+
+    [Trait("Category", "LegacySmoke")]
+    [Trait("FileTransferInfraSuite", "BridgeRecoveryExecution")]
+    [Fact]
+    public async Task BridgeRecoveryExecution_PingTimeoutWithoutCommandRequestsEvaluationWithoutRestart()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var bundleDir = TryFindBridgeBundleDirectory();
+        if (bundleDir is null)
+        {
+            return;
+        }
+
+        var nodePath = Path.Combine(bundleDir, "node.exe");
+        if (!File.Exists(nodePath))
+        {
+            return;
+        }
+
+        var tempDir = Path.Combine(Path.GetTempPath(), "nlink-mock-bridge-ping-timeout-filetransfer-active-only", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(tempDir);
+        var countFile = Path.Combine(tempDir, "connect-count.txt");
+        var bridgePath = Path.Combine(tempDir, "mock-bridge-ping-timeout-filetransfer-active-only.js");
+        WriteBridgeScriptWithManifest(bridgePath, BuildReceiveStallRecoveryMockBridgeScript(countFile, stallConnectCount: 0));
+        var prevNodePath = Environment.GetEnvironmentVariable("NLINK_NKN_NODE_PATH");
+        var prevBridgePath = Environment.GetEnvironmentVariable("NLINK_NKN_BRIDGE_PATH");
+        var prevRecovery = Environment.GetEnvironmentVariable("NLINK_NKN_RECEIVE_STALL_RECOVERY");
+        var prevControlOnlyRecovery = Environment.GetEnvironmentVariable("NLINK_NKN_CONTROL_ONLY_STALL_RECOVERY");
+        var disconnectedCount = 0;
+
+        try
+        {
+            Environment.SetEnvironmentVariable("NLINK_NKN_NODE_PATH", nodePath);
+            Environment.SetEnvironmentVariable("NLINK_NKN_BRIDGE_PATH", bridgePath);
+            Environment.SetEnvironmentVariable("NLINK_NKN_RECEIVE_STALL_RECOVERY", null);
+            Environment.SetEnvironmentVariable("NLINK_NKN_CONTROL_ONLY_STALL_RECOVERY", "0");
+            var keyPath = Path.Combine(tempDir, "identity.json");
+            WriteIdentityFile(keyPath, "ping-timeout-filetransfer-active-only");
+            var seedBackend = new FakeProtectedSeedBackend();
+            seedBackend.SaveSeed(keyPath, RandomNumberGenerator.GetBytes(32));
+            using var seedBackendOverride = NknSecretStore.OverrideBackendForTests(seedBackend);
+            var options = LoadNknOptionsWithOverrides(keyPath, "ping-timeout-filetransfer-active-only");
+            var identity = new NknIdentity("ping-timeout-filetransfer-active-only", "ping-timeout-filetransfer-active-only.fake");
+            using var adapter = new RealNknClientAdapter(identity, options);
+            var evaluations =
+                new ConcurrentQueue<FileTransferBridgeRecoveryEvaluationRequest>();
+            adapter.BridgeRecoveryEvaluationRequested +=
+                (_, args) => evaluations.Enqueue(args.Request);
+            adapter.Disconnected += (_, _) => Interlocked.Increment(ref disconnectedCount);
+            adapter.RegisterActiveFileTransferDataSession("transfer-ping-timeout-active-only");
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(12));
+            await adapter.ConnectAsync(cts.Token);
+
+            await WaitUntilAsync(
+                () => File.Exists(countFile) && int.TryParse(File.ReadAllText(countFile).Trim(), out var count) && count >= 1,
+                TimeSpan.FromSeconds(5));
+            var connectCountBeforePing = int.Parse(File.ReadAllText(countFile).Trim());
+
+            var recovered = await adapter.RecoverBridgePingTimeoutForActiveFileTransferForTestsAsync();
+
+            Assert.True(recovered);
+            await Task.Delay(150, cts.Token);
+            Assert.Equal(0, Volatile.Read(ref disconnectedCount));
+            Assert.Equal(
+                connectCountBeforePing,
+                int.Parse(File.ReadAllText(countFile).Trim()));
+            var evaluation = Assert.Single(evaluations);
+            Assert.Equal(
+                "transfer-ping-timeout-active-only",
+                evaluation.TransferId);
+            Assert.Equal(
+                FileTransferBridgeRecoveryEvaluationKind.PingTimeout,
+                evaluation.EvaluationKind);
+            Assert.Equal("ping_timeout", evaluation.ObservationKind);
+            Assert.Equal("bridge_ping_timeout", evaluation.Reason);
+            var logText = LocalOperationalLog.GetRecentLogText();
+            Assert.Contains(
+                "event=nkn_bridge_recovery_evaluation_requested",
+                logText,
+                StringComparison.Ordinal);
+            Assert.DoesNotContain("event=nkn_bridge_ping_timeout_filetransfer_recovery_started", logText, StringComparison.Ordinal);
+
+            adapter.UnregisterActiveFileTransferDataSession("transfer-ping-timeout-active-only");
+            await adapter.DisconnectAsync();
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("NLINK_NKN_NODE_PATH", prevNodePath);
+            Environment.SetEnvironmentVariable("NLINK_NKN_BRIDGE_PATH", prevBridgePath);
+            Environment.SetEnvironmentVariable("NLINK_NKN_RECEIVE_STALL_RECOVERY", prevRecovery);
+            Environment.SetEnvironmentVariable("NLINK_NKN_CONTROL_ONLY_STALL_RECOVERY", prevControlOnlyRecovery);
+            try
+            {
+                CleanupDirectoryIfExists(tempDir);
+            }
+            catch
+            {
+            }
+        }
+    }
+
+    [Trait("Category", "LegacySmoke")]
+    [Fact]
+    public async Task Bridge_PingTimeoutDuringActiveFileTransferRuntimeWithoutDataSession_ReconnectsWithoutDisconnect()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var bundleDir = TryFindBridgeBundleDirectory();
+        if (bundleDir is null)
+        {
+            return;
+        }
+
+        var nodePath = Path.Combine(bundleDir, "node.exe");
+        if (!File.Exists(nodePath))
+        {
+            return;
+        }
+
+        var tempDir = Path.Combine(Path.GetTempPath(), "nlink-mock-bridge-ping-timeout-filetransfer-runtime", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(tempDir);
+        var countFile = Path.Combine(tempDir, "connect-count.txt");
+        var bridgePath = Path.Combine(tempDir, "mock-bridge-ping-timeout-filetransfer-runtime.js");
+        WriteBridgeScriptWithManifest(bridgePath, BuildReceiveStallRecoveryMockBridgeScript(countFile, stallConnectCount: 0));
+        var prevNodePath = Environment.GetEnvironmentVariable("NLINK_NKN_NODE_PATH");
+        var prevBridgePath = Environment.GetEnvironmentVariable("NLINK_NKN_BRIDGE_PATH");
+        var prevRecovery = Environment.GetEnvironmentVariable("NLINK_NKN_RECEIVE_STALL_RECOVERY");
+        var disconnectedCount = 0;
+
+        try
+        {
+            Environment.SetEnvironmentVariable("NLINK_NKN_NODE_PATH", nodePath);
+            Environment.SetEnvironmentVariable("NLINK_NKN_BRIDGE_PATH", bridgePath);
+            Environment.SetEnvironmentVariable("NLINK_NKN_RECEIVE_STALL_RECOVERY", null);
+            var keyPath = Path.Combine(tempDir, "identity.json");
+            WriteIdentityFile(keyPath, "ping-timeout-filetransfer-runtime");
+            var seedBackend = new FakeProtectedSeedBackend();
+            seedBackend.SaveSeed(keyPath, RandomNumberGenerator.GetBytes(32));
+            using var seedBackendOverride = NknSecretStore.OverrideBackendForTests(seedBackend);
+            var options = LoadNknOptionsWithOverrides(keyPath, "ping-timeout-filetransfer-runtime");
+            var identity = new NknIdentity("ping-timeout-filetransfer-runtime", "ping-timeout-filetransfer-runtime.fake");
+            using var adapter = new RealNknClientAdapter(identity, options);
+            var evaluations =
+                new ConcurrentQueue<FileTransferBridgeRecoveryEvaluationRequest>();
+            adapter.BridgeRecoveryEvaluationRequested +=
+                (_, args) => evaluations.Enqueue(args.Request);
+            adapter.Disconnected += (_, _) => Interlocked.Increment(ref disconnectedCount);
+            adapter.RegisterActiveFileTransferRuntime("transfer-ping-timeout-runtime");
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(12));
+            await adapter.ConnectAsync(cts.Token);
+
+            await WaitUntilAsync(
+                () => File.Exists(countFile) && int.TryParse(File.ReadAllText(countFile).Trim(), out var count) && count >= 1,
+                TimeSpan.FromSeconds(5));
+            var connectCountBeforePing = int.Parse(File.ReadAllText(countFile).Trim());
+
+            var recovered = await adapter.RecoverBridgePingTimeoutForActiveFileTransferForTestsAsync();
+
+            Assert.True(recovered);
+            await Task.Delay(150, cts.Token);
+            Assert.Equal(0, Volatile.Read(ref disconnectedCount));
+            Assert.Equal(
+                connectCountBeforePing,
+                int.Parse(File.ReadAllText(countFile).Trim()));
+            var evaluation = Assert.Single(evaluations);
+            Assert.Equal(
+                "transfer-ping-timeout-runtime",
+                evaluation.TransferId);
+            Assert.Equal("ping_timeout", evaluation.ObservationKind);
+            Assert.Equal("bridge_ping_timeout", evaluation.Reason);
+            var logText = LocalOperationalLog.GetRecentLogText();
+            Assert.Contains("event=filetransfer_active_runtime_used", logText, StringComparison.Ordinal);
+            Assert.Contains(
+                "event=nkn_bridge_recovery_evaluation_requested",
+                logText,
+                StringComparison.Ordinal);
+            Assert.DoesNotContain(
+                "event=nkn_bridge_ping_timeout_filetransfer_recovery_started",
+                logText,
+                StringComparison.Ordinal);
+
+            adapter.UnregisterActiveFileTransferRuntime("transfer-ping-timeout-runtime");
+            await adapter.DisconnectAsync();
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("NLINK_NKN_NODE_PATH", prevNodePath);
+            Environment.SetEnvironmentVariable("NLINK_NKN_BRIDGE_PATH", prevBridgePath);
+            Environment.SetEnvironmentVariable("NLINK_NKN_RECEIVE_STALL_RECOVERY", prevRecovery);
+            try
+            {
+                CleanupDirectoryIfExists(tempDir);
+            }
+            catch
+            {
+            }
+        }
+    }
+
+    [Trait("Category", "LegacySmoke")]
+    [Trait("FileTransferInfraSuite", "BridgeRecoveryExecution")]
+    [Fact]
+    public async Task BridgeRecoveryExecution_PingTimeoutAfterCompletionRequestsEvaluationWithoutRestart()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var bundleDir = TryFindBridgeBundleDirectory();
+        if (bundleDir is null)
+        {
+            return;
+        }
+
+        var nodePath = Path.Combine(bundleDir, "node.exe");
+        if (!File.Exists(nodePath))
+        {
+            return;
+        }
+
+        var tempDir = Path.Combine(Path.GetTempPath(), "nlink-mock-bridge-ping-timeout-filetransfer", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(tempDir);
+        var countFile = Path.Combine(tempDir, "connect-count.txt");
+        var bridgePath = Path.Combine(tempDir, "mock-bridge-ping-timeout-filetransfer.js");
+        WriteBridgeScriptWithManifest(bridgePath, BuildReceiveStallRecoveryMockBridgeScript(countFile));
+        var prevNodePath = Environment.GetEnvironmentVariable("NLINK_NKN_NODE_PATH");
+        var prevBridgePath = Environment.GetEnvironmentVariable("NLINK_NKN_BRIDGE_PATH");
+        var prevRecovery = Environment.GetEnvironmentVariable("NLINK_NKN_RECEIVE_STALL_RECOVERY");
+        var disconnectedCount = 0;
+
+        try
+        {
+            Environment.SetEnvironmentVariable("NLINK_NKN_NODE_PATH", nodePath);
+            Environment.SetEnvironmentVariable("NLINK_NKN_BRIDGE_PATH", bridgePath);
+            Environment.SetEnvironmentVariable("NLINK_NKN_RECEIVE_STALL_RECOVERY", null);
+            var keyPath = Path.Combine(tempDir, "identity.json");
+            WriteIdentityFile(keyPath, "ping-timeout-filetransfer-recovery");
+            var seedBackend = new FakeProtectedSeedBackend();
+            seedBackend.SaveSeed(keyPath, RandomNumberGenerator.GetBytes(32));
+            using var seedBackendOverride = NknSecretStore.OverrideBackendForTests(seedBackend);
+            var options = LoadNknOptionsWithOverrides(keyPath, "ping-timeout-filetransfer-recovery");
+            var identity = new NknIdentity("ping-timeout-filetransfer-recovery", "ping-timeout-filetransfer-recovery.fake");
+            using var adapter = new RealNknClientAdapter(identity, options);
+            var evaluations =
+                new ConcurrentQueue<FileTransferBridgeRecoveryEvaluationRequest>();
+            adapter.BridgeRecoveryEvaluationRequested +=
+                (_, args) => evaluations.Enqueue(args.Request);
+            adapter.Disconnected += (_, _) => Interlocked.Increment(ref disconnectedCount);
+            adapter.RegisterActiveFileTransferDataSession("transfer-ping-timeout-recovery");
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(12));
+            await adapter.ConnectAsync(cts.Token);
+            var command = CreateBridgeRecoveryExecutionCommand(
+                "transfer-ping-timeout-recovery",
+                "test_ping_timeout_recovery");
+            var started =
+                adapter.BeginFileTransferBridgeRecoveryExecution(command);
+            Assert.Equal(
+                FileTransferBridgeRecoveryExecutionStartStatus.Started,
+                started.Status);
+
+            await WaitUntilAsync(
+                () => File.Exists(countFile) &&
+                      TryReadIntFileShared(countFile, out var count) &&
+                      count >= 2 &&
+                      LocalOperationalLog.GetRecentLogText().Contains("event=nkn_bridge_receive_stall_recovery_completed", StringComparison.Ordinal),
+                TimeSpan.FromSeconds(6));
+            var receipt = await Assert.IsType<Task<FileTransferBridgeRecoveryExecutionReceipt>>(
+                    started.Completion)
+                .WaitAsync(TimeSpan.FromSeconds(6));
+            Assert.Equal(
+                FileTransferBridgeRecoveryExecutionOutcome.Completed,
+                receipt.Outcome);
+            var connectCountBeforePing = int.Parse(File.ReadAllText(countFile).Trim());
+
+            var recovered = await adapter.RecoverBridgePingTimeoutForActiveFileTransferForTestsAsync();
+
+            Assert.True(recovered);
+            await Task.Delay(150, cts.Token);
+            Assert.Equal(0, Volatile.Read(ref disconnectedCount));
+            Assert.Equal(
+                connectCountBeforePing,
+                int.Parse(File.ReadAllText(countFile).Trim()));
+            var evaluation = Assert.Single(evaluations);
+            Assert.False(evaluation.IsDefault);
+            Assert.Equal(
+                "transfer-ping-timeout-recovery",
+                evaluation.TransferId);
+            Assert.Equal(
+                FileTransferBridgeRecoveryEvaluationKind.PingTimeout,
+                evaluation.EvaluationKind);
+            Assert.Equal("ping_timeout", evaluation.ObservationKind);
+            Assert.Equal("bridge_ping_timeout", evaluation.Reason);
+            Assert.True(evaluation.ObservationGeneration > 0);
+            var logText = LocalOperationalLog.GetRecentLogText();
+            Assert.Contains(
+                "event=nkn_bridge_recovery_evaluation_requested",
+                logText,
+                StringComparison.Ordinal);
+            Assert.DoesNotContain(
+                "event=nkn_bridge_ping_timeout_filetransfer_recovery_started",
+                logText,
+                StringComparison.Ordinal);
+
+            adapter.UnregisterActiveFileTransferDataSession("transfer-ping-timeout-recovery");
+            await adapter.DisconnectAsync();
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("NLINK_NKN_NODE_PATH", prevNodePath);
+            Environment.SetEnvironmentVariable("NLINK_NKN_BRIDGE_PATH", prevBridgePath);
+            Environment.SetEnvironmentVariable("NLINK_NKN_RECEIVE_STALL_RECOVERY", prevRecovery);
+            try
+            {
+                CleanupDirectoryIfExists(tempDir);
+            }
+            catch
+            {
+            }
+        }
+    }
+
+    [Trait("Category", "LegacySmoke")]
+    [Trait("FileTransferInfraSuite", "BridgeRecoveryExecution")]
+    [Fact]
+    public async Task BridgeRecoveryExecution_PingTimeoutDuringRecentTombstoneDoesNotRequestEvaluationOrRestart()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var bundleDir = TryFindBridgeBundleDirectory();
+        if (bundleDir is null)
+        {
+            return;
+        }
+
+        var nodePath = Path.Combine(bundleDir, "node.exe");
+        if (!File.Exists(nodePath))
+        {
+            return;
+        }
+
+        var tempDir = Path.Combine(Path.GetTempPath(), "nlink-mock-bridge-ping-timeout-filetransfer-tombstone", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(tempDir);
+        var countFile = Path.Combine(tempDir, "connect-count.txt");
+        var bridgePath = Path.Combine(tempDir, "mock-bridge-ping-timeout-filetransfer-tombstone.js");
+        WriteBridgeScriptWithManifest(bridgePath, BuildReceiveStallRecoveryMockBridgeScript(countFile));
+        var prevNodePath = Environment.GetEnvironmentVariable("NLINK_NKN_NODE_PATH");
+        var prevBridgePath = Environment.GetEnvironmentVariable("NLINK_NKN_BRIDGE_PATH");
+        var prevRecovery = Environment.GetEnvironmentVariable("NLINK_NKN_RECEIVE_STALL_RECOVERY");
+        var disconnectedCount = 0;
+
+        try
+        {
+            Environment.SetEnvironmentVariable("NLINK_NKN_NODE_PATH", nodePath);
+            Environment.SetEnvironmentVariable("NLINK_NKN_BRIDGE_PATH", bridgePath);
+            Environment.SetEnvironmentVariable("NLINK_NKN_RECEIVE_STALL_RECOVERY", null);
+            var keyPath = Path.Combine(tempDir, "identity.json");
+            WriteIdentityFile(keyPath, "ping-timeout-filetransfer-tombstone");
+            var seedBackend = new FakeProtectedSeedBackend();
+            seedBackend.SaveSeed(keyPath, RandomNumberGenerator.GetBytes(32));
+            using var seedBackendOverride = NknSecretStore.OverrideBackendForTests(seedBackend);
+            var options = LoadNknOptionsWithOverrides(keyPath, "ping-timeout-filetransfer-tombstone");
+            var identity = new NknIdentity("ping-timeout-filetransfer-tombstone", "ping-timeout-filetransfer-tombstone.fake");
+            using var adapter = new RealNknClientAdapter(identity, options);
+            adapter.Disconnected += (_, _) => Interlocked.Increment(ref disconnectedCount);
+            adapter.RegisterActiveFileTransferDataSession("transfer-ping-timeout-tombstone");
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(12));
+            await adapter.ConnectAsync(cts.Token);
+            var command = CreateBridgeRecoveryExecutionCommand(
+                "transfer-ping-timeout-tombstone",
+                "test_ping_timeout_tombstone");
+            var started =
+                adapter.BeginFileTransferBridgeRecoveryExecution(command);
+            Assert.Equal(
+                FileTransferBridgeRecoveryExecutionStartStatus.Started,
+                started.Status);
+
+            await WaitUntilAsync(
+                () => File.Exists(countFile) &&
+                      int.TryParse(File.ReadAllText(countFile).Trim(), out var count) &&
+                      count >= 2 &&
+                      LocalOperationalLog.GetRecentLogText().Contains("event=nkn_bridge_receive_stall_recovery_completed", StringComparison.Ordinal),
+                TimeSpan.FromSeconds(6));
+            _ = await Assert.IsType<Task<FileTransferBridgeRecoveryExecutionReceipt>>(
+                    started.Completion)
+                .WaitAsync(TimeSpan.FromSeconds(6));
+
+            adapter.UnregisterActiveFileTransferDataSession("transfer-ping-timeout-tombstone");
+            var connectCountBeforePing = int.Parse(File.ReadAllText(countFile).Trim());
+            var recovered = await adapter.RecoverBridgePingTimeoutForActiveFileTransferForTestsAsync();
+
+            Assert.False(recovered);
+            await Task.Delay(150, cts.Token);
+            Assert.Equal(0, Volatile.Read(ref disconnectedCount));
+            Assert.Equal(
+                connectCountBeforePing,
+                int.Parse(File.ReadAllText(countFile).Trim()));
+            var logText = LocalOperationalLog.GetRecentLogText();
+            Assert.Contains("event=filetransfer_active_recovery_tombstone_started", logText, StringComparison.Ordinal);
+            Assert.DoesNotContain(
+                "event=nkn_bridge_recovery_evaluation_requested",
+                logText,
+                StringComparison.Ordinal);
+            Assert.DoesNotContain(
+                "event=nkn_bridge_ping_timeout_filetransfer_recovery_started",
+                logText,
+                StringComparison.Ordinal);
+
+            await adapter.DisconnectAsync();
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("NLINK_NKN_NODE_PATH", prevNodePath);
+            Environment.SetEnvironmentVariable("NLINK_NKN_BRIDGE_PATH", prevBridgePath);
+            Environment.SetEnvironmentVariable("NLINK_NKN_RECEIVE_STALL_RECOVERY", prevRecovery);
             try
             {
                 CleanupDirectoryIfExists(tempDir);
@@ -1351,7 +2798,7 @@ public sealed class BridgeConnectionLifecycleTests : SessionRuntimeConnectionTes
             Environment.SetEnvironmentVariable("NLINK_NKN_BRIDGE_PATH", bridgePath);
             Environment.SetEnvironmentVariable("NLINK_NKN_RECEIVE_STALL_RECOVERY", null);
             Environment.SetEnvironmentVariable("NLINK_NKN_RECEIVE_STALL_FILETRANSFER_FAST_RECOVERY", null);
-            Environment.SetEnvironmentVariable("NLINK_NKN_CONTROL_ONLY_STALL_RECOVERY", null);
+            Environment.SetEnvironmentVariable("NLINK_NKN_CONTROL_ONLY_STALL_RECOVERY", "0");
             var keyPath = Path.Combine(tempDir, "identity.json");
             WriteIdentityFile(keyPath, "control-degraded");
             var seedBackend = new FakeProtectedSeedBackend();
@@ -1365,13 +2812,20 @@ public sealed class BridgeConnectionLifecycleTests : SessionRuntimeConnectionTes
             await adapter.ConnectAsync(cts.Token);
 
             await WaitUntilAsync(
-                () => LocalOperationalLog.GetRecentLogText().Contains("event=nkn_bridge_control_receive_recovery_suppressed", StringComparison.Ordinal),
+                () =>
+                {
+                    var text = LocalOperationalLog.GetRecentLogText();
+                    return text.Contains("event=nkn_bridge_control_receive_recovery_suppressed", StringComparison.Ordinal) &&
+                           text.Contains("reason=filetransfer_bulk_receive_active", StringComparison.Ordinal);
+                },
                 TimeSpan.FromSeconds(5));
-            var count = File.Exists(countFile) && int.TryParse(File.ReadAllText(countFile).Trim(), out var parsed)
-                ? parsed
-                : 0;
+            var logText = LocalOperationalLog.GetRecentLogText();
+            Assert.Contains("event=nkn_bridge_control_receive_degraded", logText, StringComparison.Ordinal);
+            Assert.Contains("event=nkn_bridge_control_receive_recovery_suppressed", logText, StringComparison.Ordinal);
+            Assert.Contains("reason=filetransfer_bulk_receive_active", logText, StringComparison.Ordinal);
+            Assert.True(File.Exists(countFile));
+            Assert.True(int.TryParse(File.ReadAllText(countFile).Trim(), out var count));
             Assert.Equal(1, count);
-            Assert.Contains("event=nkn_bridge_control_receive_degraded", LocalOperationalLog.GetRecentLogText(), StringComparison.Ordinal);
 
             adapter.UnregisterActiveFileTransferDataSession("transfer-control-degraded");
             await adapter.DisconnectAsync();
@@ -1395,7 +2849,7 @@ public sealed class BridgeConnectionLifecycleTests : SessionRuntimeConnectionTes
 
     [Trait("Category", "LegacySmoke")]
     [Fact]
-    public async Task Bridge_ReceiveStallRecovery_ControlOnlyOverrideReconnectsEvenWhenBulkReceiveActive()
+    public async Task Bridge_ReceiveStallRecovery_ControlOnlyOverrideDoesNotReconnectWhenBulkReceiveActive()
     {
         if (!OperatingSystem.IsWindows())
         {
@@ -1453,10 +2907,3005 @@ public sealed class BridgeConnectionLifecycleTests : SessionRuntimeConnectionTes
             await adapter.ConnectAsync(cts.Token);
 
             await WaitUntilAsync(
-                () => File.Exists(countFile) && int.TryParse(File.ReadAllText(countFile).Trim(), out var count) && count >= 2,
+                () =>
+                {
+                    var text = LocalOperationalLog.GetRecentLogText();
+                    return text.Contains("event=nkn_bridge_control_receive_recovery_suppressed", StringComparison.Ordinal) &&
+                           text.Contains("reason=filetransfer_bulk_receive_active", StringComparison.Ordinal);
+                },
                 TimeSpan.FromSeconds(5));
+            var logText = LocalOperationalLog.GetRecentLogText();
+            Assert.Contains("event=nkn_bridge_control_receive_degraded", logText, StringComparison.Ordinal);
+            Assert.Contains("event=nkn_bridge_control_receive_recovery_suppressed", logText, StringComparison.Ordinal);
+            Assert.Contains("reason=filetransfer_bulk_receive_active", logText, StringComparison.Ordinal);
+            Assert.True(File.Exists(countFile));
+            Assert.True(int.TryParse(File.ReadAllText(countFile).Trim(), out var count));
+            Assert.Equal(1, count);
 
             adapter.UnregisterActiveFileTransferDataSession("transfer-control-recovery");
+            await adapter.DisconnectAsync();
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("NLINK_NKN_NODE_PATH", prevNodePath);
+            Environment.SetEnvironmentVariable("NLINK_NKN_BRIDGE_PATH", prevBridgePath);
+            Environment.SetEnvironmentVariable("NLINK_NKN_RECEIVE_STALL_RECOVERY", prevRecovery);
+            Environment.SetEnvironmentVariable("NLINK_NKN_RECEIVE_STALL_FILETRANSFER_FAST_RECOVERY", prevFastRecovery);
+            Environment.SetEnvironmentVariable("NLINK_NKN_CONTROL_ONLY_STALL_RECOVERY", prevControlOnlyRecovery);
+            try
+            {
+                CleanupDirectoryIfExists(tempDir);
+            }
+            catch
+            {
+            }
+        }
+    }
+
+    [Trait("Category", "LegacySmoke")]
+    [Fact]
+    public async Task Bridge_ReceiveStallRecovery_ControlOnlyOverrideSuppressesAfterGraceWhenBulkReceiveActive()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var bundleDir = TryFindBridgeBundleDirectory();
+        if (bundleDir is null)
+        {
+            return;
+        }
+
+        var nodePath = Path.Combine(bundleDir, "node.exe");
+        if (!File.Exists(nodePath))
+        {
+            return;
+        }
+
+        var tempDir = Path.Combine(Path.GetTempPath(), "nlink-mock-bridge-control-recovery-grace", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(tempDir);
+        var countFile = Path.Combine(tempDir, "connect-count.txt");
+        var bridgePath = Path.Combine(tempDir, "mock-bridge-control-recovery-grace.js");
+        WriteBridgeScriptWithManifest(
+            bridgePath,
+            BuildReceiveStallRecoveryMockBridgeScript(
+                countFile,
+                controlMessagesReceivedSinceLast: 0,
+                bulkMessagesReceivedSinceLast: 1,
+                totalMessagesReceivedSinceLast: 1,
+                controlLastReceivedAgeMs: 35_000,
+                bulkLastReceivedAgeMs: 100,
+                stallHealthSampleCount: 6));
+        var prevNodePath = Environment.GetEnvironmentVariable("NLINK_NKN_NODE_PATH");
+        var prevBridgePath = Environment.GetEnvironmentVariable("NLINK_NKN_BRIDGE_PATH");
+        var prevRecovery = Environment.GetEnvironmentVariable("NLINK_NKN_RECEIVE_STALL_RECOVERY");
+        var prevFastRecovery = Environment.GetEnvironmentVariable("NLINK_NKN_RECEIVE_STALL_FILETRANSFER_FAST_RECOVERY");
+        var prevControlOnlyRecovery = Environment.GetEnvironmentVariable("NLINK_NKN_CONTROL_ONLY_STALL_RECOVERY");
+
+        try
+        {
+            Environment.SetEnvironmentVariable("NLINK_NKN_NODE_PATH", nodePath);
+            Environment.SetEnvironmentVariable("NLINK_NKN_BRIDGE_PATH", bridgePath);
+            Environment.SetEnvironmentVariable("NLINK_NKN_RECEIVE_STALL_RECOVERY", null);
+            Environment.SetEnvironmentVariable("NLINK_NKN_RECEIVE_STALL_FILETRANSFER_FAST_RECOVERY", null);
+            Environment.SetEnvironmentVariable("NLINK_NKN_CONTROL_ONLY_STALL_RECOVERY", "1");
+            var keyPath = Path.Combine(tempDir, "identity.json");
+            WriteIdentityFile(keyPath, "control-recovery-grace");
+            var seedBackend = new FakeProtectedSeedBackend();
+            seedBackend.SaveSeed(keyPath, RandomNumberGenerator.GetBytes(32));
+            using var seedBackendOverride = NknSecretStore.OverrideBackendForTests(seedBackend);
+            var options = LoadNknOptionsWithOverrides(keyPath, "control-recovery-grace");
+            var identity = new NknIdentity("control-recovery-grace", "control-recovery-grace.fake");
+            using var adapter = new RealNknClientAdapter(identity, options);
+            adapter.RegisterActiveFileTransferDataSession("transfer-control-recovery-grace");
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+            await adapter.ConnectAsync(cts.Token);
+
+            await WaitUntilAsync(
+                () =>
+                {
+                    var text = LocalOperationalLog.GetRecentLogText();
+                    return text.Contains("event=nkn_bridge_control_receive_recovery_suppressed", StringComparison.Ordinal) &&
+                           text.Contains("reason=filetransfer_bulk_receive_active", StringComparison.Ordinal) &&
+                           text.Contains("protocol_repair_grace_windows=", StringComparison.Ordinal) &&
+                           File.Exists(countFile);
+                },
+                TimeSpan.FromSeconds(5));
+            await Task.Delay(TimeSpan.FromMilliseconds(500), cts.Token);
+
+            var logText = LocalOperationalLog.GetRecentLogText();
+            Assert.Contains("event=nkn_bridge_control_receive_degraded", logText, StringComparison.Ordinal);
+            Assert.Contains("event=nkn_bridge_control_receive_recovery_suppressed", logText, StringComparison.Ordinal);
+            Assert.Contains("reason=filetransfer_bulk_receive_active", logText, StringComparison.Ordinal);
+            Assert.True(File.Exists(countFile));
+            Assert.True(int.TryParse(File.ReadAllText(countFile).Trim(), out var count));
+            Assert.Equal(1, count);
+
+            adapter.UnregisterActiveFileTransferDataSession("transfer-control-recovery-grace");
+            await adapter.DisconnectAsync();
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("NLINK_NKN_NODE_PATH", prevNodePath);
+            Environment.SetEnvironmentVariable("NLINK_NKN_BRIDGE_PATH", prevBridgePath);
+            Environment.SetEnvironmentVariable("NLINK_NKN_RECEIVE_STALL_RECOVERY", prevRecovery);
+            Environment.SetEnvironmentVariable("NLINK_NKN_RECEIVE_STALL_FILETRANSFER_FAST_RECOVERY", prevFastRecovery);
+            Environment.SetEnvironmentVariable("NLINK_NKN_CONTROL_ONLY_STALL_RECOVERY", prevControlOnlyRecovery);
+            try
+            {
+                CleanupDirectoryIfExists(tempDir);
+            }
+            catch
+            {
+            }
+        }
+    }
+
+    [Trait("Category", "LegacySmoke")]
+    [Trait("FileTransferInfraSuite", "RegularV4FrontierRepairPressure")]
+    [Fact]
+    public void Bridge_RegularV4ControlFeedbackPressure_RecordsEvidenceWithoutInstallingAuthority()
+    {
+        var tempDir = Path.Combine(Path.GetTempPath(), "nlink-regular-v4-frontier-authority", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(tempDir);
+        try
+        {
+            var keyPath = Path.Combine(tempDir, "identity.json");
+            WriteIdentityFile(keyPath, "regular-v4-frontier-authority");
+            var seedBackend = new FakeProtectedSeedBackend();
+            seedBackend.SaveSeed(keyPath, RandomNumberGenerator.GetBytes(32));
+            using var seedBackendOverride = NknSecretStore.OverrideBackendForTests(seedBackend);
+            var options = LoadNknOptionsWithOverrides(keyPath, "regular-v4-frontier-authority");
+            var identity = new NknIdentity("regular-v4-frontier-authority", "regular-v4-frontier-authority.fake");
+            using var adapter = new RealNknClientAdapter(identity, options);
+
+            var transferSuffix = Guid.NewGuid().ToString("N");
+            var acceptedDecisionGeneration = RandomNumberGenerator.GetInt32(100_000, 999_999);
+            var rejectedDecisionGeneration = RandomNumberGenerator.GetInt32(100_000, 999_999);
+            var acceptedTransferId = $"transfer-regular-v4-frontier-epoch-zero-{transferSuffix}";
+            var acceptedRepairKey = $"regular-v4-frontier-accepted:{transferSuffix}";
+            adapter.RegisterActiveFileTransferDataSession(acceptedTransferId);
+            adapter.RegisterActiveFileTransferRuntime(acceptedTransferId);
+            adapter.ReportRegularV4ControlFeedbackPressure(
+                acceptedTransferId,
+                "regular_v4_receiver_frontier_repair_due",
+                creditExhaustedTimeMs: 0,
+                frontierLagChunks: 128,
+                pendingRepairCount: 8,
+                repairAuthority: CreateRegularV4FrontierRepairAuthority(
+                    acceptedTransferId,
+                    repairKey: acceptedRepairKey,
+                    liveRouteEpoch: 0,
+                    decisionGeneration: acceptedDecisionGeneration));
+
+            var acceptedLogText = LocalOperationalLog.GetRecentLogText();
+            Assert.True(
+                ContainsLogLineWithTokens(acceptedLogText, "filetransfer_regular_v4_control_feedback_pressure_observed", "observation_disposition=evidence_only", "binding_mutated=0", "live_route_epoch=0", $"decision_generation={acceptedDecisionGeneration}"),
+                acceptedLogText);
+            Assert.False(ContainsLogLineWithTokens(
+                acceptedLogText,
+                "filetransfer_regular_v4_frontier_repair_authority_granted",
+                $"decision_generation={acceptedDecisionGeneration}"));
+            Assert.False(adapter.TryGetFileTransferRegularV4ActivationSendBlocker(out _, out _));
+            Assert.Contains("route=regular_nkn_v4_fast", acceptedLogText, StringComparison.Ordinal);
+            Assert.Contains("protocol_version=4", acceptedLogText, StringComparison.Ordinal);
+            Assert.Contains("live_route_epoch=0", acceptedLogText, StringComparison.Ordinal);
+            Assert.Contains("repair_request_key=", acceptedLogText, StringComparison.Ordinal);
+
+            var rejectedTransferId = $"transfer-regular-v4-frontier-negative-epoch-{transferSuffix}";
+            var rejectedRepairKey = $"regular-v4-frontier-rejected:{transferSuffix}";
+            adapter.RegisterActiveFileTransferDataSession(rejectedTransferId);
+            adapter.RegisterActiveFileTransferRuntime(rejectedTransferId);
+            adapter.ReportRegularV4ControlFeedbackPressure(
+                rejectedTransferId,
+                "regular_v4_receiver_frontier_repair_due",
+                creditExhaustedTimeMs: 0,
+                frontierLagChunks: 128,
+                pendingRepairCount: 8,
+                repairAuthority: CreateRegularV4FrontierRepairAuthority(
+                    rejectedTransferId,
+                    repairKey: rejectedRepairKey,
+                    liveRouteEpoch: -1,
+                    decisionGeneration: rejectedDecisionGeneration));
+
+            var rejectedLogText = LocalOperationalLog.GetRecentLogText();
+            Assert.True(
+                ContainsLogLineWithTokens(rejectedLogText, "filetransfer_regular_v4_frontier_repair_authority_rejected", "live_route_epoch=-1", $"decision_generation={rejectedDecisionGeneration}"),
+                rejectedLogText);
+            Assert.Contains("live_route_epoch=-1", rejectedLogText, StringComparison.Ordinal);
+            Assert.Contains("rejection_reason=repair_authority_invalid", rejectedLogText, StringComparison.Ordinal);
+            Assert.False(
+                ContainsLogLineWithTokens(rejectedLogText, "filetransfer_regular_v4_frontier_repair_authority_granted", "live_route_epoch=-1", $"decision_generation={rejectedDecisionGeneration}"),
+                rejectedLogText);
+            Assert.False(
+                ContainsLogLineWithTokens(rejectedLogText, "filetransfer_regular_v4_control_feedback_pressure_marked", "live_route_epoch=-1", $"decision_generation={rejectedDecisionGeneration}"),
+                rejectedLogText);
+
+            adapter.UnregisterActiveFileTransferRuntime(acceptedTransferId);
+            adapter.UnregisterActiveFileTransferDataSession(acceptedTransferId);
+            adapter.UnregisterActiveFileTransferRuntime(rejectedTransferId);
+            adapter.UnregisterActiveFileTransferDataSession(rejectedTransferId);
+        }
+        finally
+        {
+            try
+            {
+                CleanupDirectoryIfExists(tempDir);
+            }
+            catch
+            {
+            }
+        }
+    }
+
+    [Trait("Category", "LegacySmoke")]
+    [Trait("FileTransferInfraSuite", "RegularV4FrontierRepairPressure")]
+    [Fact]
+    public void Bridge_RegularV4FrontierRepairSettlement_ClearsCurrentPressure()
+    {
+        var tempDir = Path.Combine(Path.GetTempPath(), "nlink-regular-v4-frontier-settlement", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(tempDir);
+        try
+        {
+            var keyPath = Path.Combine(tempDir, "identity.json");
+            WriteIdentityFile(keyPath, "regular-v4-frontier-settlement");
+            var seedBackend = new FakeProtectedSeedBackend();
+            seedBackend.SaveSeed(keyPath, RandomNumberGenerator.GetBytes(32));
+            using var seedBackendOverride = NknSecretStore.OverrideBackendForTests(seedBackend);
+            var options = LoadNknOptionsWithOverrides(keyPath, "regular-v4-frontier-settlement");
+            var identity = new NknIdentity("regular-v4-frontier-settlement", "regular-v4-frontier-settlement.fake");
+            using var adapter = new RealNknClientAdapter(identity, options);
+
+            var transferId = $"transfer-regular-v4-frontier-settlement-{Guid.NewGuid():N}";
+            var repairKey = $"regular-v4-frontier-settlement:{Guid.NewGuid():N}";
+            var authority = CreateRegularV4FrontierRepairAuthority(
+                transferId,
+                repairKey: repairKey,
+                frontierChunkIndex: 144,
+                durableReceivedHighestChunkIndex: 5095,
+                pendingRepairCount: 3,
+                decisionGeneration: 42,
+                liveRouteEpoch: 0);
+            adapter.RegisterActiveFileTransferDataSession(transferId);
+            adapter.RegisterActiveFileTransferRuntime(transferId);
+            adapter.ReportRegularV4ControlFeedbackPressure(
+                transferId,
+                "regular_v4_receiver_frontier_repair_due",
+                creditExhaustedTimeMs: 0,
+                frontierLagChunks: 128,
+                pendingRepairCount: 3,
+                repairAuthority: authority with { AuthorityId = default });
+            Assert.False(adapter.TryGetFileTransferRegularV4ActivationSendBlocker(out _, out _));
+
+            var installReceipt = InstallRegularV4FrontierRepairPressure(
+                adapter,
+                new FileTransferRegularV4ControlFeedbackPressure(
+                    authority.SessionId,
+                    authority.TransferId,
+                    0,
+                    128,
+                    3,
+                    "regular_v4_receiver_frontier_repair_due",
+                    authority),
+                installGeneration: 1);
+            Assert.Equal(
+                FileTransferRegularV4FrontierRepairPressureInstallStatus.Installed,
+                installReceipt.Status);
+
+            Assert.True(adapter.TryGetFileTransferRegularV4ActivationSendBlocker(out var blockerReason, out _));
+            Assert.Equal("regular_v4_control_feedback_pressure", blockerReason);
+
+            var wrongKeySettlement = new FileTransferRegularV4FrontierRepairSettlement(
+                authority.SessionId,
+                authority.TransferId,
+                authority.Direction,
+                authority.RouteToken,
+                authority.ProtocolVersion,
+                authority.LiveRouteEpoch,
+                authority.RuntimeGeneration,
+                authority.TerminalGeneration,
+                authority.LegGeneration,
+                authority.TransportEpoch,
+                authority.BridgeRecoveryGeneration,
+                authority.BridgeDecisionGeneration,
+                authority.RoutePublicationGeneration,
+                authority.RouteCommitGeneration,
+                "stale-" + authority.RepairKey,
+                authority.FrontierChunkIndex,
+                authority.DurableReceivedHighestChunkIndex,
+                authority.PendingRepairCount,
+                authority.DecisionGeneration,
+                "regular_v4_frontier_repair_liveness_settled_stalled",
+                FileTransferRegularV4FrontierRepairSettlementOutcome.SettledStalled,
+                authority.TargetTransport)
+            {
+                AuthorityId = authority.AuthorityId,
+            };
+            var wrongKeyReceipt = adapter.ApplyRegularV4FrontierRepairPressureSettlement(
+                new FileTransferRegularV4FrontierRepairPressureSettlementCommand(
+                    wrongKeySettlement,
+                    installReceipt.InstallGeneration,
+                    authority.AuthorityId,
+                    RetainedPredecessorAuthorityId: null));
+
+            Assert.Equal(
+                FileTransferRegularV4FrontierRepairPressureSettlementApplyStatus.Rejected,
+                wrongKeyReceipt.Status);
+            Assert.False(wrongKeyReceipt.CurrentAuthorityCleared);
+            Assert.False(wrongKeyReceipt.RetainedPredecessorCleared);
+            Assert.True(adapter.TryGetFileTransferRegularV4ActivationSendBlocker(out blockerReason, out _));
+            Assert.Equal("regular_v4_control_feedback_pressure", blockerReason);
+
+            var acceptedSettlement = new FileTransferRegularV4FrontierRepairSettlement(
+                authority.SessionId,
+                authority.TransferId,
+                authority.Direction,
+                authority.RouteToken,
+                authority.ProtocolVersion,
+                authority.LiveRouteEpoch,
+                authority.RuntimeGeneration,
+                authority.TerminalGeneration,
+                authority.LegGeneration,
+                authority.TransportEpoch,
+                authority.BridgeRecoveryGeneration,
+                authority.BridgeDecisionGeneration,
+                authority.RoutePublicationGeneration,
+                authority.RouteCommitGeneration,
+                authority.RepairKey,
+                authority.FrontierChunkIndex,
+                authority.DurableReceivedHighestChunkIndex,
+                authority.PendingRepairCount,
+                authority.DecisionGeneration,
+                "regular_v4_frontier_repair_liveness_settled_stalled",
+                FileTransferRegularV4FrontierRepairSettlementOutcome.SettledStalled,
+                authority.TargetTransport)
+            {
+                AuthorityId = authority.AuthorityId,
+            };
+            var mismatchedAuthoritySettlement = acceptedSettlement with
+            {
+                AuthorityId = new FileTransferAuthorityId("fta2-test-mismatched-authority"),
+            };
+
+            var mismatchedAuthorityReceipt = adapter.ApplyRegularV4FrontierRepairPressureSettlement(
+                new FileTransferRegularV4FrontierRepairPressureSettlementCommand(
+                    mismatchedAuthoritySettlement,
+                    installReceipt.InstallGeneration,
+                    authority.AuthorityId,
+                    RetainedPredecessorAuthorityId: null));
+            Assert.Equal(
+                FileTransferRegularV4FrontierRepairPressureSettlementApplyStatus.Rejected,
+                mismatchedAuthorityReceipt.Status);
+            Assert.False(mismatchedAuthorityReceipt.CurrentAuthorityCleared);
+            Assert.False(mismatchedAuthorityReceipt.RetainedPredecessorCleared);
+            Assert.True(adapter.TryGetFileTransferRegularV4ActivationSendBlocker(out blockerReason, out _));
+            var settlementCommand = new FileTransferRegularV4FrontierRepairPressureSettlementCommand(
+                acceptedSettlement,
+                installReceipt.InstallGeneration,
+                authority.AuthorityId,
+                RetainedPredecessorAuthorityId: null);
+            var acceptedReceipt = adapter.ApplyRegularV4FrontierRepairPressureSettlement(settlementCommand);
+
+            Assert.Equal(
+                FileTransferRegularV4FrontierRepairPressureSettlementApplyStatus.Applied,
+                acceptedReceipt.Status);
+            Assert.True(acceptedReceipt.CurrentAuthorityCleared);
+            Assert.False(acceptedReceipt.RetainedPredecessorCleared);
+            Assert.True(adapter.IsRegularV4FrontierRepairSettlementApplied(acceptedSettlement));
+            Assert.False(adapter.TryGetFileTransferRegularV4ActivationSendBlocker(out _, out _));
+            var duplicateReceipt = adapter.ApplyRegularV4FrontierRepairPressureSettlement(settlementCommand);
+            Assert.Equal(
+                FileTransferRegularV4FrontierRepairPressureSettlementApplyStatus.Idempotent,
+                duplicateReceipt.Status);
+            Assert.True(duplicateReceipt.CurrentAuthorityCleared);
+            Assert.False(duplicateReceipt.RetainedPredecessorCleared);
+
+            var logText = LocalOperationalLog.GetRecentLogText();
+            Assert.True(
+                ContainsLogLineWithTokens(logText, "filetransfer_regular_v4_frontier_repair_settlement_rejected", "route=regular_nkn_v4_fast", "protocol_version=4", "live_route_epoch=0", "cleared_pressure=0"),
+                logText);
+            Assert.True(
+                ContainsLogLineWithTokens(
+                    logText,
+                    "filetransfer_regular_v4_frontier_repair_settlement_accepted",
+                    "route=regular_nkn_v4_fast",
+                    "protocol_version=4",
+                    "live_route_epoch=0",
+                    $"authority_id={authority.AuthorityId}",
+                    "outcome=settled_stalled",
+                    "cleared_pressure=1"),
+                logText);
+        }
+        finally
+        {
+            try
+            {
+                CleanupDirectoryIfExists(tempDir);
+            }
+            catch
+            {
+            }
+        }
+    }
+
+    [Trait("Category", "LegacySmoke")]
+    [Trait("FileTransferInfraSuite", "RegularV4FrontierRepairPressure")]
+    [Fact]
+    public void Bridge_RegularV4FrontierRepairPressure_InitialInstallIsIdempotentAndOwnsSettlement()
+    {
+        var tempDir = Path.Combine(Path.GetTempPath(), "nlink-regular-v4-frontier-initial", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(tempDir);
+        try
+        {
+            var keyPath = Path.Combine(tempDir, "identity.json");
+            WriteIdentityFile(keyPath, "regular-v4-frontier-initial");
+            var seedBackend = new FakeProtectedSeedBackend();
+            seedBackend.SaveSeed(keyPath, RandomNumberGenerator.GetBytes(32));
+            using var seedBackendOverride = NknSecretStore.OverrideBackendForTests(seedBackend);
+            var options = LoadNknOptionsWithOverrides(keyPath, "regular-v4-frontier-initial");
+            var identity = new NknIdentity("regular-v4-frontier-initial", "regular-v4-frontier-initial.fake");
+            using var adapter = new RealNknClientAdapter(identity, options);
+
+            var transferId = $"transfer-regular-v4-frontier-initial-{Guid.NewGuid():N}";
+            var authority = CreateRegularV4FrontierRepairAuthority(
+                transferId,
+                repairKey: "0:12:0:12",
+                frontierChunkIndex: 0,
+                durableReceivedHighestChunkIndex: -1,
+                pendingRepairCount: 12,
+                decisionGeneration: 1,
+                liveRouteEpoch: 0);
+            Assert.Null(authority.PredecessorAuthorityId);
+            adapter.RegisterActiveFileTransferDataSession(transferId);
+            adapter.RegisterActiveFileTransferRuntime(transferId);
+            var pressure = new FileTransferRegularV4ControlFeedbackPressure(
+                authority.SessionId,
+                authority.TransferId,
+                0,
+                12,
+                12,
+                "regular_v4_receiver_frontier_repair_due",
+                authority);
+
+            var installed = InstallRegularV4FrontierRepairPressure(adapter, pressure, installGeneration: 1);
+            Assert.Equal(FileTransferRegularV4FrontierRepairPressureInstallStatus.Installed, installed.Status);
+            Assert.True(installed.InstallGeneration > 0);
+            Assert.True(adapter.TryGetFileTransferRegularV4ActivationSendBlocker(out var blockerReason, out _));
+            Assert.Equal("regular_v4_control_feedback_pressure", blockerReason);
+
+            Thread.Sleep(25);
+            Assert.True(adapter.TryGetFileTransferRegularV4ActivationSendBlocker(out _, out var evidenceAgeBeforeDuplicateMs));
+            var duplicate = InstallRegularV4FrontierRepairPressure(adapter, pressure, installGeneration: 1);
+            Assert.Equal(FileTransferRegularV4FrontierRepairPressureInstallStatus.Idempotent, duplicate.Status);
+            Assert.Equal(installed.InstallGeneration, duplicate.InstallGeneration);
+            Assert.True(adapter.TryGetFileTransferRegularV4ActivationSendBlocker(out _, out var evidenceAgeAfterDuplicateMs));
+            Assert.True(evidenceAgeAfterDuplicateMs >= evidenceAgeBeforeDuplicateMs);
+
+            var installedBinding = GetRegularV4FrontierRepairPressureCurrent(adapter);
+            Assert.NotNull(installedBinding);
+            var installedEvidence = GetRegularV4FrontierRepairPressureEvidence(adapter);
+            Assert.NotNull(installedEvidence);
+            var expiredEvidenceTick = Stopwatch.GetTimestamp() - (Stopwatch.Frequency * 30);
+            installedEvidence.GetType().GetProperty("ObservedTick")!.SetValue(
+                installedEvidence,
+                expiredEvidenceTick);
+            Assert.True(adapter.TryGetFileTransferRegularV4ActivationSendBlocker(out blockerReason, out var expiredEvidenceAgeMs));
+            Assert.Equal("regular_v4_control_feedback_pressure", blockerReason);
+            Assert.True(expiredEvidenceAgeMs >= 20_000);
+            var expiredEvidenceDuplicate = InstallRegularV4FrontierRepairPressure(adapter, pressure, installGeneration: 1);
+            Assert.Equal(FileTransferRegularV4FrontierRepairPressureInstallStatus.Idempotent, expiredEvidenceDuplicate.Status);
+            Assert.Equal(
+                expiredEvidenceTick,
+                Assert.IsType<long>(installedEvidence.GetType().GetProperty("ObservedTick")!.GetValue(installedEvidence)));
+
+            var mutated = InstallRegularV4FrontierRepairPressure(
+                adapter,
+                pressure with
+                {
+                    RepairAuthority = authority with { RepairKey = "0:11:0:11" },
+                },
+                installGeneration: 1);
+            Assert.Equal(FileTransferRegularV4FrontierRepairPressureInstallStatus.Rejected, mutated.Status);
+            Assert.Equal("regular_v4_frontier_repair_authority_id_reuse", mutated.Reason);
+
+            var settlement = new FileTransferRegularV4FrontierRepairSettlement(
+                authority.SessionId,
+                authority.TransferId,
+                authority.Direction,
+                authority.RouteToken,
+                authority.ProtocolVersion,
+                authority.LiveRouteEpoch,
+                authority.RuntimeGeneration,
+                authority.TerminalGeneration,
+                authority.LegGeneration,
+                authority.TransportEpoch,
+                authority.BridgeRecoveryGeneration,
+                authority.BridgeDecisionGeneration,
+                authority.RoutePublicationGeneration,
+                authority.RouteCommitGeneration,
+                authority.RepairKey,
+                authority.FrontierChunkIndex,
+                authority.DurableReceivedHighestChunkIndex,
+                authority.PendingRepairCount,
+                authority.DecisionGeneration,
+                "frontier_advanced",
+                FileTransferRegularV4FrontierRepairSettlementOutcome.ProgressObserved,
+                authority.TargetTransport)
+            {
+                AuthorityId = authority.AuthorityId,
+            };
+            var settlementCommand = new FileTransferRegularV4FrontierRepairPressureSettlementCommand(
+                settlement,
+                installed.InstallGeneration,
+                authority.AuthorityId,
+                RetainedPredecessorAuthorityId: null);
+            var rejectedSettlement =
+                adapter.ApplyRegularV4FrontierRepairPressureSettlement(
+                    settlementCommand with
+                    {
+                        InstallGeneration = installed.InstallGeneration + 1,
+                    });
+            Assert.Equal(
+                FileTransferRegularV4FrontierRepairPressureSettlementApplyStatus.Rejected,
+                rejectedSettlement.Status);
+            Assert.False(rejectedSettlement.CurrentAuthorityCleared);
+            Assert.True(adapter.TryGetFileTransferRegularV4ActivationSendBlocker(out blockerReason, out _));
+            Assert.Equal("regular_v4_control_feedback_pressure", blockerReason);
+            Assert.False(adapter.IsRegularV4FrontierRepairSettlementApplied(settlement));
+            var restoredBinding = GetRegularV4FrontierRepairPressureCurrent(adapter);
+            Assert.NotNull(restoredBinding);
+            Assert.Equal(
+                authority.AuthorityId,
+                Assert.IsType<FileTransferAuthorityId>(
+                    restoredBinding.GetType().GetProperty("AuthorityId")!.GetValue(restoredBinding)));
+            Assert.Equal(
+                installed.InstallGeneration,
+                Assert.IsType<long>(
+                    restoredBinding.GetType().GetProperty("InstallGeneration")!.GetValue(restoredBinding)));
+
+            var appliedSettlement = adapter.ApplyRegularV4FrontierRepairPressureSettlement(settlementCommand);
+            Assert.Equal(FileTransferRegularV4FrontierRepairPressureSettlementApplyStatus.Applied, appliedSettlement.Status);
+            Assert.True(appliedSettlement.CurrentAuthorityCleared);
+            Assert.False(appliedSettlement.RetainedPredecessorCleared);
+            var duplicateSettlement = adapter.ApplyRegularV4FrontierRepairPressureSettlement(settlementCommand);
+            Assert.Equal(FileTransferRegularV4FrontierRepairPressureSettlementApplyStatus.Idempotent, duplicateSettlement.Status);
+            Assert.True(duplicateSettlement.CurrentAuthorityCleared);
+            Assert.False(duplicateSettlement.RetainedPredecessorCleared);
+            var wrongRetainedPredecessorDuplicate = adapter.ApplyRegularV4FrontierRepairPressureSettlement(
+                settlementCommand with
+                {
+                    RetainedPredecessorAuthorityId = new FileTransferAuthorityId("fta2-test-unrelated-predecessor"),
+                });
+            Assert.Equal(
+                FileTransferRegularV4FrontierRepairPressureSettlementApplyStatus.Rejected,
+                wrongRetainedPredecessorDuplicate.Status);
+            Assert.False(wrongRetainedPredecessorDuplicate.CurrentAuthorityCleared);
+            Assert.False(wrongRetainedPredecessorDuplicate.RetainedPredecessorCleared);
+            Assert.False(adapter.TryGetFileTransferRegularV4ActivationSendBlocker(out _, out _));
+
+            adapter.UnregisterActiveFileTransferRuntime(transferId);
+            adapter.UnregisterActiveFileTransferDataSession(transferId);
+        }
+        finally
+        {
+            try
+            {
+                CleanupDirectoryIfExists(tempDir);
+            }
+            catch
+            {
+            }
+        }
+    }
+
+    [Trait("Category", "LegacySmoke")]
+    [Trait("FileTransferInfraSuite", "RegularV4FrontierRepairPressure")]
+    [Fact]
+    public void Bridge_RegularV4FrontierRepairPressure_LocalTeardownAndEvidenceExpiryDoNotRetireCoordinatorBinding()
+    {
+        var tempDir = Path.Combine(Path.GetTempPath(), "nlink-regular-v4-frontier-command-owned", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(tempDir);
+        try
+        {
+            var keyPath = Path.Combine(tempDir, "identity.json");
+            WriteIdentityFile(keyPath, "regular-v4-frontier-command-owned");
+            var seedBackend = new FakeProtectedSeedBackend();
+            seedBackend.SaveSeed(keyPath, RandomNumberGenerator.GetBytes(32));
+            using var seedBackendOverride = NknSecretStore.OverrideBackendForTests(seedBackend);
+            var options = LoadNknOptionsWithOverrides(keyPath, "regular-v4-frontier-command-owned");
+            var identity = new NknIdentity("regular-v4-frontier-command-owned", "regular-v4-frontier-command-owned.fake");
+            using var adapter = new RealNknClientAdapter(identity, options);
+
+            var transferId = $"transfer-regular-v4-frontier-command-owned-{Guid.NewGuid():N}";
+            var authority = CreateRegularV4FrontierRepairAuthority(
+                transferId,
+                repairKey: "regular-v4-command-owned:0:64",
+                frontierChunkIndex: 0,
+                durableReceivedHighestChunkIndex: 127,
+                pendingRepairCount: 64,
+                decisionGeneration: 17,
+                liveRouteEpoch: 0);
+            var pressure = new FileTransferRegularV4ControlFeedbackPressure(
+                authority.SessionId,
+                authority.TransferId,
+                0,
+                64,
+                64,
+                "regular_v4_frontier_repair_send_deferred",
+                authority);
+
+            adapter.RegisterActiveFileTransferDataSession(transferId);
+            adapter.RegisterActiveFileTransferRuntime(transferId);
+            var installReceipt = InstallRegularV4FrontierRepairPressure(
+                adapter,
+                pressure,
+                installGeneration: 19);
+            Assert.Equal(FileTransferRegularV4FrontierRepairPressureInstallStatus.Installed, installReceipt.Status);
+            AssertCoordinatorBindingRetained();
+
+            var installedBinding = GetRegularV4FrontierRepairPressureCurrent(adapter);
+            Assert.NotNull(installedBinding);
+            var installedEvidence = GetRegularV4FrontierRepairPressureEvidence(adapter);
+            Assert.NotNull(installedEvidence);
+            var expiredEvidenceTick = Stopwatch.GetTimestamp() - (Stopwatch.Frequency * 30);
+            installedEvidence.GetType().GetProperty("ObservedTick")!.SetValue(
+                installedEvidence,
+                expiredEvidenceTick);
+            AssertCoordinatorBindingRetained(evidenceExpired: true);
+
+            adapter.MarkActiveFileTransferPostTunaFallbackRuntime(transferId, "test_post_tuna_scope");
+            adapter.ClearActiveFileTransferPostTunaFallbackRuntime(transferId, "test_post_tuna_scope_cleared");
+            AssertCoordinatorBindingRetained(evidenceExpired: true);
+
+            adapter.UnregisterActiveFileTransferRuntime(transferId);
+            AssertCoordinatorBindingRetained(evidenceExpired: true);
+            adapter.RegisterActiveFileTransferRuntime(transferId);
+            adapter.ClearActiveFileTransferRuntimeTransfers("test_runtime_scope_cleared");
+            AssertCoordinatorBindingRetained(evidenceExpired: true);
+            adapter.RegisterActiveFileTransferRuntime(transferId);
+
+            adapter.UnregisterActiveFileTransferDataSession(transferId);
+            AssertCoordinatorBindingRetained(evidenceExpired: true);
+            adapter.RegisterActiveFileTransferDataSession(transferId);
+            adapter.UnregisterActiveFileTransferRuntime(transferId);
+            adapter.UnregisterActiveFileTransferDataSession(transferId);
+
+            AssertCoordinatorBindingRetained(evidenceExpired: true);
+            var duplicateAfterLocalTeardown = InstallRegularV4FrontierRepairPressure(
+                adapter,
+                pressure,
+                installGeneration: 19);
+            Assert.Equal(
+                FileTransferRegularV4FrontierRepairPressureInstallStatus.Idempotent,
+                duplicateAfterLocalTeardown.Status);
+            Assert.Equal(installReceipt.InstallGeneration, duplicateAfterLocalTeardown.InstallGeneration);
+            Assert.Equal(
+                expiredEvidenceTick,
+                Assert.IsType<long>(
+                    installedEvidence.GetType().GetProperty("ObservedTick")!.GetValue(installedEvidence)));
+            AssertCoordinatorBindingRetained(evidenceExpired: true);
+
+            var observerTransferId = $"{transferId}-observer";
+            adapter.RegisterActiveFileTransferDataSession(observerTransferId);
+            adapter.RegisterActiveFileTransferRuntime(observerTransferId);
+            AssertCoordinatorBindingRetained(evidenceExpired: true);
+            adapter.UnregisterActiveFileTransferRuntime(observerTransferId);
+            adapter.UnregisterActiveFileTransferDataSession(observerTransferId);
+
+            adapter.RegisterActiveFileTransferDataSession(transferId);
+            adapter.RegisterActiveFileTransferRuntime(transferId);
+            AssertCoordinatorBindingRetained(evidenceExpired: true);
+
+            var settlement = new FileTransferRegularV4FrontierRepairSettlement(
+                authority.SessionId,
+                authority.TransferId,
+                authority.Direction,
+                authority.RouteToken,
+                authority.ProtocolVersion,
+                authority.LiveRouteEpoch,
+                authority.RuntimeGeneration,
+                authority.TerminalGeneration,
+                authority.LegGeneration,
+                authority.TransportEpoch,
+                authority.BridgeRecoveryGeneration,
+                authority.BridgeDecisionGeneration,
+                authority.RoutePublicationGeneration,
+                authority.RouteCommitGeneration,
+                authority.RepairKey,
+                authority.FrontierChunkIndex,
+                authority.DurableReceivedHighestChunkIndex,
+                authority.PendingRepairCount,
+                authority.DecisionGeneration,
+                "coordinator_scope_invalidated",
+                FileTransferRegularV4FrontierRepairSettlementOutcome.StaleRejected,
+                authority.TargetTransport)
+            {
+                AuthorityId = authority.AuthorityId,
+            };
+            var settlementReceipt = adapter.ApplyRegularV4FrontierRepairPressureSettlement(
+                new FileTransferRegularV4FrontierRepairPressureSettlementCommand(
+                    settlement,
+                    installReceipt.InstallGeneration,
+                    authority.AuthorityId,
+                    RetainedPredecessorAuthorityId: null));
+
+            Assert.Equal(
+                FileTransferRegularV4FrontierRepairPressureSettlementApplyStatus.Applied,
+                settlementReceipt.Status);
+            Assert.True(settlementReceipt.CurrentAuthorityCleared);
+            Assert.Null(GetRegularV4FrontierRepairPressureCurrent(adapter));
+            Assert.False(adapter.TryGetFileTransferRegularV4ActivationSendBlocker(out _, out _));
+
+            var logText = LocalOperationalLog.GetRecentLogText();
+            Assert.True(
+                ContainsLogLineWithTokens(
+                    logText,
+                    "filetransfer_regular_v4_frontier_repair_pressure_binding_observed_inactive",
+                    $"authority_id={authority.AuthorityId}",
+                    "observation_disposition=evidence_only",
+                    "binding_mutated=0"),
+                logText);
+
+            adapter.UnregisterActiveFileTransferRuntime(transferId);
+            adapter.UnregisterActiveFileTransferDataSession(transferId);
+
+            void AssertCoordinatorBindingRetained(bool evidenceExpired = false)
+            {
+                Assert.True(adapter.TryGetFileTransferRegularV4ActivationSendBlocker(out var blockerReason, out var evidenceAgeMs));
+                Assert.Equal("regular_v4_control_feedback_pressure", blockerReason);
+                if (evidenceExpired)
+                {
+                    Assert.True(evidenceAgeMs >= 20_000);
+                }
+                else
+                {
+                    Assert.True(evidenceAgeMs >= 0);
+                }
+                var currentBinding = GetRegularV4FrontierRepairPressureCurrent(adapter);
+                Assert.NotNull(currentBinding);
+                Assert.Equal(
+                    authority.AuthorityId,
+                    Assert.IsType<FileTransferAuthorityId>(
+                        currentBinding.GetType().GetProperty("AuthorityId")!.GetValue(currentBinding)));
+                Assert.Equal(
+                    installReceipt.InstallGeneration,
+                    Assert.IsType<long>(
+                        currentBinding.GetType().GetProperty("InstallGeneration")!.GetValue(currentBinding)));
+            }
+        }
+        finally
+        {
+            try
+            {
+                CleanupDirectoryIfExists(tempDir);
+            }
+            catch
+            {
+            }
+        }
+    }
+
+    [Trait("Category", "LegacySmoke")]
+    [Trait("FileTransferInfraSuite", "RegularV4FrontierRepairPressure")]
+    [Fact]
+    public void Bridge_RegularV4FrontierRepairSettlement_PredecessorCannotClearAuthorizedSuccessor()
+    {
+        var tempDir = Path.Combine(Path.GetTempPath(), "nlink-regular-v4-frontier-successor", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(tempDir);
+        try
+        {
+            var keyPath = Path.Combine(tempDir, "identity.json");
+            WriteIdentityFile(keyPath, "regular-v4-frontier-successor");
+            var seedBackend = new FakeProtectedSeedBackend();
+            seedBackend.SaveSeed(keyPath, RandomNumberGenerator.GetBytes(32));
+            using var seedBackendOverride = NknSecretStore.OverrideBackendForTests(seedBackend);
+            var options = LoadNknOptionsWithOverrides(keyPath, "regular-v4-frontier-successor");
+            var identity = new NknIdentity("regular-v4-frontier-successor", "regular-v4-frontier-successor.fake");
+            using var adapter = new RealNknClientAdapter(identity, options);
+
+            var transferId = $"transfer-regular-v4-frontier-successor-{Guid.NewGuid():N}";
+            var predecessor = CreateRegularV4FrontierRepairAuthority(
+                transferId,
+                repairKey: "regular_v4_peer_silence_safety_replay:0:0:64:1",
+                frontierChunkIndex: 0,
+                durableReceivedHighestChunkIndex: -1,
+                pendingRepairCount: 64,
+                decisionGeneration: 3,
+                liveRouteEpoch: 0,
+                bridgeDecisionGeneration: 1);
+            var successor = predecessor with
+            {
+                AuthorityId = new FileTransferAuthorityId($"fta2-test-{transferId}-4-successor"),
+                PredecessorAuthorityId = predecessor.AuthorityId,
+                BridgeDecisionGeneration = 3,
+                RepairKey = "regular_v4_peer_silence_safety_replay:0:0:64:2",
+                DecisionGeneration = 4,
+                DecisionReason = "requeue_after_send_timeout",
+            };
+            adapter.RegisterActiveFileTransferDataSession(transferId);
+            adapter.RegisterActiveFileTransferRuntime(transferId);
+            var predecessorPressure = new FileTransferRegularV4ControlFeedbackPressure(
+                predecessor.SessionId,
+                predecessor.TransferId,
+                0,
+                64,
+                64,
+                "regular_v4_frontier_repair_send_deferred",
+                predecessor);
+            var predecessorInstallReceipt = InstallRegularV4FrontierRepairPressure(
+                adapter,
+                predecessorPressure,
+                installGeneration: 1);
+            Assert.Equal(
+                FileTransferRegularV4FrontierRepairPressureInstallStatus.Installed,
+                predecessorInstallReceipt.Status);
+
+            var supersededSettlement = CreateSettlement(
+                predecessor,
+                FileTransferRegularV4FrontierRepairSettlementOutcome.Superseded,
+                "regular_v4_frontier_repair_successor_authorized") with
+            {
+                SuccessorAuthorityId = successor.AuthorityId,
+            };
+
+            var settlementBeforeInstallReceipt = adapter.ApplyRegularV4FrontierRepairPressureSettlement(
+                new FileTransferRegularV4FrontierRepairPressureSettlementCommand(
+                    supersededSettlement,
+                    predecessorInstallReceipt.InstallGeneration,
+                    predecessor.AuthorityId,
+                    RetainedPredecessorAuthorityId: null));
+            Assert.Equal(
+                FileTransferRegularV4FrontierRepairPressureSettlementApplyStatus.Rejected,
+                settlementBeforeInstallReceipt.Status);
+            Assert.False(settlementBeforeInstallReceipt.CurrentAuthorityCleared);
+            Assert.False(settlementBeforeInstallReceipt.RetainedPredecessorCleared);
+            Assert.True(adapter.TryGetFileTransferRegularV4ActivationSendBlocker(out var blockerReason, out _));
+            Assert.Equal("regular_v4_control_feedback_pressure", blockerReason);
+
+            var mismatchedSuccessor = successor with
+            {
+                AuthorityId = new FileTransferAuthorityId($"fta2-test-{transferId}-4-mismatched-successor"),
+                PredecessorAuthorityId = new FileTransferAuthorityId($"fta2-test-{transferId}-unknown-predecessor"),
+            };
+            var rejectedInstall = InstallRegularV4FrontierRepairPressure(
+                adapter,
+                new FileTransferRegularV4ControlFeedbackPressure(
+                    mismatchedSuccessor.SessionId,
+                    mismatchedSuccessor.TransferId,
+                    0,
+                    64,
+                    64,
+                    "regular_v4_frontier_repair_successor_authorized",
+                    mismatchedSuccessor),
+                installGeneration: 2);
+
+            Assert.Equal(FileTransferRegularV4FrontierRepairPressureInstallStatus.Rejected, rejectedInstall.Status);
+            Assert.Equal("regular_v4_frontier_repair_successor_predecessor_mismatch", rejectedInstall.Reason);
+            Assert.True(adapter.TryGetFileTransferRegularV4ActivationSendBlocker(out blockerReason, out _));
+
+            var scopeMismatchedSuccessor = successor with
+            {
+                AuthorityId = new FileTransferAuthorityId($"fta2-test-{transferId}-4-scope-mismatched-successor"),
+                RoutePublicationGeneration = successor.RoutePublicationGeneration + 1,
+            };
+            var scopeRejectedInstall = InstallRegularV4FrontierRepairPressure(
+                adapter,
+                new FileTransferRegularV4ControlFeedbackPressure(
+                    scopeMismatchedSuccessor.SessionId,
+                    scopeMismatchedSuccessor.TransferId,
+                    0,
+                    64,
+                    64,
+                    "regular_v4_frontier_repair_successor_authorized",
+                    scopeMismatchedSuccessor),
+                installGeneration: 2);
+            Assert.Equal(FileTransferRegularV4FrontierRepairPressureInstallStatus.Rejected, scopeRejectedInstall.Status);
+            Assert.Equal("regular_v4_frontier_repair_successor_scope_mismatch", scopeRejectedInstall.Reason);
+            Assert.True(adapter.TryGetFileTransferRegularV4ActivationSendBlocker(out blockerReason, out _));
+
+            var successorPressure = new FileTransferRegularV4ControlFeedbackPressure(
+                successor.SessionId,
+                successor.TransferId,
+                0,
+                64,
+                64,
+                "regular_v4_frontier_repair_successor_authorized",
+                successor);
+            var installReceipt = InstallRegularV4FrontierRepairPressure(adapter, successorPressure, installGeneration: 2);
+
+            Assert.Equal(FileTransferRegularV4FrontierRepairPressureInstallStatus.Installed, installReceipt.Status);
+            Assert.Equal(successor, installReceipt.Authority);
+            Assert.True(installReceipt.InstallGeneration > 0);
+            Assert.Equal(successorPressure.Reason, installReceipt.PressureReason);
+            Thread.Sleep(25);
+            Assert.True(adapter.TryGetFileTransferRegularV4ActivationSendBlocker(out blockerReason, out var evidenceAgeBeforeDuplicateMs));
+
+            var duplicateInstallReceipt = InstallRegularV4FrontierRepairPressure(adapter, successorPressure, installGeneration: 2);
+
+            Assert.Equal(FileTransferRegularV4FrontierRepairPressureInstallStatus.Idempotent, duplicateInstallReceipt.Status);
+            Assert.Equal(installReceipt.InstallGeneration, duplicateInstallReceipt.InstallGeneration);
+            Assert.True(adapter.TryGetFileTransferRegularV4ActivationSendBlocker(out blockerReason, out var evidenceAgeAfterDuplicateMs));
+            Assert.True(
+                evidenceAgeAfterDuplicateMs >= evidenceAgeBeforeDuplicateMs,
+                $"duplicate install refreshed pressure evidence from age {evidenceAgeBeforeDuplicateMs}ms to {evidenceAgeAfterDuplicateMs}ms");
+
+            var sameIdMutation = successor with
+            {
+                RepairKey = "regular_v4_peer_silence_safety_replay:0:64:64:2",
+            };
+            var sameIdMutationReceipt = InstallRegularV4FrontierRepairPressure(
+                adapter,
+                successorPressure with
+                {
+                    RepairAuthority = sameIdMutation,
+                },
+                installGeneration: 2);
+            Assert.Equal(FileTransferRegularV4FrontierRepairPressureInstallStatus.Rejected, sameIdMutationReceipt.Status);
+            Assert.Equal("regular_v4_frontier_repair_authority_id_reuse", sameIdMutationReceipt.Reason);
+
+            var nestedSuccessor = successor with
+            {
+                AuthorityId = new FileTransferAuthorityId($"fta2-test-{transferId}-4-nested-successor"),
+                PredecessorAuthorityId = successor.AuthorityId,
+                DecisionGeneration = successor.DecisionGeneration + 1,
+            };
+            var nestedSuccessorReceipt = InstallRegularV4FrontierRepairPressure(
+                adapter,
+                successorPressure with
+                {
+                    RepairAuthority = nestedSuccessor,
+                },
+                installGeneration: 3);
+            Assert.Equal(FileTransferRegularV4FrontierRepairPressureInstallStatus.Rejected, nestedSuccessorReceipt.Status);
+            Assert.Equal("regular_v4_frontier_repair_predecessor_pressure_pending", nestedSuccessorReceipt.Reason);
+
+            adapter.ReportRegularV4ControlFeedbackPressure(
+                transferId,
+                "regular_v4_frontier_repair_send_deferred",
+                creditExhaustedTimeMs: 0,
+                frontierLagChunks: 64,
+                pendingRepairCount: 64,
+                repairAuthority: predecessor);
+            adapter.ReportRegularV4ControlFeedbackPressure(
+                transferId,
+                "regular_v4_frontier_repair_send_deferred",
+                creditExhaustedTimeMs: 0,
+                frontierLagChunks: 64,
+                pendingRepairCount: 64,
+                repairAuthority: null);
+            adapter.ReportRegularV4ControlFeedbackPressure(
+                transferId,
+                "regular_v4_frontier_repair_send_deferred",
+                creditExhaustedTimeMs: 0,
+                frontierLagChunks: 64,
+                pendingRepairCount: 64,
+                repairAuthority: predecessor with { AuthorityId = default });
+            Assert.True(adapter.TryGetFileTransferRegularV4ActivationSendBlocker(out blockerReason, out _));
+            Assert.Equal(
+                FileTransferRegularV4FrontierRepairPressureInstallStatus.Idempotent,
+                InstallRegularV4FrontierRepairPressure(adapter, successorPressure, installGeneration: 2).Status);
+
+            var successorFinalSettlement = CreateSettlement(
+                successor,
+                FileTransferRegularV4FrontierRepairSettlementOutcome.SettledStalled,
+                "regular_v4_frontier_repair_missing_dispatch_settled");
+            var successorSettlementBeforePredecessorReceipt = adapter.ApplyRegularV4FrontierRepairPressureSettlement(
+                new FileTransferRegularV4FrontierRepairPressureSettlementCommand(
+                    successorFinalSettlement,
+                    installReceipt.InstallGeneration,
+                    successor.AuthorityId,
+                    predecessor.AuthorityId));
+            Assert.Equal(
+                FileTransferRegularV4FrontierRepairPressureSettlementApplyStatus.Rejected,
+                successorSettlementBeforePredecessorReceipt.Status);
+            Assert.False(successorSettlementBeforePredecessorReceipt.CurrentAuthorityCleared);
+            Assert.False(successorSettlementBeforePredecessorReceipt.RetainedPredecessorCleared);
+            Assert.True(adapter.TryGetFileTransferRegularV4ActivationSendBlocker(out blockerReason, out _));
+
+            var predecessorApplyReceipt = adapter.ApplyRegularV4FrontierRepairPressureSettlement(
+                new FileTransferRegularV4FrontierRepairPressureSettlementCommand(
+                    supersededSettlement,
+                    installReceipt.InstallGeneration,
+                    successor.AuthorityId,
+                    predecessor.AuthorityId));
+            Assert.Equal(
+                FileTransferRegularV4FrontierRepairPressureSettlementApplyStatus.Applied,
+                predecessorApplyReceipt.Status);
+            Assert.False(predecessorApplyReceipt.CurrentAuthorityCleared);
+            Assert.True(predecessorApplyReceipt.RetainedPredecessorCleared);
+            var duplicatePredecessorApplyReceipt = adapter.ApplyRegularV4FrontierRepairPressureSettlement(
+                predecessorApplyReceipt.Command);
+            Assert.Equal(
+                FileTransferRegularV4FrontierRepairPressureSettlementApplyStatus.Idempotent,
+                duplicatePredecessorApplyReceipt.Status);
+            Assert.False(duplicatePredecessorApplyReceipt.CurrentAuthorityCleared);
+            Assert.True(duplicatePredecessorApplyReceipt.RetainedPredecessorCleared);
+            var missingPredecessorBindingDuplicate = adapter.ApplyRegularV4FrontierRepairPressureSettlement(
+                predecessorApplyReceipt.Command with { RetainedPredecessorAuthorityId = null });
+            Assert.Equal(
+                FileTransferRegularV4FrontierRepairPressureSettlementApplyStatus.Rejected,
+                missingPredecessorBindingDuplicate.Status);
+            Assert.False(missingPredecessorBindingDuplicate.CurrentAuthorityCleared);
+            Assert.False(missingPredecessorBindingDuplicate.RetainedPredecessorCleared);
+
+            Assert.True(adapter.IsRegularV4FrontierRepairSettlementApplied(supersededSettlement));
+            Assert.True(adapter.TryGetFileTransferRegularV4ActivationSendBlocker(out blockerReason, out _));
+            Assert.Equal("regular_v4_control_feedback_pressure", blockerReason);
+            var postRetirementDuplicateInstall = InstallRegularV4FrontierRepairPressure(adapter, successorPressure, installGeneration: 2);
+            Assert.Equal(FileTransferRegularV4FrontierRepairPressureInstallStatus.Idempotent, postRetirementDuplicateInstall.Status);
+            Assert.Equal(installReceipt.InstallGeneration, postRetirementDuplicateInstall.InstallGeneration);
+            Assert.True(adapter.TryGetFileTransferRegularV4ActivationSendBlocker(out blockerReason, out _));
+
+            var successorSettlementCommand = new FileTransferRegularV4FrontierRepairPressureSettlementCommand(
+                successorFinalSettlement,
+                installReceipt.InstallGeneration,
+                successor.AuthorityId,
+                RetainedPredecessorAuthorityId: null);
+            var successorAcceptedReceipt = adapter.ApplyRegularV4FrontierRepairPressureSettlement(
+                successorSettlementCommand);
+            Assert.Equal(
+                FileTransferRegularV4FrontierRepairPressureSettlementApplyStatus.Applied,
+                successorAcceptedReceipt.Status);
+            Assert.True(successorAcceptedReceipt.CurrentAuthorityCleared);
+            Assert.False(successorAcceptedReceipt.RetainedPredecessorCleared);
+            Assert.True(adapter.IsRegularV4FrontierRepairSettlementApplied(successorFinalSettlement));
+            Assert.False(adapter.TryGetFileTransferRegularV4ActivationSendBlocker(out _, out _));
+            var duplicateSuccessorReceipt = adapter.ApplyRegularV4FrontierRepairPressureSettlement(
+                successorSettlementCommand);
+            Assert.Equal(
+                FileTransferRegularV4FrontierRepairPressureSettlementApplyStatus.Idempotent,
+                duplicateSuccessorReceipt.Status);
+            Assert.True(duplicateSuccessorReceipt.CurrentAuthorityCleared);
+            Assert.False(duplicateSuccessorReceipt.RetainedPredecessorCleared);
+            var stalePredecessorBindingOnSuccessorDuplicate =
+                adapter.ApplyRegularV4FrontierRepairPressureSettlement(
+                    successorSettlementCommand with
+                    {
+                        RetainedPredecessorAuthorityId = predecessor.AuthorityId,
+                    });
+            Assert.Equal(
+                FileTransferRegularV4FrontierRepairPressureSettlementApplyStatus.Rejected,
+                stalePredecessorBindingOnSuccessorDuplicate.Status);
+            Assert.False(stalePredecessorBindingOnSuccessorDuplicate.CurrentAuthorityCleared);
+            Assert.False(stalePredecessorBindingOnSuccessorDuplicate.RetainedPredecessorCleared);
+            var latePredecessorReceipt = adapter.ApplyRegularV4FrontierRepairPressureSettlement(
+                predecessorApplyReceipt.Command);
+            Assert.Equal(
+                FileTransferRegularV4FrontierRepairPressureSettlementApplyStatus.Idempotent,
+                latePredecessorReceipt.Status);
+            Assert.False(latePredecessorReceipt.CurrentAuthorityCleared);
+            Assert.True(latePredecessorReceipt.RetainedPredecessorCleared);
+            Assert.False(adapter.TryGetFileTransferRegularV4ActivationSendBlocker(out _, out _));
+
+            var terminalTransferId = $"{transferId}-terminal";
+            var terminalPredecessor = CreateRegularV4FrontierRepairAuthority(
+                terminalTransferId,
+                repairKey: "regular_v4_peer_silence_safety_replay:0:0:64:1",
+                frontierChunkIndex: 0,
+                durableReceivedHighestChunkIndex: -1,
+                pendingRepairCount: 64,
+                decisionGeneration: 5,
+                liveRouteEpoch: 0,
+                bridgeDecisionGeneration: 3);
+            var terminalSuccessor = terminalPredecessor with
+            {
+                AuthorityId = new FileTransferAuthorityId($"fta2-test-{terminalTransferId}-6-successor"),
+                PredecessorAuthorityId = terminalPredecessor.AuthorityId,
+                RepairKey = "regular_v4_peer_silence_safety_replay:0:0:64:2",
+                DecisionGeneration = 6,
+                DecisionReason = "requeue_after_send_timeout",
+            };
+            adapter.RegisterActiveFileTransferDataSession(terminalTransferId);
+            adapter.RegisterActiveFileTransferRuntime(terminalTransferId);
+            var terminalPredecessorPressure = new FileTransferRegularV4ControlFeedbackPressure(
+                terminalPredecessor.SessionId,
+                terminalPredecessor.TransferId,
+                0,
+                64,
+                64,
+                "regular_v4_frontier_repair_send_deferred",
+                terminalPredecessor);
+            var terminalPredecessorInstall = InstallRegularV4FrontierRepairPressure(
+                adapter,
+                terminalPredecessorPressure,
+                installGeneration: 3);
+            Assert.Equal(
+                FileTransferRegularV4FrontierRepairPressureInstallStatus.Installed,
+                terminalPredecessorInstall.Status);
+            var terminalSuccessorInstall = InstallRegularV4FrontierRepairPressure(
+                adapter,
+                new FileTransferRegularV4ControlFeedbackPressure(
+                    terminalSuccessor.SessionId,
+                    terminalSuccessor.TransferId,
+                    0,
+                    64,
+                    64,
+                    "regular_v4_frontier_repair_successor_authorized",
+                    terminalSuccessor),
+                installGeneration: 4);
+            Assert.Equal(
+                FileTransferRegularV4FrontierRepairPressureInstallStatus.Installed,
+                terminalSuccessorInstall.Status);
+            Assert.True(adapter.TryGetFileTransferRegularV4ActivationSendBlocker(out _, out _));
+
+            adapter.UnregisterActiveFileTransferRuntime(terminalTransferId);
+
+            Assert.True(adapter.TryGetFileTransferRegularV4ActivationSendBlocker(out _, out _));
+            var terminalPredecessorSettlement = CreateSettlement(
+                terminalPredecessor,
+                FileTransferRegularV4FrontierRepairSettlementOutcome.Superseded,
+                "terminal_late_predecessor") with
+            {
+                SuccessorAuthorityId = terminalSuccessor.AuthorityId,
+            };
+            var terminalPredecessorRetirement = adapter.ApplyRegularV4FrontierRepairPressureSettlement(
+                new FileTransferRegularV4FrontierRepairPressureSettlementCommand(
+                    terminalPredecessorSettlement,
+                    terminalSuccessorInstall.InstallGeneration,
+                    terminalSuccessor.AuthorityId,
+                    terminalPredecessor.AuthorityId));
+            Assert.Equal(
+                FileTransferRegularV4FrontierRepairPressureSettlementApplyStatus.Applied,
+                terminalPredecessorRetirement.Status);
+            Assert.True(terminalPredecessorRetirement.RetainedPredecessorCleared);
+            Assert.True(adapter.TryGetFileTransferRegularV4ActivationSendBlocker(out _, out _));
+
+            var terminalSuccessorSettlement = CreateSettlement(
+                terminalSuccessor,
+                FileTransferRegularV4FrontierRepairSettlementOutcome.TransferTerminal,
+                "terminal_late_successor");
+            var terminalSuccessorRetirement = adapter.ApplyRegularV4FrontierRepairPressureSettlement(
+                new FileTransferRegularV4FrontierRepairPressureSettlementCommand(
+                    terminalSuccessorSettlement,
+                    terminalSuccessorInstall.InstallGeneration,
+                    terminalSuccessor.AuthorityId,
+                    RetainedPredecessorAuthorityId: null));
+            Assert.Equal(
+                FileTransferRegularV4FrontierRepairPressureSettlementApplyStatus.Applied,
+                terminalSuccessorRetirement.Status);
+            Assert.True(terminalSuccessorRetirement.CurrentAuthorityCleared);
+            Assert.False(adapter.TryGetFileTransferRegularV4ActivationSendBlocker(out _, out _));
+            adapter.UnregisterActiveFileTransferDataSession(terminalTransferId);
+
+            var logText = LocalOperationalLog.GetRecentLogText();
+            Assert.True(
+                ContainsLogLineWithTokens(logText, "filetransfer_regular_v4_frontier_repair_successor_pressure_install_accepted", "install_status=installed", "install_generation=2", "evidence_observed=1"),
+                logText);
+            Assert.True(
+                ContainsLogLineWithTokens(logText, "filetransfer_regular_v4_frontier_repair_successor_pressure_install_idempotent", "install_status=idempotent", "install_generation=2", "evidence_observed=0"),
+                logText);
+            Assert.True(
+                ContainsLogLineWithTokens(logText, "filetransfer_regular_v4_frontier_repair_predecessor_pressure_retired", "successor_install_generation=2", "cleared_predecessor=1", "cleared_pressure=0"),
+                logText);
+            Assert.True(
+                ContainsLogLineWithTokens(logText, "filetransfer_regular_v4_frontier_repair_pressure_settlement_apply_decided", "settlement_outcome=Superseded", "apply_status=idempotent", "current_authority_cleared=0", "retained_predecessor_cleared=1"),
+                logText);
+            Assert.True(
+                ContainsLogLineWithTokens(logText, "filetransfer_regular_v4_frontier_repair_settlement_rejected", "outcome=settled_stalled", "settlement_disposition=rejected", "cleared_predecessor=0", "cleared_pressure=0"),
+                logText);
+            Assert.True(
+                ContainsLogLineWithTokens(logText, "filetransfer_regular_v4_frontier_repair_authority_rejected", "route=regular_nkn_v4_fast", "protocol_version=4", "decision_generation=3"),
+                logText);
+        }
+        finally
+        {
+            try
+            {
+                CleanupDirectoryIfExists(tempDir);
+            }
+            catch
+            {
+            }
+        }
+
+        static FileTransferRegularV4FrontierRepairSettlement CreateSettlement(
+            FileTransferRegularV4FrontierRepairAuthority authority,
+            FileTransferRegularV4FrontierRepairSettlementOutcome outcome,
+            string reason)
+            => new(
+                authority.SessionId,
+                authority.TransferId,
+                authority.Direction,
+                authority.RouteToken,
+                authority.ProtocolVersion,
+                authority.LiveRouteEpoch,
+                authority.RuntimeGeneration,
+                authority.TerminalGeneration,
+                authority.LegGeneration,
+                authority.TransportEpoch,
+                authority.BridgeRecoveryGeneration,
+                authority.BridgeDecisionGeneration,
+                authority.RoutePublicationGeneration,
+                authority.RouteCommitGeneration,
+                authority.RepairKey,
+                authority.FrontierChunkIndex,
+                authority.DurableReceivedHighestChunkIndex,
+                authority.PendingRepairCount,
+                authority.DecisionGeneration,
+                reason,
+                outcome,
+                authority.TargetTransport)
+            {
+                AuthorityId = authority.AuthorityId,
+            };
+    }
+
+    [Trait("Category", "LegacySmoke")]
+    [Trait("FileTransferInfraSuite", "RegularV4FrontierRepairPressure")]
+    [Fact]
+    public void Bridge_RegularV4FrontierRepairPressure_LegacyMissingAuthorityCannotClearInstalledBinding()
+    {
+        var tempDir = Path.Combine(Path.GetTempPath(), "nlink-regular-v4-frontier-recent-authority", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(tempDir);
+        try
+        {
+            var keyPath = Path.Combine(tempDir, "identity.json");
+            WriteIdentityFile(keyPath, "regular-v4-frontier-recent-authority");
+            var seedBackend = new FakeProtectedSeedBackend();
+            seedBackend.SaveSeed(keyPath, RandomNumberGenerator.GetBytes(32));
+            using var seedBackendOverride = NknSecretStore.OverrideBackendForTests(seedBackend);
+            var options = LoadNknOptionsWithOverrides(keyPath, "regular-v4-frontier-recent-authority");
+            var identity = new NknIdentity("regular-v4-frontier-recent-authority", "regular-v4-frontier-recent-authority.fake");
+            using var adapter = new RealNknClientAdapter(identity, options);
+
+            var transferId = $"transfer-regular-v4-frontier-recent-authority-{Guid.NewGuid():N}";
+            var repairKey = $"regular-v4-frontier-recent-authority:{Guid.NewGuid():N}";
+            var authority = CreateRegularV4FrontierRepairAuthority(
+                transferId,
+                repairKey: repairKey,
+                frontierChunkIndex: 144,
+                durableReceivedHighestChunkIndex: 5095,
+                pendingRepairCount: 3,
+                decisionGeneration: 43,
+                liveRouteEpoch: 0,
+                bridgeDecisionGeneration: 2);
+            adapter.RegisterActiveFileTransferDataSession(transferId);
+            adapter.RegisterActiveFileTransferRuntime(transferId);
+            var installReceipt = InstallRegularV4FrontierRepairPressure(
+                adapter,
+                new FileTransferRegularV4ControlFeedbackPressure(
+                    authority.SessionId,
+                    authority.TransferId,
+                    0,
+                    128,
+                    3,
+                    "regular_v4_receiver_frontier_repair_due",
+                    authority),
+                installGeneration: 1);
+            Assert.Equal(
+                FileTransferRegularV4FrontierRepairPressureInstallStatus.Installed,
+                installReceipt.Status);
+
+            Assert.True(adapter.TryGetFileTransferRegularV4ActivationSendBlocker(out var blockerReason, out _));
+            Assert.Equal("regular_v4_control_feedback_pressure", blockerReason);
+
+            adapter.ReportRegularV4ControlFeedbackPressure(
+                transferId,
+                "regular_v4_frontier_repair_settled_stalled",
+                creditExhaustedTimeMs: 0,
+                frontierLagChunks: 128,
+                pendingRepairCount: 3);
+
+            Assert.True(adapter.TryGetFileTransferRegularV4ActivationSendBlocker(out _, out _));
+
+            var wrongKeySettlement = new FileTransferRegularV4FrontierRepairSettlement(
+                authority.SessionId,
+                authority.TransferId,
+                authority.Direction,
+                authority.RouteToken,
+                authority.ProtocolVersion,
+                authority.LiveRouteEpoch,
+                authority.RuntimeGeneration,
+                authority.TerminalGeneration,
+                authority.LegGeneration,
+                authority.TransportEpoch,
+                authority.BridgeRecoveryGeneration,
+                authority.BridgeDecisionGeneration,
+                authority.RoutePublicationGeneration,
+                authority.RouteCommitGeneration,
+                "stale-" + authority.RepairKey,
+                authority.FrontierChunkIndex,
+                authority.DurableReceivedHighestChunkIndex,
+                authority.PendingRepairCount,
+                authority.DecisionGeneration,
+                "regular_v4_frontier_repair_liveness_settled_stalled",
+                FileTransferRegularV4FrontierRepairSettlementOutcome.SettledStalled,
+                authority.TargetTransport)
+            {
+                AuthorityId = authority.AuthorityId,
+            };
+
+            var wrongKeyReceipt = adapter.ApplyRegularV4FrontierRepairPressureSettlement(
+                new FileTransferRegularV4FrontierRepairPressureSettlementCommand(
+                    wrongKeySettlement,
+                    installReceipt.InstallGeneration,
+                    authority.AuthorityId,
+                    RetainedPredecessorAuthorityId: null));
+            Assert.Equal(
+                FileTransferRegularV4FrontierRepairPressureSettlementApplyStatus.Rejected,
+                wrongKeyReceipt.Status);
+            Assert.False(wrongKeyReceipt.CurrentAuthorityCleared);
+            Assert.False(wrongKeyReceipt.RetainedPredecessorCleared);
+            Assert.True(adapter.TryGetFileTransferRegularV4ActivationSendBlocker(out _, out _));
+
+            var currentSettlement = new FileTransferRegularV4FrontierRepairSettlement(
+                authority.SessionId,
+                authority.TransferId,
+                authority.Direction,
+                authority.RouteToken,
+                authority.ProtocolVersion,
+                authority.LiveRouteEpoch,
+                authority.RuntimeGeneration,
+                authority.TerminalGeneration,
+                authority.LegGeneration,
+                authority.TransportEpoch,
+                authority.BridgeRecoveryGeneration,
+                authority.BridgeDecisionGeneration,
+                authority.RoutePublicationGeneration,
+                authority.RouteCommitGeneration,
+                authority.RepairKey,
+                authority.FrontierChunkIndex,
+                authority.DurableReceivedHighestChunkIndex,
+                authority.PendingRepairCount,
+                authority.DecisionGeneration,
+                "regular_v4_frontier_repair_liveness_settled_stalled",
+                FileTransferRegularV4FrontierRepairSettlementOutcome.SettledStalled,
+                authority.TargetTransport)
+            {
+                AuthorityId = authority.AuthorityId,
+            };
+
+            var currentSettlementCommand = new FileTransferRegularV4FrontierRepairPressureSettlementCommand(
+                currentSettlement,
+                installReceipt.InstallGeneration,
+                authority.AuthorityId,
+                RetainedPredecessorAuthorityId: null);
+            var currentSettlementReceipt = adapter.ApplyRegularV4FrontierRepairPressureSettlement(
+                currentSettlementCommand);
+            Assert.Equal(
+                FileTransferRegularV4FrontierRepairPressureSettlementApplyStatus.Applied,
+                currentSettlementReceipt.Status);
+            Assert.True(currentSettlementReceipt.CurrentAuthorityCleared);
+            Assert.False(currentSettlementReceipt.RetainedPredecessorCleared);
+            Assert.True(adapter.IsRegularV4FrontierRepairSettlementApplied(currentSettlement));
+            var duplicateSettlementReceipt = adapter.ApplyRegularV4FrontierRepairPressureSettlement(
+                currentSettlementCommand);
+            Assert.Equal(
+                FileTransferRegularV4FrontierRepairPressureSettlementApplyStatus.Idempotent,
+                duplicateSettlementReceipt.Status);
+            Assert.True(duplicateSettlementReceipt.CurrentAuthorityCleared);
+            Assert.False(duplicateSettlementReceipt.RetainedPredecessorCleared);
+
+            var logText = LocalOperationalLog.GetRecentLogText();
+            Assert.True(
+                ContainsLogLineWithTokens(logText, "filetransfer_regular_v4_control_feedback_pressure_rejected", "stage=control_feedback_pressure", "pending_repair_count=3"),
+                logText);
+            Assert.True(
+                ContainsLogLineWithTokens(logText, "filetransfer_regular_v4_frontier_repair_settlement_rejected", "route=regular_nkn_v4_fast", "bridge_decision_generation=2", "cleared_pressure=0"),
+                logText);
+            Assert.True(
+                ContainsLogLineWithTokens(logText, "filetransfer_regular_v4_frontier_repair_settlement_accepted", "route=regular_nkn_v4_fast", "bridge_decision_generation=2", "outcome=settled_stalled", "settlement_disposition=accepted", "cleared_pressure=1"),
+                logText);
+            Assert.True(
+                ContainsLogLineWithTokens(logText, "filetransfer_regular_v4_frontier_repair_pressure_settlement_apply_decided", "install_generation=1", "settlement_outcome=settled_stalled", "apply_status=idempotent", "current_authority_cleared=1", "retained_predecessor_cleared=0"),
+                logText);
+        }
+        finally
+        {
+            try
+            {
+                CleanupDirectoryIfExists(tempDir);
+            }
+            catch
+            {
+            }
+        }
+    }
+
+    [Trait("Category", "LegacySmoke")]
+    [Trait("FileTransferInfraSuite", "RegularV4FrontierRepairPressure")]
+    [Fact]
+    public void Bridge_FileTunaV4ControlFeedbackPressure_RecordsTunaTargetEvidenceOnly()
+    {
+        var tempDir = Path.Combine(Path.GetTempPath(), "nlink-file-tuna-v4-frontier-authority", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(tempDir);
+        try
+        {
+            var keyPath = Path.Combine(tempDir, "identity.json");
+            WriteIdentityFile(keyPath, "file-tuna-v4-frontier-authority");
+            var seedBackend = new FakeProtectedSeedBackend();
+            seedBackend.SaveSeed(keyPath, RandomNumberGenerator.GetBytes(32));
+            using var seedBackendOverride = NknSecretStore.OverrideBackendForTests(seedBackend);
+            var options = LoadNknOptionsWithOverrides(keyPath, "file-tuna-v4-frontier-authority");
+            var identity = new NknIdentity("file-tuna-v4-frontier-authority", "file-tuna-v4-frontier-authority.fake");
+            using var adapter = new RealNknClientAdapter(identity, options);
+
+            var transferSuffix = Guid.NewGuid().ToString("N");
+            var acceptedDecisionGeneration = RandomNumberGenerator.GetInt32(100_000, 999_999);
+            var acceptedTransferId = $"transfer-file-tuna-v4-frontier-{transferSuffix}";
+            adapter.RegisterActiveFileTransferDataSession(acceptedTransferId);
+            adapter.RegisterActiveFileTransferRuntime(acceptedTransferId);
+            adapter.ReportRegularV4ControlFeedbackPressure(
+                acceptedTransferId,
+                "file_tuna_v4_receiver_frontier_repair_due",
+                creditExhaustedTimeMs: 0,
+                frontierLagChunks: 96,
+                pendingRepairCount: 12,
+                repairAuthority: CreateRegularV4FrontierRepairAuthority(
+                    acceptedTransferId,
+                    repairKey: $"file-tuna-v4-frontier-accepted:{transferSuffix}",
+                    liveRouteEpoch: 2,
+                    decisionGeneration: acceptedDecisionGeneration,
+                    routeToken: FileTransferRouteResolver.FileTunaV4Token,
+                    targetTransport: FileTransferTransportKind.Tuna));
+
+            var acceptedLogText = LocalOperationalLog.GetRecentLogText();
+            Assert.True(
+                ContainsLogLineWithTokens(
+                    acceptedLogText,
+                    "filetransfer_regular_v4_control_feedback_pressure_observed",
+                    "observation_disposition=evidence_only",
+                    "binding_mutated=0",
+                    "route=file_tuna_v4",
+                    "target_transport=tuna",
+                    $"decision_generation={acceptedDecisionGeneration}"),
+                acceptedLogText);
+            Assert.False(ContainsLogLineWithTokens(
+                acceptedLogText,
+                "filetransfer_file_tuna_v4_frontier_repair_authority_granted",
+                $"decision_generation={acceptedDecisionGeneration}"));
+            Assert.False(adapter.TryGetFileTransferRegularV4ActivationSendPressure(out _, out _));
+
+            var rejectedDecisionGeneration = RandomNumberGenerator.GetInt32(100_000, 999_999);
+            var rejectedTransferId = $"transfer-file-tuna-v4-frontier-wrong-target-{transferSuffix}";
+            adapter.RegisterActiveFileTransferDataSession(rejectedTransferId);
+            adapter.RegisterActiveFileTransferRuntime(rejectedTransferId);
+            adapter.ReportRegularV4ControlFeedbackPressure(
+                rejectedTransferId,
+                "file_tuna_v4_receiver_frontier_repair_due",
+                creditExhaustedTimeMs: 0,
+                frontierLagChunks: 96,
+                pendingRepairCount: 12,
+                repairAuthority: CreateRegularV4FrontierRepairAuthority(
+                    rejectedTransferId,
+                    repairKey: $"file-tuna-v4-frontier-rejected:{transferSuffix}",
+                    liveRouteEpoch: 2,
+                    decisionGeneration: rejectedDecisionGeneration,
+                    routeToken: FileTransferRouteResolver.FileTunaV4Token,
+                    targetTransport: FileTransferTransportKind.RegularNkn));
+
+            var rejectedLogText = LocalOperationalLog.GetRecentLogText();
+            Assert.True(
+                ContainsLogLineWithTokens(rejectedLogText, "filetransfer_file_tuna_v4_frontier_repair_authority_rejected", "route=file_tuna_v4", "target_transport=regular_nkn", "expected_target_transport=tuna", $"decision_generation={rejectedDecisionGeneration}"),
+                rejectedLogText);
+            Assert.False(
+                ContainsLogLineWithTokens(rejectedLogText, "filetransfer_file_tuna_v4_frontier_repair_authority_granted", $"decision_generation={rejectedDecisionGeneration}"),
+                rejectedLogText);
+
+            var unknownTargetDecisionGeneration = RandomNumberGenerator.GetInt32(100_000, 999_999);
+            var unknownTargetTransferId = $"transfer-file-tuna-v4-frontier-unknown-target-{transferSuffix}";
+            adapter.RegisterActiveFileTransferDataSession(unknownTargetTransferId);
+            adapter.RegisterActiveFileTransferRuntime(unknownTargetTransferId);
+            adapter.ReportRegularV4ControlFeedbackPressure(
+                unknownTargetTransferId,
+                "file_tuna_v4_receiver_frontier_repair_due",
+                creditExhaustedTimeMs: 0,
+                frontierLagChunks: 96,
+                pendingRepairCount: 12,
+                repairAuthority: CreateRegularV4FrontierRepairAuthority(
+                    unknownTargetTransferId,
+                    repairKey: $"file-tuna-v4-frontier-unknown-target:{transferSuffix}",
+                    liveRouteEpoch: 2,
+                    decisionGeneration: unknownTargetDecisionGeneration,
+                    routeToken: FileTransferRouteResolver.FileTunaV4Token,
+                    targetTransport: FileTransferTransportKind.Unknown));
+
+            var unknownTargetLogText = LocalOperationalLog.GetRecentLogText();
+            Assert.True(
+                ContainsLogLineWithTokens(unknownTargetLogText, "filetransfer_file_tuna_v4_frontier_repair_authority_rejected", "route=file_tuna_v4", "target_transport=unknown", "expected_target_transport=tuna", $"decision_generation={unknownTargetDecisionGeneration}"),
+                unknownTargetLogText);
+            Assert.False(
+                ContainsLogLineWithTokens(unknownTargetLogText, "filetransfer_file_tuna_v4_frontier_repair_authority_granted", $"decision_generation={unknownTargetDecisionGeneration}"),
+                unknownTargetLogText);
+
+            adapter.UnregisterActiveFileTransferRuntime(acceptedTransferId);
+            adapter.UnregisterActiveFileTransferDataSession(acceptedTransferId);
+
+            var remoteFrontierDecisionGeneration = RandomNumberGenerator.GetInt32(100_000, 999_999);
+            var remoteFrontierTransferId = $"transfer-file-tuna-v4-frontier-remote-{transferSuffix}";
+            adapter.RegisterActiveFileTransferDataSession(remoteFrontierTransferId);
+            adapter.RegisterActiveFileTransferRuntime(remoteFrontierTransferId);
+            adapter.ReportRegularV4ControlFeedbackPressure(
+                remoteFrontierTransferId,
+                "file_tuna_v4_sender_remote_frontier_pressure",
+                creditExhaustedTimeMs: 0,
+                frontierLagChunks: 96,
+                pendingRepairCount: 12,
+                repairAuthority: CreateRegularV4FrontierRepairAuthority(
+                    remoteFrontierTransferId,
+                    repairKey: $"file-tuna-v4-frontier-remote:{transferSuffix}",
+                    liveRouteEpoch: 2,
+                    decisionGeneration: remoteFrontierDecisionGeneration,
+                    routeToken: FileTransferRouteResolver.FileTunaV4Token,
+                    targetTransport: FileTransferTransportKind.Tuna));
+
+            var remoteFrontierLogText = LocalOperationalLog.GetRecentLogText();
+            Assert.True(
+                ContainsLogLineWithTokens(
+                    remoteFrontierLogText,
+                    "filetransfer_regular_v4_activation_send_pressure_observed",
+                    "observation_disposition=evidence_only",
+                    "binding_mutated=0",
+                    $"decision_generation={remoteFrontierDecisionGeneration}"),
+                remoteFrontierLogText);
+            Assert.False(adapter.TryGetFileTransferRegularV4ActivationSendPressure(out _, out _));
+
+            adapter.UnregisterActiveFileTransferRuntime(acceptedTransferId);
+            adapter.UnregisterActiveFileTransferDataSession(acceptedTransferId);
+            adapter.UnregisterActiveFileTransferRuntime(rejectedTransferId);
+            adapter.UnregisterActiveFileTransferDataSession(rejectedTransferId);
+            adapter.UnregisterActiveFileTransferRuntime(unknownTargetTransferId);
+            adapter.UnregisterActiveFileTransferDataSession(unknownTargetTransferId);
+            adapter.UnregisterActiveFileTransferRuntime(remoteFrontierTransferId);
+            adapter.UnregisterActiveFileTransferDataSession(remoteFrontierTransferId);
+        }
+        finally
+        {
+            try
+            {
+                CleanupDirectoryIfExists(tempDir);
+            }
+            catch
+            {
+            }
+        }
+    }
+
+    [Trait("Category", "LegacySmoke")]
+    [Trait("FileTransferInfraSuite", "RegularV4FrontierRepairPressure")]
+    [Fact]
+    public async Task Bridge_ReceiveStallRecovery_ControlOnlyLegacyRegularV4PressureIsEvidenceOnlyAndDoesNotRestart()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var bundleDir = TryFindBridgeBundleDirectory();
+        if (bundleDir is null)
+        {
+            return;
+        }
+
+        var nodePath = Path.Combine(bundleDir, "node.exe");
+        if (!File.Exists(nodePath))
+        {
+            return;
+        }
+
+        var tempDir = Path.Combine(Path.GetTempPath(), "nlink-mock-bridge-control-regular-v4-pressure", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(tempDir);
+        var countFile = Path.Combine(tempDir, "connect-count.txt");
+        var bridgePath = Path.Combine(tempDir, "mock-bridge-control-regular-v4-pressure.js");
+        WriteBridgeScriptWithManifest(
+            bridgePath,
+            BuildReceiveStallRecoveryMockBridgeScript(
+                countFile,
+                controlMessagesReceivedSinceLast: 0,
+                bulkMessagesReceivedSinceLast: 1,
+                totalMessagesReceivedSinceLast: 1,
+                controlLastReceivedAgeMs: 35_000,
+                bulkLastReceivedAgeMs: 100,
+                stallHealthSampleCount: 6));
+        var prevNodePath = Environment.GetEnvironmentVariable("NLINK_NKN_NODE_PATH");
+        var prevBridgePath = Environment.GetEnvironmentVariable("NLINK_NKN_BRIDGE_PATH");
+        var prevRecovery = Environment.GetEnvironmentVariable("NLINK_NKN_RECEIVE_STALL_RECOVERY");
+        var prevFastRecovery = Environment.GetEnvironmentVariable("NLINK_NKN_RECEIVE_STALL_FILETRANSFER_FAST_RECOVERY");
+        var prevControlOnlyRecovery = Environment.GetEnvironmentVariable("NLINK_NKN_CONTROL_ONLY_STALL_RECOVERY");
+
+        try
+        {
+            Environment.SetEnvironmentVariable("NLINK_NKN_NODE_PATH", nodePath);
+            Environment.SetEnvironmentVariable("NLINK_NKN_BRIDGE_PATH", bridgePath);
+            Environment.SetEnvironmentVariable("NLINK_NKN_RECEIVE_STALL_RECOVERY", null);
+            Environment.SetEnvironmentVariable("NLINK_NKN_RECEIVE_STALL_FILETRANSFER_FAST_RECOVERY", null);
+            Environment.SetEnvironmentVariable("NLINK_NKN_CONTROL_ONLY_STALL_RECOVERY", "1");
+            var keyPath = Path.Combine(tempDir, "identity.json");
+            WriteIdentityFile(keyPath, "control-regular-v4-pressure");
+            var seedBackend = new FakeProtectedSeedBackend();
+            seedBackend.SaveSeed(keyPath, RandomNumberGenerator.GetBytes(32));
+            using var seedBackendOverride = NknSecretStore.OverrideBackendForTests(seedBackend);
+            var options = LoadNknOptionsWithOverrides(keyPath, "control-regular-v4-pressure");
+            var identity = new NknIdentity("control-regular-v4-pressure", "control-regular-v4-pressure.fake");
+            using var adapter = new RealNknClientAdapter(identity, options);
+            var evaluations =
+                new ConcurrentQueue<FileTransferBridgeRecoveryEvaluationRequest>();
+            adapter.BridgeRecoveryEvaluationRequested +=
+                (_, args) => evaluations.Enqueue(args.Request);
+            adapter.RegisterActiveFileTransferDataSession("transfer-control-regular-v4-pressure");
+            var logBaseline = LocalOperationalLog.GetRecentLogText().Length;
+            adapter.ReportRegularV4ControlFeedbackPressure(
+                "transfer-control-regular-v4-pressure",
+                "test_regular_v4_credit_frontier_pressure",
+                creditExhaustedTimeMs: 42_000,
+                frontierLagChunks: 512,
+                pendingRepairCount: 4,
+                repairAuthority: CreateRegularV4FrontierRepairAuthority("transfer-control-regular-v4-pressure"));
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+            await adapter.ConnectAsync(cts.Token);
+
+            await WaitUntilAsync(
+                () =>
+                {
+                    var text = GetRecentLogTextSince(logBaseline);
+                    return text.Contains(
+                        "event=nkn_bridge_control_receive_recovery_suppressed",
+                        StringComparison.Ordinal);
+                },
+                TimeSpan.FromSeconds(5));
+
+            var logText = GetRecentLogTextSince(logBaseline);
+            Assert.Contains(
+                "event=filetransfer_regular_v4_control_feedback_pressure_observed",
+                logText,
+                StringComparison.Ordinal);
+            Assert.Contains("observation_disposition=evidence_only", logText, StringComparison.Ordinal);
+            Assert.Contains("binding_mutated=0", logText, StringComparison.Ordinal);
+            Assert.Contains(
+                "event=nkn_bridge_control_receive_recovery_suppressed",
+                logText,
+                StringComparison.Ordinal);
+            Assert.Empty(evaluations);
+            Assert.DoesNotContain("event=nkn_bridge_recovery_evaluation_requested", logText, StringComparison.Ordinal);
+            Assert.DoesNotContain("event=nkn_bridge_receive_stall_recovery_started", logText, StringComparison.Ordinal);
+            Assert.True(File.Exists(countFile));
+            Assert.True(TryReadIntFileShared(countFile, out var finalCount));
+            Assert.Equal(1, finalCount);
+
+            adapter.UnregisterActiveFileTransferDataSession("transfer-control-regular-v4-pressure");
+            await adapter.DisconnectAsync();
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("NLINK_NKN_NODE_PATH", prevNodePath);
+            Environment.SetEnvironmentVariable("NLINK_NKN_BRIDGE_PATH", prevBridgePath);
+            Environment.SetEnvironmentVariable("NLINK_NKN_RECEIVE_STALL_RECOVERY", prevRecovery);
+            Environment.SetEnvironmentVariable("NLINK_NKN_RECEIVE_STALL_FILETRANSFER_FAST_RECOVERY", prevFastRecovery);
+            Environment.SetEnvironmentVariable("NLINK_NKN_CONTROL_ONLY_STALL_RECOVERY", prevControlOnlyRecovery);
+            try
+            {
+                CleanupDirectoryIfExists(tempDir);
+            }
+            catch
+            {
+            }
+        }
+    }
+
+    [Trait("Category", "LegacySmoke")]
+    [Fact]
+    public void Bridge_PostTunaFallbackControlPlanePressureSameLegRefreshRemainsDiagnostic()
+    {
+        var tempDir = Path.Combine(Path.GetTempPath(), "nlink-post-tuna-authority-refresh", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(tempDir);
+        try
+        {
+            var keyPath = Path.Combine(tempDir, "identity.json");
+            WriteIdentityFile(keyPath, "post-tuna-authority-refresh");
+            var seedBackend = new FakeProtectedSeedBackend();
+            seedBackend.SaveSeed(keyPath, RandomNumberGenerator.GetBytes(32));
+            using var seedBackendOverride = NknSecretStore.OverrideBackendForTests(seedBackend);
+            var options = LoadNknOptionsWithOverrides(keyPath, "post-tuna-authority-refresh");
+            var identity = new NknIdentity("post-tuna-authority-refresh", "post-tuna-authority-refresh.fake");
+            using var adapter = new RealNknClientAdapter(identity, options);
+            var transferId = $"transfer-post-tuna-authority-refresh-{Guid.NewGuid():N}";
+            var sessionId = $"session-post-tuna-authority-refresh-{Guid.NewGuid():N}";
+            var logStart = GetOperationalLogLength();
+
+            adapter.RegisterActiveFileTransferDataSession(transferId);
+            adapter.MarkActiveFileTransferPostTunaFallbackRuntime(transferId, "test");
+            adapter.MarkActiveFileTransferPostTunaFallbackLegAuthority(
+                transferId,
+                sessionId,
+                legGeneration: 2,
+                routeToken: FileTransferRouteResolver.PostTunaFallbackV6Token,
+                protocolVersion: FileTransferProtocol.ProtocolVersionV6,
+                liveRouteEpoch: 1,
+                transportEpoch: 1,
+                bridgeRecoveryGeneration: 1,
+                checkpointRequestId: null,
+                authorityReason: "initial_authority");
+            adapter.ReportPostTunaFallbackControlPlanePressure(
+                sessionId,
+                transferId,
+                FileTransferRouteResolver.PostTunaFallbackV6Token,
+                protocolVersion: FileTransferProtocol.ProtocolVersionV6,
+                liveRouteEpoch: 1,
+                legGeneration: 2,
+                bridgeRecoveryGeneration: 1,
+                transportEpoch: 2,
+                checkpointRequestId: null,
+                kind: "receiver_state",
+                reason: "current_transport_epoch_pressure_before_refresh");
+
+            var beforeRefresh = ReadOperationalLogTail(logStart);
+            AssertPostTunaFallbackObservationHasNoRecoveryAuthority(adapter, beforeRefresh);
+            Assert.DoesNotContain(
+                "event=filetransfer_post_tuna_fallback_control_plane_pressure_marked;",
+                beforeRefresh,
+                StringComparison.Ordinal);
+
+            adapter.MarkActiveFileTransferPostTunaFallbackLegAuthority(
+                transferId,
+                sessionId,
+                legGeneration: 2,
+                routeToken: FileTransferRouteResolver.PostTunaFallbackV6Token,
+                protocolVersion: FileTransferProtocol.ProtocolVersionV6,
+                liveRouteEpoch: 1,
+                transportEpoch: 2,
+                bridgeRecoveryGeneration: 1,
+                checkpointRequestId: null,
+                authorityReason: "transport_epoch_advanced");
+            adapter.ReportPostTunaFallbackControlPlanePressure(
+                sessionId,
+                transferId,
+                FileTransferRouteResolver.PostTunaFallbackV6Token,
+                protocolVersion: FileTransferProtocol.ProtocolVersionV6,
+                liveRouteEpoch: 1,
+                legGeneration: 2,
+                bridgeRecoveryGeneration: 1,
+                transportEpoch: 2,
+                checkpointRequestId: null,
+                kind: "receiver_state",
+                reason: "current_transport_epoch_pressure_after_refresh");
+
+            var afterRefresh = ReadOperationalLogTail(logStart);
+            AssertPostTunaFallbackObservationHasNoRecoveryAuthority(adapter, afterRefresh);
+            Assert.Contains(
+                "event=filetransfer_fallback_leg_authority_bridge_observed;",
+                afterRefresh,
+                StringComparison.Ordinal);
+            Assert.Contains("transport_epoch=2", afterRefresh, StringComparison.Ordinal);
+            Assert.Contains("bridge_recovery_generation=1", afterRefresh, StringComparison.Ordinal);
+            Assert.Contains("checkpoint_request_id=none", afterRefresh, StringComparison.Ordinal);
+            Assert.Contains("authority_reason=transport_epoch_advanced", afterRefresh, StringComparison.Ordinal);
+            Assert.Contains(
+                "event=filetransfer_post_tuna_fallback_control_plane_pressure_observed;",
+                afterRefresh,
+                StringComparison.Ordinal);
+            Assert.Contains(
+                "route=post_tuna_fallback_v6; protocol_version=6; live_route_epoch=1; leg_generation=2; bridge_recovery_generation=1; transport_epoch=2",
+                afterRefresh,
+                StringComparison.Ordinal);
+
+            adapter.UnregisterActiveFileTransferDataSession(transferId);
+        }
+        finally
+        {
+            try
+            {
+                CleanupDirectoryIfExists(tempDir);
+            }
+            catch
+            {
+            }
+        }
+    }
+
+    [Trait("Category", "LegacySmoke")]
+    [Fact]
+    public void Bridge_PostTunaFallbackControlPlanePressureBeforeLegObservationRemainsDiagnostic()
+    {
+        var tempDir = Path.Combine(Path.GetTempPath(), "nlink-post-tuna-pending-pressure", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(tempDir);
+        try
+        {
+            var keyPath = Path.Combine(tempDir, "identity.json");
+            WriteIdentityFile(keyPath, "post-tuna-pending-pressure");
+            var seedBackend = new FakeProtectedSeedBackend();
+            seedBackend.SaveSeed(keyPath, RandomNumberGenerator.GetBytes(32));
+            using var seedBackendOverride = NknSecretStore.OverrideBackendForTests(seedBackend);
+            var options = LoadNknOptionsWithOverrides(keyPath, "post-tuna-pending-pressure");
+            var identity = new NknIdentity("post-tuna-pending-pressure", "post-tuna-pending-pressure.fake");
+            using var adapter = new RealNknClientAdapter(identity, options);
+            var transferId = $"transfer-post-tuna-pending-pressure-{Guid.NewGuid():N}";
+            var sessionId = $"session-post-tuna-pending-pressure-{Guid.NewGuid():N}";
+            var logStart = GetOperationalLogLength();
+
+            adapter.RegisterActiveFileTransferDataSession(transferId);
+            adapter.MarkActiveFileTransferPostTunaFallbackRuntime(transferId, "test_pending_pressure");
+            adapter.ReportPostTunaFallbackControlPlanePressure(
+                sessionId,
+                transferId,
+                FileTransferRouteResolver.PostTunaFallbackV6Token,
+                protocolVersion: FileTransferProtocol.ProtocolVersionV6,
+                liveRouteEpoch: 4,
+                legGeneration: 6,
+                bridgeRecoveryGeneration: 2,
+                transportEpoch: 2,
+                checkpointRequestId: null,
+                kind: "frontier_request",
+                reason: "frontier_stall_repair_due");
+
+            var beforeAuthority = ReadOperationalLogTail(logStart);
+            AssertPostTunaFallbackObservationHasNoRecoveryAuthority(adapter, beforeAuthority);
+            Assert.Contains(
+                "event=filetransfer_post_tuna_fallback_control_plane_pressure_observed;",
+                beforeAuthority,
+                StringComparison.Ordinal);
+            Assert.Contains("decision_reason=coordinator_fallback_tail_evaluation_required", beforeAuthority, StringComparison.Ordinal);
+            Assert.DoesNotContain(
+                "event=filetransfer_post_tuna_fallback_control_plane_pressure_marked;",
+                beforeAuthority,
+                StringComparison.Ordinal);
+
+            adapter.MarkActiveFileTransferPostTunaFallbackLegAuthority(
+                transferId,
+                sessionId,
+                legGeneration: 6,
+                routeToken: FileTransferRouteResolver.PostTunaFallbackV6Token,
+                protocolVersion: FileTransferProtocol.ProtocolVersionV6,
+                liveRouteEpoch: 4,
+                transportEpoch: 2,
+                bridgeRecoveryGeneration: 2,
+                checkpointRequestId: null,
+                authorityReason: "post_tuna_fallback_session_liveness_timeout_pending");
+
+            var afterAuthority = ReadOperationalLogTail(logStart);
+            AssertPostTunaFallbackObservationHasNoRecoveryAuthority(adapter, afterAuthority);
+            Assert.Contains(
+                "event=filetransfer_fallback_leg_authority_bridge_observed;",
+                afterAuthority,
+                StringComparison.Ordinal);
+            Assert.Contains(
+                "event=filetransfer_post_tuna_fallback_control_plane_pressure_observed;",
+                afterAuthority,
+                StringComparison.Ordinal);
+            Assert.Contains("decision_reason=coordinator_fallback_tail_authority_required", afterAuthority, StringComparison.Ordinal);
+            Assert.Contains("kind=frontier_request", afterAuthority, StringComparison.Ordinal);
+            Assert.Contains("reason=frontier_stall_repair_due", afterAuthority, StringComparison.Ordinal);
+
+            adapter.UnregisterActiveFileTransferDataSession(transferId);
+        }
+        finally
+        {
+            try
+            {
+                CleanupDirectoryIfExists(tempDir);
+            }
+            catch
+            {
+            }
+        }
+    }
+
+    [Trait("Category", "LegacySmoke")]
+    [Fact]
+    public void Bridge_PostTunaFallbackControlPlanePressureWrongLegObservationRemainsDiagnostic()
+    {
+        var tempDir = Path.Combine(Path.GetTempPath(), "nlink-post-tuna-pending-pressure-mismatch", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(tempDir);
+        try
+        {
+            var keyPath = Path.Combine(tempDir, "identity.json");
+            WriteIdentityFile(keyPath, "post-tuna-pending-pressure-mismatch");
+            var seedBackend = new FakeProtectedSeedBackend();
+            seedBackend.SaveSeed(keyPath, RandomNumberGenerator.GetBytes(32));
+            using var seedBackendOverride = NknSecretStore.OverrideBackendForTests(seedBackend);
+            var options = LoadNknOptionsWithOverrides(keyPath, "post-tuna-pending-pressure-mismatch");
+            var identity = new NknIdentity("post-tuna-pending-pressure-mismatch", "post-tuna-pending-pressure-mismatch.fake");
+            using var adapter = new RealNknClientAdapter(identity, options);
+            var transferId = $"transfer-post-tuna-pending-pressure-mismatch-{Guid.NewGuid():N}";
+            var sessionId = $"session-post-tuna-pending-pressure-mismatch-{Guid.NewGuid():N}";
+            var logStart = GetOperationalLogLength();
+
+            adapter.RegisterActiveFileTransferDataSession(transferId);
+            adapter.MarkActiveFileTransferPostTunaFallbackRuntime(transferId, "test_pending_pressure_mismatch");
+            adapter.ReportPostTunaFallbackControlPlanePressure(
+                sessionId,
+                transferId,
+                FileTransferRouteResolver.PostTunaFallbackV6Token,
+                protocolVersion: FileTransferProtocol.ProtocolVersionV6,
+                liveRouteEpoch: 4,
+                legGeneration: 6,
+                bridgeRecoveryGeneration: 2,
+                transportEpoch: 2,
+                checkpointRequestId: null,
+                kind: "frontier_request",
+                reason: "frontier_stall_repair_due");
+
+            adapter.MarkActiveFileTransferPostTunaFallbackLegAuthority(
+                transferId,
+                sessionId,
+                legGeneration: 7,
+                routeToken: FileTransferRouteResolver.PostTunaFallbackV6Token,
+                protocolVersion: FileTransferProtocol.ProtocolVersionV6,
+                liveRouteEpoch: 4,
+                transportEpoch: 2,
+                bridgeRecoveryGeneration: 2,
+                checkpointRequestId: null,
+                authorityReason: "post_tuna_fallback_session_liveness_timeout_pending");
+
+            var logText = ReadOperationalLogTail(logStart);
+            AssertPostTunaFallbackObservationHasNoRecoveryAuthority(adapter, logText);
+            Assert.Contains(
+                "event=filetransfer_post_tuna_fallback_control_plane_pressure_observed;",
+                logText,
+                StringComparison.Ordinal);
+            Assert.Contains(
+                "event=filetransfer_fallback_leg_authority_bridge_observed;",
+                logText,
+                StringComparison.Ordinal);
+            Assert.DoesNotContain(
+                "event=filetransfer_post_tuna_fallback_control_plane_pressure_marked;",
+                logText,
+                StringComparison.Ordinal);
+
+            adapter.UnregisterActiveFileTransferDataSession(transferId);
+        }
+        finally
+        {
+            try
+            {
+                CleanupDirectoryIfExists(tempDir);
+            }
+            catch
+            {
+            }
+        }
+    }
+
+    [Trait("Category", "LegacySmoke")]
+    [Fact]
+    public void Bridge_PostTunaFallbackControlPlanePressureNewerLegCannotRefreshAuthority()
+    {
+        var tempDir = Path.Combine(Path.GetTempPath(), "nlink-post-tuna-newer-leg-pressure", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(tempDir);
+        try
+        {
+            var keyPath = Path.Combine(tempDir, "identity.json");
+            WriteIdentityFile(keyPath, "post-tuna-newer-leg-pressure");
+            var seedBackend = new FakeProtectedSeedBackend();
+            seedBackend.SaveSeed(keyPath, RandomNumberGenerator.GetBytes(32));
+            using var seedBackendOverride = NknSecretStore.OverrideBackendForTests(seedBackend);
+            var options = LoadNknOptionsWithOverrides(keyPath, "post-tuna-newer-leg-pressure");
+            var identity = new NknIdentity("post-tuna-newer-leg-pressure", "post-tuna-newer-leg-pressure.fake");
+            using var adapter = new RealNknClientAdapter(identity, options);
+            var transferId = $"transfer-post-tuna-newer-leg-pressure-{Guid.NewGuid():N}";
+            var sessionId = $"session-post-tuna-newer-leg-pressure-{Guid.NewGuid():N}";
+            var logStart = GetOperationalLogLength();
+
+            adapter.RegisterActiveFileTransferDataSession(transferId);
+            adapter.MarkActiveFileTransferPostTunaFallbackRuntime(transferId, "test_newer_leg_pressure");
+            adapter.MarkActiveFileTransferPostTunaFallbackLegAuthority(
+                transferId,
+                sessionId,
+                legGeneration: 3,
+                routeToken: FileTransferRouteResolver.PostTunaFallbackV6Token,
+                protocolVersion: FileTransferProtocol.ProtocolVersionV6,
+                liveRouteEpoch: 2,
+                transportEpoch: 1,
+                bridgeRecoveryGeneration: 1,
+                checkpointRequestId: "v6-regular-nkn-state-refresh:2",
+                authorityReason: "old_bridge_authority");
+
+            adapter.ReportPostTunaFallbackControlPlanePressure(
+                sessionId,
+                transferId,
+                FileTransferRouteResolver.PostTunaFallbackV6Token,
+                protocolVersion: FileTransferProtocol.ProtocolVersionV6,
+                liveRouteEpoch: 2,
+                legGeneration: 4,
+                bridgeRecoveryGeneration: 1,
+                transportEpoch: 2,
+                checkpointRequestId: null,
+                kind: "receiver_state",
+                reason: "frontier_stall_repair_due");
+
+            var logText = ReadOperationalLogTail(logStart);
+            AssertPostTunaFallbackObservationHasNoRecoveryAuthority(adapter, logText);
+            Assert.Contains(
+                "event=filetransfer_post_tuna_fallback_control_plane_pressure_observed;",
+                logText,
+                StringComparison.Ordinal);
+            Assert.Contains(
+                "decision_reason=coordinator_fallback_tail_evaluation_required",
+                logText,
+                StringComparison.Ordinal);
+            Assert.DoesNotContain(
+                "authority_reason=control_plane_pressure_authority_refresh",
+                logText,
+                StringComparison.Ordinal);
+            Assert.DoesNotContain(
+                "event=filetransfer_post_tuna_fallback_control_plane_pressure_marked;",
+                logText,
+                StringComparison.Ordinal);
+            Assert.DoesNotContain("authority_source=bridge_authority_refreshed_from_pressure", logText, StringComparison.Ordinal);
+
+            adapter.UnregisterActiveFileTransferDataSession(transferId);
+        }
+        finally
+        {
+            try
+            {
+                CleanupDirectoryIfExists(tempDir);
+            }
+            catch
+            {
+            }
+        }
+    }
+
+    [Trait("Category", "LegacySmoke")]
+    [Fact]
+    public void Bridge_PostTunaFallbackControlPlanePressureCompletionAndClearRemainDiagnostic()
+    {
+        var tempDir = Path.Combine(Path.GetTempPath(), "nlink-post-tuna-completed-pressure", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(tempDir);
+        try
+        {
+            var keyPath = Path.Combine(tempDir, "identity.json");
+            WriteIdentityFile(keyPath, "post-tuna-completed-pressure");
+            var seedBackend = new FakeProtectedSeedBackend();
+            seedBackend.SaveSeed(keyPath, RandomNumberGenerator.GetBytes(32));
+            using var seedBackendOverride = NknSecretStore.OverrideBackendForTests(seedBackend);
+            var options = LoadNknOptionsWithOverrides(keyPath, "post-tuna-completed-pressure");
+            var identity = new NknIdentity("post-tuna-completed-pressure", "post-tuna-completed-pressure.fake");
+            using var adapter = new RealNknClientAdapter(identity, options);
+            var transferId = $"transfer-post-tuna-completed-pressure-{Guid.NewGuid():N}";
+            var sessionId = $"session-post-tuna-completed-pressure-{Guid.NewGuid():N}";
+
+            adapter.RegisterActiveFileTransferDataSession(transferId);
+            adapter.MarkActiveFileTransferPostTunaFallbackRuntime(transferId, "test_completed_authority");
+            adapter.MarkActiveFileTransferPostTunaFallbackLegAuthority(
+                transferId,
+                sessionId,
+                legGeneration: 3,
+                routeToken: FileTransferRouteResolver.PostTunaFallbackV6Token,
+                protocolVersion: FileTransferProtocol.ProtocolVersionV6,
+                liveRouteEpoch: 2,
+                transportEpoch: 5,
+                bridgeRecoveryGeneration: 1,
+                checkpointRequestId: null,
+                authorityReason: "test_authority");
+            adapter.ReportPostTunaFallbackControlPlanePressure(
+                sessionId,
+                transferId,
+                FileTransferRouteResolver.PostTunaFallbackV6Token,
+                protocolVersion: FileTransferProtocol.ProtocolVersionV6,
+                liveRouteEpoch: 2,
+                legGeneration: 3,
+                bridgeRecoveryGeneration: 1,
+                transportEpoch: 5,
+                checkpointRequestId: null,
+                kind: "frontier_request",
+                reason: "frontier_stall_repair_due");
+
+            var secondStart = GetOperationalLogLength();
+            adapter.MarkPostTunaFallbackLegAuthorityCompleted(
+                transferId,
+                sessionId,
+                legGeneration: 3,
+                liveRouteEpoch: 2,
+                transportEpoch: 5,
+                bridgeRecoveryGeneration: 1,
+                checkpointRequestId: null,
+                reason: "test_authority_completed");
+            adapter.ClearPostTunaFallbackControlPlanePressure(
+                transferId,
+                "fallback_authority_completed");
+            adapter.ReportPostTunaFallbackControlPlanePressure(
+                sessionId,
+                transferId,
+                FileTransferRouteResolver.PostTunaFallbackV6Token,
+                protocolVersion: FileTransferProtocol.ProtocolVersionV6,
+                liveRouteEpoch: 2,
+                legGeneration: 3,
+                bridgeRecoveryGeneration: 1,
+                transportEpoch: 5,
+                checkpointRequestId: null,
+                kind: "frontier_request",
+                reason: "frontier_stall_repair_due");
+
+            var logText = ReadOperationalLogTail(secondStart);
+            AssertPostTunaFallbackObservationHasNoRecoveryAuthority(adapter, logText);
+            Assert.Contains("event=filetransfer_fallback_leg_authority_bridge_completion_observed;", logText, StringComparison.Ordinal);
+            Assert.Contains("event=filetransfer_post_tuna_fallback_control_plane_pressure_clear_observed;", logText, StringComparison.Ordinal);
+            Assert.Contains("event=filetransfer_post_tuna_fallback_control_plane_pressure_observed;", logText, StringComparison.Ordinal);
+            Assert.Contains("allow_control_plane_pressure_after_completion=0", logText, StringComparison.Ordinal);
+            Assert.DoesNotContain(
+                "event=filetransfer_post_tuna_fallback_control_plane_pressure_marked;",
+                logText,
+                StringComparison.Ordinal);
+
+            adapter.UnregisterActiveFileTransferDataSession(transferId);
+        }
+        finally
+        {
+            try
+            {
+                CleanupDirectoryIfExists(tempDir);
+            }
+            catch
+            {
+            }
+        }
+    }
+
+    [Trait("Category", "LegacySmoke")]
+    [Fact]
+    public void Bridge_PostTunaFallbackControlPlanePressureCompletedContinuationRemainsDiagnostic()
+    {
+        var tempDir = Path.Combine(Path.GetTempPath(), "nlink-post-tuna-completed-continuation-pressure", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(tempDir);
+        try
+        {
+            var keyPath = Path.Combine(tempDir, "identity.json");
+            WriteIdentityFile(keyPath, "post-tuna-completed-continuation-pressure");
+            var seedBackend = new FakeProtectedSeedBackend();
+            seedBackend.SaveSeed(keyPath, RandomNumberGenerator.GetBytes(32));
+            using var seedBackendOverride = NknSecretStore.OverrideBackendForTests(seedBackend);
+            var options = LoadNknOptionsWithOverrides(keyPath, "post-tuna-completed-continuation-pressure");
+            var identity = new NknIdentity("post-tuna-completed-continuation-pressure", "post-tuna-completed-continuation-pressure.fake");
+            using var adapter = new RealNknClientAdapter(identity, options);
+            var transferId = $"transfer-post-tuna-completed-continuation-pressure-{Guid.NewGuid():N}";
+            var sessionId = $"session-post-tuna-completed-continuation-pressure-{Guid.NewGuid():N}";
+            var logStart = GetOperationalLogLength();
+
+            adapter.RegisterActiveFileTransferDataSession(transferId);
+            adapter.MarkActiveFileTransferPostTunaFallbackRuntime(transferId, "test_completed_continuation_authority");
+            adapter.MarkActiveFileTransferPostTunaFallbackLegAuthority(
+                transferId,
+                sessionId,
+                legGeneration: 3,
+                routeToken: FileTransferRouteResolver.PostTunaFallbackV6Token,
+                protocolVersion: FileTransferProtocol.ProtocolVersionV6,
+                liveRouteEpoch: 2,
+                transportEpoch: 5,
+                bridgeRecoveryGeneration: 1,
+                checkpointRequestId: null,
+                authorityReason: "test_authority");
+            adapter.MarkPostTunaFallbackLegAuthorityCompleted(
+                transferId,
+                sessionId,
+                legGeneration: 3,
+                liveRouteEpoch: 2,
+                transportEpoch: 5,
+                bridgeRecoveryGeneration: 1,
+                checkpointRequestId: null,
+                reason: "frontier_request_control_plane",
+                allowFurtherControlPlanePressure: true);
+            adapter.ReportPostTunaFallbackControlPlanePressure(
+                sessionId,
+                transferId,
+                FileTransferRouteResolver.PostTunaFallbackV6Token,
+                protocolVersion: FileTransferProtocol.ProtocolVersionV6,
+                liveRouteEpoch: 2,
+                legGeneration: 3,
+                bridgeRecoveryGeneration: 1,
+                transportEpoch: 5,
+                checkpointRequestId: null,
+                kind: "frontier_request",
+                reason: "frontier_stall_repair_due");
+
+            var logText = ReadOperationalLogTail(logStart);
+            AssertPostTunaFallbackObservationHasNoRecoveryAuthority(adapter, logText);
+            Assert.Contains("event=filetransfer_fallback_leg_authority_bridge_completion_observed;", logText, StringComparison.Ordinal);
+            Assert.Contains("allow_control_plane_pressure_after_completion=1", logText, StringComparison.Ordinal);
+            Assert.Contains(
+                "event=filetransfer_post_tuna_fallback_control_plane_pressure_observed;",
+                logText,
+                StringComparison.Ordinal);
+            Assert.Contains("decision_reason=coordinator_fallback_tail_authority_required", logText, StringComparison.Ordinal);
+            Assert.DoesNotContain("reason=authority_completed", logText, StringComparison.Ordinal);
+
+            adapter.UnregisterActiveFileTransferDataSession(transferId);
+        }
+        finally
+        {
+            try
+            {
+                CleanupDirectoryIfExists(tempDir);
+            }
+            catch
+            {
+            }
+        }
+    }
+
+    [Trait("Category", "LegacySmoke")]
+    [Fact]
+    public void Bridge_PostTunaFallbackControlPlanePressureNormalizesNoneCheckpointObservation()
+    {
+        var tempDir = Path.Combine(Path.GetTempPath(), "nlink-post-tuna-normalized-checkpoint-pressure", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(tempDir);
+        try
+        {
+            var keyPath = Path.Combine(tempDir, "identity.json");
+            WriteIdentityFile(keyPath, "post-tuna-normalized-checkpoint-pressure");
+            var seedBackend = new FakeProtectedSeedBackend();
+            seedBackend.SaveSeed(keyPath, RandomNumberGenerator.GetBytes(32));
+            using var seedBackendOverride = NknSecretStore.OverrideBackendForTests(seedBackend);
+            var options = LoadNknOptionsWithOverrides(keyPath, "post-tuna-normalized-checkpoint-pressure");
+            var identity = new NknIdentity("post-tuna-normalized-checkpoint-pressure", "post-tuna-normalized-checkpoint-pressure.fake");
+            using var adapter = new RealNknClientAdapter(identity, options);
+            var transferId = $"transfer-post-tuna-normalized-checkpoint-pressure-{Guid.NewGuid():N}";
+            var sessionId = $"session-post-tuna-normalized-checkpoint-pressure-{Guid.NewGuid():N}";
+            var logStart = GetOperationalLogLength();
+
+            adapter.RegisterActiveFileTransferDataSession(transferId);
+            adapter.MarkActiveFileTransferPostTunaFallbackRuntime(transferId, "test_normalized_checkpoint_pressure");
+            adapter.MarkActiveFileTransferPostTunaFallbackLegAuthority(
+                transferId,
+                sessionId,
+                legGeneration: 3,
+                routeToken: FileTransferRouteResolver.PostTunaFallbackV6Token,
+                protocolVersion: FileTransferProtocol.ProtocolVersionV6,
+                liveRouteEpoch: 2,
+                transportEpoch: 5,
+                bridgeRecoveryGeneration: 1,
+                checkpointRequestId: "(none)",
+                authorityReason: "test_authority");
+            adapter.ReportPostTunaFallbackControlPlanePressure(
+                sessionId,
+                transferId,
+                FileTransferRouteResolver.PostTunaFallbackV6Token,
+                protocolVersion: FileTransferProtocol.ProtocolVersionV6,
+                liveRouteEpoch: 2,
+                legGeneration: 3,
+                bridgeRecoveryGeneration: 1,
+                transportEpoch: 5,
+                checkpointRequestId: "none",
+                kind: "frontier_request",
+                reason: "frontier_stall_repair_due");
+
+            var logText = ReadOperationalLogTail(logStart);
+            AssertPostTunaFallbackObservationHasNoRecoveryAuthority(adapter, logText);
+            Assert.Contains("event=filetransfer_fallback_leg_authority_bridge_observed;", logText, StringComparison.Ordinal);
+            Assert.Contains("checkpoint_request_id=none", logText, StringComparison.Ordinal);
+            Assert.Contains(
+                "event=filetransfer_post_tuna_fallback_control_plane_pressure_observed;",
+                logText,
+                StringComparison.Ordinal);
+            Assert.DoesNotContain("reason=authority_mismatch", logText, StringComparison.Ordinal);
+
+            adapter.UnregisterActiveFileTransferDataSession(transferId);
+        }
+        finally
+        {
+            try
+            {
+                CleanupDirectoryIfExists(tempDir);
+            }
+            catch
+            {
+            }
+        }
+    }
+
+    [Trait("Category", "LegacySmoke")]
+    [Fact]
+    public void Bridge_PostTunaFallbackControlPlanePressureCheckpointMismatchRemainsDiagnostic()
+    {
+        var tempDir = Path.Combine(Path.GetTempPath(), "nlink-post-tuna-concrete-checkpoint-pressure", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(tempDir);
+        try
+        {
+            var keyPath = Path.Combine(tempDir, "identity.json");
+            WriteIdentityFile(keyPath, "post-tuna-concrete-checkpoint-pressure");
+            var seedBackend = new FakeProtectedSeedBackend();
+            seedBackend.SaveSeed(keyPath, RandomNumberGenerator.GetBytes(32));
+            using var seedBackendOverride = NknSecretStore.OverrideBackendForTests(seedBackend);
+            var options = LoadNknOptionsWithOverrides(keyPath, "post-tuna-concrete-checkpoint-pressure");
+            var identity = new NknIdentity("post-tuna-concrete-checkpoint-pressure", "post-tuna-concrete-checkpoint-pressure.fake");
+            using var adapter = new RealNknClientAdapter(identity, options);
+            var transferId = $"transfer-post-tuna-concrete-checkpoint-pressure-{Guid.NewGuid():N}";
+            var sessionId = $"session-post-tuna-concrete-checkpoint-pressure-{Guid.NewGuid():N}";
+            var logStart = GetOperationalLogLength();
+
+            adapter.RegisterActiveFileTransferDataSession(transferId);
+            adapter.MarkActiveFileTransferPostTunaFallbackRuntime(transferId, "test_concrete_checkpoint_pressure");
+            adapter.MarkActiveFileTransferPostTunaFallbackLegAuthority(
+                transferId,
+                sessionId,
+                legGeneration: 3,
+                routeToken: FileTransferRouteResolver.PostTunaFallbackV6Token,
+                protocolVersion: FileTransferProtocol.ProtocolVersionV6,
+                liveRouteEpoch: 2,
+                transportEpoch: 5,
+                bridgeRecoveryGeneration: 1,
+                checkpointRequestId: "fallback-checkpoint-123",
+                authorityReason: "test_authority");
+            adapter.ReportPostTunaFallbackControlPlanePressure(
+                sessionId,
+                transferId,
+                FileTransferRouteResolver.PostTunaFallbackV6Token,
+                protocolVersion: FileTransferProtocol.ProtocolVersionV6,
+                liveRouteEpoch: 2,
+                legGeneration: 3,
+                bridgeRecoveryGeneration: 1,
+                transportEpoch: 5,
+                checkpointRequestId: "none",
+                kind: "frontier_request",
+                reason: "frontier_stall_repair_due");
+
+            var logText = ReadOperationalLogTail(logStart);
+            AssertPostTunaFallbackObservationHasNoRecoveryAuthority(adapter, logText);
+            Assert.Contains("event=filetransfer_fallback_leg_authority_bridge_observed;", logText, StringComparison.Ordinal);
+            Assert.Contains("checkpoint_request_id=fallback-checkpoint-123", logText, StringComparison.Ordinal);
+            Assert.Contains(
+                "event=filetransfer_post_tuna_fallback_control_plane_pressure_observed;",
+                logText,
+                StringComparison.Ordinal);
+            Assert.Contains("decision_reason=coordinator_fallback_tail_evaluation_required", logText, StringComparison.Ordinal);
+            Assert.DoesNotContain(
+                "event=filetransfer_post_tuna_fallback_control_plane_pressure_marked;",
+                logText,
+                StringComparison.Ordinal);
+
+            adapter.UnregisterActiveFileTransferDataSession(transferId);
+        }
+        finally
+        {
+            try
+            {
+                CleanupDirectoryIfExists(tempDir);
+            }
+            catch
+            {
+            }
+        }
+    }
+
+    [Trait("Category", "LegacySmoke")]
+    [Fact]
+    public void Bridge_PostTunaFallbackControlPlanePressureLateContinuationCannotPromotePressure()
+    {
+        var tempDir = Path.Combine(Path.GetTempPath(), "nlink-post-tuna-completed-continuation-pending-pressure", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(tempDir);
+        try
+        {
+            var keyPath = Path.Combine(tempDir, "identity.json");
+            WriteIdentityFile(keyPath, "post-tuna-completed-continuation-pending-pressure");
+            var seedBackend = new FakeProtectedSeedBackend();
+            seedBackend.SaveSeed(keyPath, RandomNumberGenerator.GetBytes(32));
+            using var seedBackendOverride = NknSecretStore.OverrideBackendForTests(seedBackend);
+            var options = LoadNknOptionsWithOverrides(keyPath, "post-tuna-completed-continuation-pending-pressure");
+            var identity = new NknIdentity("post-tuna-completed-continuation-pending-pressure", "post-tuna-completed-continuation-pending-pressure.fake");
+            using var adapter = new RealNknClientAdapter(identity, options);
+            var transferId = $"transfer-post-tuna-completed-continuation-pending-pressure-{Guid.NewGuid():N}";
+            var sessionId = $"session-post-tuna-completed-continuation-pending-pressure-{Guid.NewGuid():N}";
+            var logStart = GetOperationalLogLength();
+
+            adapter.RegisterActiveFileTransferDataSession(transferId);
+            adapter.MarkActiveFileTransferPostTunaFallbackRuntime(transferId, "test_completed_continuation_pending_authority");
+            adapter.MarkActiveFileTransferPostTunaFallbackLegAuthority(
+                transferId,
+                sessionId,
+                legGeneration: 3,
+                routeToken: FileTransferRouteResolver.PostTunaFallbackV6Token,
+                protocolVersion: FileTransferProtocol.ProtocolVersionV6,
+                liveRouteEpoch: 2,
+                transportEpoch: 5,
+                bridgeRecoveryGeneration: 1,
+                checkpointRequestId: null,
+                authorityReason: "test_authority");
+            adapter.MarkPostTunaFallbackLegAuthorityCompleted(
+                transferId,
+                sessionId,
+                legGeneration: 3,
+                liveRouteEpoch: 2,
+                transportEpoch: 5,
+                bridgeRecoveryGeneration: 1,
+                checkpointRequestId: null,
+                reason: "frontier_request_control_plane",
+                allowFurtherControlPlanePressure: false);
+            adapter.ReportPostTunaFallbackControlPlanePressure(
+                sessionId,
+                transferId,
+                FileTransferRouteResolver.PostTunaFallbackV6Token,
+                protocolVersion: FileTransferProtocol.ProtocolVersionV6,
+                liveRouteEpoch: 2,
+                legGeneration: 3,
+                bridgeRecoveryGeneration: 1,
+                transportEpoch: 5,
+                checkpointRequestId: null,
+                kind: "frontier_request",
+                reason: "frontier_stall_repair_due");
+
+            var beforeContinuation = ReadOperationalLogTail(logStart);
+            AssertPostTunaFallbackObservationHasNoRecoveryAuthority(adapter, beforeContinuation);
+            Assert.Contains("allow_control_plane_pressure_after_completion=0", beforeContinuation, StringComparison.Ordinal);
+            Assert.DoesNotContain(
+                "event=filetransfer_post_tuna_fallback_control_plane_pressure_marked;",
+                beforeContinuation,
+                StringComparison.Ordinal);
+
+            adapter.MarkPostTunaFallbackLegAuthorityCompleted(
+                transferId,
+                sessionId,
+                legGeneration: 3,
+                liveRouteEpoch: 2,
+                transportEpoch: 5,
+                bridgeRecoveryGeneration: 1,
+                checkpointRequestId: null,
+                reason: "frontier_request_control_plane",
+                allowFurtherControlPlanePressure: true);
+
+            var afterContinuation = ReadOperationalLogTail(logStart);
+            AssertPostTunaFallbackObservationHasNoRecoveryAuthority(adapter, afterContinuation);
+            Assert.Contains("allow_control_plane_pressure_after_completion=1", afterContinuation, StringComparison.Ordinal);
+            Assert.Contains(
+                "event=filetransfer_post_tuna_fallback_control_plane_pressure_observed;",
+                afterContinuation,
+                StringComparison.Ordinal);
+            Assert.Contains("decision_reason=coordinator_fallback_tail_authority_required", afterContinuation, StringComparison.Ordinal);
+
+            adapter.UnregisterActiveFileTransferDataSession(transferId);
+        }
+        finally
+        {
+            try
+            {
+                CleanupDirectoryIfExists(tempDir);
+            }
+            catch
+            {
+            }
+        }
+    }
+
+    [Trait("Category", "LegacySmoke")]
+    [Fact]
+    public void Bridge_PostTunaFallbackControlPlanePressureActiveRuntimeCannotGrantAuthority()
+    {
+        var tempDir = Path.Combine(Path.GetTempPath(), "nlink-post-tuna-runtime-pressure", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(tempDir);
+        try
+        {
+            var keyPath = Path.Combine(tempDir, "identity.json");
+            WriteIdentityFile(keyPath, "post-tuna-runtime-pressure");
+            var seedBackend = new FakeProtectedSeedBackend();
+            seedBackend.SaveSeed(keyPath, RandomNumberGenerator.GetBytes(32));
+            using var seedBackendOverride = NknSecretStore.OverrideBackendForTests(seedBackend);
+            var options = LoadNknOptionsWithOverrides(keyPath, "post-tuna-runtime-pressure");
+            var identity = new NknIdentity("post-tuna-runtime-pressure", "post-tuna-runtime-pressure.fake");
+            using var adapter = new RealNknClientAdapter(identity, options);
+            var transferId = $"transfer-post-tuna-runtime-pressure-{Guid.NewGuid():N}";
+            var sessionId = $"session-post-tuna-runtime-pressure-{Guid.NewGuid():N}";
+            var logStart = GetOperationalLogLength();
+
+            adapter.RegisterActiveFileTransferDataSession(transferId);
+            adapter.MarkActiveFileTransferPostTunaFallbackRuntime(transferId, "test_receiver_side_runtime");
+            adapter.ReportPostTunaFallbackControlPlanePressure(
+                sessionId,
+                transferId,
+                FileTransferRouteResolver.PostTunaFallbackV6Token,
+                protocolVersion: FileTransferProtocol.ProtocolVersionV6,
+                liveRouteEpoch: 1,
+                legGeneration: 3,
+                bridgeRecoveryGeneration: 1,
+                transportEpoch: 2,
+                checkpointRequestId: null,
+                kind: "receiver_state",
+                reason: "frontier_stall_repair_due");
+
+            var logText = ReadOperationalLogTail(logStart);
+            AssertPostTunaFallbackObservationHasNoRecoveryAuthority(adapter, logText);
+            Assert.Contains(
+                "event=filetransfer_post_tuna_fallback_control_plane_pressure_observed;",
+                logText,
+                StringComparison.Ordinal);
+            Assert.Contains("decision_reason=coordinator_fallback_tail_evaluation_required", logText, StringComparison.Ordinal);
+            Assert.DoesNotContain(
+                "event=filetransfer_post_tuna_fallback_control_plane_pressure_marked;",
+                logText,
+                StringComparison.Ordinal);
+
+            adapter.UnregisterActiveFileTransferDataSession(transferId);
+        }
+        finally
+        {
+            try
+            {
+                CleanupDirectoryIfExists(tempDir);
+            }
+            catch
+            {
+            }
+        }
+    }
+
+    private static void AssertReceiveStallEvaluationWithoutExecution(
+        RealNknClientAdapter adapter,
+        ConcurrentQueue<FileTransferBridgeRecoveryEvaluationRequest> evaluations,
+        string transferId,
+        string countFile,
+        int expectedRecoveryCount,
+        int expectedRecoveryInProgress)
+    {
+        Assert.NotEmpty(evaluations);
+        Assert.All(evaluations, evaluation =>
+        {
+            Assert.Equal(transferId, evaluation.TransferId);
+            Assert.Equal(FileTransferBridgeRecoveryEvaluationKind.ReceiveStall, evaluation.EvaluationKind);
+            Assert.Equal("receive_stall", evaluation.ObservationKind);
+            Assert.True(evaluation.ConsecutiveObservations > 0);
+        });
+        Assert.Null(GetPrivateField(adapter, "activeFileTransferBridgeRecoveryExecutionCommand"));
+        Assert.Null(GetPrivateField(adapter, "lastFileTransferBridgeRecoveryExecutionReceipt"));
+        Assert.Equal(expectedRecoveryCount, Assert.IsType<int>(GetPrivateField(adapter, "receiveStallRecoveryCount")));
+        Assert.Equal(expectedRecoveryInProgress, Assert.IsType<int>(GetPrivateField(adapter, "receiveStallRecoveryInProgress")));
+        Assert.True(TryReadIntFileShared(countFile, out var connectCount));
+        Assert.Equal(1, connectCount);
+    }
+
+    private static void AssertPostTunaFallbackObservationHasNoRecoveryAuthority(
+        RealNknClientAdapter adapter,
+        string logText)
+    {
+        Assert.Contains("event=filetransfer_post_tuna_fallback_control_plane_pressure_observed;", logText, StringComparison.Ordinal);
+        Assert.Contains("authority_effect=none; decision_reason=coordinator_fallback_tail_evaluation_required", logText, StringComparison.Ordinal);
+        Assert.DoesNotContain("event=filetransfer_post_tuna_fallback_control_plane_pressure_marked;", logText, StringComparison.Ordinal);
+        Assert.DoesNotContain("event=filetransfer_fallback_leg_authority_bridge_registered;", logText, StringComparison.Ordinal);
+        Assert.DoesNotContain("event=filetransfer_fallback_leg_authority_bridge_completed;", logText, StringComparison.Ordinal);
+        Assert.DoesNotContain("event=nkn_bridge_recovery_execution_started;", logText, StringComparison.Ordinal);
+        Assert.Null(GetPrivateField(adapter, "activeFileTransferBridgeRecoveryExecutionCommand"));
+        Assert.Null(GetPrivateField(adapter, "lastFileTransferBridgeRecoveryExecutionReceipt"));
+        Assert.Equal(0, Assert.IsType<int>(GetPrivateField(adapter, "receiveStallRecoveryInProgress")));
+        Assert.Equal(0, Assert.IsType<int>(GetPrivateField(adapter, "receiveStallRecoveryCount")));
+        Assert.Equal(0, Assert.IsType<int>(GetPrivateField(adapter, "receiveStallRecoveryAwaitingReceiveProof")));
+        Assert.Equal(0L, Assert.IsType<long>(GetPrivateField(adapter, "receiveStallLastRecoveryStartedTick")));
+        Assert.Equal(0L, Assert.IsType<long>(GetPrivateField(adapter, "receiveStallLastRecoveryCompletedTick")));
+        Assert.Equal(0L, Assert.IsType<long>(GetPrivateField(adapter, "postTunaFallbackProofSendWindowExpiresTick")));
+        Assert.Equal(0L, Assert.IsType<long>(GetPrivateField(adapter, "fileTransferBridgeRecoveryEvaluationGeneration")));
+    }
+
+    [Trait("Category", "LegacySmoke")]
+    [Fact]
+    public async Task Bridge_ReceiveStallRecovery_ControlOnlyOverrideTreatsPostTunaFallbackControlPlanePressureAsDiagnostic()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var bundleDir = TryFindBridgeBundleDirectory();
+        if (bundleDir is null)
+        {
+            return;
+        }
+
+        var nodePath = Path.Combine(bundleDir, "node.exe");
+        if (!File.Exists(nodePath))
+        {
+            return;
+        }
+
+        var tempDir = Path.Combine(Path.GetTempPath(), "nlink-mock-bridge-control-post-tuna-pressure", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(tempDir);
+        var countFile = Path.Combine(tempDir, "connect-count.txt");
+        var bridgePath = Path.Combine(tempDir, "mock-bridge-control-post-tuna-pressure.js");
+        WriteBridgeScriptWithManifest(
+            bridgePath,
+            BuildReceiveStallRecoveryMockBridgeScript(
+                countFile,
+                controlMessagesReceivedSinceLast: 0,
+                bulkMessagesReceivedSinceLast: 1,
+                totalMessagesReceivedSinceLast: 1,
+                controlLastReceivedAgeMs: 35_000,
+                bulkLastReceivedAgeMs: 100,
+                stallHealthSampleCount: 6));
+        var prevNodePath = Environment.GetEnvironmentVariable("NLINK_NKN_NODE_PATH");
+        var prevBridgePath = Environment.GetEnvironmentVariable("NLINK_NKN_BRIDGE_PATH");
+        var prevRecovery = Environment.GetEnvironmentVariable("NLINK_NKN_RECEIVE_STALL_RECOVERY");
+        var prevFastRecovery = Environment.GetEnvironmentVariable("NLINK_NKN_RECEIVE_STALL_FILETRANSFER_FAST_RECOVERY");
+        var prevControlOnlyRecovery = Environment.GetEnvironmentVariable("NLINK_NKN_CONTROL_ONLY_STALL_RECOVERY");
+
+        try
+        {
+            Environment.SetEnvironmentVariable("NLINK_NKN_NODE_PATH", nodePath);
+            Environment.SetEnvironmentVariable("NLINK_NKN_BRIDGE_PATH", bridgePath);
+            Environment.SetEnvironmentVariable("NLINK_NKN_RECEIVE_STALL_RECOVERY", null);
+            Environment.SetEnvironmentVariable("NLINK_NKN_RECEIVE_STALL_FILETRANSFER_FAST_RECOVERY", null);
+            Environment.SetEnvironmentVariable("NLINK_NKN_CONTROL_ONLY_STALL_RECOVERY", "1");
+            var keyPath = Path.Combine(tempDir, "identity.json");
+            WriteIdentityFile(keyPath, "control-post-tuna-pressure");
+            var seedBackend = new FakeProtectedSeedBackend();
+            seedBackend.SaveSeed(keyPath, RandomNumberGenerator.GetBytes(32));
+            using var seedBackendOverride = NknSecretStore.OverrideBackendForTests(seedBackend);
+            var options = LoadNknOptionsWithOverrides(keyPath, "control-post-tuna-pressure");
+            var identity = new NknIdentity("control-post-tuna-pressure", "control-post-tuna-pressure.fake");
+            using var adapter = new RealNknClientAdapter(identity, options);
+            const string transferId = "transfer-control-post-tuna-pressure";
+            const string sessionId = "session-control-post-tuna-pressure";
+            var logStart = GetOperationalLogLength();
+            adapter.RegisterActiveFileTransferDataSession(transferId);
+            adapter.MarkActiveFileTransferPostTunaFallbackRuntime(transferId, "test");
+            adapter.MarkActiveFileTransferPostTunaFallbackLegAuthority(
+                transferId,
+                sessionId,
+                legGeneration: 4,
+                routeToken: "post_tuna_fallback_v6",
+                protocolVersion: 6,
+                liveRouteEpoch: 3,
+                transportEpoch: 7,
+                bridgeRecoveryGeneration: 2,
+                checkpointRequestId: "checkpoint-7",
+                authorityReason: "test_authority");
+            adapter.ReportPostTunaFallbackControlPlanePressure(
+                sessionId,
+                transferId,
+                "post_tuna_fallback_v6",
+                protocolVersion: 6,
+                liveRouteEpoch: 3,
+                legGeneration: 4,
+                bridgeRecoveryGeneration: 2,
+                transportEpoch: 7,
+                checkpointRequestId: "checkpoint-7",
+                kind: "receiver_state",
+                reason: "test_control_plane_pressure");
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+            await adapter.ConnectAsync(cts.Token);
+
+            await WaitUntilAsync(
+                () =>
+                {
+                    var text = ReadOperationalLogTail(logStart);
+                    return text.Contains("event=nkn_bridge_control_receive_recovery_suppressed", StringComparison.Ordinal) &&
+                           text.Contains("consecutive_control_zero_receive_windows=6;", StringComparison.Ordinal);
+                },
+                TimeSpan.FromSeconds(5));
+
+            var logText = ReadOperationalLogTail(logStart);
+            AssertPostTunaFallbackObservationHasNoRecoveryAuthority(adapter, logText);
+            Assert.Contains("event=nkn_bridge_control_receive_recovery_suppressed", logText, StringComparison.Ordinal);
+            Assert.Contains("reason=filetransfer_bulk_receive_active", logText, StringComparison.Ordinal);
+            Assert.DoesNotContain("reason=post_tuna_fallback_control_plane_pressure_diagnostic_only", logText, StringComparison.Ordinal);
+            Assert.DoesNotContain("event=nkn_bridge_control_receive_recovery_allowed", logText, StringComparison.Ordinal);
+            Assert.DoesNotContain("event=nkn_bridge_receive_stall_recovery_started", logText, StringComparison.Ordinal);
+            Assert.True(File.Exists(countFile));
+            Assert.True(TryReadIntFileShared(countFile, out var finalCount));
+            Assert.Equal(1, finalCount);
+
+            adapter.UnregisterActiveFileTransferDataSession(transferId);
+            await adapter.DisconnectAsync();
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("NLINK_NKN_NODE_PATH", prevNodePath);
+            Environment.SetEnvironmentVariable("NLINK_NKN_BRIDGE_PATH", prevBridgePath);
+            Environment.SetEnvironmentVariable("NLINK_NKN_RECEIVE_STALL_RECOVERY", prevRecovery);
+            Environment.SetEnvironmentVariable("NLINK_NKN_RECEIVE_STALL_FILETRANSFER_FAST_RECOVERY", prevFastRecovery);
+            Environment.SetEnvironmentVariable("NLINK_NKN_CONTROL_ONLY_STALL_RECOVERY", prevControlOnlyRecovery);
+            try
+            {
+                CleanupDirectoryIfExists(tempDir);
+            }
+            catch
+            {
+            }
+        }
+    }
+
+    private static bool TryReadIntFileShared(string path, out int value)
+    {
+        value = 0;
+        if (!File.Exists(path))
+        {
+            return false;
+        }
+
+        try
+        {
+            using var stream = File.Open(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+            using var reader = new StreamReader(stream);
+            return int.TryParse(reader.ReadToEnd().Trim(), out value);
+        }
+        catch (IOException)
+        {
+            return false;
+        }
+        catch (UnauthorizedAccessException)
+        {
+            return false;
+        }
+    }
+
+    [Trait("Category", "LegacySmoke")]
+    [Fact]
+    public async Task Bridge_ReceiveStallRecovery_SuppressesControlOnlyReconnectWhenBulkReceiveFreshBeyondGrace()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var bundleDir = TryFindBridgeBundleDirectory();
+        if (bundleDir is null)
+        {
+            return;
+        }
+
+        var nodePath = Path.Combine(bundleDir, "node.exe");
+        if (!File.Exists(nodePath))
+        {
+            return;
+        }
+
+        var tempDir = Path.Combine(Path.GetTempPath(), "nlink-mock-bridge-control-stale", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(tempDir);
+        var countFile = Path.Combine(tempDir, "connect-count.txt");
+        var bridgePath = Path.Combine(tempDir, "mock-bridge-control-stale.js");
+        WriteBridgeScriptWithManifest(
+            bridgePath,
+            BuildReceiveStallRecoveryMockBridgeScript(
+                countFile,
+                controlMessagesReceivedSinceLast: 0,
+                bulkMessagesReceivedSinceLast: 0,
+                totalMessagesReceivedSinceLast: 0,
+                controlLastReceivedAgeMs: 35_000,
+                bulkLastReceivedAgeMs: 100,
+                stallHealthSampleCount: 6));
+        var prevNodePath = Environment.GetEnvironmentVariable("NLINK_NKN_NODE_PATH");
+        var prevBridgePath = Environment.GetEnvironmentVariable("NLINK_NKN_BRIDGE_PATH");
+        var prevRecovery = Environment.GetEnvironmentVariable("NLINK_NKN_RECEIVE_STALL_RECOVERY");
+        var prevFastRecovery = Environment.GetEnvironmentVariable("NLINK_NKN_RECEIVE_STALL_FILETRANSFER_FAST_RECOVERY");
+        var prevControlOnlyRecovery = Environment.GetEnvironmentVariable("NLINK_NKN_CONTROL_ONLY_STALL_RECOVERY");
+
+        try
+        {
+            Environment.SetEnvironmentVariable("NLINK_NKN_NODE_PATH", nodePath);
+            Environment.SetEnvironmentVariable("NLINK_NKN_BRIDGE_PATH", bridgePath);
+            Environment.SetEnvironmentVariable("NLINK_NKN_RECEIVE_STALL_RECOVERY", null);
+            Environment.SetEnvironmentVariable("NLINK_NKN_RECEIVE_STALL_FILETRANSFER_FAST_RECOVERY", null);
+            Environment.SetEnvironmentVariable("NLINK_NKN_CONTROL_ONLY_STALL_RECOVERY", "0");
+            var keyPath = Path.Combine(tempDir, "identity.json");
+            WriteIdentityFile(keyPath, "control-stale");
+            var seedBackend = new FakeProtectedSeedBackend();
+            seedBackend.SaveSeed(keyPath, RandomNumberGenerator.GetBytes(32));
+            using var seedBackendOverride = NknSecretStore.OverrideBackendForTests(seedBackend);
+            var options = LoadNknOptionsWithOverrides(keyPath, "control-stale");
+            var identity = new NknIdentity("control-stale", "control-stale.fake");
+            using var adapter = new RealNknClientAdapter(identity, options);
+            adapter.RegisterActiveFileTransferDataSession("transfer-control-stale");
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+            await adapter.ConnectAsync(cts.Token);
+
+            await WaitUntilAsync(
+                () =>
+                {
+                    var text = LocalOperationalLog.GetRecentLogText();
+                    return text.Contains("event=nkn_bridge_control_receive_recovery_suppressed", StringComparison.Ordinal) &&
+                           text.Contains("reason=filetransfer_bulk_receive_fresh", StringComparison.Ordinal);
+                },
+                TimeSpan.FromSeconds(5));
+
+            var logText = LocalOperationalLog.GetRecentLogText();
+            Assert.Contains("event=nkn_bridge_control_receive_degraded", logText, StringComparison.Ordinal);
+            Assert.Contains("event=nkn_bridge_control_receive_recovery_suppressed", logText, StringComparison.Ordinal);
+            Assert.Contains("reason=filetransfer_bulk_receive_fresh", logText, StringComparison.Ordinal);
+            Assert.True(File.Exists(countFile));
+            Assert.True(int.TryParse(File.ReadAllText(countFile).Trim(), out var count));
+            Assert.Equal(1, count);
+
+            adapter.UnregisterActiveFileTransferDataSession("transfer-control-stale");
+            await adapter.DisconnectAsync();
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("NLINK_NKN_NODE_PATH", prevNodePath);
+            Environment.SetEnvironmentVariable("NLINK_NKN_BRIDGE_PATH", prevBridgePath);
+            Environment.SetEnvironmentVariable("NLINK_NKN_RECEIVE_STALL_RECOVERY", prevRecovery);
+            Environment.SetEnvironmentVariable("NLINK_NKN_RECEIVE_STALL_FILETRANSFER_FAST_RECOVERY", prevFastRecovery);
+            Environment.SetEnvironmentVariable("NLINK_NKN_CONTROL_ONLY_STALL_RECOVERY", prevControlOnlyRecovery);
+            try
+            {
+                CleanupDirectoryIfExists(tempDir);
+            }
+            catch
+            {
+            }
+        }
+    }
+
+    [Trait("Category", "LegacySmoke")]
+    [Fact]
+    public async Task Bridge_ReceiveStallRecovery_RegularV4FeedbackPressureIsEvidenceOnlyDuringStall()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var bundleDir = TryFindBridgeBundleDirectory();
+        if (bundleDir is null)
+        {
+            return;
+        }
+
+        var nodePath = Path.Combine(bundleDir, "node.exe");
+        if (!File.Exists(nodePath))
+        {
+            return;
+        }
+
+        var tempDir = Path.Combine(Path.GetTempPath(), "nlink-mock-bridge-regular-v4-feedback-pressure", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(tempDir);
+        var countFile = Path.Combine(tempDir, "connect-count.txt");
+        var bridgePath = Path.Combine(tempDir, "mock-bridge-regular-v4-feedback-pressure.js");
+        WriteBridgeScriptWithManifest(
+            bridgePath,
+            BuildReceiveStallRecoveryMockBridgeScript(
+                countFile,
+                controlMessagesReceivedSinceLast: 0,
+                bulkMessagesReceivedSinceLast: 0,
+                totalMessagesReceivedSinceLast: 0,
+                controlLastReceivedAgeMs: 25_000,
+                bulkLastReceivedAgeMs: 25_000,
+                stallHealthSampleCount: 4,
+                connectKey: "regular-v4-feedback-pressure-key"));
+        var prevNodePath = Environment.GetEnvironmentVariable("NLINK_NKN_NODE_PATH");
+        var prevBridgePath = Environment.GetEnvironmentVariable("NLINK_NKN_BRIDGE_PATH");
+        var prevRecovery = Environment.GetEnvironmentVariable("NLINK_NKN_RECEIVE_STALL_RECOVERY");
+        var prevFastRecovery = Environment.GetEnvironmentVariable("NLINK_NKN_RECEIVE_STALL_FILETRANSFER_FAST_RECOVERY");
+        var prevControlOnlyRecovery = Environment.GetEnvironmentVariable("NLINK_NKN_CONTROL_ONLY_STALL_RECOVERY");
+
+        try
+        {
+            Environment.SetEnvironmentVariable("NLINK_NKN_NODE_PATH", nodePath);
+            Environment.SetEnvironmentVariable("NLINK_NKN_BRIDGE_PATH", bridgePath);
+            Environment.SetEnvironmentVariable("NLINK_NKN_RECEIVE_STALL_RECOVERY", null);
+            Environment.SetEnvironmentVariable("NLINK_NKN_RECEIVE_STALL_FILETRANSFER_FAST_RECOVERY", null);
+            Environment.SetEnvironmentVariable("NLINK_NKN_CONTROL_ONLY_STALL_RECOVERY", "0");
+            var keyPath = Path.Combine(tempDir, "identity.json");
+            WriteIdentityFile(keyPath, "regular-v4-feedback-pressure");
+            var seedBackend = new FakeProtectedSeedBackend();
+            seedBackend.SaveSeed(keyPath, RandomNumberGenerator.GetBytes(32));
+            using var seedBackendOverride = NknSecretStore.OverrideBackendForTests(seedBackend);
+            var options = LoadNknOptionsWithOverrides(keyPath, "regular-v4-feedback-pressure");
+            var identity = new NknIdentity("regular-v4-feedback-pressure", "regular-v4-feedback-pressure.fake");
+            using var adapter = new RealNknClientAdapter(identity, options);
+            var evaluations = new ConcurrentQueue<FileTransferBridgeRecoveryEvaluationRequest>();
+            adapter.BridgeRecoveryEvaluationRequested += (_, args) => evaluations.Enqueue(args.Request);
+            var logBaseline = GetOperationalLogLength();
+            adapter.RegisterActiveFileTransferDataSession("transfer-regular-v4-feedback-pressure");
+            adapter.RegisterActiveFileTransferRuntime("transfer-regular-v4-feedback-pressure");
+            adapter.ReportRegularV4ControlFeedbackPressure(
+                "transfer-regular-v4-feedback-pressure",
+                "regular_v4_receiver_frontier_repair_due",
+                creditExhaustedTimeMs: 0,
+                frontierLagChunks: 128,
+                pendingRepairCount: 8,
+                repairAuthority: CreateRegularV4FrontierRepairAuthority("transfer-regular-v4-feedback-pressure"));
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(12));
+            await adapter.ConnectAsync(cts.Token);
+
+            await WaitUntilAsync(
+                () => evaluations.Any(e => e.ConsecutiveObservations >= 4),
+                TimeSpan.FromSeconds(8));
+
+            AssertReceiveStallEvaluationWithoutExecution(
+                adapter, evaluations, "transfer-regular-v4-feedback-pressure", countFile, 0, 0);
+            var logText = ReadOperationalLogTail(logBaseline);
+            Assert.DoesNotContain("event=nkn_bridge_receive_stall_recovery_started", logText, StringComparison.Ordinal);
+            Assert.DoesNotContain("event=nkn_bridge_receive_stall_recovery_hard_restart", logText, StringComparison.Ordinal);
+            Assert.DoesNotContain("event=nkn_bridge_recovery_execution_started", logText, StringComparison.Ordinal);
+            Assert.Contains("event=filetransfer_regular_v4_control_feedback_pressure_observed", logText, StringComparison.Ordinal);
+            Assert.Null(GetRegularV4FrontierRepairPressureCurrent(adapter));
+
+            adapter.UnregisterActiveFileTransferRuntime("transfer-regular-v4-feedback-pressure");
+            adapter.UnregisterActiveFileTransferDataSession("transfer-regular-v4-feedback-pressure");
+            await adapter.DisconnectAsync();
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("NLINK_NKN_NODE_PATH", prevNodePath);
+            Environment.SetEnvironmentVariable("NLINK_NKN_BRIDGE_PATH", prevBridgePath);
+            Environment.SetEnvironmentVariable("NLINK_NKN_RECEIVE_STALL_RECOVERY", prevRecovery);
+            Environment.SetEnvironmentVariable("NLINK_NKN_RECEIVE_STALL_FILETRANSFER_FAST_RECOVERY", prevFastRecovery);
+            Environment.SetEnvironmentVariable("NLINK_NKN_CONTROL_ONLY_STALL_RECOVERY", prevControlOnlyRecovery);
+            try
+            {
+                CleanupDirectoryIfExists(tempDir);
+            }
+            catch
+            {
+            }
+        }
+    }
+
+    [Trait("Category", "LegacySmoke")]
+    [Fact]
+    public async Task Bridge_ReceiveStallRecovery_RegularV4FeedbackPressureCannotGrantAuthorityDuringBulkGrace()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var bundleDir = TryFindBridgeBundleDirectory();
+        if (bundleDir is null)
+        {
+            return;
+        }
+
+        var nodePath = Path.Combine(bundleDir, "node.exe");
+        if (!File.Exists(nodePath))
+        {
+            return;
+        }
+
+        var tempDir = Path.Combine(Path.GetTempPath(), "nlink-mock-bridge-regular-v4-bulk-recent", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(tempDir);
+        var countFile = Path.Combine(tempDir, "connect-count.txt");
+        var bridgePath = Path.Combine(tempDir, "mock-bridge-regular-v4-bulk-recent.js");
+        WriteBridgeScriptWithManifest(
+            bridgePath,
+            BuildReceiveStallRecoveryMockBridgeScript(
+                countFile,
+                controlMessagesReceivedSinceLast: 0,
+                bulkMessagesReceivedSinceLast: 0,
+                totalMessagesReceivedSinceLast: 0,
+                controlLastReceivedAgeMs: 18_000,
+                bulkLastReceivedAgeMs: 9_000,
+                stallHealthSampleCount: 4,
+                connectKey: "regular-v4-bulk-recent-key"));
+        var prevNodePath = Environment.GetEnvironmentVariable("NLINK_NKN_NODE_PATH");
+        var prevBridgePath = Environment.GetEnvironmentVariable("NLINK_NKN_BRIDGE_PATH");
+        var prevRecovery = Environment.GetEnvironmentVariable("NLINK_NKN_RECEIVE_STALL_RECOVERY");
+        var prevFastRecovery = Environment.GetEnvironmentVariable("NLINK_NKN_RECEIVE_STALL_FILETRANSFER_FAST_RECOVERY");
+        var prevControlOnlyRecovery = Environment.GetEnvironmentVariable("NLINK_NKN_CONTROL_ONLY_STALL_RECOVERY");
+
+        try
+        {
+            Environment.SetEnvironmentVariable("NLINK_NKN_NODE_PATH", nodePath);
+            Environment.SetEnvironmentVariable("NLINK_NKN_BRIDGE_PATH", bridgePath);
+            Environment.SetEnvironmentVariable("NLINK_NKN_RECEIVE_STALL_RECOVERY", null);
+            Environment.SetEnvironmentVariable("NLINK_NKN_RECEIVE_STALL_FILETRANSFER_FAST_RECOVERY", null);
+            Environment.SetEnvironmentVariable("NLINK_NKN_CONTROL_ONLY_STALL_RECOVERY", "0");
+            var keyPath = Path.Combine(tempDir, "identity.json");
+            WriteIdentityFile(keyPath, "regular-v4-bulk-recent");
+            var seedBackend = new FakeProtectedSeedBackend();
+            seedBackend.SaveSeed(keyPath, RandomNumberGenerator.GetBytes(32));
+            using var seedBackendOverride = NknSecretStore.OverrideBackendForTests(seedBackend);
+            var options = LoadNknOptionsWithOverrides(keyPath, "regular-v4-bulk-recent");
+            var identity = new NknIdentity("regular-v4-bulk-recent", "regular-v4-bulk-recent.fake");
+            using var adapter = new RealNknClientAdapter(identity, options);
+            var evaluations = new ConcurrentQueue<FileTransferBridgeRecoveryEvaluationRequest>();
+            adapter.BridgeRecoveryEvaluationRequested += (_, args) => evaluations.Enqueue(args.Request);
+            var logBaseline = GetOperationalLogLength();
+            adapter.RegisterActiveFileTransferDataSession("transfer-regular-v4-bulk-recent");
+            adapter.RegisterActiveFileTransferRuntime("transfer-regular-v4-bulk-recent");
+            adapter.ReportRegularV4ControlFeedbackPressure(
+                "transfer-regular-v4-bulk-recent",
+                "regular_v4_receiver_frontier_repair_due",
+                creditExhaustedTimeMs: 0,
+                frontierLagChunks: 128,
+                pendingRepairCount: 8,
+                repairAuthority: CreateRegularV4FrontierRepairAuthority("transfer-regular-v4-bulk-recent"));
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(12));
+            await adapter.ConnectAsync(cts.Token);
+
+            await WaitUntilAsync(
+                () => evaluations.Any(e => e.ConsecutiveObservations >= 2) &&
+                      ReadOperationalLogTail(logBaseline).Contains("consecutive_zero_receive_windows=4;", StringComparison.Ordinal),
+                TimeSpan.FromSeconds(8));
+
+            AssertReceiveStallEvaluationWithoutExecution(
+                adapter, evaluations, "transfer-regular-v4-bulk-recent", countFile, 0, 0);
+            var logText = ReadOperationalLogTail(logBaseline);
+            Assert.DoesNotContain("event=nkn_bridge_receive_stall_recovery_started", logText, StringComparison.Ordinal);
+            Assert.DoesNotContain("event=nkn_bridge_receive_stall_recovery_hard_restart", logText, StringComparison.Ordinal);
+            Assert.DoesNotContain("event=nkn_bridge_recovery_execution_started", logText, StringComparison.Ordinal);
+            Assert.Contains("event=filetransfer_regular_v4_control_feedback_pressure_observed", logText, StringComparison.Ordinal);
+            Assert.Null(GetRegularV4FrontierRepairPressureCurrent(adapter));
+            Assert.Contains("reason=filetransfer_runtime_protocol_liveness;", logText, StringComparison.Ordinal);
+            Assert.All(evaluations, e => Assert.Equal(9_000L, e.BulkLastReceivedAgeMs));
+
+            adapter.UnregisterActiveFileTransferRuntime("transfer-regular-v4-bulk-recent");
+            adapter.UnregisterActiveFileTransferDataSession("transfer-regular-v4-bulk-recent");
             await adapter.DisconnectAsync();
         }
         finally
@@ -1540,6 +5989,2356 @@ public sealed class BridgeConnectionLifecycleTests : SessionRuntimeConnectionTes
             catch
             {
             }
+        }
+    }
+
+    [Trait("Category", "LegacySmoke")]
+    [Fact]
+    public async Task Bridge_ReceiveStallRecovery_ActiveFileTransferRequestsCoordinatorWithoutAutoRetry()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var bundleDir = TryFindBridgeBundleDirectory();
+        if (bundleDir is null)
+        {
+            return;
+        }
+
+        var nodePath = Path.Combine(bundleDir, "node.exe");
+        if (!File.Exists(nodePath))
+        {
+            return;
+        }
+
+        var tempDir = Path.Combine(Path.GetTempPath(), "nlink-mock-bridge-active-filetransfer-cooldown", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(tempDir);
+        var countFile = Path.Combine(tempDir, "connect-count.txt");
+        var bridgePath = Path.Combine(tempDir, "mock-bridge-active-filetransfer-cooldown.js");
+        WriteBridgeScriptWithManifest(bridgePath, BuildActiveFileTransferCooldownRecoveryMockBridgeScript(countFile));
+        var prevNodePath = Environment.GetEnvironmentVariable("NLINK_NKN_NODE_PATH");
+        var prevBridgePath = Environment.GetEnvironmentVariable("NLINK_NKN_BRIDGE_PATH");
+        var prevRecovery = Environment.GetEnvironmentVariable("NLINK_NKN_RECEIVE_STALL_RECOVERY");
+
+        try
+        {
+            Environment.SetEnvironmentVariable("NLINK_NKN_NODE_PATH", nodePath);
+            Environment.SetEnvironmentVariable("NLINK_NKN_BRIDGE_PATH", bridgePath);
+            Environment.SetEnvironmentVariable("NLINK_NKN_RECEIVE_STALL_RECOVERY", null);
+            var keyPath = Path.Combine(tempDir, "identity.json");
+            WriteIdentityFile(keyPath, "active-filetransfer-cooldown");
+            var seedBackend = new FakeProtectedSeedBackend();
+            seedBackend.SaveSeed(keyPath, RandomNumberGenerator.GetBytes(32));
+            using var seedBackendOverride = NknSecretStore.OverrideBackendForTests(seedBackend);
+            var options = LoadNknOptionsWithOverrides(keyPath, "active-filetransfer-cooldown");
+            var identity = new NknIdentity("active-filetransfer-cooldown", "active-filetransfer-cooldown.fake");
+            using var adapter = new RealNknClientAdapter(identity, options);
+            adapter.RegisterActiveFileTransferDataSession("transfer-active-filetransfer-cooldown");
+            var evaluations = new ConcurrentQueue<FileTransferBridgeRecoveryEvaluationRequest>();
+            adapter.BridgeRecoveryEvaluationRequested += (_, args) => evaluations.Enqueue(args.Request);
+            var deferredLifecycleCount = 0;
+            adapter.BridgeLifecycle += (_, e) =>
+            {
+                if (e.Kind == BridgeLifecycleEventKind.ReceiveStallRecoveryDeferred)
+                {
+                    Interlocked.Increment(ref deferredLifecycleCount);
+                }
+            };
+            var logBaseline = GetOperationalLogLength();
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(20));
+            await adapter.ConnectAsync(cts.Token);
+
+            await WaitUntilAsync(
+                () => evaluations.Any(e => e.ConsecutiveObservations >= 3) &&
+                      Volatile.Read(ref deferredLifecycleCount) > 0,
+                TimeSpan.FromSeconds(14));
+
+            Assert.All(evaluations, e =>
+            {
+                Assert.Equal("transfer-active-filetransfer-cooldown", e.TransferId);
+                Assert.Equal(FileTransferBridgeRecoveryEvaluationKind.ReceiveStall, e.EvaluationKind);
+            });
+            var logText = ReadOperationalLogTail(logBaseline);
+            Assert.Contains("event=nkn_bridge_recovery_evaluation_requested;", logText, StringComparison.Ordinal);
+            Assert.True(Volatile.Read(ref deferredLifecycleCount) > 0);
+            Assert.DoesNotContain("event=nkn_bridge_receive_stall_recovery_failed; reason=previous_recovery_unproven_cooldown", logText, StringComparison.Ordinal);
+            Assert.DoesNotContain("event=nkn_bridge_recovery_execution_started", logText, StringComparison.Ordinal);
+            Assert.Null(GetPrivateField(adapter, "activeFileTransferBridgeRecoveryExecutionCommand"));
+            Assert.Equal(0, Assert.IsType<int>(GetPrivateField(adapter, "receiveStallRecoveryCount")));
+            Assert.Equal(0, Assert.IsType<int>(GetPrivateField(adapter, "receiveStallRecoveryInProgress")));
+            var connectCount = int.Parse(File.ReadAllText(countFile).Trim());
+            Assert.Equal(1, connectCount);
+
+            adapter.UnregisterActiveFileTransferDataSession("transfer-active-filetransfer-cooldown");
+            await adapter.DisconnectAsync();
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("NLINK_NKN_NODE_PATH", prevNodePath);
+            Environment.SetEnvironmentVariable("NLINK_NKN_BRIDGE_PATH", prevBridgePath);
+            Environment.SetEnvironmentVariable("NLINK_NKN_RECEIVE_STALL_RECOVERY", prevRecovery);
+            try
+            {
+                CleanupDirectoryIfExists(tempDir);
+            }
+            catch
+            {
+            }
+        }
+    }
+
+    [Trait("Category", "LegacySmoke")]
+    [Fact]
+    public async Task Bridge_ReceiveStallRecovery_PostTunaFallbackPeerSilenceRequestsCoordinatorWithoutEscalation()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var bundleDir = TryFindBridgeBundleDirectory();
+        if (bundleDir is null)
+        {
+            return;
+        }
+
+        var nodePath = Path.Combine(bundleDir, "node.exe");
+        if (!File.Exists(nodePath))
+        {
+            return;
+        }
+
+        var tempDir = Path.Combine(Path.GetTempPath(), "nlink-mock-bridge-post-tuna-peer-silence-escalation", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(tempDir);
+        var countFile = Path.Combine(tempDir, "connect-count.txt");
+        var bridgePath = Path.Combine(tempDir, "mock-bridge-post-tuna-peer-silence-escalation.js");
+        WriteBridgeScriptWithManifest(
+            bridgePath,
+            BuildReceiveStallRecoveryMockBridgeScript(
+                countFile,
+                controlMessagesReceivedSinceLast: 0,
+                bulkMessagesReceivedSinceLast: 0,
+                totalMessagesReceivedSinceLast: 1,
+                controlLastReceivedAgeMs: 21_000,
+                bulkLastReceivedAgeMs: 21_000,
+                connectKey: "post-tuna-peer-silence-escalation-key"));
+        var prevNodePath = Environment.GetEnvironmentVariable("NLINK_NKN_NODE_PATH");
+        var prevBridgePath = Environment.GetEnvironmentVariable("NLINK_NKN_BRIDGE_PATH");
+        var prevRecovery = Environment.GetEnvironmentVariable("NLINK_NKN_RECEIVE_STALL_RECOVERY");
+        var prevFastRecovery = Environment.GetEnvironmentVariable("NLINK_NKN_RECEIVE_STALL_FILETRANSFER_FAST_RECOVERY");
+
+        try
+        {
+            Environment.SetEnvironmentVariable("NLINK_NKN_NODE_PATH", nodePath);
+            Environment.SetEnvironmentVariable("NLINK_NKN_BRIDGE_PATH", bridgePath);
+            Environment.SetEnvironmentVariable("NLINK_NKN_RECEIVE_STALL_RECOVERY", null);
+            Environment.SetEnvironmentVariable("NLINK_NKN_RECEIVE_STALL_FILETRANSFER_FAST_RECOVERY", null);
+            var keyPath = Path.Combine(tempDir, "identity.json");
+            WriteIdentityFile(keyPath, "post-tuna-peer-silence-escalation");
+            var seedBackend = new FakeProtectedSeedBackend();
+            seedBackend.SaveSeed(keyPath, RandomNumberGenerator.GetBytes(32));
+            using var seedBackendOverride = NknSecretStore.OverrideBackendForTests(seedBackend);
+            var options = LoadNknOptionsWithOverrides(keyPath, "post-tuna-peer-silence-escalation");
+            var identity = new NknIdentity("post-tuna-peer-silence-escalation", "post-tuna-peer-silence-escalation.fake");
+            using var adapter = new RealNknClientAdapter(identity, options);
+            var evaluations = new ConcurrentQueue<FileTransferBridgeRecoveryEvaluationRequest>();
+            adapter.BridgeRecoveryEvaluationRequested += (_, args) => evaluations.Enqueue(args.Request);
+            var logBaseline = GetOperationalLogLength();
+            adapter.RegisterActiveFileTransferDataSession("transfer-post-tuna-peer-silence-escalation");
+            adapter.RegisterActiveFileTransferRuntime("transfer-post-tuna-peer-silence-escalation");
+            adapter.MarkActiveFileTransferPostTunaFallbackRuntime("transfer-post-tuna-peer-silence-escalation", "test_route_hint");
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(12));
+            await adapter.ConnectAsync(cts.Token);
+            var nowTick = Stopwatch.GetTimestamp();
+            SetPrivateField(adapter, "receiveStallRecoveryCount", 4);
+            SetPrivateField(adapter, "receiveStallLastRecoveryStartedTick", nowTick);
+            SetPrivateField(adapter, "receiveStallLastRecoveryCompletedTick", nowTick);
+            SetPrivateField(adapter, "receiveStallRecoveryInProgress", 1);
+            SetPrivateField(adapter, "receiveStallRecoveryAwaitingReceiveProof", 0);
+            SetPrivateField(adapter, "receiveStallRecoveryRequiresControlProof", 1);
+            SetPrivateField(adapter, "receiveStallRecoveryRequiresBulkProof", 1);
+
+            await WaitUntilAsync(
+                () => evaluations.Any(e => e.ConsecutiveObservations >= 3),
+                TimeSpan.FromSeconds(8));
+
+            AssertReceiveStallEvaluationWithoutExecution(
+                adapter, evaluations, "transfer-post-tuna-peer-silence-escalation", countFile, 4, 1);
+            var logText = ReadOperationalLogTail(logBaseline);
+            Assert.DoesNotContain("event=nkn_bridge_receive_stall_recovery_started", logText, StringComparison.Ordinal);
+            Assert.DoesNotContain("event=nkn_bridge_receive_stall_recovery_hard_restart", logText, StringComparison.Ordinal);
+            Assert.DoesNotContain("event=nkn_bridge_recovery_execution_started", logText, StringComparison.Ordinal);
+            Assert.Equal(nowTick, Assert.IsType<long>(GetPrivateField(adapter, "receiveStallLastRecoveryStartedTick")));
+            Assert.Equal(nowTick, Assert.IsType<long>(GetPrivateField(adapter, "receiveStallLastRecoveryCompletedTick")));
+            Assert.Equal(0, Assert.IsType<int>(GetPrivateField(adapter, "receiveStallRecoveryAwaitingReceiveProof")));
+
+            adapter.UnregisterActiveFileTransferRuntime("transfer-post-tuna-peer-silence-escalation");
+            adapter.UnregisterActiveFileTransferDataSession("transfer-post-tuna-peer-silence-escalation");
+            await adapter.DisconnectAsync();
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("NLINK_NKN_NODE_PATH", prevNodePath);
+            Environment.SetEnvironmentVariable("NLINK_NKN_BRIDGE_PATH", prevBridgePath);
+            Environment.SetEnvironmentVariable("NLINK_NKN_RECEIVE_STALL_RECOVERY", prevRecovery);
+            Environment.SetEnvironmentVariable("NLINK_NKN_RECEIVE_STALL_FILETRANSFER_FAST_RECOVERY", prevFastRecovery);
+            try
+            {
+                CleanupDirectoryIfExists(tempDir);
+            }
+            catch
+            {
+            }
+        }
+    }
+
+    [Trait("Category", "LegacySmoke")]
+    [Fact]
+    public async Task Bridge_ReceiveStallRecovery_RegularV4UnprovenFeedbackPressureCannotExtendRecoveryBudget()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var bundleDir = TryFindBridgeBundleDirectory();
+        if (bundleDir is null)
+        {
+            return;
+        }
+
+        var nodePath = Path.Combine(bundleDir, "node.exe");
+        if (!File.Exists(nodePath))
+        {
+            return;
+        }
+
+        var tempDir = Path.Combine(Path.GetTempPath(), "nlink-mock-bridge-regular-v4-unproven-escalation", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(tempDir);
+        var countFile = Path.Combine(tempDir, "connect-count.txt");
+        var bridgePath = Path.Combine(tempDir, "mock-bridge-regular-v4-unproven-escalation.js");
+        WriteBridgeScriptWithManifest(
+            bridgePath,
+            BuildReceiveStallRecoveryMockBridgeScript(
+                countFile,
+                controlMessagesReceivedSinceLast: 0,
+                bulkMessagesReceivedSinceLast: 0,
+                totalMessagesReceivedSinceLast: 1,
+                controlLastReceivedAgeMs: 21_000,
+                bulkLastReceivedAgeMs: 21_000));
+        var prevNodePath = Environment.GetEnvironmentVariable("NLINK_NKN_NODE_PATH");
+        var prevBridgePath = Environment.GetEnvironmentVariable("NLINK_NKN_BRIDGE_PATH");
+        var prevRecovery = Environment.GetEnvironmentVariable("NLINK_NKN_RECEIVE_STALL_RECOVERY");
+        var prevFastRecovery = Environment.GetEnvironmentVariable("NLINK_NKN_RECEIVE_STALL_FILETRANSFER_FAST_RECOVERY");
+
+        try
+        {
+            Environment.SetEnvironmentVariable("NLINK_NKN_NODE_PATH", nodePath);
+            Environment.SetEnvironmentVariable("NLINK_NKN_BRIDGE_PATH", bridgePath);
+            Environment.SetEnvironmentVariable("NLINK_NKN_RECEIVE_STALL_RECOVERY", null);
+            Environment.SetEnvironmentVariable("NLINK_NKN_RECEIVE_STALL_FILETRANSFER_FAST_RECOVERY", null);
+            var keyPath = Path.Combine(tempDir, "identity.json");
+            WriteIdentityFile(keyPath, "regular-v4-unproven-escalation");
+            var seedBackend = new FakeProtectedSeedBackend();
+            seedBackend.SaveSeed(keyPath, RandomNumberGenerator.GetBytes(32));
+            using var seedBackendOverride = NknSecretStore.OverrideBackendForTests(seedBackend);
+            var options = LoadNknOptionsWithOverrides(keyPath, "regular-v4-unproven-escalation");
+            var identity = new NknIdentity("regular-v4-unproven-escalation", "regular-v4-unproven-escalation.fake");
+            using var adapter = new RealNknClientAdapter(identity, options);
+            var evaluations = new ConcurrentQueue<FileTransferBridgeRecoveryEvaluationRequest>();
+            adapter.BridgeRecoveryEvaluationRequested += (_, args) => evaluations.Enqueue(args.Request);
+            var logBaseline = GetOperationalLogLength();
+            adapter.RegisterActiveFileTransferDataSession("transfer-regular-v4-unproven-escalation");
+            adapter.RegisterActiveFileTransferRuntime("transfer-regular-v4-unproven-escalation");
+            adapter.ReportRegularV4ControlFeedbackPressure(
+                "transfer-regular-v4-unproven-escalation",
+                "regular_v4_receiver_frontier_repair_due",
+                creditExhaustedTimeMs: 0,
+                frontierLagChunks: 12,
+                pendingRepairCount: 12,
+                repairAuthority: CreateRegularV4FrontierRepairAuthority("transfer-regular-v4-unproven-escalation"));
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(12));
+            await adapter.ConnectAsync(cts.Token);
+            var nowTick = Stopwatch.GetTimestamp();
+            SetPrivateField(adapter, "receiveStallRecoveryCount", 4);
+            SetPrivateField(adapter, "receiveStallLastRecoveryStartedTick", nowTick);
+            SetPrivateField(adapter, "receiveStallLastRecoveryCompletedTick", nowTick);
+            SetPrivateField(adapter, "receiveStallRecoveryAwaitingReceiveProof", 1);
+            SetPrivateField(adapter, "receiveStallRecoveryRequiresControlProof", 1);
+            SetPrivateField(adapter, "receiveStallRecoveryRequiresBulkProof", 1);
+
+            await WaitUntilAsync(
+                () => evaluations.Any(e => e.ConsecutiveObservations >= 3),
+                TimeSpan.FromSeconds(8));
+
+            AssertReceiveStallEvaluationWithoutExecution(
+                adapter, evaluations, "transfer-regular-v4-unproven-escalation", countFile, 4, 0);
+            var logText = ReadOperationalLogTail(logBaseline);
+            Assert.DoesNotContain("event=nkn_bridge_receive_stall_recovery_started", logText, StringComparison.Ordinal);
+            Assert.DoesNotContain("event=nkn_bridge_receive_stall_recovery_hard_restart", logText, StringComparison.Ordinal);
+            Assert.DoesNotContain("event=nkn_bridge_recovery_execution_started", logText, StringComparison.Ordinal);
+            Assert.Contains("event=filetransfer_regular_v4_control_feedback_pressure_observed", logText, StringComparison.Ordinal);
+            Assert.Null(GetRegularV4FrontierRepairPressureCurrent(adapter));
+            Assert.Equal(nowTick, Assert.IsType<long>(GetPrivateField(adapter, "receiveStallLastRecoveryStartedTick")));
+            Assert.Equal(nowTick, Assert.IsType<long>(GetPrivateField(adapter, "receiveStallLastRecoveryCompletedTick")));
+            Assert.Equal(1, Assert.IsType<int>(GetPrivateField(adapter, "receiveStallRecoveryAwaitingReceiveProof")));
+
+            adapter.UnregisterActiveFileTransferRuntime("transfer-regular-v4-unproven-escalation");
+            adapter.UnregisterActiveFileTransferDataSession("transfer-regular-v4-unproven-escalation");
+            await adapter.DisconnectAsync();
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("NLINK_NKN_NODE_PATH", prevNodePath);
+            Environment.SetEnvironmentVariable("NLINK_NKN_BRIDGE_PATH", prevBridgePath);
+            Environment.SetEnvironmentVariable("NLINK_NKN_RECEIVE_STALL_RECOVERY", prevRecovery);
+            Environment.SetEnvironmentVariable("NLINK_NKN_RECEIVE_STALL_FILETRANSFER_FAST_RECOVERY", prevFastRecovery);
+            try
+            {
+                CleanupDirectoryIfExists(tempDir);
+            }
+            catch
+            {
+            }
+        }
+    }
+
+    [Trait("Category", "LegacySmoke")]
+    [Trait("FileTransferInfraSuite", "BridgeRecoveryExecution")]
+    [Fact]
+    public async Task BridgeRecoveryExecution_AuthorityOnlyReplayTimeoutCannotRestartOrClearState()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var bundleDir = TryFindBridgeBundleDirectory();
+        if (bundleDir is null)
+        {
+            return;
+        }
+
+        var nodePath = Path.Combine(bundleDir, "node.exe");
+        if (!File.Exists(nodePath))
+        {
+            return;
+        }
+
+        var tempDir = Path.Combine(Path.GetTempPath(), "nlink-mock-bridge-runtime-unlock-replay-escalation", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(tempDir);
+        var countFile = Path.Combine(tempDir, "connect-count.txt");
+        var bridgePath = Path.Combine(tempDir, "mock-bridge-runtime-unlock-replay-escalation.js");
+        WriteBridgeScriptWithManifest(
+            bridgePath,
+            BuildReceiveStallRecoveryMockBridgeScript(countFile));
+        var prevNodePath = Environment.GetEnvironmentVariable("NLINK_NKN_NODE_PATH");
+        var prevBridgePath = Environment.GetEnvironmentVariable("NLINK_NKN_BRIDGE_PATH");
+        var prevRecovery = Environment.GetEnvironmentVariable("NLINK_NKN_RECEIVE_STALL_RECOVERY");
+        var prevFastRecovery = Environment.GetEnvironmentVariable("NLINK_NKN_RECEIVE_STALL_FILETRANSFER_FAST_RECOVERY");
+
+        try
+        {
+            Environment.SetEnvironmentVariable("NLINK_NKN_NODE_PATH", nodePath);
+            Environment.SetEnvironmentVariable("NLINK_NKN_BRIDGE_PATH", bridgePath);
+            Environment.SetEnvironmentVariable("NLINK_NKN_RECEIVE_STALL_RECOVERY", null);
+            Environment.SetEnvironmentVariable("NLINK_NKN_RECEIVE_STALL_FILETRANSFER_FAST_RECOVERY", null);
+            var keyPath = Path.Combine(tempDir, "identity.json");
+            WriteIdentityFile(keyPath, "runtime-unlock-replay-escalation");
+            var seedBackend = new FakeProtectedSeedBackend();
+            seedBackend.SaveSeed(keyPath, RandomNumberGenerator.GetBytes(32));
+            using var seedBackendOverride = NknSecretStore.OverrideBackendForTests(seedBackend);
+            var options = LoadNknOptionsWithOverrides(keyPath, "runtime-unlock-replay-escalation");
+            var identity = new NknIdentity("runtime-unlock-replay-escalation", "runtime-unlock-replay-escalation.fake");
+            using var adapter = new RealNknClientAdapter(identity, options);
+            adapter.RegisterActiveFileTransferRuntime("transfer-runtime-unlock-replay-escalation");
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(12));
+            await adapter.ConnectAsync(cts.Token);
+            var nowTick = Stopwatch.GetTimestamp();
+            SetPrivateField(adapter, "receiveStallRecoveryCount", 2);
+            SetPrivateField(adapter, "receiveStallLastRecoveryStartedTick", nowTick);
+            SetPrivateField(adapter, "receiveStallLastRecoveryCompletedTick", nowTick);
+            SetPrivateField(adapter, "receiveStallRecoveryAwaitingReceiveProof", 1);
+            SetPrivateField(adapter, "receiveStallRecoveryRequiresControlProof", 1);
+            SetPrivateField(adapter, "receiveStallRecoveryRequiresBulkProof", 1);
+            var logBaseline = GetOperationalLogLength();
+            var connectCountBeforeRequest = int.Parse(File.ReadAllText(countFile).Trim());
+
+            Assert.False(adapter.RequestFileTransferReceiveStallRecovery(
+                CreateBridgeRecoveryAuthority("transfer-runtime-unlock-replay-escalation", "tuna_activation_offer_replay_send_timeout"),
+                "tuna_activation_offer_replay_send_timeout"));
+
+            await Task.Delay(150, cts.Token);
+
+            Assert.Equal(
+                connectCountBeforeRequest,
+                int.Parse(File.ReadAllText(countFile).Trim()));
+            Assert.Equal(
+                1,
+                Assert.IsType<int>(
+                    GetPrivateField(adapter, "receiveStallRecoveryAwaitingReceiveProof")));
+            var logText = ReadOperationalLogTail(logBaseline);
+            Assert.Contains(
+                "event=nkn_bridge_receive_stall_recovery_rejected_no_execution_command",
+                logText,
+                StringComparison.Ordinal);
+            Assert.DoesNotContain(
+                "event=nkn_bridge_receive_stall_recovery_hard_restart",
+                logText,
+                StringComparison.Ordinal);
+
+            adapter.UnregisterActiveFileTransferRuntime("transfer-runtime-unlock-replay-escalation");
+            await adapter.DisconnectAsync();
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("NLINK_NKN_NODE_PATH", prevNodePath);
+            Environment.SetEnvironmentVariable("NLINK_NKN_BRIDGE_PATH", prevBridgePath);
+            Environment.SetEnvironmentVariable("NLINK_NKN_RECEIVE_STALL_RECOVERY", prevRecovery);
+            Environment.SetEnvironmentVariable("NLINK_NKN_RECEIVE_STALL_FILETRANSFER_FAST_RECOVERY", prevFastRecovery);
+            try
+            {
+                CleanupDirectoryIfExists(tempDir);
+            }
+            catch
+            {
+                // best effort
+            }
+        }
+    }
+
+    [Trait("Category", "LegacySmoke")]
+    [Trait("FileTransferInfraSuite", "BridgeRecoveryExecution")]
+    [Fact]
+    public async Task BridgeRecoveryExecution_InvalidationIsExactAndRequiresFreshCommand()
+    {
+        var tempDir = Path.Combine(
+            Path.GetTempPath(),
+            "nlink-bridge-recovery-execution-invalidation",
+            Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(tempDir);
+        try
+        {
+            var keyPath = Path.Combine(tempDir, "identity.json");
+            WriteIdentityFile(keyPath, "bridge-recovery-execution-invalidation");
+            var seedBackend = new FakeProtectedSeedBackend();
+            seedBackend.SaveSeed(keyPath, RandomNumberGenerator.GetBytes(32));
+            using var seedBackendOverride =
+                NknSecretStore.OverrideBackendForTests(seedBackend);
+            var options = LoadNknOptionsWithOverrides(
+                keyPath,
+                "bridge-recovery-execution-invalidation");
+            var identity = new NknIdentity(
+                "bridge-recovery-execution-invalidation",
+                "bridge-recovery-execution-invalidation.fake");
+            using var adapter = new RealNknClientAdapter(identity, options);
+            const string transferId =
+                "transfer-bridge-recovery-execution-invalidation";
+            adapter.RegisterActiveFileTransferDataSession(transferId);
+            var command = CreateBridgeRecoveryExecutionCommand(
+                transferId,
+                "session_liveness_timeout_pending");
+            var logStart = GetOperationalLogLength();
+            var mutated = command with
+            {
+                Decision = command.Decision with
+                {
+                    CurrentTerminalGeneration =
+                        command.Decision.CurrentTerminalGeneration + 1,
+                },
+            };
+            var gate = Assert.IsType<object>(GetPrivateField(adapter, "gate"));
+            FileTransferBridgeRecoveryExecutionStartResult started;
+            lock (gate)
+            {
+                started =
+                    adapter.BeginFileTransferBridgeRecoveryExecution(command);
+                Assert.Equal(
+                    FileTransferBridgeRecoveryExecutionStartStatus.Started,
+                    started.Status);
+                Assert.False(
+                    adapter.InvalidateFileTransferBridgeRecoveryExecution(
+                        mutated,
+                        "terminalized"));
+                Assert.True(
+                    adapter.InvalidateFileTransferBridgeRecoveryExecution(
+                        command,
+                        "terminalized"));
+            }
+
+            var discarded =
+                await Assert.IsType<Task<FileTransferBridgeRecoveryExecutionReceipt>>(
+                        started.Completion)
+                    .WaitAsync(TimeSpan.FromSeconds(2));
+            Assert.Equal(command, discarded.Command);
+            Assert.Equal(
+                FileTransferBridgeRecoveryExecutionOutcome.Discarded,
+                discarded.Outcome);
+            Assert.Equal("terminalized", discarded.Reason);
+            Assert.True(
+                adapter.InvalidateFileTransferBridgeRecoveryExecution(
+                    command,
+                    "duplicate_terminalization"));
+
+            var completedDuplicate =
+                adapter.BeginFileTransferBridgeRecoveryExecution(command);
+            Assert.Equal(
+                FileTransferBridgeRecoveryExecutionStartStatus.Idempotent,
+                completedDuplicate.Status);
+            Assert.Equal(
+                discarded,
+                await Assert.IsType<Task<FileTransferBridgeRecoveryExecutionReceipt>>(
+                        completedDuplicate.Completion)
+                    .WaitAsync(TimeSpan.FromSeconds(2)));
+
+            var freshCommand = CreateBridgeRecoveryExecutionCommand(
+                transferId,
+                "session_liveness_timeout_pending",
+                bridgeDecisionGeneration: 2,
+                leaseGeneration: 2);
+            FileTransferBridgeRecoveryExecutionStartResult freshStart;
+            lock (gate)
+            {
+                freshStart =
+                    adapter.BeginFileTransferBridgeRecoveryExecution(freshCommand);
+                Assert.Equal(
+                    FileTransferBridgeRecoveryExecutionStartStatus.Started,
+                    freshStart.Status);
+                Assert.True(
+                    adapter.InvalidateFileTransferBridgeRecoveryExecution(
+                        freshCommand,
+                        "test_cleanup"));
+            }
+
+            var freshDiscarded =
+                await Assert.IsType<Task<FileTransferBridgeRecoveryExecutionReceipt>>(
+                        freshStart.Completion)
+                    .WaitAsync(TimeSpan.FromSeconds(2));
+            Assert.Equal(freshCommand, freshDiscarded.Command);
+            Assert.NotEqual(command, freshDiscarded.Command);
+            Assert.Equal(
+                FileTransferBridgeRecoveryExecutionOutcome.Discarded,
+                freshDiscarded.Outcome);
+
+            var invalidatedBeforeBegin = CreateBridgeRecoveryExecutionCommand(
+                transferId,
+                "session_liveness_timeout_pending",
+                bridgeDecisionGeneration: 3,
+                leaseGeneration: 3);
+            Assert.True(
+                adapter.InvalidateFileTransferBridgeRecoveryExecution(
+                    invalidatedBeforeBegin,
+                    "terminalized_before_begin"));
+            var lateBegin =
+                adapter.BeginFileTransferBridgeRecoveryExecution(invalidatedBeforeBegin);
+            Assert.Equal(
+                FileTransferBridgeRecoveryExecutionStartStatus.Idempotent,
+                lateBegin.Status);
+            var preBeginDiscarded =
+                await Assert.IsType<Task<FileTransferBridgeRecoveryExecutionReceipt>>(
+                        lateBegin.Completion)
+                    .WaitAsync(TimeSpan.FromSeconds(2));
+            Assert.Equal(invalidatedBeforeBegin, preBeginDiscarded.Command);
+            Assert.Equal(
+                FileTransferBridgeRecoveryExecutionOutcome.Discarded,
+                preBeginDiscarded.Outcome);
+            Assert.Equal("terminalized_before_begin", preBeginDiscarded.Reason);
+
+            var logText = ReadOperationalLogTail(logStart);
+            Assert.DoesNotContain(
+                "event=nkn_bridge_receive_stall_recovery_started",
+                logText,
+                StringComparison.Ordinal);
+
+            adapter.UnregisterActiveFileTransferDataSession(transferId);
+        }
+        finally
+        {
+            try
+            {
+                CleanupDirectoryIfExists(tempDir);
+            }
+            catch
+            {
+            }
+        }
+    }
+
+    [Trait("Category", "LegacySmoke")]
+    [Trait("FileTransferInfraSuite", "BridgeRecoveryExecution")]
+    [Fact]
+    public async Task BridgeSubmissionUnavailable_BridgeRecoveryExecutionCoreCommandUsesHardRestartAndCompletesOnce()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var bundleDir = TryFindBridgeBundleDirectory();
+        if (bundleDir is null)
+        {
+            return;
+        }
+
+        var nodePath = Path.Combine(bundleDir, "node.exe");
+        if (!File.Exists(nodePath))
+        {
+            return;
+        }
+
+        var tempDir = Path.Combine(Path.GetTempPath(), "nlink-mock-bridge-core-filetransfer-recovery", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(tempDir);
+        var countFile = Path.Combine(tempDir, "connect-count.txt");
+        var bridgePath = Path.Combine(tempDir, "mock-bridge-core-filetransfer-recovery.js");
+        WriteBridgeScriptWithManifest(bridgePath, BuildReceiveStallRecoveryMockBridgeScript(countFile, stallConnectCount: 0));
+        var prevNodePath = Environment.GetEnvironmentVariable("NLINK_NKN_NODE_PATH");
+        var prevBridgePath = Environment.GetEnvironmentVariable("NLINK_NKN_BRIDGE_PATH");
+        var prevRecovery = Environment.GetEnvironmentVariable("NLINK_NKN_RECEIVE_STALL_RECOVERY");
+
+        try
+        {
+            Environment.SetEnvironmentVariable("NLINK_NKN_NODE_PATH", nodePath);
+            Environment.SetEnvironmentVariable("NLINK_NKN_BRIDGE_PATH", bridgePath);
+            Environment.SetEnvironmentVariable("NLINK_NKN_RECEIVE_STALL_RECOVERY", null);
+            var keyPath = Path.Combine(tempDir, "identity.json");
+            WriteIdentityFile(keyPath, "core-filetransfer-recovery");
+            var seedBackend = new FakeProtectedSeedBackend();
+            seedBackend.SaveSeed(keyPath, RandomNumberGenerator.GetBytes(32));
+            using var seedBackendOverride = NknSecretStore.OverrideBackendForTests(seedBackend);
+            var options = LoadNknOptionsWithOverrides(keyPath, "core-filetransfer-recovery");
+            var identity = new NknIdentity("core-filetransfer-recovery", "core-filetransfer-recovery.fake");
+            using var adapter = new RealNknClientAdapter(identity, options);
+            adapter.RegisterActiveFileTransferDataSession("transfer-core-filetransfer-recovery");
+            var logBaseline = LocalOperationalLog.GetRecentLogText().Length;
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+            await adapter.ConnectAsync(cts.Token);
+            var bridgeSupervisor = Assert.IsType<BridgeSupervisor>(
+                GetPrivateField(adapter, "bridgeSupervisor"));
+            var initialProcessIdentity =
+                bridgeSupervisor.CurrentProcessIdentity;
+            Assert.False(initialProcessIdentity.IsDefault);
+            Assert.Null(
+                await bridgeSupervisor.CleanupProcessEpochAsync(
+                    initialProcessIdentity with
+                    {
+                        ProcessEpoch =
+                            initialProcessIdentity.ProcessEpoch + 1,
+                    },
+                    waitForReaders: true,
+                    "test_mismatched_source_process_epoch"));
+            Assert.Equal(
+                initialProcessIdentity,
+                bridgeSupervisor.CurrentProcessIdentity);
+
+            var command = CreateBridgeRecoveryExecutionCommand(
+                "transfer-core-filetransfer-recovery",
+                "sender_request_feedback_stalled");
+            using var oldSubmissionEntered = new ManualResetEventSlim();
+            using var releaseOldSubmission = new ManualResetEventSlim();
+            using var freshProcessStarted = new ManualResetEventSlim();
+            using var releaseFreshProcess = new ManualResetEventSlim();
+            adapter.BridgeSubmissionAfterGateAcquiredForTests =
+                channel =>
+                {
+                    adapter.BridgeSubmissionAfterGateAcquiredForTests =
+                        null;
+                    Assert.Equal(NknBridgeChannel.Control, channel);
+                    oldSubmissionEntered.Set();
+                    Assert.True(
+                        releaseOldSubmission.Wait(TimeSpan.FromSeconds(5)));
+                };
+            adapter.FileTransferBridgeRecoveryAfterProcessStartedForTests =
+                observed =>
+                {
+                    adapter.FileTransferBridgeRecoveryAfterProcessStartedForTests =
+                        null;
+                    Assert.Equal(command, observed);
+                    freshProcessStarted.Set();
+                    Assert.True(
+                        releaseFreshProcess.Wait(TimeSpan.FromSeconds(5)));
+                };
+            var admittedOldSubmission = Task.Run(
+                async () => await adapter.SendAsync(
+                    "old-epoch-destination",
+                    [1, 2, 3],
+                    cts.Token));
+            Assert.True(
+                oldSubmissionEntered.Wait(TimeSpan.FromSeconds(2)));
+            var started = adapter.BeginFileTransferBridgeRecoveryExecution(command);
+            Assert.Equal(
+                FileTransferBridgeRecoveryExecutionStartStatus.Started,
+                started.Status);
+            Assert.True(started.Accepted);
+            await WaitUntilAsync(
+                () => Assert.IsType<bool>(
+                    GetPrivateField(
+                        adapter,
+                        "bridgeRecoverySubmissionBarrierActive")),
+                TimeSpan.FromSeconds(2));
+            Assert.False(admittedOldSubmission.IsCompleted);
+            await WaitUntilAsync(
+                () => bridgeSupervisor.CurrentProcessIdentity.IsDefault,
+                TimeSpan.FromSeconds(5));
+            Assert.False(admittedOldSubmission.IsCompleted);
+            releaseOldSubmission.Set();
+            await Assert.ThrowsAnyAsync<InvalidOperationException>(
+                async () => await admittedOldSubmission.WaitAsync(
+                    TimeSpan.FromSeconds(2)));
+            Assert.True(
+                freshProcessStarted.Wait(TimeSpan.FromSeconds(5)));
+            var submissionUnavailable = await Assert.ThrowsAsync<FileTransferDataSessionSubmissionUnavailableException>(
+                () => adapter.SendAsync(
+                    "fresh-unready-destination",
+                    [4, 5, 6],
+                    cts.Token));
+            Assert.Equal(
+                FileTransferDataSessionSubmissionUnavailableReason.SubmissionEpochNotReady,
+                submissionUnavailable.Reason);
+            Assert.True(submissionUnavailable.RecoveryBarrierActive);
+            Assert.Equal("control", submissionUnavailable.Channel);
+            await Assert.ThrowsAsync<InvalidOperationException>(
+                () => adapter.ConnectAsync(cts.Token));
+            releaseFreshProcess.Set();
+            var duplicate = adapter.BeginFileTransferBridgeRecoveryExecution(command);
+            Assert.Equal(
+                FileTransferBridgeRecoveryExecutionStartStatus.Idempotent,
+                duplicate.Status);
+            Assert.Same(started.Completion, duplicate.Completion);
+            var conflicting = adapter.BeginFileTransferBridgeRecoveryExecution(
+                command with
+                {
+                    Decision = command.Decision with
+                    {
+                        BridgeDecisionGeneration =
+                            command.Decision.BridgeDecisionGeneration + 1,
+                    },
+                });
+            Assert.Equal(
+                FileTransferBridgeRecoveryExecutionStartStatus.Rejected,
+                conflicting.Status);
+
+            await WaitUntilAsync(
+                () => File.Exists(countFile) &&
+                      int.TryParse(File.ReadAllText(countFile).Trim(), out var count) &&
+                      count >= 2 &&
+                      GetRecentLogTextSince(logBaseline).Contains("event=nkn_bridge_receive_stall_recovery_hard_restart", StringComparison.Ordinal),
+                TimeSpan.FromSeconds(10));
+
+            var receipt = await Assert.IsType<Task<FileTransferBridgeRecoveryExecutionReceipt>>(
+                    started.Completion)
+                .WaitAsync(TimeSpan.FromSeconds(10));
+            Assert.Equal(command, receipt.Command);
+            Assert.Equal(
+                FileTransferBridgeRecoveryExecutionOutcome.Completed,
+                receipt.Outcome);
+            Assert.Equal("hard", receipt.ExecutionMode);
+            var restartedPingLoop = Assert.IsAssignableFrom<Task>(
+                GetPrivateField(adapter, "pingLoopTask"));
+            var restartedPingLoopCts =
+                Assert.IsType<CancellationTokenSource>(
+                    GetPrivateField(adapter, "pingLoopCts"));
+            Assert.False(restartedPingLoop.IsCompleted);
+            Assert.False(restartedPingLoopCts.IsCancellationRequested);
+            var completedDuplicate =
+                adapter.BeginFileTransferBridgeRecoveryExecution(command);
+            Assert.Equal(
+                FileTransferBridgeRecoveryExecutionStartStatus.Idempotent,
+                completedDuplicate.Status);
+            Assert.Equal(
+                receipt,
+                await Assert.IsType<Task<FileTransferBridgeRecoveryExecutionReceipt>>(
+                        completedDuplicate.Completion)
+                    .WaitAsync(TimeSpan.FromSeconds(2)));
+
+            var logText = GetRecentLogTextSince(logBaseline);
+            Assert.Contains("event=nkn_bridge_receive_stall_recovery_hard_restart", logText, StringComparison.Ordinal);
+            Assert.Contains("connect_key=core_filetransfer_request", logText, StringComparison.Ordinal);
+            Assert.Contains("core_requested=1", logText, StringComparison.Ordinal);
+            Assert.Contains("event=nkn_bridge_recovery_execution_started", logText, StringComparison.Ordinal);
+            Assert.Contains("event=nkn_bridge_recovery_execution_completed", logText, StringComparison.Ordinal);
+            Assert.Contains(
+                "event=nkn_bridge_recovery_submission_barrier_closed",
+                logText,
+                StringComparison.Ordinal);
+            Assert.Contains(
+                "event=nkn_bridge_recovery_submission_barrier_drain_started",
+                logText,
+                StringComparison.Ordinal);
+            Assert.Contains(
+                "event=nkn_bridge_recovery_submission_barrier_drain_completed",
+                logText,
+                StringComparison.Ordinal);
+            Assert.Contains(
+                "gate_acquired=1",
+                logText,
+                StringComparison.Ordinal);
+            Assert.Contains(
+                "source_process_terminated=1",
+                logText,
+                StringComparison.Ordinal);
+            Assert.Contains(
+                $"source_process_spawn_ticks={initialProcessIdentity.SpawnTicks}",
+                logText,
+                StringComparison.Ordinal);
+            Assert.Contains(
+                "event=nkn_bridge_recovery_submission_barrier_released",
+                logText,
+                StringComparison.Ordinal);
+            Assert.Contains(
+                "reason=bridge_submission_epoch_not_ready",
+                logText,
+                StringComparison.Ordinal);
+            var barrierClosedIndex = logText.IndexOf(
+                "event=nkn_bridge_recovery_submission_barrier_closed",
+                StringComparison.Ordinal);
+            var hardRestartDecisionIndex = logText.IndexOf(
+                "event=nkn_bridge_recovery_execution_hard_restart_decided",
+                StringComparison.Ordinal);
+            var drainStartedIndex = logText.IndexOf(
+                "event=nkn_bridge_recovery_submission_barrier_drain_started",
+                StringComparison.Ordinal);
+            var drainCompletedIndex = logText.IndexOf(
+                "event=nkn_bridge_recovery_submission_barrier_drain_completed",
+                StringComparison.Ordinal);
+            var replacementProcessStartedIndex = logText.LastIndexOf(
+                "Bridge process started",
+                StringComparison.Ordinal);
+            var replacementReadyIndex = logText.LastIndexOf(
+                "event=nkn_bridge_submission_epoch_bound",
+                StringComparison.Ordinal);
+            var barrierReleasedIndex = logText.IndexOf(
+                "event=nkn_bridge_recovery_submission_barrier_released",
+                StringComparison.Ordinal);
+            var terminalReceiptIndex = logText.IndexOf(
+                "event=nkn_bridge_recovery_execution_completed",
+                StringComparison.Ordinal);
+            Assert.True(barrierClosedIndex >= 0);
+            Assert.True(hardRestartDecisionIndex > barrierClosedIndex);
+            Assert.True(drainStartedIndex > hardRestartDecisionIndex);
+            Assert.True(drainCompletedIndex > drainStartedIndex);
+            Assert.True(replacementProcessStartedIndex > drainCompletedIndex);
+            Assert.True(replacementReadyIndex > replacementProcessStartedIndex);
+            Assert.True(barrierReleasedIndex > replacementReadyIndex);
+            Assert.True(terminalReceiptIndex > barrierReleasedIndex);
+            Assert.Contains(
+                "recovery_liveness_lease_authority_id=",
+                logText,
+                StringComparison.Ordinal);
+            Assert.DoesNotContain(
+                "recovery_liveness_lease_authority_id=none",
+                logText,
+                StringComparison.Ordinal);
+            Assert.Contains(
+                $"checkpoint_request_id={command.CheckpointRequestId ?? "none"}",
+                logText,
+                StringComparison.Ordinal);
+            Assert.Contains(
+                $"decision_reason={command.Decision.Reason}",
+                logText,
+                StringComparison.Ordinal);
+            var connectCount = int.Parse(File.ReadAllText(countFile).Trim());
+            Assert.Equal(2, connectCount);
+
+            using var staleAdmissionCaptured = new ManualResetEventSlim();
+            using var releaseStaleAdmission = new ManualResetEventSlim();
+            adapter.BridgeSubmissionAfterAdmissionCapturedForTests =
+                channel =>
+                {
+                    adapter.BridgeSubmissionAfterAdmissionCapturedForTests =
+                        null;
+                    Assert.Equal(NknBridgeChannel.Control, channel);
+                    staleAdmissionCaptured.Set();
+                    Assert.True(
+                        releaseStaleAdmission.Wait(TimeSpan.FromSeconds(5)));
+                };
+            var staleSubmission = Task.Run(
+                async () => await adapter.SendAsync(
+                    "stale-epoch-destination",
+                    [7, 8, 9],
+                    cts.Token));
+            Assert.True(
+                staleAdmissionCaptured.Wait(TimeSpan.FromSeconds(2)));
+            var epochRaceCommand = CreateBridgeRecoveryExecutionCommand(
+                "transfer-core-filetransfer-recovery",
+                "sender_request_feedback_stalled",
+                bridgeDecisionGeneration: 2);
+            var epochRaceStart =
+                adapter.BeginFileTransferBridgeRecoveryExecution(
+                    epochRaceCommand);
+            Assert.Equal(
+                FileTransferBridgeRecoveryExecutionStartStatus.Started,
+                epochRaceStart.Status);
+            var epochRaceReceipt =
+                await Assert.IsType<Task<FileTransferBridgeRecoveryExecutionReceipt>>(
+                        epochRaceStart.Completion)
+                    .WaitAsync(TimeSpan.FromSeconds(10));
+            Assert.Equal(
+                FileTransferBridgeRecoveryExecutionOutcome.Completed,
+                epochRaceReceipt.Outcome);
+            releaseStaleAdmission.Set();
+            var staleSubmissionUnavailable =
+                await Assert.ThrowsAsync<FileTransferDataSessionSubmissionUnavailableException>(
+                    async () => await staleSubmission.WaitAsync(
+                        TimeSpan.FromSeconds(2)));
+            Assert.Equal(
+                FileTransferDataSessionSubmissionUnavailableReason.SubmissionEpochChanged,
+                staleSubmissionUnavailable.Reason);
+            Assert.False(staleSubmissionUnavailable.RecoveryBarrierActive);
+            connectCount = int.Parse(File.ReadAllText(countFile).Trim());
+            Assert.Equal(3, connectCount);
+            Assert.Contains(
+                "reason=bridge_submission_epoch_changed",
+                GetRecentLogTextSince(logBaseline),
+                StringComparison.Ordinal);
+
+            using var heldSubmissionEntered = new ManualResetEventSlim();
+            using var releaseHeldSubmission = new ManualResetEventSlim();
+            adapter.BridgeSubmissionAfterGateAcquiredForTests =
+                channel =>
+                {
+                    adapter.BridgeSubmissionAfterGateAcquiredForTests =
+                        null;
+                    Assert.Equal(NknBridgeChannel.Control, channel);
+                    heldSubmissionEntered.Set();
+                    Assert.True(
+                        releaseHeldSubmission.Wait(TimeSpan.FromSeconds(5)));
+                };
+            var heldSubmission = Task.Run(
+                async () => await adapter.SendAsync(
+                    "invalidation-holder-destination",
+                    [10, 11, 12],
+                    cts.Token));
+            Assert.True(
+                heldSubmissionEntered.Wait(TimeSpan.FromSeconds(2)));
+            var invalidatedWhileWaitingCommand =
+                CreateBridgeRecoveryExecutionCommand(
+                    "transfer-core-filetransfer-recovery",
+                    "sender_request_feedback_stalled",
+                    bridgeDecisionGeneration: 3);
+            var invalidatedWhileWaitingStart =
+                adapter.BeginFileTransferBridgeRecoveryExecution(
+                    invalidatedWhileWaitingCommand);
+            Assert.Equal(
+                FileTransferBridgeRecoveryExecutionStartStatus.Started,
+                invalidatedWhileWaitingStart.Status);
+            await WaitUntilAsync(
+                () => Assert.IsType<bool>(
+                    GetPrivateField(
+                        adapter,
+                        "bridgeRecoverySubmissionBarrierActive")),
+                TimeSpan.FromSeconds(2));
+            Assert.True(
+                adapter.InvalidateFileTransferBridgeRecoveryExecution(
+                    invalidatedWhileWaitingCommand,
+                    "terminalized_while_waiting_for_submission_barrier"));
+            var invalidatedWhileWaitingReceipt =
+                await Assert.IsType<Task<FileTransferBridgeRecoveryExecutionReceipt>>(
+                        invalidatedWhileWaitingStart.Completion)
+                    .WaitAsync(TimeSpan.FromSeconds(2));
+            Assert.Equal(
+                FileTransferBridgeRecoveryExecutionOutcome.Discarded,
+                invalidatedWhileWaitingReceipt.Outcome);
+            var invalidatedSubmissionUnavailable =
+                await Assert.ThrowsAsync<FileTransferDataSessionSubmissionUnavailableException>(
+                () => adapter.SendAsync(
+                    "invalidated-barrier-destination",
+                    [13, 14, 15],
+                    cts.Token));
+            Assert.Equal(
+                FileTransferDataSessionSubmissionUnavailableReason.SubmissionEpochNotReady,
+                invalidatedSubmissionUnavailable.Reason);
+            releaseHeldSubmission.Set();
+            await Assert.ThrowsAnyAsync<InvalidOperationException>(
+                async () => await heldSubmission.WaitAsync(
+                    TimeSpan.FromSeconds(2)));
+            await WaitUntilAsync(
+                () => Assert.IsType<int>(
+                    GetPrivateField(
+                        adapter,
+                        "receiveStallRecoveryInProgress")) == 0,
+                TimeSpan.FromSeconds(2));
+            Assert.Contains(
+                "event=nkn_bridge_recovery_submission_barrier_drain_invalidated",
+                GetRecentLogTextSince(logBaseline),
+                StringComparison.Ordinal);
+            var invalidatedReadySnapshot =
+                GetPrivateField(adapter, "bridgeSubmissionReadySnapshot");
+            Assert.NotNull(invalidatedReadySnapshot);
+            Assert.Equal(
+                0L,
+                Assert.IsType<long>(
+                    invalidatedReadySnapshot!.GetType()
+                        .GetProperty("SubmissionEpoch")!
+                        .GetValue(invalidatedReadySnapshot)));
+            var invalidatedUnreadySubmission =
+                await Assert.ThrowsAsync<FileTransferDataSessionSubmissionUnavailableException>(
+                () => adapter.SendAsync(
+                    "invalidated-unready-destination",
+                    [16, 17, 18],
+                    cts.Token));
+            Assert.Equal(
+                FileTransferDataSessionSubmissionUnavailableReason.SubmissionEpochNotReady,
+                invalidatedUnreadySubmission.Reason);
+            Assert.Equal(
+                connectCount,
+                int.Parse(File.ReadAllText(countFile).Trim()));
+
+            var terminalReceiptCountBeforeInvalidation =
+                GetRecentLogTextSince(logBaseline).Split(
+                    "event=nkn_bridge_recovery_execution_completed;",
+                    StringSplitOptions.None).Length - 1;
+
+            var invalidatedBeforeCurrentnessCommand = CreateBridgeRecoveryExecutionCommand(
+                "transfer-core-filetransfer-recovery",
+                "sender_request_feedback_stalled",
+                bridgeDecisionGeneration: 4);
+            adapter.FileTransferBridgeRecoveryBeforeHardRestartCurrentnessForTests =
+                observed =>
+                {
+                    adapter.FileTransferBridgeRecoveryBeforeHardRestartCurrentnessForTests =
+                        null;
+                    Assert.Equal(invalidatedBeforeCurrentnessCommand, observed);
+                    Assert.True(adapter.InvalidateFileTransferBridgeRecoveryExecution(
+                        observed,
+                        "test_invalidation_before_hard_currentness"));
+                };
+            var invalidatedBeforeCurrentnessStart =
+                adapter.BeginFileTransferBridgeRecoveryExecution(
+                    invalidatedBeforeCurrentnessCommand);
+            Assert.Equal(
+                FileTransferBridgeRecoveryExecutionStartStatus.Started,
+                invalidatedBeforeCurrentnessStart.Status);
+            var invalidatedBeforeCurrentnessReceipt =
+                await Assert.IsType<Task<FileTransferBridgeRecoveryExecutionReceipt>>(
+                        invalidatedBeforeCurrentnessStart.Completion)
+                    .WaitAsync(TimeSpan.FromSeconds(2));
+            Assert.Equal(
+                FileTransferBridgeRecoveryExecutionOutcome.Discarded,
+                invalidatedBeforeCurrentnessReceipt.Outcome);
+            await WaitUntilAsync(
+                () => Assert.IsType<int>(
+                    GetPrivateField(adapter, "receiveStallRecoveryInProgress")) == 0,
+                TimeSpan.FromSeconds(2));
+            Assert.Equal(connectCount, int.Parse(File.ReadAllText(countFile).Trim()));
+
+            var invalidatedCommand = CreateBridgeRecoveryExecutionCommand(
+                "transfer-core-filetransfer-recovery",
+                "sender_request_feedback_stalled",
+                bridgeDecisionGeneration: 5);
+            using var hardRestartReserved = new ManualResetEventSlim();
+            using var releaseHardRestart = new ManualResetEventSlim();
+            adapter.FileTransferBridgeRecoveryAfterHardRestartReservationForTests =
+                observed =>
+                {
+                    adapter.FileTransferBridgeRecoveryAfterHardRestartReservationForTests =
+                        null;
+                    Assert.Equal(invalidatedCommand, observed);
+                    hardRestartReserved.Set();
+                    Assert.True(releaseHardRestart.Wait(TimeSpan.FromSeconds(5)));
+                };
+            var invalidatedStart =
+                adapter.BeginFileTransferBridgeRecoveryExecution(invalidatedCommand);
+            Assert.Equal(
+                FileTransferBridgeRecoveryExecutionStartStatus.Started,
+                invalidatedStart.Status);
+            Assert.True(hardRestartReserved.Wait(TimeSpan.FromSeconds(2)));
+            var disconnectTask = adapter.DisconnectAsync();
+            var invalidatedReceipt =
+                await Assert.IsType<Task<FileTransferBridgeRecoveryExecutionReceipt>>(
+                        invalidatedStart.Completion)
+                    .WaitAsync(TimeSpan.FromSeconds(2));
+            Assert.Equal(
+                FileTransferBridgeRecoveryExecutionOutcome.Discarded,
+                invalidatedReceipt.Outcome);
+            var cleanupOverlap =
+                adapter.BeginFileTransferBridgeRecoveryExecution(
+                    CreateBridgeRecoveryExecutionCommand(
+                        "transfer-core-filetransfer-recovery",
+                        "sender_request_feedback_stalled",
+                        bridgeDecisionGeneration: 6));
+            Assert.Equal(
+                FileTransferBridgeRecoveryExecutionStartStatus.Rejected,
+                cleanupOverlap.Status);
+            Assert.Equal(
+                "bridge_recovery_adapter_stopping",
+                cleanupOverlap.Reason);
+            await Task.Delay(50, cts.Token);
+            Assert.False(disconnectTask.IsCompleted);
+            releaseHardRestart.Set();
+            await disconnectTask.WaitAsync(TimeSpan.FromSeconds(5));
+            await WaitUntilAsync(
+                () => Assert.IsType<int>(
+                    GetPrivateField(adapter, "receiveStallRecoveryInProgress")) == 0,
+                TimeSpan.FromSeconds(2));
+            await Task.Delay(150, cts.Token);
+            Assert.Equal(connectCount, int.Parse(File.ReadAllText(countFile).Trim()));
+            var invalidationLogText = GetRecentLogTextSince(logBaseline);
+            Assert.Equal(
+                terminalReceiptCountBeforeInvalidation,
+                invalidationLogText.Split(
+                    "event=nkn_bridge_recovery_execution_completed;",
+                    StringSplitOptions.None).Length - 1);
+            Assert.Contains(
+                "event=nkn_bridge_recovery_execution_completion_late;",
+                invalidationLogText,
+                StringComparison.Ordinal);
+
+            adapter.UnregisterActiveFileTransferDataSession("transfer-core-filetransfer-recovery");
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("NLINK_NKN_NODE_PATH", prevNodePath);
+            Environment.SetEnvironmentVariable("NLINK_NKN_BRIDGE_PATH", prevBridgePath);
+            Environment.SetEnvironmentVariable("NLINK_NKN_RECEIVE_STALL_RECOVERY", prevRecovery);
+            try
+            {
+                CleanupDirectoryIfExists(tempDir);
+            }
+            catch
+            {
+            }
+        }
+    }
+
+    [Trait("Category", "LegacySmoke")]
+    [Trait("FileTransferInfraSuite", "BridgeRecoveryExecution")]
+    [Fact]
+    public async Task BridgeRecoveryExecution_TotalDeadlineExhaustsFromWorkerAndKeepsPhysicalRestartExclusive()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var bundleDir = TryFindBridgeBundleDirectory();
+        if (bundleDir is null)
+        {
+            return;
+        }
+
+        var nodePath = Path.Combine(bundleDir, "node.exe");
+        if (!File.Exists(nodePath))
+        {
+            return;
+        }
+
+        var tempDir = Path.Combine(
+            Path.GetTempPath(),
+            "nlink-mock-bridge-command-watchdog",
+            Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(tempDir);
+        var countFile = Path.Combine(tempDir, "connect-count.txt");
+        var bridgePath = Path.Combine(tempDir, "mock-bridge-command-watchdog.js");
+        WriteBridgeScriptWithManifest(
+            bridgePath,
+            BuildReceiveStallRecoveryMockBridgeScript(
+                countFile,
+                stallConnectCount: 0,
+                hangConnectFromCount: 2,
+                failConnectCount: 3));
+        var prevNodePath = Environment.GetEnvironmentVariable("NLINK_NKN_NODE_PATH");
+        var prevBridgePath = Environment.GetEnvironmentVariable("NLINK_NKN_BRIDGE_PATH");
+        var prevRecovery = Environment.GetEnvironmentVariable("NLINK_NKN_RECEIVE_STALL_RECOVERY");
+        using var terminalCommitReached = new ManualResetEventSlim();
+        using var releaseTerminalCommit = new ManualResetEventSlim();
+
+        try
+        {
+            Environment.SetEnvironmentVariable("NLINK_NKN_NODE_PATH", nodePath);
+            Environment.SetEnvironmentVariable("NLINK_NKN_BRIDGE_PATH", bridgePath);
+            Environment.SetEnvironmentVariable("NLINK_NKN_RECEIVE_STALL_RECOVERY", null);
+            var keyPath = Path.Combine(tempDir, "identity.json");
+            WriteIdentityFile(keyPath, "bridge-command-watchdog");
+            var seedBackend = new FakeProtectedSeedBackend();
+            seedBackend.SaveSeed(keyPath, RandomNumberGenerator.GetBytes(32));
+            using var seedBackendOverride = NknSecretStore.OverrideBackendForTests(seedBackend);
+            var options = LoadNknOptionsWithOverrides(keyPath, "bridge-command-watchdog");
+            var identity = new NknIdentity(
+                "bridge-command-watchdog",
+                "bridge-command-watchdog.fake");
+            using var adapter = new RealNknClientAdapter(identity, options);
+            adapter.SetConnectReadyTimeoutForTests(TimeSpan.FromSeconds(2));
+            adapter.SetFileTransferBridgeRecoveryExecutionTimeoutsForTests(
+                TimeSpan.FromMilliseconds(150),
+                TimeSpan.FromMilliseconds(700));
+            const string transferId = "transfer-bridge-command-watchdog";
+            adapter.RegisterActiveFileTransferDataSession(transferId);
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+            await adapter.ConnectAsync(cts.Token);
+            var logBaseline = GetOperationalLogLength();
+
+            var command = CreateBridgeRecoveryExecutionCommand(
+                transferId,
+                "sender_request_feedback_stalled");
+            adapter.FileTransferBridgeRecoveryBeforeTerminalCommitForTests =
+                observed =>
+                {
+                    adapter.FileTransferBridgeRecoveryBeforeTerminalCommitForTests =
+                        null;
+                    Assert.Equal(command, observed);
+                    terminalCommitReached.Set();
+                    Assert.True(releaseTerminalCommit.Wait(TimeSpan.FromSeconds(5)));
+                };
+            var started = adapter.BeginFileTransferBridgeRecoveryExecution(command);
+            Assert.Equal(
+                FileTransferBridgeRecoveryExecutionStartStatus.Started,
+                started.Status);
+            Assert.True(terminalCommitReached.Wait(TimeSpan.FromSeconds(5)));
+            Assert.False(started.Completion!.IsCompleted);
+            var duplicateInFlight =
+                adapter.BeginFileTransferBridgeRecoveryExecution(command);
+            Assert.Equal(
+                FileTransferBridgeRecoveryExecutionStartStatus.Idempotent,
+                duplicateInFlight.Status);
+            Assert.Same(started.Completion, duplicateInFlight.Completion);
+            var overlapping = adapter.BeginFileTransferBridgeRecoveryExecution(
+                CreateBridgeRecoveryExecutionCommand(
+                    transferId,
+                    "sender_request_feedback_stalled",
+                    bridgeDecisionGeneration: 2));
+            Assert.Equal(
+                FileTransferBridgeRecoveryExecutionStartStatus.Rejected,
+                overlapping.Status);
+            Assert.Equal(
+                "bridge_recovery_execution_in_progress",
+                overlapping.Reason);
+
+            releaseTerminalCommit.Set();
+            var receipt =
+                await Assert.IsType<Task<FileTransferBridgeRecoveryExecutionReceipt>>(
+                        started.Completion)
+                    .WaitAsync(TimeSpan.FromSeconds(2));
+            Assert.Equal(command, receipt.Command);
+            Assert.Equal(
+                FileTransferBridgeRecoveryExecutionOutcome.Exhausted,
+                receipt.Outcome);
+            Assert.Equal("hard", receipt.ExecutionMode);
+            Assert.Equal("bridge_recovery_execution_timeout", receipt.Reason);
+            Assert.Equal(
+                0,
+                Assert.IsType<int>(
+                    GetPrivateField(adapter, "receiveStallRecoveryInProgress")));
+
+            var duplicate = adapter.BeginFileTransferBridgeRecoveryExecution(command);
+            Assert.Equal(
+                FileTransferBridgeRecoveryExecutionStartStatus.Idempotent,
+                duplicate.Status);
+            Assert.Equal(
+                receipt,
+                await Assert.IsType<Task<FileTransferBridgeRecoveryExecutionReceipt>>(
+                        duplicate.Completion)
+                    .WaitAsync(TimeSpan.FromSeconds(1)));
+
+            var freshCommand =
+                CreateBridgeRecoveryExecutionCommand(
+                    transferId,
+                    "sender_request_feedback_stalled",
+                    bridgeDecisionGeneration: 2);
+            adapter.SetConnectReadyTimeoutForTests(TimeSpan.FromMilliseconds(150));
+            adapter.SetFileTransferBridgeRecoveryExecutionTimeoutsForTests(
+                TimeSpan.FromMilliseconds(100),
+                TimeSpan.FromSeconds(5));
+            var fresh = adapter.BeginFileTransferBridgeRecoveryExecution(
+                freshCommand);
+            Assert.Equal(
+                FileTransferBridgeRecoveryExecutionStartStatus.Started,
+                fresh.Status);
+            var hardFailureReceipt =
+                await Assert.IsType<Task<FileTransferBridgeRecoveryExecutionReceipt>>(
+                        fresh.Completion)
+                    .WaitAsync(TimeSpan.FromSeconds(5));
+            Assert.Equal(
+                FileTransferBridgeRecoveryExecutionOutcome.Exhausted,
+                hardFailureReceipt.Outcome);
+            Assert.Equal("hard", hardFailureReceipt.ExecutionMode);
+            Assert.Equal(
+                "bridge_recovery_execution_exhausted",
+                hardFailureReceipt.Reason);
+
+            var logText = ReadOperationalLogTail(logBaseline);
+            Assert.Equal(
+                2,
+                logText.Split(
+                    "event=nkn_bridge_recovery_execution_completed;",
+                    StringSplitOptions.None).Length - 1);
+            Assert.Contains(
+                "outcome=exhausted;",
+                logText,
+                StringComparison.Ordinal);
+            Assert.Contains(
+                "reason=bridge_recovery_execution_timeout",
+                logText,
+                StringComparison.Ordinal);
+            Assert.Contains(
+                "reason=bridge_recovery_execution_exhausted",
+                logText,
+                StringComparison.Ordinal);
+            Assert.Contains(
+                "event=nkn_bridge_recovery_execution_completed;",
+                logText,
+                StringComparison.Ordinal);
+            Assert.Contains("physical_execution_terminated=1", logText, StringComparison.Ordinal);
+            Assert.Contains("total_deadline_expired=1", logText, StringComparison.Ordinal);
+
+            adapter.UnregisterActiveFileTransferDataSession(transferId);
+            await adapter.DisconnectAsync();
+        }
+        finally
+        {
+            releaseTerminalCommit.Set();
+            Environment.SetEnvironmentVariable("NLINK_NKN_NODE_PATH", prevNodePath);
+            Environment.SetEnvironmentVariable("NLINK_NKN_BRIDGE_PATH", prevBridgePath);
+            Environment.SetEnvironmentVariable("NLINK_NKN_RECEIVE_STALL_RECOVERY", prevRecovery);
+            try
+            {
+                CleanupDirectoryIfExists(tempDir);
+            }
+            catch
+            {
+            }
+        }
+    }
+
+    [Trait("Category", "LegacySmoke")]
+    [Trait("FileTransferInfraSuite", "BridgeRecoveryExecution")]
+    [Fact]
+    public async Task Bridge_ReceiveStallRecovery_PostTunaFallbackStateRefreshUsesSoftRecovery()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var bundleDir = TryFindBridgeBundleDirectory();
+        if (bundleDir is null)
+        {
+            return;
+        }
+
+        var nodePath = Path.Combine(bundleDir, "node.exe");
+        if (!File.Exists(nodePath))
+        {
+            return;
+        }
+
+        var tempDir = Path.Combine(Path.GetTempPath(), "nlink-mock-bridge-post-tuna-refresh-recovery", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(tempDir);
+        var countFile = Path.Combine(tempDir, "connect-count.txt");
+        var bridgePath = Path.Combine(tempDir, "mock-bridge-post-tuna-refresh-recovery.js");
+        WriteBridgeScriptWithManifest(bridgePath, BuildReceiveStallRecoveryMockBridgeScript(countFile, stallConnectCount: 0));
+        var prevNodePath = Environment.GetEnvironmentVariable("NLINK_NKN_NODE_PATH");
+        var prevBridgePath = Environment.GetEnvironmentVariable("NLINK_NKN_BRIDGE_PATH");
+        var prevRecovery = Environment.GetEnvironmentVariable("NLINK_NKN_RECEIVE_STALL_RECOVERY");
+
+        try
+        {
+            Environment.SetEnvironmentVariable("NLINK_NKN_NODE_PATH", nodePath);
+            Environment.SetEnvironmentVariable("NLINK_NKN_BRIDGE_PATH", bridgePath);
+            Environment.SetEnvironmentVariable("NLINK_NKN_RECEIVE_STALL_RECOVERY", null);
+            var keyPath = Path.Combine(tempDir, "identity.json");
+            WriteIdentityFile(keyPath, "post-tuna-refresh-recovery");
+            var seedBackend = new FakeProtectedSeedBackend();
+            seedBackend.SaveSeed(keyPath, RandomNumberGenerator.GetBytes(32));
+            using var seedBackendOverride = NknSecretStore.OverrideBackendForTests(seedBackend);
+            var options = LoadNknOptionsWithOverrides(keyPath, "post-tuna-refresh-recovery");
+            var identity = new NknIdentity("post-tuna-refresh-recovery", "post-tuna-refresh-recovery.fake");
+            using var adapter = new RealNknClientAdapter(identity, options);
+            adapter.RegisterActiveFileTransferDataSession("transfer-post-tuna-refresh-recovery");
+            var logBaseline = LocalOperationalLog.GetRecentLogText().Length;
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+            await adapter.ConnectAsync(cts.Token);
+
+            var recoveryCountField = typeof(RealNknClientAdapter).GetField("receiveStallRecoveryCount", BindingFlags.Instance | BindingFlags.NonPublic);
+            Assert.NotNull(recoveryCountField);
+            recoveryCountField.SetValue(adapter, 1);
+
+            var command = CreateBridgeRecoveryExecutionCommand(
+                    "transfer-post-tuna-refresh-recovery",
+                    "post_tuna_fallback_state_refresh_failed",
+                    routeToken: FileTransferRouteResolver.PostTunaFallbackV6Token,
+                    protocolVersion: FileTransferProtocol.ProtocolVersionV6);
+            var started =
+                adapter.BeginFileTransferBridgeRecoveryExecution(command);
+            Assert.Equal(
+                FileTransferBridgeRecoveryExecutionStartStatus.Started,
+                started.Status);
+
+            await WaitUntilAsync(
+                () => GetRecentLogTextSince(logBaseline).Contains(
+                    "event=nkn_bridge_receive_stall_recovery_soft_for_filetransfer",
+                    StringComparison.Ordinal),
+                TimeSpan.FromSeconds(10));
+            var receipt =
+                await Assert.IsType<Task<FileTransferBridgeRecoveryExecutionReceipt>>(
+                        started.Completion)
+                    .WaitAsync(TimeSpan.FromSeconds(10));
+            Assert.Equal(
+                FileTransferBridgeRecoveryExecutionOutcome.Completed,
+                receipt.Outcome);
+            Assert.Equal("soft", receipt.ExecutionMode);
+
+            var logText = GetRecentLogTextSince(logBaseline);
+            Assert.Contains("event=nkn_bridge_receive_stall_recovery_soft_for_filetransfer", logText, StringComparison.Ordinal);
+            Assert.Contains("connect_key=core_filetransfer_request", logText, StringComparison.Ordinal);
+            Assert.Contains("stall_reason=post_tuna_fallback_state_refresh_failed", logText, StringComparison.Ordinal);
+            Assert.Contains("attempt=2", logText, StringComparison.Ordinal);
+            Assert.DoesNotContain("event=nkn_bridge_receive_stall_recovery_hard_restart", logText, StringComparison.Ordinal);
+
+            adapter.UnregisterActiveFileTransferDataSession("transfer-post-tuna-refresh-recovery");
+            await adapter.DisconnectAsync();
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("NLINK_NKN_NODE_PATH", prevNodePath);
+            Environment.SetEnvironmentVariable("NLINK_NKN_BRIDGE_PATH", prevBridgePath);
+            Environment.SetEnvironmentVariable("NLINK_NKN_RECEIVE_STALL_RECOVERY", prevRecovery);
+            try
+            {
+                CleanupDirectoryIfExists(tempDir);
+            }
+            catch
+            {
+            }
+        }
+    }
+
+    [Trait("Category", "LegacySmoke")]
+    [Trait("FileTransferInfraSuite", "BridgeRecoveryExecution")]
+    [Fact]
+    public async Task Bridge_ReceiveStallRecovery_SessionLivenessPendingUsesSoftRecovery()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var bundleDir = TryFindBridgeBundleDirectory();
+        if (bundleDir is null)
+        {
+            return;
+        }
+
+        var nodePath = Path.Combine(bundleDir, "node.exe");
+        if (!File.Exists(nodePath))
+        {
+            return;
+        }
+
+        var tempDir = Path.Combine(Path.GetTempPath(), "nlink-mock-bridge-session-liveness-recovery", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(tempDir);
+        var countFile = Path.Combine(tempDir, "connect-count.txt");
+        var bridgePath = Path.Combine(tempDir, "mock-bridge-session-liveness-recovery.js");
+        WriteBridgeScriptWithManifest(bridgePath, BuildReceiveStallRecoveryMockBridgeScript(countFile, stallConnectCount: 0));
+        var prevNodePath = Environment.GetEnvironmentVariable("NLINK_NKN_NODE_PATH");
+        var prevBridgePath = Environment.GetEnvironmentVariable("NLINK_NKN_BRIDGE_PATH");
+        var prevRecovery = Environment.GetEnvironmentVariable("NLINK_NKN_RECEIVE_STALL_RECOVERY");
+
+        try
+        {
+            Environment.SetEnvironmentVariable("NLINK_NKN_NODE_PATH", nodePath);
+            Environment.SetEnvironmentVariable("NLINK_NKN_BRIDGE_PATH", bridgePath);
+            Environment.SetEnvironmentVariable("NLINK_NKN_RECEIVE_STALL_RECOVERY", null);
+            var keyPath = Path.Combine(tempDir, "identity.json");
+            WriteIdentityFile(keyPath, "session-liveness-recovery");
+            var seedBackend = new FakeProtectedSeedBackend();
+            seedBackend.SaveSeed(keyPath, RandomNumberGenerator.GetBytes(32));
+            using var seedBackendOverride = NknSecretStore.OverrideBackendForTests(seedBackend);
+            var options = LoadNknOptionsWithOverrides(keyPath, "session-liveness-recovery");
+            var identity = new NknIdentity("session-liveness-recovery", "session-liveness-recovery.fake");
+            using var adapter = new RealNknClientAdapter(identity, options);
+            adapter.RegisterActiveFileTransferDataSession("transfer-session-liveness-recovery");
+            var logBaseline = LocalOperationalLog.GetRecentLogText().Length;
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+            await adapter.ConnectAsync(cts.Token);
+
+            var command = CreateBridgeRecoveryExecutionCommand(
+                "transfer-session-liveness-recovery",
+                "session_liveness_timeout_pending");
+            var started =
+                adapter.BeginFileTransferBridgeRecoveryExecution(command);
+            Assert.Equal(
+                FileTransferBridgeRecoveryExecutionStartStatus.Started,
+                started.Status);
+
+            await WaitUntilAsync(
+                () => GetRecentLogTextSince(logBaseline).Contains(
+                    "event=nkn_bridge_receive_stall_recovery_soft_for_filetransfer",
+                    StringComparison.Ordinal),
+                TimeSpan.FromSeconds(10));
+            var receipt =
+                await Assert.IsType<Task<FileTransferBridgeRecoveryExecutionReceipt>>(
+                        started.Completion)
+                    .WaitAsync(TimeSpan.FromSeconds(10));
+            Assert.Equal(
+                FileTransferBridgeRecoveryExecutionOutcome.Completed,
+                receipt.Outcome);
+            Assert.Equal("soft", receipt.ExecutionMode);
+
+            var logText = GetRecentLogTextSince(logBaseline);
+            Assert.Contains("event=nkn_bridge_receive_stall_recovery_soft_for_filetransfer", logText, StringComparison.Ordinal);
+            Assert.Contains("connect_key=core_filetransfer_request", logText, StringComparison.Ordinal);
+            Assert.Contains("stall_reason=session_liveness_timeout_pending", logText, StringComparison.Ordinal);
+            Assert.DoesNotContain("event=nkn_bridge_receive_stall_recovery_hard_restart", logText, StringComparison.Ordinal);
+
+            adapter.UnregisterActiveFileTransferDataSession("transfer-session-liveness-recovery");
+            await adapter.DisconnectAsync();
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("NLINK_NKN_NODE_PATH", prevNodePath);
+            Environment.SetEnvironmentVariable("NLINK_NKN_BRIDGE_PATH", prevBridgePath);
+            Environment.SetEnvironmentVariable("NLINK_NKN_RECEIVE_STALL_RECOVERY", prevRecovery);
+            try
+            {
+                CleanupDirectoryIfExists(tempDir);
+            }
+            catch
+            {
+            }
+        }
+    }
+
+    [Trait("Category", "LegacySmoke")]
+    [Trait("FileTransferInfraSuite", "BridgeRecoveryExecution")]
+    [Theory]
+    [InlineData("tuna_activation_offer_send_timeout", false)]
+    [InlineData("runtime_unlock_retry_authority_offer_blocked", false)]
+    [InlineData("session_liveness_timeout_pending", true)]
+    public async Task BridgeRecoveryExecution_AuthorityOnlyUnprovenRecoveryCannotRestart(
+        string requestedReason,
+        bool staleInProgress)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var bundleDir = TryFindBridgeBundleDirectory();
+        if (bundleDir is null)
+        {
+            return;
+        }
+
+        var nodePath = Path.Combine(bundleDir, "node.exe");
+        if (!File.Exists(nodePath))
+        {
+            return;
+        }
+
+        var reasonName = requestedReason.Replace('_', '-');
+        var tempDir = Path.Combine(Path.GetTempPath(), "nlink-mock-bridge-runtime-unlock-unproven-escalation", reasonName, Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(tempDir);
+        var countFile = Path.Combine(tempDir, "connect-count.txt");
+        var bridgePath = Path.Combine(tempDir, $"mock-bridge-runtime-unlock-unproven-escalation-{reasonName}.js");
+        WriteBridgeScriptWithManifest(bridgePath, BuildReceiveStallRecoveryMockBridgeScript(countFile, stallConnectCount: 0));
+        var prevNodePath = Environment.GetEnvironmentVariable("NLINK_NKN_NODE_PATH");
+        var prevBridgePath = Environment.GetEnvironmentVariable("NLINK_NKN_BRIDGE_PATH");
+        var prevRecovery = Environment.GetEnvironmentVariable("NLINK_NKN_RECEIVE_STALL_RECOVERY");
+
+        try
+        {
+            Environment.SetEnvironmentVariable("NLINK_NKN_NODE_PATH", nodePath);
+            Environment.SetEnvironmentVariable("NLINK_NKN_BRIDGE_PATH", bridgePath);
+            Environment.SetEnvironmentVariable("NLINK_NKN_RECEIVE_STALL_RECOVERY", null);
+            var keyPath = Path.Combine(tempDir, "identity.json");
+            WriteIdentityFile(keyPath, $"runtime-unlock-unproven-escalation-{reasonName}");
+            var seedBackend = new FakeProtectedSeedBackend();
+            seedBackend.SaveSeed(keyPath, RandomNumberGenerator.GetBytes(32));
+            using var seedBackendOverride = NknSecretStore.OverrideBackendForTests(seedBackend);
+            var options = LoadNknOptionsWithOverrides(keyPath, $"runtime-unlock-unproven-escalation-{reasonName}");
+            var identity = new NknIdentity($"runtime-unlock-unproven-escalation-{reasonName}", $"runtime-unlock-unproven-escalation-{reasonName}.fake");
+            using var adapter = new RealNknClientAdapter(identity, options);
+            adapter.RegisterActiveFileTransferDataSession($"transfer-runtime-unlock-unproven-escalation-{reasonName}");
+            adapter.RegisterActiveFileTransferRuntime($"transfer-runtime-unlock-unproven-escalation-{reasonName}");
+            var logBaseline = LocalOperationalLog.GetRecentLogText().Length;
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(20));
+            await adapter.ConnectAsync(cts.Token);
+
+            var nowTick = Stopwatch.GetTimestamp();
+            var startedTick = staleInProgress
+                ? nowTick - Stopwatch.Frequency * 25
+                : nowTick;
+            var completedTick = staleInProgress ? 0 : nowTick;
+            SetPrivateField(adapter, "receiveStallRecoveryInProgress", 1);
+            SetPrivateField(adapter, "receiveStallRecoveryCount", 1);
+            SetPrivateField(adapter, "receiveStallLastRecoveryStartedTick", startedTick);
+            SetPrivateField(adapter, "receiveStallLastRecoveryCompletedTick", completedTick);
+            SetPrivateField(adapter, "receiveStallRecoveryAwaitingReceiveProof", staleInProgress ? 0 : 1);
+            SetPrivateField(adapter, "receiveStallRecoveryRequiresControlProof", 1);
+            SetPrivateField(adapter, "receiveStallRecoveryRequiresBulkProof", 1);
+
+            var connectCountBeforeRequest =
+                int.Parse(File.ReadAllText(countFile).Trim());
+            Assert.False(
+                adapter.RequestFileTransferReceiveStallRecovery(
+                    CreateBridgeRecoveryAuthority($"transfer-runtime-unlock-unproven-escalation-{reasonName}", requestedReason),
+                    requestedReason),
+                GetRecentLogTextSince(logBaseline));
+            await Task.Delay(150, cts.Token);
+
+            var logText = GetRecentLogTextSince(logBaseline);
+            Assert.Equal(
+                connectCountBeforeRequest,
+                int.Parse(File.ReadAllText(countFile).Trim()));
+            Assert.Contains($"requested_reason={requestedReason}", logText, StringComparison.Ordinal);
+            Assert.Contains(
+                "event=nkn_bridge_receive_stall_recovery_rejected_no_execution_command",
+                logText,
+                StringComparison.Ordinal);
+            Assert.DoesNotContain(
+                "event=nkn_bridge_receive_stall_recovery_hard_restart",
+                logText,
+                StringComparison.Ordinal);
+
+            adapter.UnregisterActiveFileTransferRuntime($"transfer-runtime-unlock-unproven-escalation-{reasonName}");
+            adapter.UnregisterActiveFileTransferDataSession($"transfer-runtime-unlock-unproven-escalation-{reasonName}");
+            await adapter.DisconnectAsync();
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("NLINK_NKN_NODE_PATH", prevNodePath);
+            Environment.SetEnvironmentVariable("NLINK_NKN_BRIDGE_PATH", prevBridgePath);
+            Environment.SetEnvironmentVariable("NLINK_NKN_RECEIVE_STALL_RECOVERY", prevRecovery);
+            try
+            {
+                CleanupDirectoryIfExists(tempDir);
+            }
+            catch
+            {
+            }
+        }
+    }
+
+    [Trait("Category", "LegacySmoke")]
+    [Trait("FileTransferInfraSuite", "BridgeRecoveryExecution")]
+    [Fact]
+    public async Task BridgeRecoveryExecution_FreshGenerationDoesNotReusePriorUnprovenEscalation()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var bundleDir = TryFindBridgeBundleDirectory();
+        if (bundleDir is null)
+        {
+            return;
+        }
+
+        var nodePath = Path.Combine(bundleDir, "node.exe");
+        if (!File.Exists(nodePath))
+        {
+            return;
+        }
+
+        var tempDir = Path.Combine(Path.GetTempPath(), "nlink-mock-bridge-post-tuna-unproven-escalation", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(tempDir);
+        var countFile = Path.Combine(tempDir, "connect-count.txt");
+        var bridgePath = Path.Combine(tempDir, "mock-bridge-post-tuna-unproven-escalation.js");
+        WriteBridgeScriptWithManifest(bridgePath, BuildReceiveStallRecoveryMockBridgeScript(countFile, stallConnectCount: 0));
+        var prevNodePath = Environment.GetEnvironmentVariable("NLINK_NKN_NODE_PATH");
+        var prevBridgePath = Environment.GetEnvironmentVariable("NLINK_NKN_BRIDGE_PATH");
+        var prevRecovery = Environment.GetEnvironmentVariable("NLINK_NKN_RECEIVE_STALL_RECOVERY");
+
+        try
+        {
+            Environment.SetEnvironmentVariable("NLINK_NKN_NODE_PATH", nodePath);
+            Environment.SetEnvironmentVariable("NLINK_NKN_BRIDGE_PATH", bridgePath);
+            Environment.SetEnvironmentVariable("NLINK_NKN_RECEIVE_STALL_RECOVERY", null);
+            var keyPath = Path.Combine(tempDir, "identity.json");
+            WriteIdentityFile(keyPath, "post-tuna-unproven-escalation");
+            var seedBackend = new FakeProtectedSeedBackend();
+            seedBackend.SaveSeed(keyPath, RandomNumberGenerator.GetBytes(32));
+            using var seedBackendOverride = NknSecretStore.OverrideBackendForTests(seedBackend);
+            var options = LoadNknOptionsWithOverrides(keyPath, "post-tuna-unproven-escalation");
+            var identity = new NknIdentity("post-tuna-unproven-escalation", "post-tuna-unproven-escalation.fake");
+            using var adapter = new RealNknClientAdapter(identity, options);
+            adapter.RegisterActiveFileTransferDataSession("transfer-post-tuna-unproven-escalation");
+            adapter.RegisterActiveFileTransferRuntime("transfer-post-tuna-unproven-escalation");
+            var logBaseline = LocalOperationalLog.GetRecentLogText().Length;
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(20));
+            await adapter.ConnectAsync(cts.Token);
+
+            var firstCommand = CreateBridgeRecoveryExecutionCommand(
+                    "transfer-post-tuna-unproven-escalation",
+                    "post_tuna_fallback_state_refresh_failed",
+                    routeToken: FileTransferRouteResolver.PostTunaFallbackV6Token,
+                    protocolVersion: FileTransferProtocol.ProtocolVersionV6);
+            var firstStart =
+                adapter.BeginFileTransferBridgeRecoveryExecution(firstCommand);
+            Assert.Equal(
+                FileTransferBridgeRecoveryExecutionStartStatus.Started,
+                firstStart.Status);
+            await WaitUntilAsync(
+                () =>
+                {
+                    var text = GetRecentLogTextSince(logBaseline);
+                    return text.Contains("event=nkn_bridge_receive_stall_recovery_completed", StringComparison.Ordinal) &&
+                           text.Contains("stall_reason=post_tuna_fallback_state_refresh_failed", StringComparison.Ordinal);
+                },
+                TimeSpan.FromSeconds(10));
+            _ = await Assert.IsType<Task<FileTransferBridgeRecoveryExecutionReceipt>>(
+                    firstStart.Completion)
+                .WaitAsync(TimeSpan.FromSeconds(10));
+
+            var secondCommand = CreateBridgeRecoveryExecutionCommand(
+                    "transfer-post-tuna-unproven-escalation",
+                    "post_tuna_fallback_state_refresh_failed",
+                    routeToken: FileTransferRouteResolver.PostTunaFallbackV6Token,
+                    protocolVersion: FileTransferProtocol.ProtocolVersionV6,
+                    bridgeDecisionGeneration: 2);
+            var secondStart =
+                adapter.BeginFileTransferBridgeRecoveryExecution(secondCommand);
+            Assert.Equal(
+                FileTransferBridgeRecoveryExecutionStartStatus.Started,
+                secondStart.Status);
+            var secondReceipt =
+                await Assert.IsType<Task<FileTransferBridgeRecoveryExecutionReceipt>>(
+                    secondStart.Completion)
+                .WaitAsync(TimeSpan.FromSeconds(10));
+            Assert.Equal(secondCommand, secondReceipt.Command);
+            Assert.Equal(
+                FileTransferBridgeRecoveryExecutionOutcome.Completed,
+                secondReceipt.Outcome);
+            Assert.Equal("soft", secondReceipt.ExecutionMode);
+
+            var logText = GetRecentLogTextSince(logBaseline);
+            Assert.DoesNotContain(
+                "event=nkn_bridge_receive_stall_recovery_post_tuna_fallback_unproven_escalation_allowed",
+                logText,
+                StringComparison.Ordinal);
+            Assert.DoesNotContain(
+                "event=nkn_bridge_receive_stall_recovery_hard_restart",
+                logText,
+                StringComparison.Ordinal);
+            var connectCount = int.Parse(File.ReadAllText(countFile).Trim());
+            Assert.True(connectCount >= 3);
+
+            adapter.UnregisterActiveFileTransferRuntime("transfer-post-tuna-unproven-escalation");
+            adapter.UnregisterActiveFileTransferDataSession("transfer-post-tuna-unproven-escalation");
+            await adapter.DisconnectAsync();
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("NLINK_NKN_NODE_PATH", prevNodePath);
+            Environment.SetEnvironmentVariable("NLINK_NKN_BRIDGE_PATH", prevBridgePath);
+            Environment.SetEnvironmentVariable("NLINK_NKN_RECEIVE_STALL_RECOVERY", prevRecovery);
+            try
+            {
+                CleanupDirectoryIfExists(tempDir);
+            }
+            catch
+            {
+            }
+        }
+    }
+
+    [Trait("Category", "LegacySmoke")]
+    [Fact]
+    public void Bridge_ReceiveStallRecovery_PostTunaFallbackProofWindowRequiresFallbackRuntime()
+    {
+        var tempDir = Path.Combine(Path.GetTempPath(), "nlink-post-tuna-proof-window-route-scope", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(tempDir);
+
+        try
+        {
+            var keyPath = Path.Combine(tempDir, "identity.json");
+            WriteIdentityFile(keyPath, "post-tuna-proof-window-route-scope");
+            var seedBackend = new FakeProtectedSeedBackend();
+            seedBackend.SaveSeed(keyPath, RandomNumberGenerator.GetBytes(32));
+            using var seedBackendOverride = NknSecretStore.OverrideBackendForTests(seedBackend);
+            var options = LoadNknOptionsWithOverrides(keyPath, "post-tuna-proof-window-route-scope");
+            var identity = new NknIdentity("post-tuna-proof-window-route-scope", "post-tuna-proof-window-route-scope.fake");
+            using var adapter = new RealNknClientAdapter(identity, options);
+
+            adapter.RegisterActiveFileTransferDataSession("transfer-regular-v4-proof-window");
+            adapter.RegisterActiveFileTransferRuntime("transfer-regular-v4-proof-window");
+            var logBaseline = GetOperationalLogLength();
+
+            adapter.ArmPostTunaFallbackProofSendWindow(
+                "post_tuna_fallback_state_refresh_failed",
+                "unit_test_regular_v4_only",
+                "session-regular-v4-proof-window");
+
+            var logText = ReadOperationalLogTail(logBaseline);
+            Assert.Contains(
+                "event=nkn_bridge_post_tuna_fallback_proof_send_window_skipped; reason=no_active_post_tuna_fallback_runtime",
+                logText,
+                StringComparison.Ordinal);
+            Assert.DoesNotContain(
+                "event=nkn_bridge_post_tuna_fallback_proof_send_window_armed",
+                logText,
+                StringComparison.Ordinal);
+
+            adapter.UnregisterActiveFileTransferRuntime("transfer-regular-v4-proof-window");
+            adapter.UnregisterActiveFileTransferDataSession("transfer-regular-v4-proof-window");
+        }
+        finally
+        {
+            try
+            {
+                CleanupDirectoryIfExists(tempDir);
+            }
+            catch
+            {
+            }
+        }
+    }
+
+    [Trait("Category", "LegacySmoke")]
+    [Fact]
+    public void Bridge_ReceiveStallRecovery_PostTunaFallbackProofWindowDoesNotSlideWhileAwaitingProof()
+    {
+        var tempDir = Path.Combine(Path.GetTempPath(), "nlink-post-tuna-proof-window-preserved", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(tempDir);
+
+        try
+        {
+            var keyPath = Path.Combine(tempDir, "identity.json");
+            WriteIdentityFile(keyPath, "post-tuna-proof-window-preserved");
+            var seedBackend = new FakeProtectedSeedBackend();
+            seedBackend.SaveSeed(keyPath, RandomNumberGenerator.GetBytes(32));
+            using var seedBackendOverride = NknSecretStore.OverrideBackendForTests(seedBackend);
+            var options = LoadNknOptionsWithOverrides(keyPath, "post-tuna-proof-window-preserved");
+            var identity = new NknIdentity("post-tuna-proof-window-preserved", "post-tuna-proof-window-preserved.fake");
+            using var adapter = new RealNknClientAdapter(identity, options);
+
+            adapter.RegisterActiveFileTransferDataSession("transfer-post-tuna-proof-window-preserved");
+            adapter.RegisterActiveFileTransferRuntime("transfer-post-tuna-proof-window-preserved");
+            adapter.MarkActiveFileTransferPostTunaFallbackRuntime("transfer-post-tuna-proof-window-preserved", "test_route_hint");
+            SetPrivateField(adapter, "receiveStallRecoveryAwaitingReceiveProof", 1);
+            var logBaseline = GetOperationalLogLength();
+
+            adapter.ArmPostTunaFallbackProofSendWindow(
+                "post_tuna_fallback_state_refresh_failed",
+                "unit_test_first_state_refresh",
+                "session-post-tuna-proof-window-preserved");
+            var firstExpiresTick = Assert.IsType<long>(GetPrivateField(adapter, "postTunaFallbackProofSendWindowExpiresTick"));
+
+            adapter.ArmPostTunaFallbackProofSendWindow(
+                "post_tuna_fallback_state_refresh_failed",
+                "unit_test_second_state_refresh",
+                "session-post-tuna-proof-window-preserved");
+            var secondExpiresTick = Assert.IsType<long>(GetPrivateField(adapter, "postTunaFallbackProofSendWindowExpiresTick"));
+
+            Assert.Equal(firstExpiresTick, secondExpiresTick);
+            var logText = ReadOperationalLogTail(logBaseline);
+            Assert.Contains(
+                "event=nkn_bridge_post_tuna_fallback_proof_send_window_armed",
+                logText,
+                StringComparison.Ordinal);
+            Assert.Contains(
+                "event=nkn_bridge_post_tuna_fallback_proof_send_window_preserved",
+                logText,
+                StringComparison.Ordinal);
+            Assert.Contains("requested_trigger=unit_test_second_state_refresh", logText, StringComparison.Ordinal);
+
+            adapter.UnregisterActiveFileTransferRuntime("transfer-post-tuna-proof-window-preserved");
+            adapter.UnregisterActiveFileTransferDataSession("transfer-post-tuna-proof-window-preserved");
+        }
+        finally
+        {
+            try
+            {
+                CleanupDirectoryIfExists(tempDir);
+            }
+            catch
+            {
+            }
+        }
+    }
+
+    [Trait("Category", "LegacySmoke")]
+    [Fact]
+    public async Task Bridge_ReceiveStallRecovery_PostTunaFallbackProofWindowDoesNotReplaceCoordinatorEvaluation()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var bundleDir = TryFindBridgeBundleDirectory();
+        if (bundleDir is null)
+        {
+            return;
+        }
+
+        var nodePath = Path.Combine(bundleDir, "node.exe");
+        if (!File.Exists(nodePath))
+        {
+            return;
+        }
+
+        var tempDir = Path.Combine(Path.GetTempPath(), "nlink-mock-bridge-post-tuna-proof-window", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(tempDir);
+        var countFile = Path.Combine(tempDir, "connect-count.txt");
+        var bridgePath = Path.Combine(tempDir, "mock-bridge-post-tuna-proof-window.js");
+        WriteBridgeScriptWithManifest(
+            bridgePath,
+            BuildReceiveStallRecoveryMockBridgeScript(
+                countFile,
+                controlMessagesReceivedSinceLast: 0,
+                bulkMessagesReceivedSinceLast: 0,
+                totalMessagesReceivedSinceLast: 1,
+                controlLastReceivedAgeMs: 21_000,
+                bulkLastReceivedAgeMs: 21_000));
+        var prevNodePath = Environment.GetEnvironmentVariable("NLINK_NKN_NODE_PATH");
+        var prevBridgePath = Environment.GetEnvironmentVariable("NLINK_NKN_BRIDGE_PATH");
+        var prevRecovery = Environment.GetEnvironmentVariable("NLINK_NKN_RECEIVE_STALL_RECOVERY");
+        var prevFastRecovery = Environment.GetEnvironmentVariable("NLINK_NKN_RECEIVE_STALL_FILETRANSFER_FAST_RECOVERY");
+
+        try
+        {
+            Environment.SetEnvironmentVariable("NLINK_NKN_NODE_PATH", nodePath);
+            Environment.SetEnvironmentVariable("NLINK_NKN_BRIDGE_PATH", bridgePath);
+            Environment.SetEnvironmentVariable("NLINK_NKN_RECEIVE_STALL_RECOVERY", null);
+            Environment.SetEnvironmentVariable("NLINK_NKN_RECEIVE_STALL_FILETRANSFER_FAST_RECOVERY", null);
+            var keyPath = Path.Combine(tempDir, "identity.json");
+            WriteIdentityFile(keyPath, "post-tuna-proof-window");
+            var seedBackend = new FakeProtectedSeedBackend();
+            seedBackend.SaveSeed(keyPath, RandomNumberGenerator.GetBytes(32));
+            using var seedBackendOverride = NknSecretStore.OverrideBackendForTests(seedBackend);
+            var options = LoadNknOptionsWithOverrides(keyPath, "post-tuna-proof-window");
+            var identity = new NknIdentity("post-tuna-proof-window", "post-tuna-proof-window.fake");
+            using var adapter = new RealNknClientAdapter(identity, options);
+            var evaluations = new ConcurrentQueue<FileTransferBridgeRecoveryEvaluationRequest>();
+            adapter.BridgeRecoveryEvaluationRequested += (_, args) => evaluations.Enqueue(args.Request);
+            var logBaseline = GetOperationalLogLength();
+            adapter.RegisterActiveFileTransferDataSession("transfer-post-tuna-proof-window");
+            adapter.RegisterActiveFileTransferRuntime("transfer-post-tuna-proof-window");
+            adapter.MarkActiveFileTransferPostTunaFallbackRuntime("transfer-post-tuna-proof-window", "test_route_hint");
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(12));
+            await adapter.ConnectAsync(cts.Token);
+
+            var nowTick = Stopwatch.GetTimestamp();
+            SetPrivateField(adapter, "receiveStallRecoveryCount", 4);
+            SetPrivateField(adapter, "receiveStallLastRecoveryStartedTick", nowTick);
+            SetPrivateField(adapter, "receiveStallLastRecoveryCompletedTick", nowTick);
+            SetPrivateField(adapter, "receiveStallRecoveryAwaitingReceiveProof", 1);
+            SetPrivateField(adapter, "receiveStallRecoveryRequiresControlProof", 1);
+            SetPrivateField(adapter, "receiveStallRecoveryRequiresBulkProof", 1);
+            adapter.ArmPostTunaFallbackProofSendWindow(
+                "post_tuna_fallback_state_refresh_failed",
+                "unit_test_state_refresh_queued",
+                "session-post-tuna-proof-window");
+
+            var proofWindowExpiresTick = Assert.IsType<long>(GetPrivateField(adapter, "postTunaFallbackProofSendWindowExpiresTick"));
+
+            await WaitUntilAsync(
+                () => evaluations.Any(e => e.ConsecutiveObservations >= 3),
+                TimeSpan.FromSeconds(8));
+
+            AssertReceiveStallEvaluationWithoutExecution(
+                adapter, evaluations, "transfer-post-tuna-proof-window", countFile, 4, 0);
+            var logText = ReadOperationalLogTail(logBaseline);
+            Assert.DoesNotContain("event=nkn_bridge_receive_stall_recovery_started", logText, StringComparison.Ordinal);
+            Assert.DoesNotContain("event=nkn_bridge_receive_stall_recovery_hard_restart", logText, StringComparison.Ordinal);
+            Assert.DoesNotContain("event=nkn_bridge_recovery_execution_started", logText, StringComparison.Ordinal);
+            Assert.Equal(nowTick, Assert.IsType<long>(GetPrivateField(adapter, "receiveStallLastRecoveryStartedTick")));
+            Assert.Equal(nowTick, Assert.IsType<long>(GetPrivateField(adapter, "receiveStallLastRecoveryCompletedTick")));
+            Assert.Equal(1, Assert.IsType<int>(GetPrivateField(adapter, "receiveStallRecoveryAwaitingReceiveProof")));
+            Assert.True(proofWindowExpiresTick > 0);
+            Assert.Equal(proofWindowExpiresTick, Assert.IsType<long>(GetPrivateField(adapter, "postTunaFallbackProofSendWindowExpiresTick")));
+            Assert.Equal("unit_test_state_refresh_queued", GetPrivateField(adapter, "postTunaFallbackProofSendWindowTrigger"));
+
+            adapter.UnregisterActiveFileTransferRuntime("transfer-post-tuna-proof-window");
+            adapter.UnregisterActiveFileTransferDataSession("transfer-post-tuna-proof-window");
+            await adapter.DisconnectAsync();
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("NLINK_NKN_NODE_PATH", prevNodePath);
+            Environment.SetEnvironmentVariable("NLINK_NKN_BRIDGE_PATH", prevBridgePath);
+            Environment.SetEnvironmentVariable("NLINK_NKN_RECEIVE_STALL_RECOVERY", prevRecovery);
+            Environment.SetEnvironmentVariable("NLINK_NKN_RECEIVE_STALL_FILETRANSFER_FAST_RECOVERY", prevFastRecovery);
+            try
+            {
+                CleanupDirectoryIfExists(tempDir);
+            }
+            catch
+            {
+            }
+        }
+    }
+
+    [Trait("Category", "LegacySmoke")]
+    [Fact]
+    public async Task Bridge_ReceiveStallRecovery_PostTunaFallbackProofWindowPressureRemainsEvidenceOnly()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var bundleDir = TryFindBridgeBundleDirectory();
+        if (bundleDir is null)
+        {
+            return;
+        }
+
+        var nodePath = Path.Combine(bundleDir, "node.exe");
+        if (!File.Exists(nodePath))
+        {
+            return;
+        }
+
+        var tempDir = Path.Combine(Path.GetTempPath(), "nlink-mock-bridge-post-tuna-proof-window-pressure", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(tempDir);
+        var countFile = Path.Combine(tempDir, "connect-count.txt");
+        var bridgePath = Path.Combine(tempDir, "mock-bridge-post-tuna-proof-window-pressure.js");
+        WriteBridgeScriptWithManifest(
+            bridgePath,
+            BuildReceiveStallRecoveryMockBridgeScript(
+                countFile,
+                controlMessagesReceivedSinceLast: 0,
+                bulkMessagesReceivedSinceLast: 0,
+                totalMessagesReceivedSinceLast: 1,
+                controlLastReceivedAgeMs: 21_000,
+                bulkLastReceivedAgeMs: 21_000));
+        var prevNodePath = Environment.GetEnvironmentVariable("NLINK_NKN_NODE_PATH");
+        var prevBridgePath = Environment.GetEnvironmentVariable("NLINK_NKN_BRIDGE_PATH");
+        var prevRecovery = Environment.GetEnvironmentVariable("NLINK_NKN_RECEIVE_STALL_RECOVERY");
+        var prevFastRecovery = Environment.GetEnvironmentVariable("NLINK_NKN_RECEIVE_STALL_FILETRANSFER_FAST_RECOVERY");
+
+        try
+        {
+            Environment.SetEnvironmentVariable("NLINK_NKN_NODE_PATH", nodePath);
+            Environment.SetEnvironmentVariable("NLINK_NKN_BRIDGE_PATH", bridgePath);
+            Environment.SetEnvironmentVariable("NLINK_NKN_RECEIVE_STALL_RECOVERY", null);
+            Environment.SetEnvironmentVariable("NLINK_NKN_RECEIVE_STALL_FILETRANSFER_FAST_RECOVERY", null);
+            var keyPath = Path.Combine(tempDir, "identity.json");
+            WriteIdentityFile(keyPath, "post-tuna-proof-window-pressure");
+            var seedBackend = new FakeProtectedSeedBackend();
+            seedBackend.SaveSeed(keyPath, RandomNumberGenerator.GetBytes(32));
+            using var seedBackendOverride = NknSecretStore.OverrideBackendForTests(seedBackend);
+            var options = LoadNknOptionsWithOverrides(keyPath, "post-tuna-proof-window-pressure");
+            var identity = new NknIdentity("post-tuna-proof-window-pressure", "post-tuna-proof-window-pressure.fake");
+            using var adapter = new RealNknClientAdapter(identity, options);
+            var evaluations = new ConcurrentQueue<FileTransferBridgeRecoveryEvaluationRequest>();
+            adapter.BridgeRecoveryEvaluationRequested += (_, args) => evaluations.Enqueue(args.Request);
+            var logBaseline = GetOperationalLogLength();
+            var transferId = "transfer-post-tuna-proof-window-pressure";
+            var sessionId = "session-post-tuna-proof-window-pressure";
+            var checkpointRequestId = "v6-regular-nkn-state-refresh:pressure";
+            adapter.RegisterActiveFileTransferDataSession(transferId);
+            adapter.RegisterActiveFileTransferRuntime(transferId);
+            adapter.MarkActiveFileTransferPostTunaFallbackRuntime(transferId, "test_route_hint");
+            adapter.MarkActiveFileTransferPostTunaFallbackLegAuthority(
+                transferId,
+                sessionId,
+                legGeneration: 6,
+                routeToken: FileTransferRouteResolver.PostTunaFallbackV6Token,
+                protocolVersion: FileTransferProtocol.ProtocolVersionV6,
+                liveRouteEpoch: 4,
+                transportEpoch: 2,
+                bridgeRecoveryGeneration: 1,
+                checkpointRequestId: checkpointRequestId,
+                authorityReason: "unit_test_pressure");
+            adapter.ReportPostTunaFallbackControlPlanePressure(
+                sessionId,
+                transferId,
+                FileTransferRouteResolver.PostTunaFallbackV6Token,
+                protocolVersion: FileTransferProtocol.ProtocolVersionV6,
+                liveRouteEpoch: 4,
+                legGeneration: 6,
+                bridgeRecoveryGeneration: 1,
+                transportEpoch: 2,
+                checkpointRequestId: checkpointRequestId,
+                kind: "receiver_state",
+                reason: "unit_test_pressure");
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(12));
+            await adapter.ConnectAsync(cts.Token);
+
+            var nowTick = Stopwatch.GetTimestamp();
+            SetPrivateField(adapter, "receiveStallRecoveryCount", 4);
+            SetPrivateField(adapter, "receiveStallLastRecoveryStartedTick", nowTick);
+            SetPrivateField(adapter, "receiveStallLastRecoveryCompletedTick", nowTick);
+            SetPrivateField(adapter, "receiveStallRecoveryAwaitingReceiveProof", 1);
+            SetPrivateField(adapter, "receiveStallRecoveryRequiresControlProof", 1);
+            SetPrivateField(adapter, "receiveStallRecoveryRequiresBulkProof", 1);
+            adapter.ArmPostTunaFallbackProofSendWindow(
+                "post_tuna_fallback_state_refresh_failed",
+                "unit_test_state_refresh_queued",
+                sessionId);
+
+            var proofWindowExpiresTick = Assert.IsType<long>(GetPrivateField(adapter, "postTunaFallbackProofSendWindowExpiresTick"));
+
+            await WaitUntilAsync(
+                () => evaluations.Any(e => e.ConsecutiveObservations >= 3),
+                TimeSpan.FromSeconds(8));
+
+            AssertReceiveStallEvaluationWithoutExecution(
+                adapter, evaluations, transferId, countFile, 4, 0);
+            var logText = ReadOperationalLogTail(logBaseline);
+            Assert.DoesNotContain("event=nkn_bridge_receive_stall_recovery_started", logText, StringComparison.Ordinal);
+            Assert.DoesNotContain("event=nkn_bridge_receive_stall_recovery_hard_restart", logText, StringComparison.Ordinal);
+            Assert.DoesNotContain("event=nkn_bridge_recovery_execution_started", logText, StringComparison.Ordinal);
+            Assert.Equal(nowTick, Assert.IsType<long>(GetPrivateField(adapter, "receiveStallLastRecoveryStartedTick")));
+            Assert.Equal(nowTick, Assert.IsType<long>(GetPrivateField(adapter, "receiveStallLastRecoveryCompletedTick")));
+            Assert.Equal(1, Assert.IsType<int>(GetPrivateField(adapter, "receiveStallRecoveryAwaitingReceiveProof")));
+            Assert.True(proofWindowExpiresTick > 0);
+            Assert.Equal(proofWindowExpiresTick, Assert.IsType<long>(GetPrivateField(adapter, "postTunaFallbackProofSendWindowExpiresTick")));
+            Assert.Equal("unit_test_state_refresh_queued", GetPrivateField(adapter, "postTunaFallbackProofSendWindowTrigger"));
+            Assert.Contains("event=filetransfer_post_tuna_fallback_control_plane_pressure_observed;", logText, StringComparison.Ordinal);
+            Assert.Contains("authority_effect=none; decision_reason=coordinator_fallback_tail_evaluation_required", logText, StringComparison.Ordinal);
+
+            adapter.UnregisterActiveFileTransferRuntime(transferId);
+            adapter.UnregisterActiveFileTransferDataSession(transferId);
+            await adapter.DisconnectAsync();
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("NLINK_NKN_NODE_PATH", prevNodePath);
+            Environment.SetEnvironmentVariable("NLINK_NKN_BRIDGE_PATH", prevBridgePath);
+            Environment.SetEnvironmentVariable("NLINK_NKN_RECEIVE_STALL_RECOVERY", prevRecovery);
+            Environment.SetEnvironmentVariable("NLINK_NKN_RECEIVE_STALL_FILETRANSFER_FAST_RECOVERY", prevFastRecovery);
+            try
+            {
+                CleanupDirectoryIfExists(tempDir);
+            }
+            catch
+            {
+            }
+        }
+    }
+
+    [Trait("Category", "LegacySmoke")]
+    [Trait("FileTransferInfraSuite", "BridgeRecoveryExecution")]
+    [Fact]
+    public async Task Bridge_ReceiveStallRecovery_PostTunaFallbackSoftFailureFallsBackToHardRestart()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var bundleDir = TryFindBridgeBundleDirectory();
+        if (bundleDir is null)
+        {
+            return;
+        }
+
+        var nodePath = Path.Combine(bundleDir, "node.exe");
+        if (!File.Exists(nodePath))
+        {
+            return;
+        }
+
+        var tempDir = Path.Combine(Path.GetTempPath(), "nlink-mock-bridge-post-tuna-soft-fallback", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(tempDir);
+        var countFile = Path.Combine(tempDir, "connect-count.txt");
+        var bridgePath = Path.Combine(tempDir, "mock-bridge-post-tuna-soft-fallback.js");
+        WriteBridgeScriptWithManifest(bridgePath, BuildReceiveStallRecoverySoftFailureThenHardRestartMockBridgeScript(countFile));
+        var prevNodePath = Environment.GetEnvironmentVariable("NLINK_NKN_NODE_PATH");
+        var prevBridgePath = Environment.GetEnvironmentVariable("NLINK_NKN_BRIDGE_PATH");
+        var prevRecovery = Environment.GetEnvironmentVariable("NLINK_NKN_RECEIVE_STALL_RECOVERY");
+
+        try
+        {
+            Environment.SetEnvironmentVariable("NLINK_NKN_NODE_PATH", nodePath);
+            Environment.SetEnvironmentVariable("NLINK_NKN_BRIDGE_PATH", bridgePath);
+            Environment.SetEnvironmentVariable("NLINK_NKN_RECEIVE_STALL_RECOVERY", null);
+            var keyPath = Path.Combine(tempDir, "identity.json");
+            WriteIdentityFile(keyPath, "post-tuna-soft-fallback");
+            var seedBackend = new FakeProtectedSeedBackend();
+            seedBackend.SaveSeed(keyPath, RandomNumberGenerator.GetBytes(32));
+            using var seedBackendOverride = NknSecretStore.OverrideBackendForTests(seedBackend);
+            var options = LoadNknOptionsWithOverrides(keyPath, "post-tuna-soft-fallback");
+            var identity = new NknIdentity("post-tuna-soft-fallback", "post-tuna-soft-fallback.fake");
+            using var adapter = new RealNknClientAdapter(identity, options);
+            adapter.SetConnectReadyTimeoutForTests(TimeSpan.FromSeconds(5));
+            adapter.SetFileTransferBridgeRecoveryExecutionTimeoutsForTests(
+                TimeSpan.FromMilliseconds(150),
+                TimeSpan.FromSeconds(5));
+            adapter.RegisterActiveFileTransferDataSession("transfer-post-tuna-soft-fallback");
+            var logBaseline = LocalOperationalLog.GetRecentLogText().Length;
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+            await adapter.ConnectAsync(cts.Token);
+
+            var recoveryCountField = typeof(RealNknClientAdapter).GetField("receiveStallRecoveryCount", BindingFlags.Instance | BindingFlags.NonPublic);
+            Assert.NotNull(recoveryCountField);
+            recoveryCountField.SetValue(adapter, 1);
+
+            var command = CreateBridgeRecoveryExecutionCommand(
+                    "transfer-post-tuna-soft-fallback",
+                    "post_tuna_fallback_state_refresh_failed",
+                    routeToken: FileTransferRouteResolver.PostTunaFallbackV6Token,
+                    protocolVersion: FileTransferProtocol.ProtocolVersionV6);
+            var started =
+                adapter.BeginFileTransferBridgeRecoveryExecution(command);
+            Assert.Equal(
+                FileTransferBridgeRecoveryExecutionStartStatus.Started,
+                started.Status);
+
+            await WaitUntilAsync(
+                () =>
+                    File.Exists(countFile) &&
+                    int.TryParse(File.ReadAllText(countFile).Trim(), out var count) &&
+                    count >= 3 &&
+                    GetRecentLogTextSince(logBaseline).Contains(
+                        "event=nkn_bridge_receive_stall_recovery_soft_failed_hard_restart",
+                        StringComparison.Ordinal) &&
+                    GetRecentLogTextSince(logBaseline).Contains(
+                        "event=nkn_bridge_receive_stall_recovery_completed",
+                        StringComparison.Ordinal),
+                TimeSpan.FromSeconds(10));
+            var receipt =
+                await Assert.IsType<Task<FileTransferBridgeRecoveryExecutionReceipt>>(
+                        started.Completion)
+                    .WaitAsync(TimeSpan.FromSeconds(10));
+            Assert.Equal(
+                FileTransferBridgeRecoveryExecutionOutcome.Completed,
+                receipt.Outcome);
+            Assert.Equal("soft_then_hard", receipt.ExecutionMode);
+
+            var logText = GetRecentLogTextSince(logBaseline);
+            Assert.Contains("event=nkn_bridge_receive_stall_recovery_soft_for_filetransfer", logText, StringComparison.Ordinal);
+            Assert.Contains("event=nkn_bridge_receive_stall_recovery_soft_failed_hard_restart", logText, StringComparison.Ordinal);
+            Assert.Contains(
+                "event=nkn_bridge_recovery_execution_hard_restart_decided;",
+                logText,
+                StringComparison.Ordinal);
+            Assert.Contains("decision_status=Started", logText, StringComparison.Ordinal);
+            Assert.Contains("event=nkn_bridge_receive_stall_recovery_hard_restart", logText, StringComparison.Ordinal);
+            Assert.Contains("trigger=soft_failed", logText, StringComparison.Ordinal);
+            Assert.Contains("connect_key=core_filetransfer_request", logText, StringComparison.Ordinal);
+            Assert.Contains("stall_reason=post_tuna_fallback_state_refresh_failed", logText, StringComparison.Ordinal);
+            Assert.DoesNotContain("event=nkn_bridge_receive_stall_recovery_failed", logText, StringComparison.Ordinal);
+            Assert.Contains("physical_execution_terminated=1", logText, StringComparison.Ordinal);
+            Assert.Contains("total_deadline_expired=0", logText, StringComparison.Ordinal);
+            var hardDecisionIndex = logText.IndexOf(
+                "event=nkn_bridge_recovery_execution_hard_restart_decided;",
+                StringComparison.Ordinal);
+            var hardRestartIndex = logText.IndexOf(
+                "event=nkn_bridge_receive_stall_recovery_hard_restart;",
+                StringComparison.Ordinal);
+            var terminalReceiptIndex = logText.IndexOf(
+                "event=nkn_bridge_recovery_execution_completed;",
+                StringComparison.Ordinal);
+            Assert.True(hardDecisionIndex >= 0);
+            Assert.True(hardRestartIndex > hardDecisionIndex);
+            Assert.True(terminalReceiptIndex > hardRestartIndex);
+            var connectCount = int.Parse(File.ReadAllText(countFile).Trim());
+            Assert.True(connectCount >= 3);
+
+            adapter.SetFileTransferBridgeRecoveryExecutionTimeoutsForTests(
+                TimeSpan.FromMilliseconds(150),
+                TimeSpan.FromMilliseconds(250));
+            var terminalRaceCommand = CreateBridgeRecoveryExecutionCommand(
+                "transfer-post-tuna-soft-fallback",
+                "sender_request_feedback_stalled",
+                routeToken: FileTransferRouteResolver.PostTunaFallbackV6Token,
+                protocolVersion: FileTransferProtocol.ProtocolVersionV6,
+                bridgeDecisionGeneration: 2);
+            using var terminalCommitReached = new ManualResetEventSlim();
+            using var releaseTerminalCommit = new ManualResetEventSlim();
+            adapter.FileTransferBridgeRecoveryBeforeTerminalCommitForTests =
+                observed =>
+                {
+                    adapter.FileTransferBridgeRecoveryBeforeTerminalCommitForTests =
+                        null;
+                    Assert.Equal(terminalRaceCommand, observed);
+                    terminalCommitReached.Set();
+                    Assert.True(releaseTerminalCommit.Wait(TimeSpan.FromSeconds(5)));
+                };
+            var terminalRaceStart =
+                adapter.BeginFileTransferBridgeRecoveryExecution(
+                    terminalRaceCommand);
+            Assert.Equal(
+                FileTransferBridgeRecoveryExecutionStartStatus.Started,
+                terminalRaceStart.Status);
+            Assert.True(terminalCommitReached.Wait(TimeSpan.FromSeconds(3)));
+            await Task.Delay(350, cts.Token);
+            Assert.False(terminalRaceStart.Completion!.IsCompleted);
+            releaseTerminalCommit.Set();
+            var terminalRaceReceipt =
+                await terminalRaceStart.Completion.WaitAsync(TimeSpan.FromSeconds(2));
+            Assert.Equal(
+                FileTransferBridgeRecoveryExecutionOutcome.Exhausted,
+                terminalRaceReceipt.Outcome);
+            Assert.Equal("hard", terminalRaceReceipt.ExecutionMode);
+            Assert.Equal(
+                "bridge_recovery_execution_timeout",
+                terminalRaceReceipt.Reason);
+            var terminalRaceLogText = GetRecentLogTextSince(logBaseline);
+            Assert.Contains(
+                "event=nkn_bridge_recovery_execution_completed;",
+                terminalRaceLogText,
+                StringComparison.Ordinal);
+            Assert.Contains(
+                "total_deadline_expired=1",
+                terminalRaceLogText,
+                StringComparison.Ordinal);
+
+            adapter.UnregisterActiveFileTransferDataSession("transfer-post-tuna-soft-fallback");
+            await adapter.DisconnectAsync();
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("NLINK_NKN_NODE_PATH", prevNodePath);
+            Environment.SetEnvironmentVariable("NLINK_NKN_BRIDGE_PATH", prevBridgePath);
+            Environment.SetEnvironmentVariable("NLINK_NKN_RECEIVE_STALL_RECOVERY", prevRecovery);
+            try
+            {
+                CleanupDirectoryIfExists(tempDir);
+            }
+            catch
+            {
+            }
+        }
+    }
+
+    [Trait("Category", "LegacySmoke")]
+    [Fact]
+    public void Bridge_FileTransferRecoveryRejectedByOptionsDoesNotCacheBridgeAuthority()
+    {
+        var previousRecovery = Environment.GetEnvironmentVariable("NLINK_NKN_RECEIVE_STALL_RECOVERY");
+        try
+        {
+            Environment.SetEnvironmentVariable("NLINK_NKN_RECEIVE_STALL_RECOVERY", "0");
+            var options = NknTransportOptions.Load();
+            var identity = new NknIdentity("rejected-bridge-authority-cache", "rejected-bridge-authority-cache.fake");
+            using var adapter = new RealNknClientAdapter(identity, options);
+            const string transferId = "transfer_rejected_bridge_authority_cache";
+            adapter.RegisterActiveFileTransferDataSession(transferId);
+            var logStart = GetOperationalLogLength();
+
+            Assert.False(adapter.RequestFileTransferReceiveStallRecovery(
+                CreateBridgeRecoveryAuthority(transferId, "test_rejected_bridge_authority_cache"),
+                "test_rejected_bridge_authority_cache"));
+            var rejected = adapter.BeginFileTransferBridgeRecoveryExecution(
+                CreateBridgeRecoveryExecutionCommand(transferId, "test_disabled_recovery"));
+            Assert.Equal(FileTransferBridgeRecoveryExecutionStartStatus.Rejected, rejected.Status);
+            Assert.Equal("bridge_recovery_execution_disabled", rejected.Reason);
+            Assert.Null(rejected.Completion);
+            Assert.Null(GetPrivateField(adapter, "activeFileTransferBridgeRecoveryExecutionCommand"));
+            Assert.Null(GetPrivateField(adapter, "lastFileTransferBridgeRecoveryExecutionReceipt"));
+            Assert.Equal(0, Assert.IsType<int>(GetPrivateField(adapter, "receiveStallRecoveryInProgress")));
+            Assert.Equal(0, Assert.IsType<int>(GetPrivateField(adapter, "receiveStallRecoveryCount")));
+
+            var suppressed = adapter.SuppressBridgePingTimeoutForActiveFileTransferForTests(
+                framesSentSinceLast: 1,
+                messagesReceivedSinceLast: 1,
+                controlLastReceivedAgeMs: 10,
+                bulkLastReceivedAgeMs: 10,
+                disconnectSignalCount: 0,
+                healthSummaryAge: TimeSpan.FromMilliseconds(10));
+
+            Assert.False(suppressed);
+            var logText = ReadOperationalLogTail(logStart);
+            Assert.Contains("event=nkn_bridge_receive_stall_recovery_rejected_no_execution_command;", logText, StringComparison.Ordinal);
+            Assert.Contains("rejection_reason=bridge_recovery_execution_command_missing", logText, StringComparison.Ordinal);
+            Assert.Contains("event=nkn_bridge_ping_timeout_filetransfer_recovery_suppression_diagnostic_only;", logText, StringComparison.Ordinal);
+            Assert.Contains("reason=bridge_recovery_authority_missing", logText, StringComparison.Ordinal);
+            Assert.DoesNotContain("event=nkn_bridge_ping_timeout_filetransfer_recovery_suppressed;", logText, StringComparison.Ordinal);
+
+            adapter.UnregisterActiveFileTransferDataSession(transferId);
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("NLINK_NKN_RECEIVE_STALL_RECOVERY", previousRecovery);
         }
     }
 
@@ -1710,6 +8509,146 @@ public sealed class BridgeConnectionLifecycleTests : SessionRuntimeConnectionTes
             Environment.SetEnvironmentVariable("NLINK_NKN_PREFLIGHT_TIMEOUT_MS", prevTimeout);
             Environment.SetEnvironmentVariable("NLINK_NKN_PREFLIGHT_CONCURRENCY", prevConc);
             Environment.SetEnvironmentVariable("NLINK_NKN_PREFLIGHT_CACHE_TTL_MS", prevTtl);
+            try
+            {
+                CleanupDirectoryIfExists(tempDir);
+            }
+            catch
+            {
+            }
+        }
+    }
+
+    [Trait("Category", "LegacySmoke")]
+    [Fact]
+    public void Bridge_ConnectReadyTimeout_CoversDefaultPreflightFallbackCandidates()
+    {
+        var tempDir = Path.Combine(Path.GetTempPath(), "nlink-mock-bridge-ready-budget-default", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(tempDir);
+        var prevSeedRpc = Environment.GetEnvironmentVariable("NLINK_NKN_SEED_RPC");
+        var prevEnabled = Environment.GetEnvironmentVariable("NLINK_NKN_PREFLIGHT_RPC_ENABLED");
+        var prevTimeout = Environment.GetEnvironmentVariable("NLINK_NKN_PREFLIGHT_TIMEOUT_MS");
+        try
+        {
+            Environment.SetEnvironmentVariable("NLINK_NKN_SEED_RPC", null);
+            Environment.SetEnvironmentVariable("NLINK_NKN_PREFLIGHT_RPC_ENABLED", "true");
+            Environment.SetEnvironmentVariable("NLINK_NKN_PREFLIGHT_TIMEOUT_MS", "8000");
+
+            var options = LoadNknOptionsWithOverrides(Path.Combine(tempDir, "id.json"), "mock-ready-budget-default");
+            var timeout = RealNknClientAdapter.ResolveConnectReadyTimeoutForOptions(options);
+
+            Assert.True(timeout > TimeSpan.FromSeconds(30));
+            Assert.True(timeout >= TimeSpan.FromSeconds(34));
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("NLINK_NKN_SEED_RPC", prevSeedRpc);
+            Environment.SetEnvironmentVariable("NLINK_NKN_PREFLIGHT_RPC_ENABLED", prevEnabled);
+            Environment.SetEnvironmentVariable("NLINK_NKN_PREFLIGHT_TIMEOUT_MS", prevTimeout);
+            try
+            {
+                CleanupDirectoryIfExists(tempDir);
+            }
+            catch
+            {
+            }
+        }
+    }
+
+    [Trait("Category", "LegacySmoke")]
+    [Fact]
+    public void Bridge_ConnectReadyTimeout_KeepsMinimumForSinglePreflightRpc()
+    {
+        var tempDir = Path.Combine(Path.GetTempPath(), "nlink-mock-bridge-ready-budget-single", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(tempDir);
+        var prevSeedRpc = Environment.GetEnvironmentVariable("NLINK_NKN_SEED_RPC");
+        var prevEnabled = Environment.GetEnvironmentVariable("NLINK_NKN_PREFLIGHT_RPC_ENABLED");
+        var prevTimeout = Environment.GetEnvironmentVariable("NLINK_NKN_PREFLIGHT_TIMEOUT_MS");
+        try
+        {
+            Environment.SetEnvironmentVariable("NLINK_NKN_SEED_RPC", "https://mock-rpc.example/mainnet/api/wallet");
+            Environment.SetEnvironmentVariable("NLINK_NKN_PREFLIGHT_RPC_ENABLED", "true");
+            Environment.SetEnvironmentVariable("NLINK_NKN_PREFLIGHT_TIMEOUT_MS", "8000");
+
+            var options = LoadNknOptionsWithOverrides(Path.Combine(tempDir, "id.json"), "mock-ready-budget-single");
+            var timeout = RealNknClientAdapter.ResolveConnectReadyTimeoutForOptions(options);
+
+            Assert.Equal(TimeSpan.FromSeconds(30), timeout);
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("NLINK_NKN_SEED_RPC", prevSeedRpc);
+            Environment.SetEnvironmentVariable("NLINK_NKN_PREFLIGHT_RPC_ENABLED", prevEnabled);
+            Environment.SetEnvironmentVariable("NLINK_NKN_PREFLIGHT_TIMEOUT_MS", prevTimeout);
+            try
+            {
+                CleanupDirectoryIfExists(tempDir);
+            }
+            catch
+            {
+            }
+        }
+    }
+
+    [Trait("Category", "LegacySmoke")]
+    [Fact]
+    public async Task Bridge_Connect_WithPreflight_AllowsDelayedConnectAck()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var bundleDir = TryFindBridgeBundleDirectory();
+        if (bundleDir is null)
+        {
+            return;
+        }
+
+        var nodePath = Path.Combine(bundleDir, "node.exe");
+        if (!File.Exists(nodePath))
+        {
+            return;
+        }
+
+        var tempDir = Path.Combine(Path.GetTempPath(), "nlink-mock-bridge-delayed-preflight-ack", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(tempDir);
+        var bridgePath = Path.Combine(tempDir, "mock-bridge-delayed-preflight-ack.js");
+        WriteBridgeScriptWithManifest(bridgePath, BuildMockBridgeScriptWithCustomConnect(connectBehaviorJs: @"
+    setTimeout(() => {
+      emit({ event:'ok', id: msg.id ?? null, cmd:'connect' });
+      setTimeout(() => emit({ event:'ready', protocol:2, channels:['control','media','bulk'], address:'delayed-preflight.addr', controlAddress:'delayed-preflight.addr', mediaAddress:'delayed-preflight-media.addr', bulkAddress:'delayed-preflight-bulk.addr', connectId: msg.connectId ?? null }), 20);
+    }, 3500);
+    return;
+    "));
+        var prevNodePath = Environment.GetEnvironmentVariable("NLINK_NKN_NODE_PATH");
+        var prevBridgePath = Environment.GetEnvironmentVariable("NLINK_NKN_BRIDGE_PATH");
+        var prevEnabled = Environment.GetEnvironmentVariable("NLINK_NKN_PREFLIGHT_RPC_ENABLED");
+        var prevTimeout = Environment.GetEnvironmentVariable("NLINK_NKN_PREFLIGHT_TIMEOUT_MS");
+        try
+        {
+            Environment.SetEnvironmentVariable("NLINK_NKN_NODE_PATH", nodePath);
+            Environment.SetEnvironmentVariable("NLINK_NKN_BRIDGE_PATH", bridgePath);
+            Environment.SetEnvironmentVariable("NLINK_NKN_PREFLIGHT_RPC_ENABLED", "true");
+            Environment.SetEnvironmentVariable("NLINK_NKN_PREFLIGHT_TIMEOUT_MS", "5000");
+            var options = LoadNknOptionsWithOverrides(Path.Combine(tempDir, "id.json"), "mock-delayed-preflight-ack");
+            var identity = NknIdentityStore.LoadOrCreate(options);
+            using var adapter = new RealNknClientAdapter(identity, options);
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(12));
+
+            var sw = Stopwatch.StartNew();
+            await adapter.ConnectAsync(cts.Token);
+            sw.Stop();
+
+            Assert.True(sw.Elapsed >= TimeSpan.FromSeconds(3), $"Connect returned before delayed ACK elapsed: {sw.Elapsed}");
+            Assert.Equal("delayed-preflight.addr", adapter.Address);
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("NLINK_NKN_NODE_PATH", prevNodePath);
+            Environment.SetEnvironmentVariable("NLINK_NKN_BRIDGE_PATH", prevBridgePath);
+            Environment.SetEnvironmentVariable("NLINK_NKN_PREFLIGHT_RPC_ENABLED", prevEnabled);
+            Environment.SetEnvironmentVariable("NLINK_NKN_PREFLIGHT_TIMEOUT_MS", prevTimeout);
             try
             {
                 CleanupDirectoryIfExists(tempDir);
@@ -1952,6 +8891,118 @@ public sealed class BridgeConnectionLifecycleTests : SessionRuntimeConnectionTes
     }
 
     [Trait("Category", "LegacySmoke")]
+    [Fact]
+    public async Task BridgeBootstrapHealthFailure_PromotesHostReadinessTerminalSnapshot()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var bundleDir = TryFindBridgeBundleDirectory();
+        if (bundleDir is null)
+        {
+            return;
+        }
+
+        var nodePath = Path.Combine(bundleDir, "node.exe");
+        if (!File.Exists(nodePath))
+        {
+            return;
+        }
+
+        var tempDir = Path.Combine(Path.GetTempPath(), "nlink-mock-bridge-bootstrap-health", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(tempDir);
+        var bridgePath = Path.Combine(tempDir, "mock-bridge-bootstrap-health.js");
+        WriteBridgeScriptWithManifest(bridgePath, BuildMockBridgeScriptWithCustomConnect(connectBehaviorJs: @"
+    emit({ event:'ok', id: msg.id ?? null, cmd:'connect' });
+    for (let i = 0; i < 3; i++) {
+      setTimeout(() => emit({
+        event: 'bridge_transport_health_summary',
+        selected_rpc: 'https://mock-bootstrap.example/mainnet/api/wallet',
+        selected_rpc_key: 'mock-bootstrap',
+        selected_rpc_stage: 'initial',
+        connect_id: msg.connectId ?? null,
+        connect_key: 'mock-bootstrap-key',
+        ready_emitted: 0,
+        client_ready_age_ms: -1,
+        disconnect_count_since_last: 0,
+        connect_failed_count_since_last: 1,
+        ws_error_count_since_last: 0,
+        rpc_fallback_attempt_count_since_last: 0,
+        control_ready: 0,
+        media_ready: 0,
+        bulk_ready: 0,
+        frames_sent_since_last: 0,
+        latest_disconnect_reason: '(none)',
+        sample_window_ms: 2000,
+        control_subclients: 4,
+        media_subclients: 8,
+        bulk_subclients: 4,
+        bulk_send_concurrency: 4,
+        control_messages_received_since_last: 0,
+        media_messages_received_since_last: 0,
+        bulk_messages_received_since_last: 0,
+        total_messages_received_since_last: 0,
+        control_bytes_received_since_last: 0,
+        media_bytes_received_since_last: 0,
+        bulk_bytes_received_since_last: 0,
+        total_bytes_received_since_last: 0,
+        control_last_received_age_ms: -1,
+        media_last_received_age_ms: -1,
+        bulk_last_received_age_ms: -1
+      }), 20 + i * 20);
+    }
+    return;
+    "));
+        var prevNodePath = Environment.GetEnvironmentVariable("NLINK_NKN_NODE_PATH");
+        var prevBridgePath = Environment.GetEnvironmentVariable("NLINK_NKN_BRIDGE_PATH");
+        try
+        {
+            Environment.SetEnvironmentVariable("NLINK_NKN_NODE_PATH", nodePath);
+            Environment.SetEnvironmentVariable("NLINK_NKN_BRIDGE_PATH", bridgePath);
+            var options = LoadNknOptionsWithOverrides(Path.Combine(tempDir, "id.json"), "mock-bootstrap-health");
+            var identity = NknIdentityStore.LoadOrCreate(options);
+            using var adapter = new RealNknClientAdapter(identity, options);
+            adapter.SetConnectReadyTimeoutForTests(TimeSpan.FromSeconds(5));
+            using var transport = new NknSignalingTransport(adapter, options, identity);
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+
+            var hostTask = transport.HostByAddressAsync(cts.Token);
+
+            await WaitUntilAsync(
+                () => transport.GetBridgeBootstrapReadinessSnapshot().TerminalFailure,
+                TimeSpan.FromSeconds(2));
+
+            var snapshot = transport.GetBridgeBootstrapReadinessSnapshot();
+            Assert.False(snapshot.ReadyEmitted);
+            Assert.Equal("bridge_transport_connect_failed_before_ready", snapshot.FailureReason);
+            Assert.Contains("connect_failed=1", snapshot.LastError, StringComparison.OrdinalIgnoreCase);
+
+            cts.Cancel();
+            try
+            {
+                await hostTask;
+            }
+            catch (OperationCanceledException)
+            {
+            }
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("NLINK_NKN_NODE_PATH", prevNodePath);
+            Environment.SetEnvironmentVariable("NLINK_NKN_BRIDGE_PATH", prevBridgePath);
+            try
+            {
+                CleanupDirectoryIfExists(tempDir);
+            }
+            catch
+            {
+            }
+        }
+    }
+
+    [Trait("Category", "LegacySmoke")]
     [Trait("Category", "BridgeStabilityPromotion")]
     [Fact]
     public async Task Bridge_Disconnect_WithUnresponsiveShutdownBridge_ForcesKill_AndCleansProcessHandles()
@@ -2117,6 +9168,303 @@ public sealed class BridgeConnectionLifecycleTests : SessionRuntimeConnectionTes
         Assert.True((bool)(method.Invoke(adapter, ["[nkn-bridge] WebSocket error: WebSocket was closed before the connection was established"]) ?? false));
     }
 
+    [Theory]
+    [Trait("FileTransferInfraSuite", "BridgeRecoveryExecution")]
+    [InlineData(false, false, false)]
+    [InlineData(false, false, true)]
+    [InlineData(false, true, false)]
+    [InlineData(false, true, true)]
+    [InlineData(true, false, false)]
+    [InlineData(true, false, true)]
+    [InlineData(true, true, false)]
+    [InlineData(true, true, true)]
+    public async Task BridgeRecoveryExecution_PingTimeoutHandlerRequiresEvaluationDespiteRecentActivity(
+        bool registerAfterInitialCheck,
+        bool recentSend,
+        bool runtimeOnly)
+    {
+        var options = NknTransportOptions.Load();
+        var identity = new NknIdentity("ping-timeout-boundary", "ping-timeout-boundary.fake");
+        using var adapter = new RealNknClientAdapter(identity, options);
+        const string transferId = "transfer-ping-timeout-boundary";
+        if (recentSend)
+        {
+            adapter.SuppressBridgePingTimeoutForActiveFileTransferAfterRecentSendForTests(
+                NknBridgeChannel.Bulk, 1024, 1100, TimeSpan.Zero);
+        }
+        else
+        {
+            adapter.SuppressBridgePingTimeoutForActiveFileTransferForTests(
+                12, 0, 45_000, 42_000, 0, TimeSpan.Zero);
+        }
+
+        void RegisterTransfer()
+        {
+            if (runtimeOnly)
+            {
+                adapter.RegisterActiveFileTransferRuntime(transferId);
+            }
+            else
+            {
+                adapter.RegisterActiveFileTransferDataSession(transferId);
+            }
+        }
+
+        if (registerAfterInitialCheck)
+        {
+            adapter.BridgePingTimeoutAfterInactiveTransferCheckForTests = RegisterTransfer;
+        }
+        else
+        {
+            RegisterTransfer();
+        }
+
+        var evaluations = new ConcurrentQueue<FileTransferBridgeRecoveryEvaluationRequest>();
+        adapter.BridgeRecoveryEvaluationRequested += (_, args) => evaluations.Enqueue(args.Request);
+        var disconnectedCount = 0;
+        var lifecycleCount = 0;
+        adapter.Disconnected += (_, _) => Interlocked.Increment(ref disconnectedCount);
+        adapter.BridgeLifecycle += (_, _) => Interlocked.Increment(ref lifecycleCount);
+        var before = NknRuntimeDiagnostics.Snapshot();
+
+        Assert.True(await (Task<bool>)InvokePrivateMethod(adapter, "HandleBridgePingTimeoutAsync", 3)!);
+
+        var evaluation = Assert.Single(evaluations);
+        Assert.Equal(transferId, evaluation.TransferId);
+        Assert.Equal(FileTransferBridgeRecoveryEvaluationKind.PingTimeout, evaluation.EvaluationKind);
+        Assert.Equal("ping_timeout", evaluation.ObservationKind);
+        Assert.Equal("bridge_ping_timeout", evaluation.Reason);
+        Assert.Equal(3, evaluation.ConsecutiveObservations);
+        Assert.Equal(recentSend ? 0 : 12, evaluation.FramesSentSinceLast);
+        Assert.Equal(0, disconnectedCount);
+        Assert.Equal(0, lifecycleCount);
+        Assert.False(adapter.IsBridgeProcessRunning);
+        Assert.Equal(0, Assert.IsType<int>(GetPrivateField(adapter, "receiveStallRecoveryInProgress")));
+        Assert.Equal(0, Assert.IsType<int>(GetPrivateField(adapter, "receiveStallRecoveryCount")));
+        Assert.Null(GetPrivateField(adapter, "activeFileTransferBridgeRecoveryExecutionCommand"));
+        Assert.Null(GetPrivateField(adapter, "lastFileTransferBridgeRecoveryExecutionReceipt"));
+        var after = NknRuntimeDiagnostics.Snapshot();
+        Assert.Equal(before.BridgeRestartCount, after.BridgeRestartCount);
+        Assert.Equal(before.LastError, after.LastError);
+    }
+
+    [Fact]
+    public void Bridge_PingTimeoutDuringActiveFileTransferWithRecentBridgeHealth_IsSuppressed()
+    {
+        var adapter = (RealNknClientAdapter)System.Runtime.Serialization.FormatterServices.GetUninitializedObject(typeof(RealNknClientAdapter));
+        var activeSessionsField = typeof(RealNknClientAdapter).GetField("activeFileTransferDataSessions", BindingFlags.Instance | BindingFlags.NonPublic);
+        Assert.NotNull(activeSessionsField);
+        activeSessionsField!.SetValue(adapter, 1);
+
+        var suppressed = adapter.SuppressBridgePingTimeoutForActiveFileTransferForTests(
+            framesSentSinceLast: 12,
+            messagesReceivedSinceLast: 0,
+            controlLastReceivedAgeMs: 45_987,
+            bulkLastReceivedAgeMs: 42_460,
+            disconnectSignalCount: 0,
+            healthSummaryAge: TimeSpan.FromSeconds(1));
+
+        Assert.False(suppressed);
+        var logText = LocalOperationalLog.GetRecentLogText();
+        Assert.Contains("event=nkn_bridge_ping_timeout_filetransfer_recovery_suppression_diagnostic_only", logText, StringComparison.Ordinal);
+        Assert.Contains("reason=bridge_recovery_authority_missing", logText, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Bridge_PingTimeoutDuringActiveFileTransferWithoutRecentBridgeHealth_IsNotSuppressed()
+    {
+        var adapter = (RealNknClientAdapter)System.Runtime.Serialization.FormatterServices.GetUninitializedObject(typeof(RealNknClientAdapter));
+        var activeSessionsField = typeof(RealNknClientAdapter).GetField("activeFileTransferDataSessions", BindingFlags.Instance | BindingFlags.NonPublic);
+        Assert.NotNull(activeSessionsField);
+        activeSessionsField!.SetValue(adapter, 1);
+
+        var suppressed = adapter.SuppressBridgePingTimeoutForActiveFileTransferForTests(
+            framesSentSinceLast: 12,
+            messagesReceivedSinceLast: 0,
+            controlLastReceivedAgeMs: 45_987,
+            bulkLastReceivedAgeMs: 42_460,
+            disconnectSignalCount: 0,
+            healthSummaryAge: TimeSpan.FromSeconds(10));
+
+        Assert.False(suppressed);
+        var logText = LocalOperationalLog.GetRecentLogText();
+        Assert.Contains("event=nkn_bridge_ping_timeout_filetransfer_recovery_suppression_diagnostic_only", logText, StringComparison.Ordinal);
+        Assert.Contains("reason=bridge_recovery_authority_missing", logText, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Bridge_PingTimeoutDuringActiveFileTransferWithRecentBridgeSend_IsSuppressed()
+    {
+        var adapter = (RealNknClientAdapter)System.Runtime.Serialization.FormatterServices.GetUninitializedObject(typeof(RealNknClientAdapter));
+        var activeSessionsField = typeof(RealNknClientAdapter).GetField("activeFileTransferDataSessions", BindingFlags.Instance | BindingFlags.NonPublic);
+        Assert.NotNull(activeSessionsField);
+        activeSessionsField!.SetValue(adapter, 1);
+
+        var suppressed = adapter.SuppressBridgePingTimeoutForActiveFileTransferAfterRecentSendForTests(
+            NknBridgeChannel.Bulk,
+            payloadBytes: 64_950,
+            serializedBytes: 65_050,
+            sendAge: TimeSpan.FromSeconds(1));
+
+        Assert.False(suppressed);
+        var logText = LocalOperationalLog.GetRecentLogText();
+        Assert.Contains("event=nkn_bridge_ping_timeout_filetransfer_recovery_suppression_diagnostic_only", logText, StringComparison.Ordinal);
+        Assert.Contains("reason=bridge_recovery_authority_missing", logText, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Bridge_PingTimeoutDuringActiveFileTransferWithStaleBridgeSend_IsNotSuppressed()
+    {
+        var adapter = (RealNknClientAdapter)System.Runtime.Serialization.FormatterServices.GetUninitializedObject(typeof(RealNknClientAdapter));
+        var activeSessionsField = typeof(RealNknClientAdapter).GetField("activeFileTransferDataSessions", BindingFlags.Instance | BindingFlags.NonPublic);
+        Assert.NotNull(activeSessionsField);
+        activeSessionsField!.SetValue(adapter, 1);
+
+        var suppressed = adapter.SuppressBridgePingTimeoutForActiveFileTransferAfterRecentSendForTests(
+            NknBridgeChannel.Bulk,
+            payloadBytes: 64_950,
+            serializedBytes: 65_050,
+            sendAge: TimeSpan.FromSeconds(10));
+
+        Assert.False(suppressed);
+        var logText = LocalOperationalLog.GetRecentLogText();
+        Assert.Contains("event=nkn_bridge_ping_timeout_filetransfer_recovery_suppression_diagnostic_only", logText, StringComparison.Ordinal);
+        Assert.Contains("reason=bridge_recovery_authority_missing", logText, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Bridge_ReceiveStallRecoveryFailureDuringActiveFileTransferEmitsExhaustedNotDisconnected()
+    {
+        var options = NknTransportOptions.Load();
+        var identity = new NknIdentity("receive-stall-active-filetransfer-exhausted", "receive-stall-active-filetransfer-exhausted.fake");
+        using var adapter = new RealNknClientAdapter(identity, options);
+        var disconnectedCount = 0;
+        BridgeLifecycleEvent? exhaustedEvent = null;
+        adapter.Disconnected += (_, _) => Interlocked.Increment(ref disconnectedCount);
+        adapter.BridgeLifecycle += (_, e) =>
+        {
+            if (e.Kind == BridgeLifecycleEventKind.ReceiveStallRecoveryExhausted)
+            {
+                exhaustedEvent = e;
+            }
+        };
+        adapter.RegisterActiveFileTransferDataSession("transfer-receive-stall-active-exhausted");
+
+        Assert.True(adapter.EmitActiveFileTransferReceiveStallRecoveryExhaustedForTests("tuna_activation_offer_send_timeout"));
+
+        Assert.Equal(0, Volatile.Read(ref disconnectedCount));
+        Assert.NotNull(exhaustedEvent);
+        Assert.Equal("tuna_activation_offer_send_timeout_recovery_failed", exhaustedEvent.Value.ExitReasonText);
+        var logText = LocalOperationalLog.GetRecentLogText();
+        Assert.Contains("event=nkn_bridge_receive_stall_recovery_exhausted_for_filetransfer", logText, StringComparison.Ordinal);
+        Assert.Contains("stall_reason=tuna_activation_offer_send_timeout", logText, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    [Trait("Category", "Contract")]
+    public async Task Bridge_ReceiveStallSoftRecoveryBudget_CancelsConnectAndNormalizesTimeout()
+    {
+        var connectTokenWasCancelable = false;
+
+        var exception = await Assert.ThrowsAsync<TimeoutException>(() =>
+            RealNknClientAdapter.RunBoundedReceiveStallRecoveryConnectAsync(
+                async cancellationToken =>
+                {
+                    connectTokenWasCancelable = cancellationToken.CanBeCanceled;
+                    await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
+                },
+                TimeSpan.FromMilliseconds(25)));
+
+        Assert.True(connectTokenWasCancelable);
+        Assert.Contains("Receive-stall recovery exceeded", exception.Message, StringComparison.Ordinal);
+        Assert.Contains("25 ms budget", exception.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    [Trait("Category", "Contract")]
+    [Trait("FileTransferInfraSuite", "BridgeRecoveryExecution")]
+    public async Task BridgeRecoveryExecution_TotalCancellationBypassesSoftTimeoutNormalization()
+    {
+        using var totalDeadline = new CancellationTokenSource(
+            TimeSpan.FromMilliseconds(25));
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
+            RealNknClientAdapter.RunBoundedReceiveStallRecoveryConnectAsync(
+                cancellationToken =>
+                    Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken),
+                TimeSpan.FromSeconds(5),
+                totalDeadline.Token));
+    }
+
+    [Fact]
+    public void Bridge_ReceiveStallRecoveryFailureWithoutActiveFileTransferDoesNotEmitExhausted()
+    {
+        var options = NknTransportOptions.Load();
+        var identity = new NknIdentity("receive-stall-no-filetransfer-exhausted", "receive-stall-no-filetransfer-exhausted.fake");
+        using var adapter = new RealNknClientAdapter(identity, options);
+        BridgeLifecycleEvent? exhaustedEvent = null;
+        adapter.BridgeLifecycle += (_, e) =>
+        {
+            if (e.Kind == BridgeLifecycleEventKind.ReceiveStallRecoveryExhausted)
+            {
+                exhaustedEvent = e;
+            }
+        };
+
+        Assert.False(adapter.EmitActiveFileTransferReceiveStallRecoveryExhaustedForTests("tuna_activation_offer_send_timeout"));
+        Assert.Null(exhaustedEvent);
+    }
+
+    [Fact]
+    [Trait("FileTransferInfraSuite", "BridgeRecoveryExecution")]
+    public async Task Bridge_PostTunaFallbackRecoveryGateRequiresExactCommandInvalidation()
+    {
+        var options = NknTransportOptions.Load();
+        var identity = new NknIdentity("post-tuna-stale-recovery-gate", "post-tuna-stale-recovery-gate.fake");
+        using var adapter = new RealNknClientAdapter(identity, options);
+        const string transferId = "transfer-post-tuna-stale-recovery-gate";
+        adapter.RegisterActiveFileTransferDataSession(transferId);
+        adapter.RegisterActiveFileTransferRuntime(transferId);
+        var command = CreateBridgeRecoveryExecutionCommand(
+            transferId,
+            "post_tuna_fallback_stale_state_refresh_send_retired",
+            routeToken: FileTransferRouteResolver.PostTunaFallbackV6Token,
+            protocolVersion: FileTransferProtocol.ProtocolVersionV6);
+        var mismatched = command with { CheckpointRequestId = "other-checkpoint" };
+        FileTransferBridgeRecoveryExecutionStartResult started;
+        // Hold the existing adapter gate so invalidation precedes physical worker dispatch.
+        lock (Assert.IsType<object>(GetPrivateField(adapter, "gate")))
+        {
+            started = adapter.BeginFileTransferBridgeRecoveryExecution(command);
+            Assert.Equal(FileTransferBridgeRecoveryExecutionStartStatus.Started, started.Status);
+            var staleStartedTick = Stopwatch.GetTimestamp() - (long)(Stopwatch.Frequency * 25.0);
+            SetPrivateField(adapter, "receiveStallLastRecoveryStartedTick", staleStartedTick);
+
+            Assert.False(adapter.RequestFileTransferReceiveStallRecovery(command.Decision.Reason));
+            var overlapping = adapter.BeginFileTransferBridgeRecoveryExecution(mismatched);
+            Assert.Equal(FileTransferBridgeRecoveryExecutionStartStatus.Rejected, overlapping.Status);
+            Assert.Equal("bridge_recovery_execution_in_progress", overlapping.Reason);
+            Assert.False(adapter.InvalidateFileTransferBridgeRecoveryExecution(mismatched, "terminalized"));
+            Assert.Equal(1, Assert.IsType<int>(GetPrivateField(adapter, "receiveStallRecoveryInProgress")));
+            Assert.Equal(staleStartedTick, Assert.IsType<long>(GetPrivateField(adapter, "receiveStallLastRecoveryStartedTick")));
+            Assert.Equal(command, Assert.IsType<FileTransferBridgeRecoveryExecutionCommand>(
+                GetPrivateField(adapter, "activeFileTransferBridgeRecoveryExecutionCommand")));
+            Assert.Null(GetPrivateField(adapter, "lastFileTransferBridgeRecoveryExecutionReceipt"));
+
+            Assert.True(adapter.InvalidateFileTransferBridgeRecoveryExecution(command, "terminalized"));
+            Assert.Equal(0, Assert.IsType<int>(GetPrivateField(adapter, "receiveStallRecoveryInProgress")));
+            Assert.Null(GetPrivateField(adapter, "activeFileTransferBridgeRecoveryExecutionCommand"));
+        }
+
+        var receipt = await Assert.IsType<Task<FileTransferBridgeRecoveryExecutionReceipt>>(
+            started.Completion).WaitAsync(TimeSpan.FromSeconds(5));
+        Assert.Equal(command, receipt.Command);
+        Assert.Equal(FileTransferBridgeRecoveryExecutionOutcome.Discarded, receipt.Outcome);
+        Assert.False(adapter.IsBridgeProcessRunning);
+        adapter.UnregisterActiveFileTransferRuntime(transferId);
+        adapter.UnregisterActiveFileTransferDataSession(transferId);
+    }
+
     [Trait("Category", "LegacySmoke")]
     [Trait("Category", "BridgeStabilityPromotion")]
     [Fact]
@@ -2232,18 +9580,30 @@ public sealed class BridgeConnectionLifecycleTests : SessionRuntimeConnectionTes
         {
             Environment.SetEnvironmentVariable("NLINK_NKN_NODE_PATH", nodePath);
             Environment.SetEnvironmentVariable("NLINK_NKN_BRIDGE_PATH", bridgePath);
-            var options = NknTransportOptions.Load();
-            var identity = new NknIdentity("mock-stderr-spam", "mock-stderr-spam.fake");
+            var options = LoadNknOptionsWithOverrides(Path.Combine(tempDir, "id.json"), "mock-stderr-spam");
+            var identity = NknIdentityStore.LoadOrCreate(options);
             using var adapter = new RealNknClientAdapter(identity, options);
             using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+            var logBaseline = GetOperationalLogLength();
             await adapter.StartBridgeAsync(cts.Token);
+            var unavailable = await Assert.ThrowsAsync<FileTransferDataSessionSubmissionUnavailableException>(
+                () => adapter.PingBridgeAsync(cts.Token));
+            Assert.Equal(FileTransferDataSessionSubmissionUnavailableReason.SubmissionEpochNotReady, unavailable.Reason);
+            await adapter.ConnectAsync(cts.Token);
+            Assert.Equal("mock.stderr.addr", adapter.Address);
+            await WaitUntilAsync(
+                () => GetRecentLogTextSince(logBaseline).Contains("spam-line-", StringComparison.Ordinal),
+                TimeSpan.FromSeconds(2));
             await adapter.PingBridgeAsync(cts.Token);
             await adapter.DisconnectAsync().WaitAsync(TimeSpan.FromSeconds(10), cts.Token);
             await WaitUntilAsync(() => !adapter.IsBridgeProcessRunning, TimeSpan.FromSeconds(2));
+            Assert.Contains("event=bridge_shutdown_graceful_completed;", GetRecentLogTextSince(logBaseline), StringComparison.Ordinal);
             var debugState = adapter.GetDebugStateForTests();
             Assert.False(debugState.HasProcessReference);
+            Assert.False(debugState.HasStdinReference);
             Assert.False(debugState.HasStdoutReaderTaskReference);
             Assert.False(debugState.HasStderrReaderTaskReference);
+            Assert.Equal(0, debugState.TrackedPid);
         }
         finally
         {
@@ -2498,7 +9858,214 @@ public sealed class BridgeConnectionLifecycleTests : SessionRuntimeConnectionTes
         int bulkMessagesReceivedSinceLast = 0,
         int totalMessagesReceivedSinceLast = 0,
         int controlLastReceivedAgeMs = 9000,
-        int bulkLastReceivedAgeMs = 9000)
+        int bulkLastReceivedAgeMs = 9000,
+        int? postRecoveryControlMessagesReceivedSinceLast = null,
+        int? postRecoveryBulkMessagesReceivedSinceLast = null,
+        int? postRecoveryTotalMessagesReceivedSinceLast = null,
+        int? postRecoveryControlLastReceivedAgeMs = null,
+        int? postRecoveryBulkLastReceivedAgeMs = null,
+        int stallHealthSampleCount = 3,
+        int stallHealthSampleSpacingMs = 50,
+        bool rampStallBulkAgeForAllChannelRecovery = false,
+        int? hangConnectFromCount = null,
+        int? failConnectCount = null,
+        string connectKey = "mock-key")
+    {
+        var normalizedStallHealthSampleSpacingMs = Math.Max(1, stallHealthSampleSpacingMs);
+        var stallHealthBlock = rampStallBulkAgeForAllChannelRecovery
+            ? $@"
+      const stallBulkAges = [3000, 5000, 7000, 9000];
+      for (let i = 0; i < {Math.Max(1, stallHealthSampleCount)}; i++) {{
+        const bulkAgeMs = stallBulkAges[Math.min(i, stallBulkAges.length - 1)];
+        emitHealth(
+          60 + (i * {normalizedStallHealthSampleSpacingMs}),
+          {controlMessagesReceivedSinceLast},
+          {bulkMessagesReceivedSinceLast},
+          {totalMessagesReceivedSinceLast},
+          {controlLastReceivedAgeMs},
+          bulkAgeMs);
+      }}"
+            : $@"
+      for (let i = 0; i < {Math.Max(1, stallHealthSampleCount)}; i++) {{
+        emitHealth(60 + (i * {normalizedStallHealthSampleSpacingMs}));
+      }}";
+        var postRecoveryHealthBlock =
+            postRecoveryControlMessagesReceivedSinceLast is null ||
+            postRecoveryBulkMessagesReceivedSinceLast is null ||
+            postRecoveryTotalMessagesReceivedSinceLast is null ||
+            postRecoveryControlLastReceivedAgeMs is null ||
+            postRecoveryBulkLastReceivedAgeMs is null
+                ? string.Empty
+                : $@"
+    else {{
+      emitHealth(
+        60,
+        {postRecoveryControlMessagesReceivedSinceLast.Value},
+        {postRecoveryBulkMessagesReceivedSinceLast.Value},
+        {postRecoveryTotalMessagesReceivedSinceLast.Value},
+        {postRecoveryControlLastReceivedAgeMs.Value},
+        {postRecoveryBulkLastReceivedAgeMs.Value});
+    }}";
+        var hangConnectBlock = hangConnectFromCount is > 0
+            ? $"    if (connectCount >= {hangConnectFromCount.Value}) return;\n"
+            : string.Empty;
+        var failConnectBlock = failConnectCount is > 0
+            ? $"    if (connectCount === {failConnectCount.Value}) {{ setTimeout(() => process.exit(17), 10); return; }}\n"
+            : string.Empty;
+        return
+$@"'use strict';
+const fs = require('fs');
+const readline = require('readline');
+const rl = readline.createInterface({{ input: process.stdin, crlfDelay: Infinity, terminal: false }});
+let connectCount = 0;
+try {{
+  if (fs.existsSync({JsonSerializer.Serialize(countFile)})) {{
+    connectCount = Number.parseInt(fs.readFileSync({JsonSerializer.Serialize(countFile)}, 'utf8').trim(), 10) || 0;
+  }}
+}} catch (e) {{
+  connectCount = 0;
+}}
+function emit(obj) {{ process.stdout.write(JSON.stringify(obj) + '\n'); }}
+function emitHealth(
+  delayMs,
+  controlMessagesReceivedSinceLast = {controlMessagesReceivedSinceLast},
+  bulkMessagesReceivedSinceLast = {bulkMessagesReceivedSinceLast},
+  totalMessagesReceivedSinceLast = {totalMessagesReceivedSinceLast},
+  controlLastReceivedAgeMs = {controlLastReceivedAgeMs},
+  bulkLastReceivedAgeMs = {bulkLastReceivedAgeMs}) {{
+  setTimeout(() => emit({{
+    event: 'bridge_transport_health_summary',
+    selected_rpc: '(none)',
+    selected_rpc_key: '(none)',
+    selected_rpc_stage: 'none',
+    connect_id: 'mock-connect',
+    connect_key: {JsonSerializer.Serialize(connectKey)},
+    ready_emitted: 1,
+    client_ready_age_ms: 10000,
+    disconnect_count_since_last: 0,
+    connect_failed_count_since_last: 0,
+    ws_error_count_since_last: 0,
+    rpc_fallback_attempt_count_since_last: 0,
+    control_ready: 1,
+    media_ready: 1,
+    bulk_ready: 1,
+    frames_sent_since_last: 1,
+    latest_disconnect_reason: '(none)',
+    sample_window_ms: 2000,
+    control_subclients: 4,
+    media_subclients: 8,
+    bulk_subclients: 4,
+    bulk_send_concurrency: 4,
+    control_messages_received_since_last: controlMessagesReceivedSinceLast,
+    media_messages_received_since_last: 0,
+    bulk_messages_received_since_last: bulkMessagesReceivedSinceLast,
+    total_messages_received_since_last: totalMessagesReceivedSinceLast,
+    control_bytes_received_since_last: 0,
+    media_bytes_received_since_last: 0,
+    bulk_bytes_received_since_last: 0,
+    total_bytes_received_since_last: 0,
+    control_last_received_age_ms: controlLastReceivedAgeMs,
+    media_last_received_age_ms: 9000,
+    bulk_last_received_age_ms: bulkLastReceivedAgeMs
+  }}), delayMs);
+}}
+rl.on('line', (line) => {{
+  if (!line || !line.trim()) return;
+  let msg;
+  try {{ msg = JSON.parse(line); }} catch (e) {{ emit({{ event:'error', id:null, cmd:null, reason:'Invalid JSON' }}); return; }}
+  if (msg.cmd === 'hello') {{
+    emit({{ event:'hello_ok', id: msg.id ?? null, protocol: 2, sdk: 'mock-sdk@1.0.0' }});
+    return;
+  }}
+  if ((msg.type === 'ping') || (msg.cmd === 'ping')) {{
+    emit({{ type:'pong', id: msg.id ?? null, ts: Date.now() }});
+    return;
+  }}
+  if (msg.cmd === 'connect') {{
+    connectCount++;
+    fs.writeFileSync({JsonSerializer.Serialize(countFile)}, String(connectCount));
+{failConnectBlock}
+{hangConnectBlock}
+    emit({{ event:'ok', id: msg.id ?? null, cmd:'connect' }});
+    setTimeout(() => emit({{ event:'ready', protocol:2, channels:['control','media','bulk'], address:'receive-stall.addr', controlAddress:'receive-stall.addr', mediaAddress:'receive-stall-media.addr', bulkAddress:'receive-stall-bulk.addr', connectId: msg.connectId ?? null }}), 10);
+    if (connectCount <= {stallConnectCount}) {{
+{stallHealthBlock}
+    }}
+    {postRecoveryHealthBlock}
+    return;
+  }}
+  if (msg.cmd === 'shutdown') {{
+    emit({{ event:'ok', id: msg.id ?? null, cmd:'shutdown' }});
+    emit({{ event:'disconnected', reason:'shutdown' }});
+    setTimeout(() => process.exit(0), 10);
+    return;
+  }}
+  emit({{ event:'ok', id: msg.id ?? null, cmd: msg.cmd ?? msg.type ?? null }});
+}});
+";
+    }
+
+    private static string BuildReceiveStallRecoverySoftFailureThenHardRestartMockBridgeScript(string countFile)
+    {
+        var serializedCountFile = JsonSerializer.Serialize(countFile);
+        return
+$@"'use strict';
+const fs = require('fs');
+const readline = require('readline');
+const rl = readline.createInterface({{ input: process.stdin, crlfDelay: Infinity, terminal: false }});
+function emit(obj) {{ process.stdout.write(JSON.stringify(obj) + '\n'); }}
+function readConnectCount() {{
+  try {{
+    if (fs.existsSync({serializedCountFile})) {{
+      return Number.parseInt(fs.readFileSync({serializedCountFile}, 'utf8').trim(), 10) || 0;
+    }}
+  }} catch (e) {{}}
+  return 0;
+}}
+rl.on('line', (line) => {{
+  if (!line || !line.trim()) return;
+  let msg;
+  try {{ msg = JSON.parse(line); }} catch (e) {{ emit({{ event:'error', id:null, cmd:null, reason:'Invalid JSON' }}); return; }}
+  if (msg.cmd === 'hello') {{
+    emit({{ event:'hello_ok', id: msg.id ?? null, protocol: 2, sdk: 'mock-sdk@1.0.0' }});
+    return;
+  }}
+  if ((msg.type === 'ping') || (msg.cmd === 'ping')) {{
+    emit({{ type:'pong', id: msg.id ?? null, ts: Date.now() }});
+    return;
+  }}
+  if (msg.cmd === 'connect') {{
+    const connectCount = readConnectCount() + 1;
+    fs.writeFileSync({serializedCountFile}, String(connectCount));
+    emit({{ event:'ok', id: msg.id ?? null, cmd:'connect' }});
+    if (connectCount === 2) {{
+      emit({{ event:'rpc_selected', rpc:'https://mock-rpc-soft-failure.example:30003', connectId: msg.connectId ?? null, ts: Date.now() }});
+      return;
+    }}
+    setTimeout(() => emit({{
+      event:'ready',
+      protocol:2,
+      channels:['control','media','bulk'],
+      address:'post-tuna-soft-fallback-' + connectCount + '.addr',
+      controlAddress:'post-tuna-soft-fallback-' + connectCount + '.addr',
+      mediaAddress:'post-tuna-soft-fallback-' + connectCount + '-media.addr',
+      bulkAddress:'post-tuna-soft-fallback-' + connectCount + '-bulk.addr',
+      connectId: msg.connectId ?? null
+    }}), 20);
+    return;
+  }}
+  if (msg.cmd === 'shutdown') {{
+    emit({{ event:'ok', id: msg.id ?? null, cmd:'shutdown' }});
+    emit({{ event:'disconnected', reason:'shutdown' }});
+    setTimeout(() => process.exit(0), 10);
+    return;
+  }}
+  emit({{ event:'ok', id: msg.id ?? null, cmd: msg.cmd ?? msg.type ?? null }});
+}});
+";
+    }
+
+    private static string BuildReceiveStallRecoveryTransientAllZeroMockBridgeScript(string countFile)
     {
         return
 $@"'use strict';
@@ -2506,8 +10073,15 @@ const fs = require('fs');
 const readline = require('readline');
 const rl = readline.createInterface({{ input: process.stdin, crlfDelay: Infinity, terminal: false }});
 let connectCount = 0;
+try {{
+  if (fs.existsSync({JsonSerializer.Serialize(countFile)})) {{
+    connectCount = Number.parseInt(fs.readFileSync({JsonSerializer.Serialize(countFile)}, 'utf8').trim(), 10) || 0;
+  }}
+}} catch (e) {{
+  connectCount = 0;
+}}
 function emit(obj) {{ process.stdout.write(JSON.stringify(obj) + '\n'); }}
-function emitHealth(delayMs) {{
+function emitHealth(delayMs, bulkAgeMs) {{
   setTimeout(() => emit({{
     event: 'bridge_transport_health_summary',
     selected_rpc: '(none)',
@@ -2531,17 +10105,17 @@ function emitHealth(delayMs) {{
     media_subclients: 8,
     bulk_subclients: 4,
     bulk_send_concurrency: 4,
-    control_messages_received_since_last: {controlMessagesReceivedSinceLast},
+    control_messages_received_since_last: 0,
     media_messages_received_since_last: 0,
-    bulk_messages_received_since_last: {bulkMessagesReceivedSinceLast},
-    total_messages_received_since_last: {totalMessagesReceivedSinceLast},
+    bulk_messages_received_since_last: 0,
+    total_messages_received_since_last: 0,
     control_bytes_received_since_last: 0,
     media_bytes_received_since_last: 0,
     bulk_bytes_received_since_last: 0,
     total_bytes_received_since_last: 0,
-    control_last_received_age_ms: {controlLastReceivedAgeMs},
+    control_last_received_age_ms: 9000,
     media_last_received_age_ms: 9000,
-    bulk_last_received_age_ms: {bulkLastReceivedAgeMs}
+    bulk_last_received_age_ms: bulkAgeMs
   }}), delayMs);
 }}
 rl.on('line', (line) => {{
@@ -2560,12 +10134,117 @@ rl.on('line', (line) => {{
     connectCount++;
     fs.writeFileSync({JsonSerializer.Serialize(countFile)}, String(connectCount));
     emit({{ event:'ok', id: msg.id ?? null, cmd:'connect' }});
-    setTimeout(() => emit({{ event:'ready', protocol:2, channels:['control','media','bulk'], address:'receive-stall.addr', controlAddress:'receive-stall.addr', mediaAddress:'receive-stall-media.addr', bulkAddress:'receive-stall-bulk.addr', connectId: msg.connectId ?? null }}), 10);
-    if (connectCount <= {stallConnectCount}) {{
-      emitHealth(60);
-      emitHealth(110);
-      emitHealth(160);
+    setTimeout(() => emit({{ event:'ready', protocol:2, channels:['control','media','bulk'], address:'all-zero-probe-window.addr', controlAddress:'all-zero-probe-window.addr', mediaAddress:'all-zero-probe-window-media.addr', bulkAddress:'all-zero-probe-window-bulk.addr', connectId: msg.connectId ?? null }}), 10);
+    if (connectCount === 1) {{
+      emitHealth(60, 3000);
+      emitHealth(110, 5000);
+      emitHealth(160, 7000);
     }}
+    return;
+  }}
+  if (msg.cmd === 'shutdown') {{
+    emit({{ event:'ok', id: msg.id ?? null, cmd:'shutdown' }});
+    emit({{ event:'disconnected', reason:'shutdown' }});
+    setTimeout(() => process.exit(0), 10);
+    return;
+  }}
+  emit({{ event:'ok', id: msg.id ?? null, cmd: msg.cmd ?? msg.type ?? null }});
+}});
+";
+    }
+
+    private static string BuildActiveFileTransferCooldownRecoveryMockBridgeScript(string countFile)
+    {
+        return
+$@"'use strict';
+const fs = require('fs');
+const readline = require('readline');
+const rl = readline.createInterface({{ input: process.stdin, crlfDelay: Infinity, terminal: false }});
+let connectCount = 0;
+try {{
+  if (fs.existsSync({JsonSerializer.Serialize(countFile)})) {{
+    connectCount = Number.parseInt(fs.readFileSync({JsonSerializer.Serialize(countFile)}, 'utf8').trim(), 10) || 0;
+  }}
+}} catch (e) {{
+  connectCount = 0;
+}}
+function emit(obj) {{ process.stdout.write(JSON.stringify(obj) + '\n'); }}
+function emitHealth(delayMs, controlMessages, bulkMessages, totalMessages, controlAgeMs, bulkAgeMs) {{
+  setTimeout(() => emit({{
+    event: 'bridge_transport_health_summary',
+    selected_rpc: '(none)',
+    selected_rpc_key: '(none)',
+    selected_rpc_stage: 'none',
+    connect_id: 'mock-connect',
+    connect_key: 'mock-key-' + connectCount,
+    ready_emitted: 1,
+    client_ready_age_ms: 10000,
+    disconnect_count_since_last: 0,
+    connect_failed_count_since_last: 0,
+    ws_error_count_since_last: 0,
+    rpc_fallback_attempt_count_since_last: 0,
+    control_ready: 1,
+    media_ready: 1,
+    bulk_ready: 1,
+    frames_sent_since_last: 1,
+    latest_disconnect_reason: '(none)',
+    sample_window_ms: 2000,
+    control_subclients: 4,
+    media_subclients: 8,
+    bulk_subclients: 4,
+    bulk_send_concurrency: 4,
+    control_messages_received_since_last: controlMessages,
+    media_messages_received_since_last: 0,
+    bulk_messages_received_since_last: bulkMessages,
+    total_messages_received_since_last: totalMessages,
+    control_bytes_received_since_last: controlMessages > 0 ? 1 : 0,
+    media_bytes_received_since_last: 0,
+    bulk_bytes_received_since_last: bulkMessages > 0 ? 1 : 0,
+    total_bytes_received_since_last: totalMessages > 0 ? 1 : 0,
+    control_last_received_age_ms: controlAgeMs,
+    media_last_received_age_ms: 9000,
+    bulk_last_received_age_ms: bulkAgeMs
+  }}), delayMs);
+}}
+function scheduleHealthForConnect() {{
+  if (connectCount <= 4) {{
+    emitHealth(60, 0, 0, 0, 9000, 9000);
+    emitHealth(110, 0, 0, 0, 9000, 9000);
+    emitHealth(160, 0, 0, 0, 9000, 9000);
+    return;
+  }}
+
+  if (connectCount === 5) {{
+    emitHealth(60, 1, 1, 2, 100, 100);
+    emitHealth(3100, 0, 0, 0, 9000, 9000);
+    emitHealth(3200, 0, 0, 0, 9000, 9000);
+    emitHealth(3300, 0, 0, 0, 9000, 9000);
+    return;
+  }}
+
+  if (connectCount === 6) {{
+    emitHealth(3100, 0, 1, 1, 9000, 100);
+    emitHealth(3200, 0, 1, 1, 9000, 100);
+  }}
+}}
+rl.on('line', (line) => {{
+  if (!line || !line.trim()) return;
+  let msg;
+  try {{ msg = JSON.parse(line); }} catch (e) {{ emit({{ event:'error', id:null, cmd:null, reason:'Invalid JSON' }}); return; }}
+  if (msg.cmd === 'hello') {{
+    emit({{ event:'hello_ok', id: msg.id ?? null, protocol: 2, sdk: 'mock-sdk@1.0.0' }});
+    return;
+  }}
+  if ((msg.type === 'ping') || (msg.cmd === 'ping')) {{
+    emit({{ type:'pong', id: msg.id ?? null, ts: Date.now() }});
+    return;
+  }}
+  if (msg.cmd === 'connect') {{
+    connectCount++;
+    fs.writeFileSync({JsonSerializer.Serialize(countFile)}, String(connectCount));
+    emit({{ event:'ok', id: msg.id ?? null, cmd:'connect' }});
+    setTimeout(() => emit({{ event:'ready', protocol:2, channels:['control','media','bulk'], address:'active-filetransfer-cooldown.addr', controlAddress:'active-filetransfer-cooldown.addr', mediaAddress:'active-filetransfer-cooldown-media.addr', bulkAddress:'active-filetransfer-cooldown-bulk.addr', connectId: msg.connectId ?? null }}), 10);
+    scheduleHealthForConnect();
     return;
   }}
   if (msg.cmd === 'shutdown') {{
@@ -2608,5 +10287,189 @@ rl.on('line', (line) => {{
 
         return max;
     }
+
+    private static string GetRecentLogTextSince(int baselineLength)
+    {
+        var text = LocalOperationalLog.GetRecentLogText();
+        if (baselineLength <= 0)
+        {
+            return text;
+        }
+
+        return text.Length >= baselineLength
+            ? text[baselineLength..]
+            : text;
+    }
+
+    private static bool ContainsLogLineWithTokens(string text, string eventName, params string[] tokens)
+    {
+        var eventToken = $"event={eventName}";
+        return text
+            .Split(new[] { "\r\n", "\n" }, StringSplitOptions.None)
+            .Any(line =>
+                line.Contains(eventToken, StringComparison.Ordinal) &&
+                tokens.All(token => line.Contains(token, StringComparison.Ordinal)));
+    }
+
+    private static FileTransferBridgeRecoveryAuthority CreateBridgeRecoveryAuthority(
+        string transferId,
+        string reason,
+        string routeToken = FileTransferRouteResolver.RegularNknV4FastToken,
+        int protocolVersion = FileTransferProtocol.ProtocolVersionV4,
+        int liveRouteEpoch = 1,
+        int runtimeGeneration = 1,
+        int terminalGeneration = 0,
+        int legGeneration = 1,
+        long transportEpoch = 1,
+        int bridgeRecoveryGeneration = 1,
+        int bridgeDecisionGeneration = 1)
+        => new(
+            "test-session",
+            transferId,
+            FileTransferDirection.Outbound,
+            routeToken,
+            protocolVersion,
+            liveRouteEpoch,
+            runtimeGeneration,
+            terminalGeneration,
+            legGeneration,
+            transportEpoch,
+            bridgeRecoveryGeneration,
+            bridgeDecisionGeneration,
+            "BridgeReceiveStallRecovery",
+            reason);
+
+    private static FileTransferBridgeRecoveryExecutionCommand
+        CreateBridgeRecoveryExecutionCommand(
+            string transferId,
+            string reason,
+            string routeToken = FileTransferRouteResolver.RegularNknV4FastToken,
+            int protocolVersion = FileTransferProtocol.ProtocolVersionV4,
+            int liveRouteEpoch = 1,
+            int runtimeGeneration = 1,
+            int terminalGeneration = 0,
+            int legGeneration = 1,
+            long transportEpoch = 1,
+            int bridgeRecoveryGeneration = 1,
+            int bridgeDecisionGeneration = 1,
+            int leaseGeneration = 1)
+    {
+        var route = string.Equals(
+            routeToken,
+            FileTransferRouteResolver.PostTunaFallbackV6Token,
+            StringComparison.Ordinal)
+            ? FileTransferRoute.PostTunaFallbackV6
+            : FileTransferRoute.RegularNknV4Fast;
+        var owner = new RuntimeOwnerToken(
+            "test-session",
+            transferId,
+            FileTransferDirection.Outbound,
+            route,
+            routeToken,
+            protocolVersion,
+            liveRouteEpoch,
+            runtimeGeneration,
+            terminalGeneration,
+            RuntimeFamily: routeToken,
+            CreatedReason: reason);
+        var decision = new BridgeRecoveryDecision(
+            Accepted: true,
+            BridgeRecoveryKind.BridgeReceiveStallRecovery,
+            reason,
+            bridgeDecisionGeneration,
+            route,
+            protocolVersion,
+            liveRouteEpoch,
+            runtimeGeneration,
+            terminalGeneration,
+            legGeneration,
+            transportEpoch,
+            bridgeRecoveryGeneration,
+            owner);
+        var lease =
+            route == FileTransferRoute.RegularNknV4Fast &&
+            protocolVersion == FileTransferProtocol.ProtocolVersionV4
+                ? new RecoveryLivenessLease(
+                    owner.SessionId,
+                    owner.TransferId,
+                    owner.Direction,
+                    owner,
+                    route,
+                    routeToken,
+                    protocolVersion,
+                    liveRouteEpoch,
+                    runtimeGeneration,
+                    terminalGeneration,
+                    legGeneration,
+                    transportEpoch,
+                    bridgeRecoveryGeneration,
+                    leaseGeneration,
+                    new FileTransferAuthorityId(
+                        $"bridge-recovery-lease-{transferId}-{leaseGeneration}"),
+                    RecoveryLivenessLeaseState.Active,
+                    reason)
+                : (RecoveryLivenessLease?)null;
+        return new FileTransferBridgeRecoveryExecutionCommand(
+            decision,
+            lease,
+            CheckpointRequestId: null);
+    }
+
+    private static FileTransferRegularV4FrontierRepairAuthority CreateRegularV4FrontierRepairAuthority(
+        string transferId,
+        string sessionId = "test-session",
+        string repairKey = "regular-v4-frontier:0:12",
+        int frontierChunkIndex = 0,
+        int durableReceivedHighestChunkIndex = -1,
+        int pendingRepairCount = 8,
+        int decisionGeneration = 1,
+        int liveRouteEpoch = 1,
+        string routeToken = FileTransferRouteResolver.RegularNknV4FastToken,
+        FileTransferTransportKind targetTransport = FileTransferTransportKind.RegularNkn,
+        int bridgeDecisionGeneration = 1)
+        => new(
+            sessionId,
+            transferId,
+            FileTransferDirection.Outbound,
+            routeToken,
+            FileTransferProtocol.ProtocolVersionV4,
+            LiveRouteEpoch: liveRouteEpoch,
+            RuntimeGeneration: 1,
+            TerminalGeneration: 0,
+            LegGeneration: 1,
+            TransportEpoch: 1,
+            BridgeRecoveryGeneration: 1,
+            BridgeDecisionGeneration: bridgeDecisionGeneration,
+            RoutePublicationGeneration: 1,
+            RouteCommitGeneration: null,
+            repairKey,
+            frontierChunkIndex,
+            durableReceivedHighestChunkIndex,
+            pendingRepairCount,
+            decisionGeneration,
+            "test_regular_v4_frontier_repair_authority",
+            targetTransport)
+        {
+            AuthorityId = new FileTransferAuthorityId(
+                $"fta2-test-{transferId}-{decisionGeneration}-{repairKey}"),
+        };
+
+    private static FileTransferRegularV4FrontierRepairPressureInstallReceipt InstallRegularV4FrontierRepairPressure(
+        RealNknClientAdapter adapter,
+        FileTransferRegularV4ControlFeedbackPressure pressure,
+        long installGeneration)
+        => adapter.InstallRegularV4FrontierRepairPressure(
+            new FileTransferRegularV4FrontierRepairPressureInstallCommand(
+                pressure,
+                installGeneration));
+
+    private static object? GetRegularV4FrontierRepairPressureCurrent(RealNknClientAdapter adapter)
+    {
+        var shadow = GetPrivateField(adapter, "regularV4FrontierRepairPressureShadow");
+        return shadow?.GetType().GetProperty("Current")?.GetValue(shadow);
+    }
+
+    private static object? GetRegularV4FrontierRepairPressureEvidence(RealNknClientAdapter adapter)
+        => GetPrivateField(adapter, "regularV4FrontierRepairPressureEvidence");
 
 }

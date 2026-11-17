@@ -1,5 +1,5 @@
 using System;
-using System.Runtime.InteropServices;
+using System.Runtime.Versioning;
 using NLink.App.Configuration;
 
 namespace NLink.App.Services.ScreenCapture;
@@ -20,7 +20,7 @@ public static class ScreenCaptureFactory
     /// </summary>
     public static IScreenCaptureSource Create(ScreenCapturePipelineKind pipelineKind)
     {
-        if (!RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+        if (!OperatingSystem.IsWindows())
         {
             return new NotSupportedCaptureSource();
         }
@@ -38,12 +38,17 @@ public static class ScreenCaptureFactory
     /// <returns>A supported capture source on Windows, otherwise a non-supported stub.</returns>
     public static IScreenCaptureSource CreateDefault()
     {
-        return CreateDefault(() => WindowsH264ScreenCaptureSource.IsPreviewRuntimeSupported());
+        if (!OperatingSystem.IsWindows())
+        {
+            return new NotSupportedCaptureSource();
+        }
+
+        return CreateDefaultWindows();
     }
 
     public static IScreenCaptureSource CreateForTransport()
     {
-        if (!RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+        if (!OperatingSystem.IsWindows())
         {
             return new NotSupportedCaptureSource();
         }
@@ -58,7 +63,7 @@ public static class ScreenCaptureFactory
 
     internal static IScreenCaptureSource CreateDefault(Func<bool> h264RuntimeSupportResolver, bool requirePreviewOptIn = true)
     {
-        if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+        if (OperatingSystem.IsWindows())
         {
             if (h264RuntimeSupportResolver())
             {
@@ -66,6 +71,17 @@ public static class ScreenCaptureFactory
             }
 
             return new NotSupportedCaptureSource();
+        }
+
+        return new NotSupportedCaptureSource();
+    }
+
+    [SupportedOSPlatform("windows")]
+    private static IScreenCaptureSource CreateDefaultWindows()
+    {
+        if (WindowsH264ScreenCaptureSource.IsPreviewRuntimeSupported())
+        {
+            return Create(ScreenCapturePipelineKind.H264);
         }
 
         return new NotSupportedCaptureSource();

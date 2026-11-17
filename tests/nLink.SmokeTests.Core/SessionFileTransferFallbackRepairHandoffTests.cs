@@ -1,0 +1,378 @@
+using System.Reflection;
+using System.Security.Cryptography;
+using System.Threading.Channels;
+using NLink.Core.FileTransfer;
+
+namespace NLink.SmokeTests;
+
+public sealed partial class SessionFileTransferV4SenderTests
+{
+    [Theory]
+    [InlineData(2L, false)] [InlineData(3L, false)]
+    [InlineData(2L, true)] [InlineData(3L, true)]
+    [Trait("FileTransferRuntimeSuite", "FallbackRepairHandoff")]
+    public async Task FallbackRepairHandoffRuntime_ProviderGenerationRetainsExactCheckpoint(long providerGeneration, bool replaced)
+    {
+        using var session = new InitialBootstrapRecordingDataSession("session_fallback_repair_write", "fallback_repair_write")
+        { Generation = providerGeneration };
+        using var fixture = CreateRuntimeRepairHandoffFixture(session: session);
+        ApplyRuntimeRepairHandoffPeer(fixture);
+        await WaitUntilAsync(() => GetRuntimeRepairHandoff(fixture)?.State == FileTransferFallbackRepairHandoffState.Drained, 3000);
+        lock (GetServiceGate(fixture.Service))
+        {
+            var hold = GetRuntimeRepairHandoff(fixture)!;
+            var receipt = hold.DrainReceipt!;
+            var before = CreateCoordinatorStateForTest(fixture.Context);
+            var written = fixture.Written;
+            Assert.Equal(1, receipt.Checkpoint.DataSessionGeneration);
+            Assert.Equal(providerGeneration, hold.Capture!.Checkpoint.DataSessionProviderGeneration);
+            Assert.Equal(providerGeneration, receipt.Checkpoint.DataSessionProviderGeneration);
+            Assert.Equal(hold.Capture.Checkpoint, receipt.Checkpoint);
+            var lookup = typeof(SessionFileTransferService).GetMethod("TryGetDrainedInboundFallbackRepairHandoffLocked",
+                BindingFlags.Instance | BindingFlags.NonPublic)!;
+            object?[] arguments = [fixture.Context, null, true];
+            Assert.True(Assert.IsType<bool>(lookup.Invoke(fixture.Service, arguments)));
+            Assert.Same(receipt, arguments[1]);
+            if (replaced)
+            {
+                fixture.Invalidate("provider");
+                Assert.False(Assert.IsType<bool>(lookup.Invoke(fixture.Service, [fixture.Context, null, true])));
+            }
+            Assert.Equal(!replaced, InvokeRuntimeRepairHandoffRestore(fixture));
+            var after = CreateCoordinatorStateForTest(fixture.Context);
+            Assert.Equal(before.CurrentRuntimeOwner, after.CurrentRuntimeOwner);
+            Assert.Equal(before.CurrentRoutePublicationToken, after.CurrentRoutePublicationToken);
+            Assert.Same(written, fixture.Written);
+            Assert.Same(fixture.Stream, GetPrivatePropertyValue(fixture.Context, "WriteStream"));
+            Assert.Equal(100, fixture.Frontier);
+            if (replaced)
+            {
+                Assert.Same(hold, GetRuntimeRepairHandoff(fixture));
+                Assert.True(GetPrivateProperty<bool>(fixture.Context, "PullTransportPaused"));
+                Assert.Null(hold.RestoreCommand);
+            }
+            else
+            {
+                Assert.Equal(receipt.Checkpoint, GetRuntimeRepairHandoff(fixture)!.RestoreCommand!.Checkpoint);
+                Assert.Equal(receipt.MissingRanges, GetRuntimeRepairHandoff(fixture)!.RestoreCommand!.MissingRanges);
+                Assert.False(GetPrivateProperty<bool>(fixture.Context, "PullTransportPaused"));
+            }
+        }
+    }
+
+    [Fact]
+    [Trait("FileTransferRuntimeSuite", "FallbackRepairHandoff")]
+    public async Task FallbackRepairHandoffRuntime_CapturedLastGapRestoresAndFinalizesWithTerminalFeedback()
+    {
+        using var transport = new LoopbackFileTransferTransport("session_fallback_repair_write");
+        using var peer = new LoopbackFileTransferTransport("session_fallback_repair_write");
+        transport.Connect(peer);
+        using var fixture = CreateRuntimeRepairHandoffFixture(blockWrite: true, transport: transport);
+        var size = GetPrivateProperty<long>(fixture.Context, "FileSizeBytes");
+        var chunkSize = GetPrivateProperty<int>(fixture.Context, "ChunkSizeBytes");
+        for (var index = 100; index < 254; index++) { fixture.Written[index] = true; }
+        SetPrivateProperty(fixture.Context, "NextChunkIndex", 254);
+        SetPrivateProperty(fixture.Context, "BytesTransferred", 254L * chunkSize);
+        SetPrivateProperty(fixture.Context, "Sha256Base64", Convert.ToBase64String(SHA256.HashData(new byte[size])));
+        SetPrivateProperty(fixture.Context, "Hash", IncrementalHash.CreateHash(HashAlgorithmName.SHA256));
+        fixture.Stream.SetLength(size);
+        var writing = fixture.WriteAsync();
+        ApplyRuntimeRepairHandoffPeer(fixture);
+        Assert.Equal(FileTransferFallbackRepairHandoffState.Captured, GetRuntimeRepairHandoff(fixture)!.State);
+        fixture.Stream.CompleteWrite();
+        await writing.WaitAsync(TimeSpan.FromSeconds(3));
+        await WaitUntilAsync(() => GetPrivateProperty<FileTransferTransferState>(fixture.Context, "State") == FileTransferTransferState.Completed, 3000);
+        Assert.Equal(256, fixture.Frontier);
+        Assert.Equal(FileTransferFallbackRepairHandoffState.Restored, GetRuntimeRepairHandoff(fixture)!.State);
+        Assert.Empty(GetRuntimeRepairHandoff(fixture)!.DrainReceipt!.MissingRanges);
+        Assert.Null(GetCoordinatorFallbackTailYieldSubstate(fixture.Context).CurrentOperation);
+        Assert.Contains(fixture.Session.SentFrames.OfType<FileTransferReceiverStateFrameV6>(), frame => frame.TerminalReady);
+        Assert.DoesNotContain(fixture.Session.SentFrames, frame => frame.GetType() == typeof(FileTransferStateFrameV4));
+    }
+
+    [Fact]
+    [Trait("FileTransferRuntimeSuite", "FallbackRepairHandoff")]
+    public async Task FallbackRepairHandoffRuntime_CapturedWriteDrainsUnderOwnedPauseAndRetainsExactGaps()
+    {
+        using var fixture = CreateRuntimeRepairHandoffFixture(blockWrite: true);
+        var writing = fixture.WriteAsync(fixture.Batch(count: 2));
+        var operation = Assert.Single(fixture.Operations());
+        ApplyRuntimeRepairHandoffPeer(fixture);
+        var captured = GetRuntimeRepairHandoff(fixture)!;
+        Assert.Equal(FileTransferFallbackRepairHandoffState.Captured, captured.State);
+        Assert.Single(captured.Capture!.InboundWrites);
+        Assert.True(GetPrivateProperty<bool>(fixture.Context, "PullTransportPaused"));
+        Assert.False(BootstrapFeedbackSettledForTest(operation).IsCompleted);
+        Assert.Null(GetCoordinatorFallbackTailYieldSubstate(fixture.Context).CurrentOperation);
+        await fixture.WriteAsync(fixture.Batch(count: 1));
+        Assert.Single(fixture.Operations());
+        Assert.Equal(1, fixture.Stream.Writes);
+        fixture.Stream.CompleteWrite();
+        await writing.WaitAsync(TimeSpan.FromSeconds(3));
+        await WaitUntilAsync(() => GetRuntimeRepairHandoff(fixture)?.State == FileTransferFallbackRepairHandoffState.Drained, 3000);
+        var drained = GetRuntimeRepairHandoff(fixture)!;
+        Assert.Equal(102, fixture.Frontier);
+        Assert.Equal(255, drained.DrainReceipt!.Checkpoint.DurableHighestChunkIndex);
+        Assert.Equal(new[] { new FileTransferRepairHandoffRange(102, 153) }, drained.DrainReceipt.MissingRanges);
+        Assert.True(fixture.Written[255]);
+        Assert.Empty(fixture.Operations());
+        Assert.NotNull(GetCoordinatorFallbackTailYieldSubstate(fixture.Context).CurrentOperation);
+        Assert.Equal(FileTransferRoute.PostTunaFallbackV6, CreateCoordinatorStateForTest(fixture.Context).RouteSelection.Route);
+    }
+
+    [Fact]
+    [Trait("FileTransferRuntimeSuite", "FallbackRepairHandoff")]
+    public async Task FallbackRepairHandoffRuntime_FeedbackDeliveryDoesNotDrainPhysicalOrLocalWork()
+    {
+        var transport = new PhysicalFallbackFeedbackTransport("session_fallback_repair_write");
+        using var fixture = CreateRuntimeRepairHandoffFixture(transport: transport);
+        var send = SendFallbackRepairStateForTest(fixture);
+        await transport.RequestCaptured.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        var operation = Assert.Single(FallbackRepairFeedbackOperationsForTest(fixture.Context));
+        ApplyRuntimeRepairHandoffPeer(fixture);
+        Assert.Equal(FileTransferFallbackRepairHandoffState.Captured, GetRuntimeRepairHandoff(fixture)!.State);
+        Assert.Single(GetRuntimeRepairHandoff(fixture)!.Capture!.InboundFeedback);
+        transport.ReleaseDelivery.TrySetResult();
+        Assert.True(await send.WaitAsync(TimeSpan.FromSeconds(2)));
+        Assert.False(BootstrapFeedbackSettledForTest(operation).IsCompleted);
+        Assert.Equal(FileTransferFallbackRepairHandoffState.Captured, GetRuntimeRepairHandoff(fixture)!.State);
+        Assert.False(await SendFallbackRepairStateForTest(fixture));
+        transport.ReleasePhysical.TrySetResult();
+        await BootstrapFeedbackSettledForTest(operation).WaitAsync(TimeSpan.FromSeconds(2));
+        await WaitUntilAsync(() => GetRuntimeRepairHandoff(fixture)?.State == FileTransferFallbackRepairHandoffState.Drained, 3000);
+        Assert.Equal(new[] { new FileTransferRepairHandoffRange(100, 155) }, GetRuntimeRepairHandoff(fixture)!.DrainReceipt!.MissingRanges);
+    }
+
+    [Theory]
+    [InlineData("stream")] [InlineData("layout")] [InlineData("session")] [InlineData("provider")]
+    [InlineData("service")] [InlineData("pause")] [InlineData("leg")] [InlineData("checkpoint")] [InlineData("publication")]
+    [Trait("FileTransferRuntimeSuite", "FallbackRepairHandoff")]
+    public async Task FallbackRepairHandoffRuntime_StaleCapturedWriteCannotDrainYieldOrRestore(string mutation)
+    {
+        using var fixture = CreateRuntimeRepairHandoffFixture(blockWrite: true);
+        var writing = fixture.WriteAsync();
+        var operation = Assert.Single(fixture.Operations());
+        ApplyRuntimeRepairHandoffPeer(fixture);
+        fixture.Invalidate(mutation);
+        var before = GetPrivatePropertyValue(fixture.Context, "CoordinatorPersistentState");
+        fixture.Stream.CompleteWrite();
+        await writing.WaitAsync(TimeSpan.FromSeconds(3));
+        await BootstrapFeedbackSettledForTest(operation).WaitAsync(TimeSpan.FromSeconds(2));
+        Assert.False(InvokeRuntimeRepairHandoffRestore(fixture));
+        Assert.Equal(before, GetPrivatePropertyValue(fixture.Context, "CoordinatorPersistentState"));
+        Assert.Equal(FileTransferFallbackRepairHandoffState.Captured, GetRuntimeRepairHandoff(fixture)!.State);
+        Assert.Equal(100, fixture.Frontier);
+        Assert.Null(GetCoordinatorFallbackTailYieldSubstate(fixture.Context).CurrentOperation);
+    }
+
+    [Fact]
+    [Trait("FileTransferRuntimeSuite", "FallbackRepairHandoff")]
+    public async Task FallbackRepairHandoffRuntime_ClosedNegotiationRestoresSameStreamBitmapAndGaps()
+    {
+        using var fixture = CreateRuntimeRepairHandoffFixture();
+        var written = fixture.Written;
+        ApplyRuntimeRepairHandoffPeer(fixture);
+        await WaitUntilAsync(() => GetRuntimeRepairHandoff(fixture)?.State == FileTransferFallbackRepairHandoffState.Drained, 3000);
+        var receipt = GetRuntimeRepairHandoff(fixture)!.DrainReceipt!;
+        Assert.True(InvokeRuntimeRepairHandoffRestore(fixture));
+        Assert.Equal(FileTransferFallbackRepairHandoffState.Restored, GetRuntimeRepairHandoff(fixture)!.State);
+        Assert.Equal(receipt.Checkpoint, GetRuntimeRepairHandoff(fixture)!.RestoreCommand!.Checkpoint);
+        Assert.Equal(receipt.MissingRanges, GetRuntimeRepairHandoff(fixture)!.RestoreCommand!.MissingRanges);
+        Assert.Same(written, fixture.Written);
+        Assert.Same(fixture.Stream, GetPrivatePropertyValue(fixture.Context, "WriteStream"));
+        Assert.False(GetPrivateProperty<bool>(fixture.Context, "PullTransportPaused"));
+        Assert.Null(GetPrivatePropertyValue(fixture.Context, "FallbackRepairHandoffExecution"));
+        Assert.Null(GetCoordinatorFallbackTailYieldSubstate(fixture.Context).CurrentOperation);
+        Assert.Equal(100, fixture.Frontier);
+        Assert.False(InvokeRuntimeRepairHandoffRestore(fixture));
+        await fixture.WriteAsync();
+        Assert.Equal(101, fixture.Frontier);
+    }
+
+    [Fact]
+    [Trait("FileTransferRuntimeSuite", "FallbackRepairHandoff")]
+    public async Task FallbackRepairHandoffRuntime_ReceiveLoopRestoresExpiredHoldAndResumesV6Repair()
+    {
+        var frames = Channel.CreateUnbounded<FileTransferReceivedDataFrame>();
+        using var session = new InitialBootstrapRecordingDataSession("session_fallback_repair_write", "fallback_repair_write")
+        {
+            ReceiveWithMetadataForTest = ct => frames.Reader.ReadAsync(ct),
+        };
+        using var fixture = CreateRuntimeRepairHandoffFixture(session: session);
+        var before = CreateCoordinatorStateForTest(fixture.Context);
+        var written = fixture.Written;
+        ApplyRuntimeRepairHandoffPeer(fixture);
+        await WaitUntilAsync(() => GetRuntimeRepairHandoff(fixture)?.State == FileTransferFallbackRepairHandoffState.Drained, 3000);
+        var receipt = GetRuntimeRepairHandoff(fixture)!.DrainReceipt!;
+        var pausedSince = GetPrivateProperty<DateTimeOffset>(fixture.Context, "PullTransportPausedSinceUtc");
+        var deadline = GetPrivateProperty<DateTimeOffset>(fixture.Context, "PullTransportGraceDeadlineUtc");
+        Assert.Equal(TimeSpan.FromSeconds(15), deadline - pausedSince);
+        var loop = fixture.StartReceiveLoop();
+        try
+        {
+            await Task.Delay(500);
+            Assert.True(DateTimeOffset.UtcNow < deadline);
+            Assert.True(GetPrivateProperty<bool>(fixture.Context, "PullTransportPaused"));
+            Assert.Equal(FileTransferFallbackRepairHandoffState.Drained, GetRuntimeRepairHandoff(fixture)!.State);
+            Assert.DoesNotContain(session.SentFrames, frame => frame is FileTransferFrontierRequestFrameV6);
+
+            await WaitUntilAsync(() => GetRuntimeRepairHandoff(fixture)?.State == FileTransferFallbackRepairHandoffState.Restored, 20000);
+            Assert.True(DateTimeOffset.UtcNow >= deadline);
+            Assert.Equal(receipt.Checkpoint, GetRuntimeRepairHandoff(fixture)!.RestoreCommand!.Checkpoint);
+            Assert.Equal(receipt.MissingRanges, GetRuntimeRepairHandoff(fixture)!.RestoreCommand!.MissingRanges);
+            Assert.Same(written, fixture.Written);
+            Assert.Same(fixture.Stream, GetPrivatePropertyValue(fixture.Context, "WriteStream"));
+            Assert.False(GetPrivateProperty<bool>(fixture.Context, "PullTransportPaused"));
+            Assert.Null(GetPrivatePropertyValue(fixture.Context, "FallbackRepairHandoffExecution"));
+            Assert.Null(GetCoordinatorFallbackTailYieldSubstate(fixture.Context).CurrentOperation);
+            await WaitUntilAsync(() => session.SentFrames.OfType<FileTransferFrontierRequestFrameV6>()
+                .Any(frame => frame.MissingRanges.Any(range => range.StartChunkIndex == 100)), 3000);
+
+            var request = session.SentFrames.OfType<FileTransferFrontierRequestFrameV6>()
+                .Last(frame => frame.MissingRanges.Any(range => range.StartChunkIndex == 100));
+            var reply = fixture.Batch() with
+            {
+                TransportEpoch = request.TransportEpoch, RepairRequestId = request.RepairRequestId,
+                Priority = request.Priority, RecoveryMode = request.RecoveryMode,
+            };
+            await frames.Writer.WriteAsync(new(reply, FileTransferTransportKind.RegularNkn, "bulk", DateTimeOffset.UtcNow));
+            await WaitUntilAsync(() => fixture.Frontier == 101, 3000);
+            Assert.Equal(1, fixture.Stream.Writes);
+            Assert.True(written[255]);
+            var after = CreateCoordinatorStateForTest(fixture.Context);
+            Assert.Equal(before.CurrentRuntimeOwner, after.CurrentRuntimeOwner);
+            Assert.Equal(before.CurrentRoutePublicationToken, after.CurrentRoutePublicationToken);
+            Assert.Equal(FileTransferRoute.PostTunaFallbackV6, after.RouteSelection.Route);
+            Assert.Equal(6, after.RouteSelection.ProtocolVersion);
+            Assert.False(GetPrivateProperty<bool>(fixture.Context, "IsTerminal"));
+        }
+        finally
+        {
+            TryCancelContextLifetime(fixture.Context);
+            await loop.WaitAsync(TimeSpan.FromSeconds(3));
+        }
+    }
+
+    [Fact]
+    [Trait("FileTransferRuntimeSuite", "FallbackRepairHandoff")]
+    public async Task FallbackRepairHandoffRuntime_OrdinaryTransportResumeCannotReleasePause()
+    {
+        using var fixture = CreateRuntimeRepairHandoffFixture();
+        ApplyRuntimeRepairHandoffPeer(fixture);
+        await WaitUntilAsync(() => GetRuntimeRepairHandoff(fixture)?.State == FileTransferFallbackRepairHandoffState.Drained, 3000);
+        var before = GetPrivatePropertyValue(fixture.Context, "CoordinatorPersistentState");
+        var result = typeof(SessionFileTransferService).GetMethod("TryResumeInboundTransportLocked", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(fixture.Service, [fixture.Context, "transport_ready", false, FileTransferTransportHandoffKind.None, FileTransferTransportKind.RegularNkn]);
+        Assert.False(Assert.IsType<bool>(result));
+        Assert.True(GetPrivateProperty<bool>(fixture.Context, "PullTransportPaused"));
+        Assert.Equal(before, GetPrivatePropertyValue(fixture.Context, "CoordinatorPersistentState"));
+    }
+
+    [Theory]
+    [InlineData("source_replaced")]
+    [InlineData("negotiation_active")]
+    [InlineData("reader_replaced")]
+    [Trait("FileTransferRuntimeSuite", "FallbackRepairHandoff")]
+    public async Task FallbackRepairHandoffRuntime_ReceiveLoopExpiryCannotReleaseIneligibleHold(string boundary)
+    {
+        var frames = Channel.CreateUnbounded<FileTransferReceivedDataFrame>();
+        using var session = new InitialBootstrapRecordingDataSession("session_fallback_repair_write", "fallback_repair_write")
+        {
+            ReceiveWithMetadataForTest = ct => frames.Reader.ReadAsync(ct),
+        };
+        using var fixture = CreateRuntimeRepairHandoffFixture(session: session);
+        Task? loop = null;
+        try
+        {
+            lock (GetServiceGate(fixture.Service))
+            {
+                if (boundary == "reader_replaced")
+                {
+                    loop = fixture.StartReceiveLoop();
+                    session.Generation++;
+                }
+                ApplyRuntimeRepairHandoffPeer(fixture);
+            }
+            await WaitUntilAsync(() => GetRuntimeRepairHandoff(fixture)?.State == FileTransferFallbackRepairHandoffState.Drained, 3000);
+            lock (GetServiceGate(fixture.Service))
+            {
+                if (boundary == "source_replaced") { fixture.Invalidate("stream"); }
+                if (boundary == "negotiation_active")
+                {
+                    SeedRuntimeUnlockAdmissionForTest(fixture.Context, FileTransferDirection.Inbound, "expiry_guard_test");
+                }
+                loop ??= fixture.StartReceiveLoop();
+            }
+            var hold = GetRuntimeRepairHandoff(fixture)!;
+            var before = CreateCoordinatorStateForTest(fixture.Context);
+            var deadline = GetPrivateProperty<DateTimeOffset>(fixture.Context, "PullTransportGraceDeadlineUtc");
+            await Task.Delay(deadline - DateTimeOffset.UtcNow + TimeSpan.FromSeconds(1));
+            Assert.Same(hold, GetRuntimeRepairHandoff(fixture));
+            Assert.Equal(FileTransferFallbackRepairHandoffState.Drained, hold.State);
+            Assert.Null(hold.RestoreCommand);
+            Assert.True(GetPrivateProperty<bool>(fixture.Context, "PullTransportPaused"));
+            Assert.Equal(deadline, GetPrivateProperty<DateTimeOffset>(fixture.Context, "PullTransportGraceDeadlineUtc"));
+            Assert.Equal(100, fixture.Frontier);
+            Assert.DoesNotContain(session.SentFrames, frame => frame is FileTransferFrontierRequestFrameV6);
+            var after = CreateCoordinatorStateForTest(fixture.Context);
+            Assert.Equal(before.CurrentRuntimeOwner, after.CurrentRuntimeOwner);
+            Assert.Equal(before.CurrentRoutePublicationToken, after.CurrentRoutePublicationToken);
+            Assert.Equal(before.CurrentRuntimeUnlockAdmission, after.CurrentRuntimeUnlockAdmission);
+        }
+        finally
+        {
+            TryCancelContextLifetime(fixture.Context);
+            if (loop is not null) { await loop.WaitAsync(TimeSpan.FromSeconds(3)); }
+        }
+    }
+
+    private static FallbackRepairWriteFixture CreateRuntimeRepairHandoffFixture(bool blockWrite = false,
+        IFileTransferSignalingTransport? transport = null, InitialBootstrapRecordingDataSession? session = null)
+    {
+        var fixture = new FallbackRepairWriteFixture(blockWrite, transport, session);
+        GetCurrentContextLeg(fixture.Context).CheckpointGeneration = 1;
+        SetPrivateProperty(fixture.Context, "PullPostTunaRecoveryActive", true);
+        SetPrivateProperty(fixture.Context, "V6TransportHandoff", new TransportHandoffEpoch
+        {
+            EpochId = GetCurrentContextLeg(fixture.Context).TransportEpochId,
+            Direction = FileTransferDirection.Inbound,
+            State = V6TransportHandoffState.FrontierRepairOnly,
+        });
+        return fixture;
+    }
+
+    private static FileTransferFallbackRepairHandoffOperation? GetRuntimeRepairHandoff(FallbackRepairWriteFixture fixture)
+        => GetCoordinatorFallbackTailYieldSubstate(fixture.Context).RepairHandoff;
+
+    private static bool InvokeRuntimeRepairHandoffRestore(FallbackRepairWriteFixture fixture)
+    {
+        lock (typeof(SessionFileTransferService).GetField("gate", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(fixture.Service)!)
+        {
+            return Assert.IsType<bool>(typeof(SessionFileTransferService)
+            .GetMethod("TryRestoreInboundFallbackRepairHandoffLocked", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(fixture.Service, [fixture.Context, null]));
+        }
+    }
+
+    private static void ApplyRuntimeRepairHandoffPeer(FallbackRepairWriteFixture fixture)
+    {
+        var leg = GetCurrentContextLeg(fixture.Context);
+        var peer = new FileTransferFallbackTailYieldFrameV6
+        {
+            AuthoritySchema = FileTransferAuthoritySchema.Current,
+            SessionId = fixture.Session.SessionId, TransferId = fixture.Session.TransferId, Direction = "outbound",
+            TransportEpoch = leg.TransportEpochId, LiveRouteEpoch = leg.LiveRouteEpochId,
+            FallbackLegGeneration = leg.Generation, BridgeRecoveryGeneration = leg.BridgeRecoveryGeneration,
+            OwnerKey = FileTransferCoordinator.BuildFallbackTailYieldOwnerKey(fixture.Session.SessionId, fixture.Session.TransferId,
+                leg.RouteSelection.TelemetryToken, leg.ProtocolVersion, leg.LiveRouteEpochId, leg.Generation,
+                leg.BridgeRecoveryGeneration, leg.TransportEpochId, "(none)"),
+            PairKey = FileTransferCoordinator.BuildFallbackTailYieldPairKey(fixture.Session.SessionId, fixture.Session.TransferId,
+                leg.RouteSelection.TelemetryToken, leg.ProtocolVersion, leg.LiveRouteEpochId, leg.TransportEpochId, "(none)"),
+            YieldGeneration = 1, AuthorityId = CreatePeerFallbackTailYieldAuthorityId(fixture.Session.TransferId),
+            CommittedChunkIndex = 100, HighestObservedChunkIndex = 255, RecoveryMode = "fallback_tail_yield",
+        };
+        typeof(SessionFileTransferService).GetMethod("ApplyInboundFallbackTailYieldProof", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(fixture.Service, [fixture.Context, peer]);
+        Assert.NotNull(GetRuntimeRepairHandoff(fixture));
+    }
+}

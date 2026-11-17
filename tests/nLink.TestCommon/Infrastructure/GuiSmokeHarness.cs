@@ -59,7 +59,7 @@ internal static class GuiSmokeHarness
                 StartInfo = new ProcessStartInfo
                 {
                     FileName = "powershell",
-                    Arguments = $"-ExecutionPolicy Bypass -File \"{scriptPath}\" -ExePath \"{exePath}\"",
+                    Arguments = $"-ExecutionPolicy Bypass -File \"{scriptPath}\" -ExePath \"{exePath}\" -TimeoutSeconds {(int)Math.Ceiling(wrapperTimeout.TotalSeconds)}",
                     WorkingDirectory = repoRoot,
                     UseShellExecute = false,
                     RedirectStandardOutput = true,
@@ -140,7 +140,7 @@ internal static class GuiSmokeHarness
     {
         var parsed = (scenarios ?? Array.Empty<string>())
             .Select(x => x?.Trim().ToUpperInvariant())
-            .Where(x => x is "A" or "B" or "C" or "D" or "E" or "F" or "G" or "H" or "I" or "J" or "K" or "L" or "M" or "NKN_DIRECT_CONNECT" or "HEADER_CHAT_COHERENCE" or "END_SESSION_DISABLES_CHAT" or "SCREENSHARE_BUTTON_VISIBILITY" or "SCREENSHARE_VIEWER_TOGGLE" or "SCREENSHARE_CHAT_COEXISTENCE" or "SCREENSHARE_STOP_PENDING_APPROVAL" or "STATUS_TEXT_GUARDRAILS")
+            .Where(x => x is "A" or "B" or "C" or "D" or "E" or "F" or "G" or "H" or "I" or "J" or "K" or "L" or "M" or "NKN_DIRECT_CONNECT" or "HEADER_CHAT_COHERENCE" or "END_SESSION_DISABLES_CHAT" or "SCREENSHARE_BUTTON_VISIBILITY" or "SCREENSHARE_VIEWER_TOGGLE" or "SCREENSHARE_CHAT_COEXISTENCE" or "SCREENSHARE_STOP_PENDING_APPROVAL" or "FILETRANSFER_NKN_SOAK" or "FILETRANSFER_NKN_MIXED_SOAK" or "FILETRANSFER_TUNA_HANDOFF_FALLBACK" or "STATUS_TEXT_GUARDRAILS")
             .Cast<string>()
             .Distinct()
             .ToArray();
@@ -171,6 +171,9 @@ internal static class GuiSmokeHarness
                 "SCREENSHARE_VIEWER_TOGGLE" => 90,
                 "SCREENSHARE_CHAT_COEXISTENCE" => 90,
                 "SCREENSHARE_STOP_PENDING_APPROVAL" => 90,
+                "FILETRANSFER_NKN_SOAK" => 300,
+                "FILETRANSFER_NKN_MIXED_SOAK" => 360,
+                "FILETRANSFER_TUNA_HANDOFF_FALLBACK" => 600,
                 "STATUS_TEXT_GUARDRAILS" => 90,
                 "E" => 120,
                 _ => 90

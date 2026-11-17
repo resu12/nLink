@@ -282,6 +282,9 @@ public sealed class WindowsH264InfrastructureTests : IClassFixture<ScreenShareCo
     public void WindowsH264EncodePolicy_TransportNormalProfile_CapsTo1440x810_AndUsesIpOnlyBudget()
     {
         using var scaleOverride = new EnvironmentOverride("NLINK_FEATURE_SCREENCAP_SCALE", "1");
+        using var profileOverride = new EnvironmentOverride(
+            ScreenShareQualitySettings.ScreenShareQualityProfileVariable,
+            FeatureFlags.ScreenShareQualityProfileNormal);
 
         var profile = WindowsH264EncodePolicy.ResolveProfile(
             sourceWidth: 1920,
@@ -300,14 +303,68 @@ public sealed class WindowsH264InfrastructureTests : IClassFixture<ScreenShareCo
 
     [Fact]
     [Trait("Category", "Smoke")]
+    public void WindowsH264EncodePolicy_TransportTunaQualityProfile_CapsTo1600x900_AndUsesTunaBudget()
+    {
+        using var scaleOverride = new EnvironmentOverride("NLINK_FEATURE_SCREENCAP_SCALE", "1");
+        using var profileOverride = new EnvironmentOverride(
+            ScreenShareQualitySettings.ScreenShareQualityProfileVariable,
+            FeatureFlags.ScreenShareQualityProfileTunaQuality);
+        using var transportFpsOverride = new EnvironmentOverride(
+            ScreenShareQualitySettings.ScreenShareTransportMaxFpsVariable,
+            "15");
+
+        var profile = WindowsH264EncodePolicy.ResolveProfile(
+            sourceWidth: 1920,
+            sourceHeight: 1080,
+            targetFramesPerSecond: FeatureFlags.ScreenShareTransportMaxFps,
+            tuningLevel: ScreenShareTransportTuningLevel.Normal,
+            transportIpOnly: true);
+
+        Assert.Equal("normal", profile.ProfileName);
+        Assert.Equal(1600, profile.Width);
+        Assert.Equal(900, profile.Height);
+        Assert.Equal(15, profile.TargetFramesPerSecond);
+        Assert.True(profile.TransportIpOnly);
+        Assert.InRange(profile.TargetBitrate, 6_000_000u, 9_000_000u);
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
     public void WindowsH264EncodePolicy_TransportBandwidthReducedProfile_CapsTo1280x720_AndUsesIpOnlyBudget()
     {
         using var scaleOverride = new EnvironmentOverride("NLINK_FEATURE_SCREENCAP_SCALE", "1");
+        using var profileOverride = new EnvironmentOverride(
+            ScreenShareQualitySettings.ScreenShareQualityProfileVariable,
+            FeatureFlags.ScreenShareQualityProfileNormal);
 
         var profile = WindowsH264EncodePolicy.ResolveProfile(
             sourceWidth: 1920,
             sourceHeight: 1080,
             targetFramesPerSecond: 5,
+            tuningLevel: ScreenShareTransportTuningLevel.BandwidthReduced,
+            transportIpOnly: true);
+
+        Assert.Equal("reduced", profile.ProfileName);
+        Assert.Equal(1280, profile.Width);
+        Assert.Equal(720, profile.Height);
+        Assert.Equal(5, profile.TargetFramesPerSecond);
+        Assert.True(profile.TransportIpOnly);
+        Assert.InRange(profile.TargetBitrate, 2_000_000u, 3_000_000u);
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public void WindowsH264EncodePolicy_TransportBandwidthReducedProfile_OverridesTunaQualityBudget()
+    {
+        using var scaleOverride = new EnvironmentOverride("NLINK_FEATURE_SCREENCAP_SCALE", "1");
+        using var profileOverride = new EnvironmentOverride(
+            ScreenShareQualitySettings.ScreenShareQualityProfileVariable,
+            FeatureFlags.ScreenShareQualityProfileTunaQuality);
+
+        var profile = WindowsH264EncodePolicy.ResolveProfile(
+            sourceWidth: 1920,
+            sourceHeight: 1080,
+            targetFramesPerSecond: 15,
             tuningLevel: ScreenShareTransportTuningLevel.BandwidthReduced,
             transportIpOnly: true);
 
@@ -406,6 +463,9 @@ public sealed class WindowsH264InfrastructureTests : IClassFixture<ScreenShareCo
     public void WindowsH264EncodePolicy_PreviewNormalProfile_RemainsInterFrameBudget()
     {
         using var scaleOverride = new EnvironmentOverride("NLINK_FEATURE_SCREENCAP_SCALE", "1");
+        using var profileOverride = new EnvironmentOverride(
+            ScreenShareQualitySettings.ScreenShareQualityProfileVariable,
+            FeatureFlags.ScreenShareQualityProfileTunaQuality);
 
         var profile = WindowsH264EncodePolicy.ResolveProfile(
             sourceWidth: 1920,
@@ -418,6 +478,7 @@ public sealed class WindowsH264InfrastructureTests : IClassFixture<ScreenShareCo
         Assert.False(profile.TransportIpOnly);
         Assert.Equal(1280, profile.Width);
         Assert.Equal(720, profile.Height);
+        Assert.Equal(8, profile.TargetFramesPerSecond);
         Assert.InRange(profile.TargetBitrate, 1_800_000u, 2_400_000u);
     }
 
@@ -549,6 +610,29 @@ public sealed class WindowsH264InfrastructureTests : IClassFixture<ScreenShareCo
         Assert.Equal(3, received.Height);
         Assert.NotNull(received.StreamConfig);
         Assert.Equal(1, received.StreamConfig!.StreamEpoch);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    [Trait("Category", "Smoke")]
+    public async Task WindowsH264ScreenCaptureSource_EncoderFailureOrNoOutput_DoesNotPublishFrame(bool rejectInput)
+    {
+        await using var rawSource = new FakeWindowsRawCaptureSource();
+        await using var encoder = new NoOutputWindowsH264FrameEncoder(rejectInput);
+        await using var source = new WindowsH264ScreenCaptureSource(
+            ScreenCaptureTargetSelection.PrimaryDisplay,
+            rawCaptureSourceFactory: () => rawSource,
+            encoderFactory: () => encoder);
+        var receivedCount = 0;
+        source.FrameArrived += (_, _) => Interlocked.Increment(ref receivedCount);
+
+        await source.StartAsync(CancellationToken.None);
+        rawSource.RaiseFrame(new WindowsRawCaptureFrame(new DrawingBitmap(4, 3), capturedTsUtcMs: 123));
+        await encoder.Attempted.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        await source.StopAsync().WaitAsync(TimeSpan.FromSeconds(2));
+
+        Assert.Equal(0, receivedCount);
     }
 
     [Fact]
@@ -765,6 +849,7 @@ public sealed class WindowsH264InfrastructureTests : IClassFixture<ScreenShareCo
     [Trait("Category", "Smoke")]
     public async Task WindowsH264ScreenCaptureSource_TransportRawCapture_AppliesUpstreamRawCadenceTarget()
     {
+        using var screenShareQuality = UseBalancedScreenShareQualityForTest();
         await using var rawSource = new FakeWindowsRawCaptureSource();
         await using var encoder = new FakeWindowsH264FrameEncoder();
         await using var source = new WindowsH264ScreenCaptureSource(
@@ -788,6 +873,7 @@ public sealed class WindowsH264InfrastructureTests : IClassFixture<ScreenShareCo
     [Trait("Category", "Smoke")]
     public async Task WindowsH264ScreenCaptureSource_TransportRawCapture_AppliesUpstreamRawOutputSizeHint()
     {
+        using var screenShareQuality = UseBalancedScreenShareQualityForTest();
         await using var rawSource = new FakeWindowsRawCaptureSource();
         await using var encoder = new FakeWindowsH264FrameEncoder();
         await using var source = new WindowsH264ScreenCaptureSource(
@@ -1951,6 +2037,30 @@ public sealed class WindowsH264InfrastructureTests : IClassFixture<ScreenShareCo
         }
     }
 
+    private sealed class NoOutputWindowsH264FrameEncoder(bool rejectInput) : IWindowsH264FrameEncoder
+    {
+        public bool IsSupported => true;
+
+        public TaskCompletionSource<bool> Attempted { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public ValueTask<WindowsH264EncodedFrame?> EncodeAsync(
+            WindowsRawCaptureFrame frame,
+            WindowsH264EncodeOptions options,
+            CancellationToken cancellationToken)
+        {
+            Attempted.TrySetResult(true);
+            return rejectInput
+                ? ValueTask.FromException<WindowsH264EncodedFrame?>(new COMException("synthetic input rejection"))
+                : ValueTask.FromResult<WindowsH264EncodedFrame?>(null);
+        }
+
+        public ValueTask DisposeAsync() => ValueTask.CompletedTask;
+
+        public void StartRecoveryBurst(string reason, long streamEpoch)
+        {
+        }
+    }
+
     private sealed class BlockingWindowsH264FrameEncoder : IWindowsH264FrameEncoder
     {
         private readonly List<int> encodedWidths = new();
@@ -2022,6 +2132,31 @@ public sealed class WindowsH264InfrastructureTests : IClassFixture<ScreenShareCo
     {
         using var stream = new MemoryStream(Convert.FromBase64String("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/a5kAAAAASUVORK5CYII="), writable: false);
         return new AvaloniaBitmap(stream);
+    }
+
+    private static IDisposable UseBalancedScreenShareQualityForTest()
+        => new CompositeDisposable(
+            new EnvironmentOverride(ScreenShareQualitySettings.ScreenShareMaxFpsVariable, "15"),
+            new EnvironmentOverride(ScreenShareQualitySettings.ScreenShareTransportMaxFpsVariable, "8"),
+            new EnvironmentOverride(ScreenShareQualitySettings.ScreenShareScaleVariable, "1"),
+            new EnvironmentOverride(ScreenShareQualitySettings.ScreenShareQualityProfileVariable, FeatureFlags.ScreenShareQualityProfileNormal));
+
+    private sealed class CompositeDisposable : IDisposable
+    {
+        private readonly IDisposable[] disposables;
+
+        public CompositeDisposable(params IDisposable[] disposables)
+        {
+            this.disposables = disposables;
+        }
+
+        public void Dispose()
+        {
+            for (var i = disposables.Length - 1; i >= 0; i--)
+            {
+                disposables[i].Dispose();
+            }
+        }
     }
 
     private static async Task WaitUntilAsync(Func<bool> predicate, TimeSpan timeout)

@@ -101,7 +101,7 @@
                 </Border>
 
                 <Button Classes="linkButton linkAction"
-                        Content="Diagnostics"
+                        Content="Options"
                         Command="{Binding DiagnosticsCommand}"
                         HorizontalAlignment="Center"
                         Padding="10,6"/>

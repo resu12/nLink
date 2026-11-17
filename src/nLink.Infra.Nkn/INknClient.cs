@@ -24,3 +24,12 @@ internal interface INknClient : IDisposable
 
     event EventHandler? Disconnected;
 }
+
+internal interface IRuntimeUnlockRetryPriorityNknClient
+{
+    Task SendRuntimeUnlockRetryControlAsync(
+        string destination,
+        byte[] payload,
+        NknBridgeChannel channel,
+        CancellationToken ct);
+}

@@ -201,6 +201,38 @@ public sealed class FileTransferPanelItemViewModelTests
         Assert.Null(item.ResumeCommand);
     }
 
+    [Theory]
+    [InlineData(FileTransferDirection.Inbound, false)]
+    [InlineData(FileTransferDirection.Outbound, false)]
+    [InlineData(FileTransferDirection.Inbound, true)]
+    [InlineData(FileTransferDirection.Outbound, true)]
+    public void TunaActivationPauseGuard_HidesPauseWithoutChangingResumeOrCancel(
+        FileTransferDirection direction, bool userPaused)
+    {
+        var pauseCommand = new AsyncRelayCommand<string?>(_ => Task.CompletedTask);
+        var resumeCommand = new AsyncRelayCommand<string?>(_ => Task.CompletedTask);
+        var cancelCommand = new AsyncRelayCommand<string?>(_ => Task.CompletedTask);
+        var snapshot = new FileTransferTransferSnapshot(
+            "session-a", "transfer-a", direction,
+            direction == FileTransferDirection.Inbound ? FileTransferTransferState.Receiving : FileTransferTransferState.Sending,
+            "archive.bin", 4096, null, 1024, 1, 4, 1024, null, null, IsPaused: userPaused);
+
+        foreach (var blocked in new[] { false, true, false })
+        {
+            var item = FileTransferPanelItemViewModel.FromSnapshot(
+                snapshot with { IsPauseBlockedByTransport = blocked },
+                pauseCommand: pauseCommand, resumeCommand: resumeCommand, cancelCommand: cancelCommand);
+
+            Assert.NotNull(item);
+            Assert.Equal(!userPaused && !blocked, item!.ShowPause);
+            Assert.Same(item.ShowPause ? pauseCommand : null, item.PauseCommand);
+            Assert.Equal(userPaused, item.ShowResume);
+            Assert.Same(userPaused ? resumeCommand : null, item.ResumeCommand);
+            Assert.True(item.ShowCancel);
+            Assert.Same(cancelCommand, item.CancelCommand);
+        }
+    }
+
     [Fact]
     public void PausedTransfer_ShowsResumeCommand_AndCancel()
     {
@@ -508,7 +540,7 @@ public sealed class FileTransferPanelItemViewModelTests
     }
 
     [Fact]
-    public void OutboundTransfer_ShowsReceiverAcknowledgedProgress()
+    public void OutboundTransfer_ShowsReceiverAcknowledgedProgressWhenTransportRunsAhead()
     {
         var item = FileTransferPanelItemViewModel.FromSnapshot(
             new FileTransferTransferSnapshot(
@@ -531,6 +563,55 @@ public sealed class FileTransferPanelItemViewModelTests
         Assert.NotNull(item);
         Assert.Equal("11.3 MB / 54.7 MB", item!.ProgressText);
         Assert.Equal(11_800_000d / 57_400_000d, item.ProgressFraction, 6);
+    }
+
+    [Fact]
+    public void LargeTransfer_ShowsGbProgressWithTensOfMbPrecision()
+    {
+        var item = FileTransferPanelItemViewModel.FromSnapshot(
+            new FileTransferTransferSnapshot(
+                SessionId: "session-a",
+                TransferId: "transfer-large",
+                Direction: FileTransferDirection.Inbound,
+                State: FileTransferTransferState.Receiving,
+                FileName: "disk-image.bin",
+                FileSizeBytes: 5_583_457_484,
+                Sha256Base64: null,
+                BytesTransferred: 2_842_594_713,
+                ChunksTransferred: 43_741,
+                ChunkCount: 85_800,
+                ChunkSizeBytes: 65_536,
+                ErrorCode: null,
+                StatusMessage: null));
+
+        Assert.NotNull(item);
+        Assert.Equal("2.65 GB / 5.20 GB", item!.ProgressText);
+        Assert.Equal("5.20 GB", item.FileSizeText);
+    }
+
+    [Fact]
+    public void InboundSparseTransfer_ShowsDiskWrittenProgressWhenContiguousPrefixLags()
+    {
+        var item = FileTransferPanelItemViewModel.FromSnapshot(
+            new FileTransferTransferSnapshot(
+                SessionId: "session-a",
+                TransferId: "transfer-sparse",
+                Direction: FileTransferDirection.Inbound,
+                State: FileTransferTransferState.Receiving,
+                FileName: "movie.mkv",
+                FileSizeBytes: 134_217_728,
+                Sha256Base64: null,
+                BytesTransferred: 10_485_760,
+                ChunksTransferred: 160,
+                ChunkCount: 2048,
+                ChunkSizeBytes: 65_536,
+                ErrorCode: null,
+                StatusMessage: "Receiving V6 file data.",
+                BytesAcceptedForTransport: 74_448_896));
+
+        Assert.NotNull(item);
+        Assert.Equal("71 MB / 128 MB", item!.ProgressText);
+        Assert.Equal(74_448_896d / 134_217_728d, item.ProgressFraction, 6);
     }
 
     [Fact]

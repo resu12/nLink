@@ -20,6 +20,7 @@ using NLink.App.Services;
 using NLink.App.ViewModels;
 using NLink.App.Views;
 using NLink.Core;
+using NLink.Core.FileTransfer;
 using NLink.Core.Metrics;
 using NLink.Core.SessionConnect;
 using NLink.Core.SessionSecurity;
@@ -205,6 +206,318 @@ public sealed class Beta3SessionShellLayoutSmokeTests : Beta3DefaultUiSmokeTestB
                 window.Close();
             }
 
+            return true;
+        }, CancellationToken.None);
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public async Task SessionHeader_TunaNegotiationPulsesWithExactTooltip_AndWaitingApprovalIsSteady()
+    {
+        await fixture.Session.Dispatch(async () =>
+        {
+            EnsureAppServices();
+            var header = new SessionHeaderView
+            {
+                TunaActive = false,
+                TunaStatusReason = "post_tuna_fallback_route_active",
+            };
+
+            SetPrivateField(header, "tunaUnlockToggleOn", true);
+            SetPrivateField(header, "tunaRuntimeStatus", "listener_starting");
+            InvokePrivate(header, "UpdateTunaVisualState");
+
+            Assert.Equal(
+                "Starting Tuna listener. Regular NKN stays connected until ready. This computer is paying as the Tuna listener.",
+                header.TunaPictogramTip);
+            Assert.True(header.TunaGlowOpacity > 0d);
+            SetPrivateField(header, "tunaPulseStartedUtc", DateTime.UtcNow.AddMilliseconds(-350));
+            InvokePrivate(header, "OnTunaPulseTimerTick", null, EventArgs.Empty);
+            Assert.NotEqual(1d, header.TunaPulseScale);
+
+            SetPrivateField(header, "tunaRuntimeStatus", "waiting_for_approved_session");
+            InvokePrivate(header, "UpdateTunaVisualState");
+
+            Assert.Equal("Tuna is unavailable. Regular NKN is being used.", header.TunaPictogramTip);
+            Assert.Equal(0d, header.TunaGlowOpacity);
+            Assert.Equal(1d, header.TunaPulseScale);
+            InvokePrivate(header, "StopTunaPulse");
+            await FlushUiAsync();
+            return true;
+        }, CancellationToken.None);
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public async Task SessionHeader_TunaEstablishmentRefreshesBothTipsAndPulse_WithoutRuntimeRefresh()
+    {
+        await fixture.Session.Dispatch(async () =>
+        {
+            EnsureAppServices();
+            var header = new SessionHeaderView { RoleText = "Helpee" };
+            var window = new Window { Content = header };
+            window.Show();
+            try
+            {
+                await FlushUiAsync();
+                SetPrivateField(header, "tunaUnlockToggleOn", true);
+                SetPrivateField(header, "tunaRuntimeStatus", "listener_paths_starting");
+                var timer = Assert.IsType<DispatcherTimer>(typeof(SessionHeaderView)
+                    .GetField("tunaPulseTimer", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(header));
+
+                header.TunaStatusReason = "preflight_listener_unavailable";
+                Assert.StartsWith("Starting Tuna relay paths.", header.TunaPictogramTip);
+                Assert.StartsWith("Starting Tuna relay paths.", header.TunaUnlockTip);
+                Assert.True(timer.IsEnabled);
+                SetPrivateField(header, "tunaPulseStartedUtc", DateTime.UtcNow.AddMilliseconds(-350));
+                InvokePrivate(header, "OnTunaPulseTimerTick", null, EventArgs.Empty);
+                Assert.NotEqual(1d, header.TunaPulseScale);
+
+                header.TunaStatusReason = "waiting_for_answer";
+                Assert.StartsWith("Negotiating Tuna acceleration.", header.TunaPictogramTip);
+                Assert.Equal("Negotiating Tuna acceleration.", header.TunaUnlockTip);
+                Assert.True(timer.IsEnabled);
+
+                InvokePrivate(header, "SetTunaUnlockMessage", "Temporary user feedback");
+                header.TunaStatusReason = "runtime_unlock_pending_route_commit";
+                Assert.Equal("Temporary user feedback", header.TunaUnlockTip);
+                SetPrivateField(header, "tunaUnlockMessageUntilUtc", DateTimeOffset.UtcNow.AddSeconds(-1));
+
+                header.TunaActive = true;
+                Assert.Contains("active", header.TunaUnlockTip);
+                Assert.False(timer.IsEnabled);
+                Assert.Equal(1d, header.TunaPulseScale);
+                header.TunaActive = false;
+                Assert.True(timer.IsEnabled);
+
+                foreach (var reason in new[] { "header_switch_off", "remote_header_switch_off", "provider_paths_wait_timeout", "handoff_rejected" })
+                {
+                    header.TunaStatusReason = reason;
+                    Assert.False(timer.IsEnabled);
+                    Assert.Equal(1d, header.TunaPulseScale);
+                    Assert.Equal(header.TunaPictogramTip, header.TunaUnlockTip);
+                }
+
+                SetPrivateField(header, "tunaUnlockToggleOn", false);
+                SetPrivateField(header, "tunaRuntimeStatus", "off");
+                header.TunaStatusReason = "preflight_listener_unavailable";
+                Assert.False(timer.IsEnabled);
+                Assert.Contains("off", header.TunaUnlockTip);
+
+                SetPrivateField(header, "tunaUnlockToggleOn", true);
+                SetPrivateField(header, "tunaRuntimeStatus", "listener_ready");
+                InvokePrivate(header, "UpdateTunaVisualState");
+                Assert.True(timer.IsEnabled);
+                window.Content = null;
+                Assert.False(timer.IsEnabled);
+                Assert.Equal(1d, header.TunaPulseScale);
+            }
+            finally
+            {
+                InvokePrivate(header, "StopTunaPulse");
+                window.Close();
+            }
+
+            return true;
+        }, CancellationToken.None);
+    }
+
+    [Theory]
+    [InlineData("Helper")]
+    [InlineData("Helpee")]
+    [Trait("Category", "Smoke")]
+    public async Task SessionHeader_TunaListenerProgressRefreshesTipsAndPulse_OverPreSessionIneligibility(string role)
+    {
+        await fixture.Session.Dispatch(async () =>
+        {
+            EnsureAppServices();
+            var header = new SessionHeaderView
+            {
+                RoleText = role,
+                TunaStatusReason = "session_security_state_not_eligible",
+            };
+            var window = new Window { Content = header };
+            window.Show();
+            try
+            {
+                await FlushUiAsync();
+                var timer = Assert.IsType<DispatcherTimer>(typeof(SessionHeaderView)
+                    .GetField("tunaPulseTimer", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(header));
+                var fish = Assert.Single(header.GetVisualDescendants().OfType<Viewbox>());
+
+                InvokePrivate(header, "ApplyTunaUnlockToggleState", true, true, true, "", "waiting_for_approved_session");
+                Assert.Equal("Tuna is unavailable. Regular NKN is being used.", header.TunaPictogramTip);
+                Assert.False(timer.IsEnabled);
+
+                foreach (var status in new[] { "listener_starting", "listener_paths_starting", "provider_paths_ready", "waiting_for_peer_dial" })
+                {
+                    InvokePrivate(header, "ApplyTunaUnlockToggleState", true, true, true, "", status);
+                    var expected = TunaStatusPresentationMapper.FromState(false, null, status, true).Text;
+                    Assert.Equal(expected + " This computer is paying as the Tuna listener.", header.TunaPictogramTip);
+                    Assert.Equal(expected, header.TunaUnlockTip);
+                    Assert.Equal(header.TunaPictogramTip, ToolTip.GetTip(fish));
+                    Assert.True(timer.IsEnabled);
+                    Assert.True(header.TunaGlowOpacity > 0d);
+                    SetPrivateField(header, "tunaPulseStartedUtc", DateTime.UtcNow.AddMilliseconds(-350));
+                    InvokePrivate(header, "OnTunaPulseTimerTick", null, EventArgs.Empty);
+                    Assert.NotEqual(1d, header.TunaPulseScale);
+                    Assert.False(header.TunaActive);
+                    Assert.Equal("session_security_state_not_eligible", header.TunaStatusReason);
+                }
+
+                header.TunaActive = true;
+                Assert.Contains("active", header.TunaPictogramTip);
+                Assert.False(timer.IsEnabled);
+                Assert.Equal(1d, header.TunaPulseScale);
+            }
+            finally
+            {
+                InvokePrivate(header, "StopTunaPulse");
+                window.Close();
+            }
+
+            return true;
+        }, CancellationToken.None);
+    }
+
+    [Theory]
+    [InlineData("listener_ready", true, true)]
+    [InlineData("dialer_ready", true, false)]
+    [InlineData("inactive", false, false)]
+    [Trait("Category", "Smoke")]
+    public async Task SessionHeader_TunaFinishedFileStopsPendingPulse_AndFreshNegotiationCanPulse(
+        string runtimeStatus, bool unlockOn, bool localPayer)
+    {
+        await fixture.Session.Dispatch(async () =>
+        {
+            EnsureAppServices();
+            var header = new SessionHeaderView { TunaStatusReason = "runtime_unlock_pending_route_commit" };
+            SetPrivateField(header, "tunaUnlockToggleOn", unlockOn);
+            SetPrivateField(header, "tunaRuntimeStatus", runtimeStatus);
+            var timer = Assert.IsType<DispatcherTimer>(typeof(SessionHeaderView)
+                .GetField("tunaPulseTimer", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(header));
+            try
+            {
+                InvokePrivate(header, "UpdateTunaVisualState");
+                Assert.Equal(unlockOn, timer.IsEnabled);
+                header.TunaActive = true;
+                Assert.False(timer.IsEnabled);
+                var activeColor = ((ISolidColorBrush)header.TunaPictogramBrush).Color;
+                Assert.Equal(localPayer ? Color.FromRgb(255, 211, 91) : Color.FromRgb(125, 220, 255), activeColor);
+                // An independently active session/Screen route wins when the file ends.
+                header.TunaStatusReason = "file_transfer_tuna_idle";
+                Assert.True(header.TunaActive);
+                Assert.Contains("active", header.TunaPictogramTip);
+                Assert.Equal(activeColor, ((ISolidColorBrush)header.TunaPictogramBrush).Color);
+                Assert.True(header.TunaGlowOpacity > 0d);
+                Assert.False(timer.IsEnabled);
+                header.TunaActive = false;
+                InvokePrivate(header, "UpdateTunaVisualState");
+                Assert.False(timer.IsEnabled);
+                Assert.Equal(1d, header.TunaPulseScale);
+                Assert.Equal(0d, header.TunaGlowOpacity);
+                Assert.Equal(activeColor, ((ISolidColorBrush)header.TunaPictogramBrush).Color);
+                Assert.Equal(1d, header.TunaPictogramOpacity);
+                Assert.False(header.TunaActive);
+                Assert.Equal("Tuna is idle for file transfer.", header.TunaPictogramTip);
+                Assert.Equal(header.TunaPictogramTip, header.TunaUnlockTip);
+                InvokePrivate(header, "OnTunaPulseTimerTick", null, EventArgs.Empty);
+                Assert.False(timer.IsEnabled);
+                Assert.Equal(activeColor, ((ISolidColorBrush)header.TunaPictogramBrush).Color);
+
+                header.TunaStatusReason = "waiting_for_answer";
+                Assert.Equal(unlockOn, timer.IsEnabled);
+                Assert.StartsWith("Negotiating Tuna acceleration.", header.TunaPictogramTip);
+                header.TunaActive = true;
+                Assert.False(timer.IsEnabled);
+                Assert.Equal(activeColor, ((ISolidColorBrush)header.TunaPictogramBrush).Color);
+
+                header.TunaActive = false;
+                foreach (var reason in new[] { "header_switch_off", "remote_header_switch_off", "handoff_rejected" })
+                {
+                    header.TunaStatusReason = reason;
+                    Assert.False(timer.IsEnabled);
+                    Assert.Equal(Color.FromRgb(111, 122, 136), ((ISolidColorBrush)header.TunaPictogramBrush).Color);
+                    Assert.Equal(0d, header.TunaGlowOpacity);
+                }
+
+                SetPrivateField(header, "tunaUnlockToggleOn", false);
+                SetPrivateField(header, "tunaRuntimeStatus", "locked");
+                header.TunaStatusReason = "file_transfer_tuna_idle";
+                Assert.False(timer.IsEnabled);
+                Assert.Equal(Color.FromRgb(111, 122, 136), ((ISolidColorBrush)header.TunaPictogramBrush).Color);
+                Assert.StartsWith("Tuna wallet is locked.", header.TunaPictogramTip);
+            }
+            finally
+            {
+                InvokePrivate(header, "StopTunaPulse");
+            }
+            await FlushUiAsync();
+            return true;
+        }, CancellationToken.None);
+    }
+
+    [Theory]
+    [InlineData(true, FileTransferDirection.Outbound, "regular_nkn_v4_fast", 4)]
+    [InlineData(true, FileTransferDirection.Inbound, "regular_nkn_v4_fast", 4)]
+    [InlineData(false, FileTransferDirection.Outbound, "regular_nkn_v4_fast", 4)]
+    [InlineData(false, FileTransferDirection.Inbound, "regular_nkn_v4_fast", 4)]
+    [InlineData(true, FileTransferDirection.Outbound, "post_tuna_fallback_v6", 6)]
+    [InlineData(true, FileTransferDirection.Inbound, "post_tuna_fallback_v6", 6)]
+    [InlineData(false, FileTransferDirection.Outbound, "post_tuna_fallback_v6", 6)]
+    [InlineData(false, FileTransferDirection.Inbound, "post_tuna_fallback_v6", 6)]
+    [Trait("Category", "Smoke")]
+    public async Task SessionHeader_TunaSessionColorAndTooltipSurviveFilePauseAndCancel(
+        bool localPayer, FileTransferDirection direction, string route, int protocol)
+    {
+        await fixture.Session.Dispatch(async () =>
+        {
+            EnsureAppServices();
+            var header = new SessionHeaderView();
+            SetPrivateField(header, "tunaUnlockToggleOn", localPayer);
+            SetPrivateField(header, "tunaRuntimeStatus", localPayer ? "listener_ready" : "dialer_ready");
+            var timer = Assert.IsType<DispatcherTimer>(typeof(SessionHeaderView)
+                .GetField("tunaPulseTimer", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(header));
+            var reason = localPayer ? "paid_listener_active" : "free_dialer_active";
+            var expectedTip = localPayer
+                ? "Tuna is active. This computer is paying as the Tuna listener."
+                : "Tuna is active and the other computer is paying.";
+            var transfer = new FileTransferTransferSnapshot(
+                "session", "transfer", direction,
+                direction == FileTransferDirection.Outbound ? FileTransferTransferState.Sending : FileTransferTransferState.Receiving,
+                "file.bin", 1024, null, 0, 0, 1, 1024, null, null,
+                RouteToken: route, ProtocolVersion: protocol);
+            try
+            {
+                foreach (var item in new FileTransferTransferSnapshot?[]
+                {
+                    null, transfer, transfer with { IsPaused = true }, transfer with { IsPeerPaused = true },
+                    transfer with { State = FileTransferTransferState.Canceled }, null,
+                })
+                {
+                    var snapshot = direction == FileTransferDirection.Outbound
+                        ? new SessionFileTransferSnapshot(item, null) : new SessionFileTransferSnapshot(null, item);
+                    var projection = TunaHeaderStateProjector.FromSnapshot(snapshot, true, reason);
+                    header.TunaActive = projection.IsActive;
+                    header.TunaStatusReason = projection.StatusReason;
+                    Assert.True(header.TunaActive);
+                    Assert.Equal(expectedTip, header.TunaPictogramTip);
+                    Assert.Equal(expectedTip, header.TunaUnlockTip);
+                    Assert.Equal(localPayer ? Color.FromRgb(255, 211, 91) : Color.FromRgb(125, 220, 255),
+                        ((ISolidColorBrush)header.TunaPictogramBrush).Color);
+                    Assert.Equal(1d, header.TunaPictogramOpacity);
+                    Assert.True(header.TunaGlowOpacity > 0d);
+                    Assert.False(timer.IsEnabled);
+                    Assert.Equal(1d, header.TunaPulseScale);
+                    Assert.Equal(route, transfer.RouteToken);
+                    Assert.Equal(protocol, transfer.ProtocolVersion);
+                }
+            }
+            finally
+            {
+                InvokePrivate(header, "StopTunaPulse");
+            }
+            await FlushUiAsync();
             return true;
         }, CancellationToken.None);
     }

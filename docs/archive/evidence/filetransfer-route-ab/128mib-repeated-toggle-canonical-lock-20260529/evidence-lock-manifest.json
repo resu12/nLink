@@ -1,0 +1,42 @@
+{
+  "lock_name": "128mib-repeated-toggle-canonical-lock-20260529",
+  "created_utc": "2026-05-29",
+  "branch": "v0.7.0",
+  "source_head_before_commit": "d956f078",
+  "canonical_repeated_toggle_payload": {
+    "bytes": 134217728,
+    "label": "128MiB",
+    "scenario": "regular-v4-live-activation-off-on-off-128mb",
+    "route_mode": "live-regular-activation-cycle",
+    "toggle_sequence": "on,off,on,off",
+    "live_proof_mode": "RegularActivationCycle"
+  },
+  "evidence_roots": [
+    {
+      "name": "pre_fallback_epoch_adoption_128mib",
+      "path": "artifacts/filetransfer-route-ab/stability-proof-20260529T-regular-cycle-128mib-immediate-off-after-epoch/regular-activation-cycle",
+      "operator_verdict": "INCONCLUSIVE",
+      "hard_failure_count": 0,
+      "live_route_epoch_proof_verdict": "pass",
+      "conclusion": "128MiB proved the full live route epoch chain but exposed fallback V6 terminal starvation from stale transport epoch proof."
+    },
+    {
+      "name": "post_fallback_epoch_adoption_128mib",
+      "path": "artifacts/filetransfer-route-ab/stability-proof-20260529T-regular-cycle-128mib-adopt-fallback-epoch/regular-activation-cycle",
+      "operator_verdict": "FAIL_PROTOCOL_OR_INTEGRITY",
+      "hard_failure_count": 11,
+      "live_route_epoch_proof_verdict": "fail",
+      "conclusion": "Rerun failed earlier in regular V4 runtime unlock because activation offer send was not observed and liveness terminalized before Tuna activation."
+    }
+  ],
+  "decision": "Keep 128MiB as the canonical repeated-toggle stress payload. It provides enough runtime to prove live epochs and expose fallback/runtime-unlock coordination failures that shorter 64MiB runs can miss.",
+  "non_goals": [
+    "No throughput tuning",
+    "No bridge queue or concurrency tuning",
+    "No Tuna wallet or payer policy changes",
+    "No installer behavior changes",
+    "No default Tuna enablement changes",
+    "No screen-sharing policy changes",
+    "No active file_tuna_v6 revival"
+  ]
+}

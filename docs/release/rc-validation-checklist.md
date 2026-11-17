@@ -1,5 +1,7 @@
 # RC Validation Checklist
 
+This is a sign-off template, not a record that unchecked items failed or passed. The published original `0.7.0` and hotfix-1 records are in [ReleaseRunbook.md](../ReleaseRunbook.md#published-070-hotfix-revision-1-2026-11-15); historical candidate evidence remains separately labeled there. [Hotfix 2](../releases/0.7.0-hotfix.2.md) remains unreleased. For future releases, copy only applicable source/contract/payload-bound results into an approved release sign-off. Do not infer a fresh live GUI or upgrade result from CI success.
+
 ## Build & Packaging
 
 - [ ] CI is green for smoke, reliability gate, packaging, and `installer_smoke`.
@@ -8,6 +10,8 @@
 - [ ] `artifacts/releases/<version>/` contains `nLink-Portable-win-x64-<version>.zip`.
 - [ ] `artifacts/releases/<version>/` contains `nLink-Setup-win-x64-<version>.exe`.
 - [ ] `artifacts/releases/<version>/` contains `SHA256SUMS.txt`.
+- [ ] Final packaged runtime/bridge/sidecar hashes match the qualified payload, or that final payload has its own runtime qualification. A later rebuild does not inherit exact-binary GUI proof merely because source is unchanged.
+- [ ] Candidate asset/provenance paths are identified explicitly; stale default release-folder contents are not uploaded accidentally.
 
 ## Install / Uninstall
 
@@ -19,6 +23,7 @@
 
 - [ ] Previous supported public installer -> current RC in-place upgrade was tested.
 - [ ] Settings or local runtime data were preserved where applicable.
+- [ ] Preservation scope is recorded (synthetic fixtures versus real user settings), without overclaiming migration coverage.
 
 ## UI Sanity
 
@@ -29,10 +34,19 @@
 
 - [ ] Release shell is clean of `NLINK_UNSAFE_DEVELOPER_MODE`, `NLINK_TRANSPORT=DEVLOCAL`, `NLINK_NKN_*`, `NLINK_FILETRANSFER_*`, `NLINK_SCREENSHARE_UNSAFE_*`, `NLINK_NKN_NODE_PATH`, `NLINK_NKN_BRIDGE_PATH`, `NLINK_DOWNLOAD_URL`, and `NLINK_REPO_URL` override env vars before packaging.
 - [ ] Diagnostics from the packaged app show no unexpected `security_relevant_overrides`; any `release_override_suppressed` evidence is investigated before sign-off.
-- [ ] File transfer is validated as shipped scope only: V4-only, single-file, explicit accept/decline, session-envelope protected, and source/session validated.
-- [ ] Live NKN file-transfer soak passed on the packaged app with integrity OK and no `filetransfer_data_session_overflow`, `filetransfer_message_rejected`, or bridge stdout protocol-violation events.
-- [ ] Any `post_completion_late_frame_ignored_count` evidence is reviewed as benign authenticated NKN late delivery after terminal completion, not as a protocol reject.
+- [ ] File transfer is validated as shipped scope only: single-file, explicit accept/decline, route-aware, session-envelope protected, and source/session validated.
+- [ ] Live NKN file-transfer soak passed on the packaged app with route `regular_nkn_v4_fast`, protocol `4`, integrity OK, and no `filetransfer_data_session_overflow`, `filetransfer_message_rejected`, bridge stdout protocol-violation, or regular-NKN bridge bulk send/clear failure events.
+- [ ] Full seven-scenario Phase 5 route correctness passed with strict campaign preflights before installer creation: regular NKN 64 MiB uses coordinator-published `regular_nkn_v4_fast` protocol `4`; active Tuna 64 MiB proves authenticated payload delivery on `file_tuna_v4` protocol `4`; live switch-off from each side ends on `post_tuna_fallback_v6` protocol `6`; helper-to-helpee payer handoff proves `file_tuna_v4,post_tuna_fallback_v6,file_tuna_v4,post_tuna_fallback_v6` with authenticated delivery in both Tuna phases; the 256 MiB route cycle proves `regular_nkn_v4_fast,file_tuna_v4,post_tuna_fallback_v6,file_tuna_v4,post_tuna_fallback_v6` with authenticated Tuna payload delivery at both activations; the second transfer after live reactivation selects `file_tuna_v4` protocol `4`. All scenarios require actual delivery, SHA/integrity OK, terminal GUI completion, hard failures `0`, no active `file_tuna_v6`, and strict coordinator route proof. SHA OK or fallback completion alone does not prove the second Tuna activation.
+- [ ] Live validation used a rebuilt portable package, explicit escalation outside a restricted sandbox, and passing preflights; no failed preflight was bypassed.
+- [ ] The separate performance verdict, warnings, and measurement contamination are recorded without relabeling failures as passes. Existing Phase 5 policy separates performance from release correctness; numeric baselines and limits remain unchanged, and no Tuna or fallback throughput is guaranteed. Bridge tuning requires a separate decision.
+- [ ] Any `post_completion_late_frame_ignored_count` evidence is reviewed as benign authenticated NKN late delivery after successful terminal completion, not as a protocol reject.
+- [ ] Any `post_terminal_late_sender_frame_*` evidence after declined, canceled, or failed transfers is treated as a protocol/integrity gate failure.
 - [ ] Packaged app uses bundled `bridge/win-x64/node.exe` and `bridge/win-x64/index.js`; public release does not depend on bridge path overrides.
+- [ ] Bridge bundle was built from `tools/nkn-bridge/package-lock.json` with clean `npm ci --ignore-scripts --no-audit --no-fund`; there is no `npm install` fallback.
+- [ ] Bridge build verified the pinned Node archive SHA-256 before extraction.
+- [ ] Packaged bridge includes `package-lock.json`, `bridge-manifest.json`, and `bridge-dependencies.json`.
+- [ ] Packaged bridge has no shipped `node_modules`, and `bridge-manifest.json` records `nodeModulesShipped=false`.
+- [ ] Optional online `npm audit --omit=dev` evidence is recorded when network is available; absence of online advisory evidence is not a local/offline build blocker.
 - [ ] Release evidence confirms file-transfer queue limits (`512` frames / `32 MiB`) and bridge binary caps (`64 KiB` payload, `196,606` body bytes before allocation).
 - [ ] Unsigned public Windows artifacts are recorded as an accepted release exception if Authenticode signature status is not `Valid`.
 
@@ -45,4 +59,5 @@
 
 - [ ] `VERSION` matches the intended tag.
 - [ ] Release notes are ready under `docs/releases/<version>.md`.
+- [ ] Candidate/draft wording is changed to published wording only when publication is actually approved; changelog release date is not invented in advance.
 - [ ] Support guidance still points to `docs/supportability.md` and Diagnostics / Hang Report capture.

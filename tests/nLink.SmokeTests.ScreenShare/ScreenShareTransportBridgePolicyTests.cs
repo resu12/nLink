@@ -16,6 +16,46 @@ public sealed class ScreenShareTransportBridgePolicyTests : ScreenShareTransport
 {
 [Trait("Category", "Smoke")]
     [Fact]
+    public void SessionRuntime_HelperRemoteTransportRebind_RequestsKeyframeUntilFrameApplied()
+    {
+        using var transport = new ScreenSharePolicyAwareTransportDouble();
+        using var runtime = new SessionRuntime(() => transport);
+        var securityState = CreateApprovedSecurityState(
+            new PeerAddress("rebind.helpee"),
+            new PeerAddress("rebind.helper"),
+            CapabilityGrant.ScreenShare);
+        var sessionId = securityState.SessionId.GetValueOrDefault().Value;
+
+        runtime.SetRoleForTests(SessionRuntimeRole.Helper);
+        SetPrivateField(runtime, "transport", transport);
+        SetPrivateField(runtime, "state", SessionRuntimeState.Connected);
+        SetPrivateField(runtime, "statusText", "Connected");
+        SetPrivateField(GetScreenShareControlHost(runtime), "remoteScreenShareActive", true);
+        SetPrivateField(runtime, "helperRemoteScreenShareLastAcceptedEpoch", 7L);
+        InvokePrivateMethod(runtime, "WireTransport", transport);
+        transport.SetSessionSecurityStateForTests(securityState);
+
+        InvokePrivateMethod(runtime, "BeginHelperRemoteScreenShareTransportRebindRecovery", "header_switch_off");
+
+        WaitUntil(() => transport.SentVideoKeyframeRequests.Count >= 1);
+        Assert.Equal(sessionId, transport.SentVideoKeyframeRequests[0].SessionId);
+        Assert.Equal(7L, transport.SentVideoKeyframeRequests[0].StreamEpoch);
+        Assert.Contains("transport_rebind_recovery_header_switch_off", transport.SentVideoKeyframeRequests[0].Reason, StringComparison.Ordinal);
+
+        transport.RaiseScreenShareFrameCompleted(new ScreenShareFrameCompletedEventArgs(
+            101,
+            640,
+            360,
+            "h264",
+            new byte[] { 1, 2, 3 },
+            SessionId: sessionId,
+            IsKeyFrame: true,
+            StreamEpoch: 7));
+        WaitUntil(() => GetPrivateLongField(runtime, "helperRemoteTransportRebindRecoveredGeneration") >= 1);
+    }
+
+[Trait("Category", "Smoke")]
+    [Fact]
     public void SessionRuntime_SenderDegradedMode_UpdatesTransportCatchUpPolicy()
     {
         using var transport = new ScreenSharePolicyAwareTransportDouble();

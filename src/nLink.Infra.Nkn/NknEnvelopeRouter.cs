@@ -29,6 +29,7 @@ internal sealed class NknEnvelopeRouter
             case MsgType.Chat:
             case MsgType.Ack:
             case MsgType.SessionEnd:
+            case MsgType.SessionHeartbeat:
             case MsgType.SessionHandshakeStart:
             case MsgType.SessionHandshakeChallenge:
             case MsgType.SessionHandshakeResponse:
@@ -50,6 +51,14 @@ internal sealed class NknEnvelopeRouter
             case MsgType.ScreenShareVideoKeyframeRequest:
             case MsgType.ScreenShareRecoveryReceipt:
             case MsgType.ScreenShareCursorState:
+            case MsgType.TransportAccelerationOffer:
+            case MsgType.TransportAccelerationAnswer:
+            case MsgType.TransportAccelerationAnswerAck:
+            case MsgType.TransportAccelerationDown:
+            case MsgType.TransportAccelerationPayerIntent:
+            case MsgType.SessionPreparationOffer:
+            case MsgType.SessionPreparationAnswer:
+            case MsgType.SessionPreparationAnswerAck:
                 controlChannel.Handle(inboundContext);
                 break;
             case MsgType.ScreenShareFrame:
@@ -69,6 +78,11 @@ internal sealed class NknEnvelopeRouter
             case MsgType.FileTransferComplete:
             case MsgType.FileTransferSessionOpen:
             case MsgType.FileTransferDataFrame:
+            case MsgType.FileTransferPauseControl:
+            case MsgType.FileTransferHeartbeat:
+            case MsgType.FileTransferTransportEpoch:
+            case MsgType.FileTransferTransportProbe:
+            case MsgType.FileTransferRepairProof:
                 fileTransferChannel.Handle(inboundContext);
                 break;
             default:
@@ -84,7 +98,7 @@ internal sealed class NknLifecycleChannel
 
     public NknLifecycleChannel(NknSignalingTransport owner) => this.owner = owner;
 
-    public void Handle(NknInboundEnvelopeContext inboundContext) => owner.RouteLifecycleEnvelope(inboundContext.Source, inboundContext.Envelope);
+    public void Handle(NknInboundEnvelopeContext inboundContext) => owner.RouteLifecycleEnvelope(inboundContext);
 
     public void HandleUnexpected(Envelope env) => owner.HandleUnexpectedEnvelopeType(env);
 }

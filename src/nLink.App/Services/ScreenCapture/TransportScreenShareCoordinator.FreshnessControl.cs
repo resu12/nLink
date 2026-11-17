@@ -30,6 +30,45 @@ internal sealed partial class TransportScreenShareCoordinator
         OnAutoTuneTimerTick();
     }
 
+    internal bool BeginTransportRebindRecovery(string reason)
+    {
+        string currentSessionId;
+        long generation;
+        var normalizedReason = string.IsNullOrWhiteSpace(reason)
+            ? "transport_rebind"
+            : reason.Trim();
+
+        lock (gate)
+        {
+            if (captureSource is null ||
+                sendPipeline is null ||
+                string.IsNullOrWhiteSpace(sessionId))
+            {
+                return false;
+            }
+
+            currentSessionId = sessionId;
+            generation = ++transportRebindGeneration;
+            transportRebindPendingGeneration = generation;
+            transportRebindReason = normalizedReason;
+        }
+
+        LocalOperationalLog.Info(
+            "ScreenShareTransport",
+            $"event=screenshare_transport_rebind_generation_started; direction=outbound; session_id={currentSessionId}; reason={normalizedReason}; rebind_generation={generation}");
+
+        flushTransportQueue?.Invoke("transport_rebind_" + normalizedReason);
+
+        LocalOperationalLog.Info(
+            "ScreenShareTransport",
+            $"event=screenshare_transport_rebind_keyframe_requested; direction=outbound; session_id={currentSessionId}; reason={normalizedReason}; rebind_generation={generation}");
+        LocalOperationalLog.Info(
+            "ScreenShareTransport",
+            $"event=screenshare_tuna_handoff_keyframe_requested; direction=outbound; session_id={currentSessionId}; reason={normalizedReason}; rebind_generation={generation}");
+        RequestKeyFrame("transport_rebind_recovery_" + normalizedReason);
+        return true;
+    }
+
     internal void RequestKeyFrame(string reason)
     {
         IScreenCaptureSource? currentCaptureSource;
@@ -51,12 +90,33 @@ internal sealed partial class TransportScreenShareCoordinator
         var recoveryBurstTransportDisarmToken = 0L;
         var recoveryGapToRequestMsValue = -1L;
         var recoveryBurstStartedWhileHelperProofHealthy = false;
+        var streamConfigMissingResendArmed = false;
+        var streamConfigMissingCachedEpoch = 0L;
         lock (gate)
         {
             currentCaptureSource = captureSource;
             currentPipeline = sendPipeline;
             currentSessionId = sessionId;
             currentTransportTuningLevel = transportTuningLevel;
+            if (IsStreamConfigMissingReason(normalizedReason))
+            {
+                streamConfigMissingRequestCount++;
+                if (currentPipeline is not null &&
+                    bootstrapStreamConfig is not null &&
+                    bootstrapStreamConfigEpoch > 0)
+                {
+                    streamConfigMissingResendPending = true;
+                    streamConfigMissingResendArmed = true;
+                    streamConfigMissingCachedEpoch = bootstrapStreamConfigEpoch;
+                }
+            }
+        }
+
+        if (IsStreamConfigMissingReason(normalizedReason))
+        {
+            LocalOperationalLog.Info(
+                "ScreenShareTransport",
+                $"event=screenshare_stream_config_recovery_resend_armed; session_id={(string.IsNullOrWhiteSpace(currentSessionId) ? "(none)" : currentSessionId)}; has_cached_config={(streamConfigMissingResendArmed ? 1 : 0)}; cached_stream_epoch={(streamConfigMissingCachedEpoch > 0 ? streamConfigMissingCachedEpoch.ToString(CultureInfo.InvariantCulture) : "(none)")}; request_count={Math.Max(0, streamConfigMissingRequestCount)}");
         }
 
         if (shouldStartRecoveryBurst)
@@ -226,6 +286,9 @@ internal sealed partial class TransportScreenShareCoordinator
                 $"event=screenshare_sender_recovery_burst_request_suppressed; session_id={(string.IsNullOrWhiteSpace(currentSessionId) ? "(none)" : currentSessionId)}; stream_epoch={Math.Max(0, currentStreamEpoch)}; reason={normalizedReason}; phase={FormatRecoveryBurstPhase(burstPhase)}; suppress_reason={(recoveryBurstSuppressedDueToHelperAck ? "helper_acknowledged" : "active_burst")}");
         }
     }
+
+    private static bool IsStreamConfigMissingReason(string reason)
+        => string.Equals(reason, "stream_config_missing", StringComparison.OrdinalIgnoreCase);
 
     private static bool ShouldStartRecoveryBurstForReason(string reason)
     {
@@ -1521,11 +1584,18 @@ internal sealed partial class TransportScreenShareCoordinator
         int configuredCap,
         bool inStartupWarmup)
     {
+        var normalSenderCeiling = string.Equals(
+            FeatureFlags.ScreenShareQualityProfile,
+            FeatureFlags.ScreenShareQualityProfileTunaQuality,
+            StringComparison.Ordinal)
+            ? TunaQualitySenderFramesPerSecond
+            : NormalSenderFramesPerSecond;
+
         return mode switch
         {
             ScreenShareSenderFreshnessMode.CatchUp => CatchUpSenderFramesPerSecond,
             ScreenShareSenderFreshnessMode.Reduced => ReducedSenderFramesPerSecond,
-            _ => Math.Min(configuredCap, NormalSenderFramesPerSecond),
+            _ => Math.Min(configuredCap, normalSenderCeiling),
         };
     }
 

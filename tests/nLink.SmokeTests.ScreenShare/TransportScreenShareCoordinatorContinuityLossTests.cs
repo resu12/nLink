@@ -27,6 +27,32 @@ public sealed class TransportScreenShareCoordinatorContinuityLossTests : ScreenS
 
     [Fact]
     [Trait("Category", "Smoke")]
+    public async Task TransportScreenShareCoordinator_TransportRebind_RequestsKeyframeAndFlushesQueue()
+    {
+        var fakeSource = new AdaptiveFakeScreenCaptureSource();
+        var flushedReasons = new List<string>();
+        var clock = new FakeScreenShareClock(new DateTimeOffset(2026, 5, 6, 18, 0, 0, TimeSpan.Zero));
+        await using var coordinator = new TransportScreenShareCoordinator(
+            captureSourceFactory: () => fakeSource,
+            sendPayloadAsync: (_, _) => Task.CompletedTask,
+            clock: clock,
+            flushTransportQueue: reason => flushedReasons.Add(reason));
+        await AwaitCompletesAsync(
+            coordinator.StartAsync("session-transport-rebind-keyframe", CancellationToken.None),
+            TimeSpan.FromSeconds(2),
+            "transport rebind start");
+        fakeSource.SetFreshnessMetrics(new ScreenCaptureFreshnessMetrics(CurrentStreamEpoch: 21, LastEncodeDurationMs: 18, LastEncodeTotalDurationMs: 32));
+
+        var started = coordinator.BeginTransportRebindRecovery("header_switch_off");
+
+        Assert.True(started);
+        Assert.Contains(flushedReasons, reason => reason.Contains("transport_rebind_header_switch_off", StringComparison.Ordinal));
+        Assert.Contains(fakeSource.KeyFrameRequestReasons, reason => reason.Contains("transport_rebind_recovery_header_switch_off", StringComparison.Ordinal));
+        Assert.True(GetPrivateFieldValue<long>(coordinator, "transportRebindGeneration") > 0);
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
     public async Task TransportScreenShareCoordinator_PostReceiptContinuityLossStaleBlockers_DoNotBlockPromotion()
     {
         var fakeSource = new AdaptiveFakeScreenCaptureSource();

@@ -95,6 +95,37 @@ public partial class App : Application
             tracker.Start();
             Services.AddSingleton(tracker);
         }
+
+        if (!Services.TryGet<ITunaWalletLinkStore>(out _))
+        {
+            Services.AddSingleton<ITunaWalletLinkStore>(new JsonTunaWalletLinkStore());
+        }
+
+        if (!Services.TryGet<ITunaWalletVerifier>(out _))
+        {
+            Services.AddSingleton<ITunaWalletVerifier>(new TunaWalletSidecarVerifier());
+        }
+
+        if (!Services.TryGet<ITunaRuntimePreferenceStore>(out _))
+        {
+            Services.AddSingleton<ITunaRuntimePreferenceStore>(new JsonTunaRuntimePreferenceStore());
+        }
+
+        if (!Services.TryGet<ITunaUsageAccountingStore>(out _))
+        {
+            Services.AddSingleton<ITunaUsageAccountingStore>(new JsonTunaUsageAccountingStore());
+        }
+
+        if (!Services.TryGet<ITunaRuntimePilotService>(out _))
+        {
+            var walletStore = Services.GetRequired<ITunaWalletLinkStore>();
+            var verifier = Services.GetRequired<ITunaWalletVerifier>();
+            Services.AddSingleton<ITunaRuntimePilotService>(new TunaRuntimePilotService(
+                Services.GetRequired<ITunaRuntimePreferenceStore>(),
+                Services.GetRequired<ITunaUsageAccountingStore>(),
+                walletStore,
+                verifier));
+        }
     }
 
     private void DisableAvaloniaDataAnnotationValidation()

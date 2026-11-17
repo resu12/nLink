@@ -8,68 +8,88 @@ Powered by NKN. Official website: https://nkn.org/
 
 Minimal `.NET 8` / Avalonia desktop app for Windows with deterministic smoke tests.
 
-## Current Release (0.6.2)
+## Download 0.7.0 hotfix revision 2
 
-`0.6.2` is the current release. It keeps the H.264 screen-sharing default from the prior release, and focuses on file-transfer reliability, session approval clarity, connection lifecycle recovery, and chat usability while screen sharing.
+[Download 0.7.0 hotfix revision 2](https://github.com/resu12/nLink/releases/tag/v0.7.0-hotfix.2), released **17 November 2026** from `36557e07` with CI #108's exact validated artifacts. The app still reports **0.7.0**: use the release tag and its own `SHA256SUMS.txt` to distinguish packages.
+
+- [Windows x64 installer (recommended)](https://github.com/resu12/nLink/releases/download/v0.7.0-hotfix.2/nLink-Setup-win-x64-0.7.0.exe)
+- [Windows x64 portable ZIP](https://github.com/resu12/nLink/releases/download/v0.7.0-hotfix.2/nLink-Portable-win-x64-0.7.0.zip)
+- [SHA256SUMS.txt](https://github.com/resu12/nLink/releases/download/v0.7.0-hotfix.2/SHA256SUMS.txt)
 
 ## Quick Start (Windows)
 
-1. Go to the GitHub Releases page and download the Installer (recommended) or Portable ZIP.
-2. Helper opens nLink, clicks `I want to help`, and copies the helper address.
+1. Download the Installer (recommended) or Portable ZIP from [hotfix 2's release page](https://github.com/resu12/nLink/releases/tag/v0.7.0-hotfix.2). A source-branch version is not necessarily a published release.
+2. Helper opens nLink, clicks `I want to help someone`, and waits for the full helper address beginning with `nlinkh1.` before copying it. Do not copy the brief short bootstrap address shown by older builds.
 3. Helpee opens nLink, clicks `I need help`, enters the provided helper address, and clicks `Request help`.
 4. Helper receives the incoming help request and clicks `Accept`.
 5. Both sides compare the session verification symbols, then Helpee clicks `Allow`.
 6. Chat opens on both sides.
 7. If `Transfer files` is allowed for the session, either side can click `Send file`.
 
+## Screenshots
+
+Screenshots supplied by the user on **16 November 2026** during hotfix-2 review. They include the new preparing-address state and show the UI in use; they are not exact-build or CI qualification. See [screenshot provenance](docs/images/README.md).
+
 Home:
 
-![Home screen](docs/images/home-0.4.5.png)
+![nLink home screen with help and helper options](docs/images/home-2026-11-16.png)
 
-Helper:
+Helper preparing its address:
 
-![Helper screen](docs/images/helper-0.4.5.png)
+![Helper showing Preparing helper address, with Copy and Share disabled](docs/images/helper-2026-11-16.png)
 
 Helpee:
 
-![Helpee screen](docs/images/helpee-0.4.5.png)
+![Helpee screen for entering or importing the helper address](docs/images/helpee-2026-11-16.png)
 
 Screen sharing:
 
-![Screen sharing session](docs/images/screenshare-0.4.5.png)
+![Active screen sharing with the Helpee preview, chat and Stop sharing control](docs/images/screenshare-2026-11-16.png)
 
-Remote control:
+File transfer:
 
-![Remote control session](docs/images/remote-control-0.4.5.png)
+![File transfer in progress with Pause and Cancel controls](docs/images/file-transfer-2026-11-16.png)
+
+## Usage notes
 
 If connection fails:
-Open Diagnostics -> Copy diagnostics and include it when reporting issues. If a screenshare soak artifact has already been analyzed, Diagnostics includes a compact screenshare evidence summary; for hangs or freezes, use Diagnostics -> Save Hang Report. See [`docs/supportability.md`](docs/supportability.md) for the support evidence checklist.
+Open Options -> Diagnostics -> Copy diagnostics and include it when reporting issues. If a screenshare soak artifact has already been analyzed, Options includes a compact screenshare evidence summary; for hangs or freezes, use Options -> Diagnostics -> Save Hang Report. See [`docs/supportability.md`](docs/supportability.md) for the support evidence checklist.
 
-For release-safe builds, Diagnostics should show:
+For release-safe builds, Options -> Diagnostics should show:
+
 - `invite_security_mode: issued_one_time_secret_invites`
 - `invite_public_flow: verified_helper_required`
 - `invite_security_release_ready: Yes`
 - `invite_security_warning: none`
 
-Normal release UX uses a raw helper address and an approval-time session verification sequence, then a direct helpee-side `Request help` flow with QR/share/copy support where needed. The approval check is a compact five-symbol comparison on both screens.
+Normal release UX uses a verified helper-address payload (`nlinkh1.`) and an approval-time session verification sequence, then a direct helpee-side `Request help` flow with QR/share/copy support where needed. The approval check is a compact five-symbol comparison on both screens.
 
 Notes:
+
 - Windows x64 only
-- Current release (`0.6.2`)
 - Default screensharing uses H.264 video transport, with helper-side recovery protection for broken reference chains.
-- Advanced Diagnostics includes Balanced, High quality, and High performance screen-share presets.
+- Options -> Settings includes Balanced, High quality, Tuna quality, and High performance screen-share presets. High quality now opts into 24 capture FPS / 15 transport FPS over normal NKN, while Tuna quality remains the higher-bandwidth preset recommended for Tuna-enabled screen sharing.
 - The helper-side cursor overlay, H.264 motion/keyframe safeguards, WGC GPU scaling, and same-apartment Win10 WGC teardown remain enabled.
 - Chat UX keeps `Enter` to send, `Shift+Enter` for a new line, stable pane sizing in chat-only and screen-sharing layouts, and message entry remains available during screen sharing.
-- File transfer in `0.6.2` is V4-only and single-file only. No folders, drag-and-drop, or resume after restart yet.
+- File transfer in `0.7.0` is single-file only. No folders, drag-and-drop, or resume after restart yet.
+- Route defaults are explicit: regular NKN uses `regular_nkn_v4_fast` / protocol `4`, active file Tuna uses `file_tuna_v4` / protocol `4`, and controlled post-Tuna fallback uses `post_tuna_fallback_v6` / protocol `6` for the affected transfer. `diagnostic_regular_nkn_v6` is unsafe developer/test opt-in only; active `file_tuna_v6` is invalid.
 - Receiving a file requires explicit accept/decline, and file-transfer data is protected by nLink's session envelope plus source/session validation rather than by assuming NKN transport alone is sufficient.
+- The bundled NKN bridge/runtime remains a trust boundary; transport encryption does not replace nLink's application checks.
 - Active file transfers can be paused, resumed, or canceled from either side when file transfer is allowed.
+- File-transfer lifecycle actions are hard-priority: cancel, pause, session end, peer down, window close, and app exit do not wait for file-data queues, repair queues, Tuna, or bulk backlog.
+- If Tuna stops during a Tuna V4 transfer, the same transfer live-transitions to V6 fallback over regular NKN. Explicit reactivation can return that transfer to Tuna V4. After successful final fallback completion, the next new transfer resolves from current transport state: Tuna V4 when active, otherwise regular V4.
+- Progress is based on accepted/receiver-confirmed bytes, not merely queued sends. The bars smooth reported progress without predicting future delivery; network acknowledgements can still make the two displays differ briefly. Completion requires final SHA-256 verification.
 - Received files are saved into the Windows Downloads folder by default, with a numbered suffix added automatically when the target name already exists.
-- Safe-by-default file size cap for `0.6.2`: `25 GiB`
+- Safe-by-default file size cap for `0.7.0`: `25 GiB`
+- Options -> Wallet exposes an experimental Tuna wallet-linking and runtime opt-in section; linking a wallet does not start Tuna, spend NKN, or change the default transport.
+- Tuna startup status and a pulsing fish indicate an unlocked connection attempt, not proof of payload delivery. Gray is inactive, light blue is the non-paying side, and yellow identifies the selected paying listener. Linking or validating a wallet does not spend NKN; starting a paid listener can. See the [Tuna guide](docs/nkn-tuna-implementation.md).
+- The strict Phase 5 release gate requires actual payload delivery, SHA integrity, coordinator-published routes, authenticated Tuna delivery, fallback, and terminal GUI completion. Performance is reported separately under the existing policy, without changing numeric baselines or promising Tuna/fallback throughput.
 - Large file transfers over NKN can still be noticeably slower than local or direct network copy. Live screenshare latency can also vary with NKN/network delivery.
-- Release exception: Windows artifacts for `0.6.2` are unsigned; verify downloads with `SHA256SUMS.txt`.
+- The `v0.7.0`, `v0.7.0-hotfix.1` and `v0.7.0-hotfix.2` Windows artifacts each have an explicit unsigned-artifact exception. Verify downloads against the checksum file from the same tag; these exceptions do not approve future release artifacts.
 - Installer path: `%LOCALAPPDATA%\Programs\nLink`
 
 License:
+
 - MIT (see `LICENSE`)
 
 ## Documentation
@@ -82,6 +102,14 @@ License:
   [`docs/test-lanes.md`](docs/test-lanes.md)
 - Screenshare operator guide:
   [`docs/screenshare-operability.md`](docs/screenshare-operability.md)
+- Screenshare implementation guide:
+  [`docs/screenshare-implementation.md`](docs/screenshare-implementation.md)
+- File transfer implementation guide:
+  [`docs/file-transfer-implementation.md`](docs/file-transfer-implementation.md)
+- File transfer and Tuna operator guide:
+  [`docs/file-transfer-operability.md`](docs/file-transfer-operability.md)
+- NKN Tuna implementation guide:
+  [`docs/nkn-tuna-implementation.md`](docs/nkn-tuna-implementation.md)
 
 ## Build from source (developers)
 
@@ -99,7 +127,7 @@ License:
 
 ### Tests
 
-- Run all domain ownership lanes:
+- During implementation, run focused tests for the changed behavior and its affected ownership lane. Reserve the full sweep for a planned broad regression gate:
   `powershell -ExecutionPolicy Bypass -File .\tools\Test-Lanes.ps1 -Lane Core,Gui,ScreenShare,RemoteControl,Contracts`
 - Run deterministic release smoke tests:
   `powershell -ExecutionPolicy Bypass -File .\tools\Test-Lanes.ps1 -Lane Smoke -Configuration Release`
@@ -111,17 +139,21 @@ License:
 
 ### Release Validation (Maintainers, Windows)
 
-- Recommended full pre-release automation (tests + packaging):
-  `powershell -ExecutionPolicy Bypass -File .\tools\PreRelease-Check.ps1 -RunFormatCheck -RunBetaReadiness`
-- Optional GUI smoke (interactive desktop session required):
-  `powershell -ExecutionPolicy Bypass -File .\tools\PreRelease-Check.ps1 -RunGuiSmoke -RunFormatCheck -RunBetaReadiness`
+- Planned final gate (tests, strict Phase 5 GUI route acceptance, and packaging):
+  `powershell -ExecutionPolicy Bypass -File .\tools\PreRelease-Check.ps1 -RunGuiSmoke -RunBetaReadiness -RunFileTransferRouteAcceptanceGate`
+- Live validation needs an interactive Windows desktop, a low-balance test wallet, and a session-only password. In sandboxed automation, run live NKN/GUI checks and preflights with explicit escalation; never bypass a failed preflight. See the [runbook](docs/ReleaseRunbook.md) for setup and evidence requirements.
+- Omitting `-RunFileTransferRouteAcceptanceGate` skips that gate; packaging success alone is not route qualification.
 - Output release assets:
   `artifacts/releases/<version>/nLink-Portable-win-x64-<version>.zip`
   `artifacts/releases/<version>/nLink-Setup-win-x64-<version>.exe`
-- Final release notes:
-  [`docs/releases/0.6.2.md`](docs/releases/0.6.2.md)
-- GitHub release body:
-  [`docs/releases/0.6.2-github.md`](docs/releases/0.6.2-github.md)
+- Published hotfix-1 release notes:
+  [`docs/releases/0.7.0-hotfix.1.md`](docs/releases/0.7.0-hotfix.1.md)
+- Original 0.7.0 release notes:
+  [`docs/releases/0.7.0.md`](docs/releases/0.7.0.md)
+- Published hotfix-2 release notes and exact downloads:
+  [0.7.0 hotfix revision 2](https://github.com/resu12/nLink/releases/tag/v0.7.0-hotfix.2)
+- Historical hotfix-2 preparation records (pre-publication status and local-build hashes):
+  [candidate notes](docs/releases/0.7.0-hotfix.2.md), [release-body draft](docs/releases/0.7.0-hotfix.2-github.md)
 - RC/final validation checklist:
   [`docs/release/rc-validation-checklist.md`](docs/release/rc-validation-checklist.md)
 
@@ -149,81 +181,57 @@ License:
 - Pre-release helpers:
   `powershell -ExecutionPolicy Bypass -File .\tools\PreRelease-Check.ps1 -RunResources -RunLeakCheck`
 
-### Building Portable EXE (ZIP Release)
+### Building the Portable Package and Installer
 
-Portable releases are built from one canonical folder, then optionally copied into helper/helpee alias folders.
+Build prerequisites are the .NET 8 SDK and Go toolchain; installer creation also needs Inno Setup 6 (`ISCC.exe`). Bridge dependencies use the pinned, hash-verified Node bootstrap and locked npm restore. End users do not need .NET, Node, npm, or Go installed.
 
-1. Build the canonical portable folder + ZIP:
-   `powershell -ExecutionPolicy Bypass -File .\installer\Build-Portable.ps1`
+```powershell
+# Portable app, bridge, Tuna sidecar, and ZIP:
+powershell -ExecutionPolicy Bypass -File .\installer\Build-Portable.ps1 -Runtime win-x64
+
+# Alternatively, build these plus the installer and release assets:
+powershell -ExecutionPolicy Bypass -File .\installer\Build-Installer.ps1 -Runtime win-x64
+```
+
+Both scripts rebuild the canonical payload by default; a separate bridge build is not a prerequisite. `Build-Installer.ps1` calls `Build-Portable.ps1`, so running both consecutively rebuilds it twice. A new rebuild is not automatically covered by earlier exact-binary GUI evidence: retain source/contract applicability and payload hashes before release sign-off.
 
 Outputs:
-- Canonical portable folder:
-  `artifacts/portable/nLink/win-x64`
-- Portable ZIP (share this):
-  `artifacts/portable/nLink-Portable-win-x64-<version>.zip`
 
-Optional alias copies (same app contents, different folders for workflow convenience):
-- Helper alias:
-  `powershell -ExecutionPolicy Bypass -File .\installer\Build-Portable.ps1 -CopyHelperAlias`
-- Helpee alias:
-  `powershell -ExecutionPolicy Bypass -File .\installer\Build-Portable.ps1 -CopyHelpeeAlias`
+- Canonical portable folder: `artifacts/portable/nLink/win-x64`.
+- Portable ZIP: `artifacts/portable/nLink-Portable-win-x64-<version>.zip`.
+- Installer: `artifacts/installer/nLink-Setup-win-x64-<version>.exe`.
+- Release assets and checksums: `artifacts/releases/<version>/` (unless `-LocalOnly`).
 
-Notes:
-- This is a portable folder build zipped for sharing (not a single-file EXE).
-- The main executable is `nLink.exe` inside the folder/zip contents.
-- The portable ZIP includes the bundled NKN bridge runtime by default (requires `artifacts/bridge/win-x64` to exist first).
-- If the bridge bundle is missing, build it first:
-  `powershell -ExecutionPolicy Bypass -File .\installer\Build-BridgeBundle.ps1`
+The ZIP contains a self-contained `nLink.exe` plus required bridge, Tuna, and media files; keep the folder together. Helper/helpee alias folders are optional (`-CopyHelperAlias` / `-CopyHelpeeAlias` on the portable builder), not separate products or default installer staging.
 
-### Building Installer
-
-Minimal installer option (Inno Setup 6), split into two steps:
-
-1. Build the bridge bundle artifact (requires Node.js on the build machine):
-   `powershell -ExecutionPolicy Bypass -File .\installer\Build-BridgeBundle.ps1`
-2. Install Inno Setup 6 (needs `ISCC.exe` on your machine).
-3. Run the installer build script (does not require Node.js/npm):
-   `powershell -ExecutionPolicy Bypass -File .\installer\Build-Installer.ps1`
-
-What the script does:
-- Builds the canonical portable folder + ZIP (via `installer/Build-Portable.ps1`)
-- Copies the canonical portable build into helper staging:
-  `artifacts/portable/helper/win-x64`
-- Requires and validates the prebuilt bridge bundle artifact:
-  `artifacts/bridge/win-x64`
-- Copies the bridge bundle into helper staging under:
-  `artifacts/portable/helper/win-x64/bridge/win-x64`
-- Builds an installer to:
-  `artifacts/installer`
-  (filename: `nLink-Setup-win-x64-<version>.exe`)
-
-Notes:
-- If Inno Setup is not installed, the script still builds the portable helper folder and then prints a clear message.
-- The installer is a simple per-user install (`LocalAppData\Programs\nLink`) to avoid admin prompts.
-- If `artifacts/bridge/win-x64/` is missing, installer build stops with:
-  `Bridge runtime not found. Run the bridge bundle build step first.`
+Without Inno Setup, the installer script leaves the portable output available but exits with a missing-compiler error. The installer is per-user (`%LOCALAPPDATA%\Programs\nLink`) and does not require admin elevation. For release qualification and signing policy, use the [release runbook](docs/ReleaseRunbook.md).
 
 ### Bundled NKN Bridge Runtime (No Node Install Needed on End User PC)
 
-Canonical bridge bundle artifact (built in Step 1):
+Canonical bridge bundle artifact (built by the portable builder):
 
 - `artifacts/bridge/win-x64/node.exe`
 - `artifacts/bridge/win-x64/index.js`
 - `artifacts/bridge/win-x64/package.json`
-- `artifacts/bridge/win-x64/node_modules/...` (including `nkn-sdk`)
+- `artifacts/bridge/win-x64/package-lock.json`
+- `artifacts/bridge/win-x64/bridge-manifest.json`
+- `artifacts/bridge/win-x64/bridge-dependencies.json`
 
-The installer step copies this artifact into the helper app output/install, so the end user does not need Node.js installed.
+The bridge uses a clean `npm ci` restore (`npm ci --ignore-scripts --no-audit --no-fund`) against `tools/nkn-bridge/package-lock.json`, `ncc`, and a pinned, hash-verified Node runtime. There is no shipped `node_modules` tree. The manifest records the app version from `VERSION`; packaging rejects stale manifests. The bundle is copied into the canonical app output/install.
 
 Bundled runtime location inside the app output/install (required Release layout):
 
 - `bridge/win-x64/node.exe`
 - `bridge/win-x64/index.js`
 - `bridge/win-x64/package.json`
-- `bridge/win-x64/node_modules/...`
+- `bridge/win-x64/package-lock.json`
+- `bridge/win-x64/bridge-manifest.json`
+- `bridge/win-x64/bridge-dependencies.json`
 
 Runtime behavior:
 - `Release` builds prefer the bundled bridge runtime (`bridge/<rid>/node(.exe)` + `bridge/<rid>/index.js`)
 - `Debug` builds allow launching `node` from `PATH` for local development
+- `installer/Build-BridgeBundle.ps1 -UseSystemNode` exists for local experiments only; release builds use the pinned, hash-verified bootstrap path
 
 Advanced overrides (developer/test only):
 - `NLINK_NKN_NODE_PATH`
@@ -233,25 +241,26 @@ In `Release` builds, unsafe transport, bridge path, NKN topology/recovery, file-
 
 ### Manual NKN Integration Test (Not CI)
 
-Use this only as a manual two-instance sanity check. Do not add CI tests that depend on real NKN connectivity. Release builds use the bundled NKN internet transport by default; set overrides only when intentionally testing a custom local environment.
+Use this only as a manual two-instance sanity check, not as file-transfer release proof. Do not add deterministic CI tests that depend on real NKN connectivity. Rebuild the portable package first, use its bundled runtime, and run live checks outside a restricted sandbox with explicit escalation when applicable.
 
 Setup:
 1. (Optional) Set a seed RPC endpoint:
-   `set NLINK_UNSAFE_DEVELOPER_MODE=1`
-   `set NLINK_NKN_SEED_RPC=<rpc-host:port>`
+   `$env:NLINK_UNSAFE_DEVELOPER_MODE = "1"`
+   `$env:NLINK_NKN_SEED_RPC = "<rpc-host:port>"`
+
+Keep such overrides scoped to the deliberate developer test process, not the public release shell.
 
 Run the test (same PC, two app instances):
 1. Start the first app instance:
-   `dotnet run --project src/nLink.App -c Release`
+   `.\artifacts\portable\nLink\win-x64\nLink.exe`
 2. Click `I want to help` and copy the helper address.
-4. Start the second app instance:
-   `dotnet run --project src/nLink.App -c Release`
-5. Click `I need help`, paste the helper address, and click `Request help`.
-6. Accept the incoming request on the helper side.
-7. Compare the session verification symbols on both screens, then click `Allow` on the helpee side.
-8. Send chat messages both ways and confirm they appear on both sides.
+3. Start the second app instance from the same portable folder.
+4. Click `I need help`, paste the helper address, and click `Request help`.
+5. Accept the incoming request on the helper side.
+6. Compare the session verification symbols on both screens, then click `Allow` on the helpee side.
+7. Send chat messages both ways and confirm they appear on both sides.
 
 If it fails (copy diagnostics):
-1. In the app, open `Diagnostics`
-2. Click `Copy diagnostics`
+1. In the app, open `Options`
+2. Select `Diagnostics` and click `Copy diagnostics`
 3. Include the copied text when reporting the issue

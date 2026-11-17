@@ -3,7 +3,7 @@ param(
     [ValidateSet("AnalyzeRetained", "LocalFast", "LocalImpaired", "LocalMixed", "NknFast", "NknMixed", "SupportCapture", "Test")]
     [string]$Mode,
 
-    [ValidateSet("Default", "PinnedMainnetRpc", "PinnedSeedHttps", "MediaFanout8", "MediaFanout12", "BulkSingle1", "BulkFanout8", "BulkFanout12", "DefaultKeepAlive")]
+    [ValidateSet("Default", "PinnedMainnetRpc", "PinnedSeedHttps", "MediaFanout8", "MediaFanout12", "BulkSingle1", "BulkFanout4Legacy", "BulkFanout8", "BulkFanout12", "DefaultKeepAlive")]
     [string]$ExternalTopologyProfile = "Default",
     [string]$LogDir = "",
     [string[]]$LogPath = @(),
@@ -29,7 +29,9 @@ param(
     [switch]$Build,
     [int]$TimeoutSeconds = 600,
     [string]$SafeBaselineArtifactDir = "",
-    [string]$StrongBaselineArtifactDir = ""
+    [string]$StrongBaselineArtifactDir = "",
+    [ValidateSet("None", "SwitchOff", "MultiToggle", "RegularActivationCycle")]
+    [string]$LiveRouteProofMode = "None"
 )
 
 Set-StrictMode -Version Latest
@@ -176,8 +178,8 @@ function Write-FileTransferSupportCaptureInstructions {
     Write-Host "4. Read filetransfer-operator-verdict.txt first."
     Write-Host "5. Attach the full artifact directory when support asks for raw retained analyzer output."
     Write-Host "6. Local soak artifacts also include filetransfer-impairment-summary.txt and mixed-screenshare-summary.txt."
-    Write-Host "7. Live NKN soak artifacts also include filetransfer-live-nkn-summary.txt, filetransfer-live-nkn-summary.json, filetransfer-live-nkn-cycles.jsonl, and baseline-comparison.txt."
-    Write-Host "8. For V4 file-only runs, keep protocol-shape-summary.txt, payload-efficiency-summary.txt, bridge-bulk-summary.txt, throughput-decomposition-summary.txt, baseline-comparison.txt, and v4-promotion-decision.txt."
+    Write-Host "7. Live NKN soak artifacts also include filetransfer-live-nkn-summary.txt, filetransfer-live-nkn-summary.json, filetransfer-live-nkn-cycles.jsonl, bridge-config-summary.txt, and baseline-comparison.txt."
+    Write-Host "8. For V4 file-only runs, keep protocol-shape-summary.txt, payload-efficiency-summary.txt, bridge-config-summary.txt, bridge-bulk-summary.txt, throughput-decomposition-summary.txt, baseline-comparison.txt, and v4-promotion-decision.txt."
     Write-Host "9. For receive stalls, keep external-transport-health-summary.txt and throughput-decomposition-summary.txt."
     Write-Host "10. Optional receive-stall matrix: powershell -ExecutionPolicy Bypass -File .\tools\Run-FileTransferReceiveStallMatrix.ps1"
     Write-Host "11. Optional bridge-only probe: powershell -ExecutionPolicy Bypass -File .\tools\Run-NknBridgeReceiveProbe.ps1"
@@ -202,6 +204,7 @@ Assert-ParameterMode -Name "TimeoutSeconds" -AllowedModes @("NknFast", "NknMixed
 Assert-ParameterMode -Name "ProgressTimeoutSeconds" -AllowedModes @("NknFast", "NknMixed")
 Assert-ParameterMode -Name "ExternalTopologyProfile" -AllowedModes @("NknFast", "NknMixed")
 Assert-ParameterMode -Name "PayloadEfficiencyProfile" -AllowedModes @("LocalFast", "LocalImpaired", "LocalMixed", "NknFast", "NknMixed")
+Assert-ParameterMode -Name "LiveRouteProofMode" -AllowedModes @("AnalyzeRetained")
 Assert-PayloadEfficiencyProfileIsSafeForMode
 
 function Invoke-LocalFileTransferSoakMode {
@@ -383,7 +386,7 @@ switch ($Mode) {
             "-c",
             $Configuration,
             "--filter",
-            "FullyQualifiedName~FileTransferOpsScriptsTests|FullyQualifiedName~FileTransferSoakRunnerTests"
+            "OpsSuite=ScriptSurface|OpsSuite=GuiHarness|OpsSuite=RetainedAuthorityProof|OpsSuite=RetainedRouteLaw|OpsSuite=RetainedFallback|OpsSuite=RetainedRuntimeUnlock|OpsSuite=RetainedV4Transport|OpsSuite=AcceptancePhase4|OpsSuite=AcceptancePhase5Fast|OpsSuite=AcceptancePhase5Full|OpsSuite=NknSoakAndBaseline|FullyQualifiedName~FileTransferSoakRunnerTests"
         )
         exit (Invoke-ExternalCommand -Command "dotnet" -Arguments $arguments)
     }
@@ -516,13 +519,14 @@ switch ($Mode) {
             -ArtifactDir $ArtifactDir `
             -TransferId $TransferId `
             -TailMinutes $TailMinutes `
-            -IncludeRawSlices:$IncludeRawSlices
+            -IncludeRawSlices:$IncludeRawSlices `
+            -LiveRouteProofMode $LiveRouteProofMode
 
         Write-Host ("[FileTransferOps] artifact_dir={0}" -f $result.ArtifactDir) -ForegroundColor Green
         Write-Host ("[FileTransferOps] verdict={0}" -f $result.GateResult.Verdict) -ForegroundColor Green
         Write-Host ("[FileTransferOps] first_read=filetransfer-operator-verdict.txt") -ForegroundColor Green
 
-        if ($FailOnGate -and ($result.GateResult.Verdict -eq "FAIL_PROTOCOL_OR_INTEGRITY" -or $result.GateResult.Verdict -like "INCONCLUSIVE*" -or $result.GateResult.Verdict -eq "INVALID_SETUP")) {
+        if ($FailOnGate -and ($result.GateResult.Verdict -eq "FAIL_PROTOCOL_OR_INTEGRITY" -or $result.GateResult.Verdict -eq "FAIL_EXTERNAL_TRANSPORT_CHURN" -or $result.GateResult.Verdict -like "INCONCLUSIVE*" -or $result.GateResult.Verdict -eq "INVALID_SETUP")) {
             exit 1
         }
 

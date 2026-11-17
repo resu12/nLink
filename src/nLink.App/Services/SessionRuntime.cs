@@ -138,7 +138,10 @@ internal sealed record SessionRuntimeWatchdogOptions(
     TimeSpan BridgeStartingTimeout,
     TimeSpan ConnectingTimeout,
     TimeSpan HandshakeTimeout,
-    TimeSpan ReconnectingTimeout)
+    TimeSpan ReconnectingTimeout,
+    TimeSpan SessionLivenessHeartbeatInterval,
+    TimeSpan SessionLivenessSuspectTimeout,
+    TimeSpan SessionLivenessTimeout)
 {
     public static SessionRuntimeWatchdogOptions Default { get; } = new(
         Enabled: true,
@@ -146,7 +149,10 @@ internal sealed record SessionRuntimeWatchdogOptions(
         BridgeStartingTimeout: TimeSpan.FromSeconds(8),
         ConnectingTimeout: TimeSpan.FromSeconds(20),
         HandshakeTimeout: SessionApprovalTimeouts.DefaultHumanDecisionTimeout,
-        ReconnectingTimeout: TimeSpan.FromSeconds(8));
+        ReconnectingTimeout: TimeSpan.FromSeconds(8),
+        SessionLivenessHeartbeatInterval: TimeSpan.FromSeconds(2),
+        SessionLivenessSuspectTimeout: TimeSpan.FromSeconds(6),
+        SessionLivenessTimeout: TimeSpan.FromSeconds(18));
 }
 
 internal static class SessionApprovalTimeouts
@@ -193,6 +199,8 @@ public sealed partial class SessionRuntime : IDisposable, ISessionRuntimeScreenS
         RemoteControlModifiersMask.Meta |
         RemoteControlModifiersMask.Win;
     private const int RemoteControlInjectionQueueCapacity = 256;
+    private const long MaxQuietHelpeeRehostConnectAttempt = 3;
+    private const long MaxQuietHelpeeBridgeBootstrapRehostConnectAttempt = 90;
     private const long RemoteControlConsentTokenTtlMs = 60_000;
     private const long RemoteControlAckMouseMoveMinSeqDelta = 8;
     private const string RemoteControlScreenChangedStatusTextHelper = "Screen changed";
@@ -201,14 +209,17 @@ public sealed partial class SessionRuntime : IDisposable, ISessionRuntimeScreenS
     private const string FileTransferTransfersDirectoryName = "transfers";
     private const string FileTransferIncomingDirectoryName = "incoming";
     private static readonly TimeSpan RemoteScreenShareStopFrameSuppressionWindow = TimeSpan.FromMilliseconds(750);
+    private static readonly TimeSpan QuietHelpeeBridgeBootstrapRehostDelay = TimeSpan.FromSeconds(1);
 
     private readonly Func<ISignalingTransport> createTransport;
     private readonly SessionChatService chatService = new();
-    private readonly SessionFileTransferService fileTransferService = new();
+    private readonly SessionFileTransferService fileTransferService = SessionFileTransferService.CreateForApp();
+    private readonly GuiSmokeSessionPreparationBridge? preparationObservationBridge;
     private readonly SemaphoreSlim lifecycleGate = new(1, 1);
     private readonly Dictionary<TransportState, long> transportStateEntryTimestamps = new();
     private readonly Dictionary<string, double> lastDurationMetricsMs = new(StringComparer.Ordinal);
     private readonly object watchdogGate = new();
+    private readonly object explicitDisconnectGate = new();
     private readonly SessionRuntimeWatchdogOptions watchdogOptions;
     private readonly Func<TimeSpan, CancellationToken, Task> watchdogDelayAsync;
     private readonly ITransportTelemetrySink telemetrySink;
@@ -242,15 +253,21 @@ public sealed partial class SessionRuntime : IDisposable, ISessionRuntimeScreenS
     private readonly object remoteControlMouseMoveQueueGate = new();
     private readonly object fileTransferTerminalLogGate = new();
     private readonly HashSet<string> loggedFileTransferTerminalKeys = new(StringComparer.Ordinal);
+    private SessionFileTransferSnapshot latestFileTransferSnapshot = new(null, null);
     private string? preservedDevLocalPeerAddress;
     private string lastAuthorizationDenialReason = "(none)";
 
     private CancellationTokenSource? sessionCts;
     private ISignalingTransport? transport;
+    private BridgeBootstrapReadinessSnapshot? lastBridgeBootstrapReadinessSnapshot;
     private IncomingJoinRequestEventArgs? pendingJoinRequest;
     private volatile SessionRuntimeRole role;
     private volatile SessionRuntimeState state = SessionRuntimeState.Idle;
     private volatile TransportState transportState = TransportState.Idle;
+    private volatile bool transportAccelerationActive;
+    private volatile string transportAccelerationStatusReason = "inactive";
+    private readonly object transportAccelerationPresentationGate = new();
+    private volatile TransportAccelerationStateChangedEventArgs transportAccelerationPresentation = new(false, "inactive");
     private PeerAddress? currentHelperTargetAddress;
     private HelperConnectOrigin helperConnectOrigin;
     private bool helperShouldReturnToListenerWaiting;
@@ -259,6 +276,8 @@ public sealed partial class SessionRuntime : IDisposable, ISessionRuntimeScreenS
     private volatile bool resetInProgress;
     private volatile bool startInProgress;
     private volatile bool remoteSessionEndHandling;
+    private int fileTransferSessionEndInferenceStarted;
+    private Task? explicitDisconnectTask;
     private volatile bool disposed;
     private long connectAttempt;
     private string sessionId = string.Empty;
@@ -282,6 +301,7 @@ public sealed partial class SessionRuntime : IDisposable, ISessionRuntimeScreenS
     private bool transientStatusCanCancel;
     private string remoteControlStatusHintText = string.Empty;
     private int quietHelpeeRehostInProgress;
+    private int quietHelpeeRehostPending;
     private int quietHelperListenerRestartInProgress;
     private bool activeSessionCounted;
     private bool activeConnectAttemptCounted;
@@ -433,27 +453,10 @@ public sealed partial class SessionRuntime : IDisposable, ISessionRuntimeScreenS
     private long helperRemoteContinuityRecoveryEpoch;
     private DateTimeOffset helperRemoteContinuityRecoveryStartedUtc;
     private bool helperRemoteContinuityRecoveryTimeoutSent;
-    private bool helperRemotePostRecoveryStabilizationActive;
-    private DateTimeOffset helperRemotePostRecoveryStabilizationStartedUtc;
     private long helperRemotePostRecoveryAgeGraceEpoch;
     private DateTimeOffset helperRemotePostRecoveryAgeGraceUntilUtc;
     private bool helperRemotePostRecoveryHealthySignalSent;
-    private bool helperRemotePostRecoverySettleWindowTimedOut;
-    private bool helperRemotePostRecoverySettleWindowSucceeded;
-    private long helperRemotePostRecoverySettleWindowCount;
-    private long helperRemotePostRecoverySettleWindowSuccessCount;
-    private long helperRemotePostRecoverySettleWindowTimeoutCount;
-    private bool helperRemoteRecoveryWindowActive;
-    private bool helperRemoteRecoveryWindowProgressed;
-    private bool helperRemoteRecoveryWindowSucceeded;
-    private long helperRemoteRecoveryWindowProgressedCount;
-    private long helperRemoteRecoveryWindowSuccessCount;
-    private long helperRemoteRecoveryWindowEpoch;
-    private long helperRemoteRecoveryWindowRecoveryFrameId = -1;
-    private long helperRemoteRecoveryWindowLastContiguousFrameId = -1;
-    private int helperRemoteRecoveryWindowContiguousFollowerApplyCount;
     private string helperRemoteRecoveryWindowAbortReason = string.Empty;
-    private long helperRemoteCurrentPressureEpochAfterVisibleRecoveryFrameSuppressedDueToSuccessCount;
     private long helperRemoteSteadyProgressEpoch;
     private bool helperRemoteSteadyVisibleProgressActive;
     private long helperRemoteSteadyProgressActivationFrameId = -1;
@@ -491,6 +494,9 @@ public sealed partial class SessionRuntime : IDisposable, ISessionRuntimeScreenS
     private long helperRemoteLastFirstVisibleApplyToPressureSendMs = -1;
     private DateTimeOffset helperRemoteLastRecoveryKeyframeRequestUtc;
     private long helperRemoteLastRecoveryKeyframeRequestEpoch;
+    private long helperRemoteTransportRebindGeneration;
+    private long helperRemoteTransportRebindRecoveredGeneration;
+    private string helperRemoteTransportRebindSessionId = string.Empty;
     private ScreenSharePressureMode lastSentScreenSharePressureMode = ScreenSharePressureMode.Normal;
     private string lastSentScreenSharePressureReason = ScreenSharePressureProtocol.PressureReasonHealthy;
     private long lastSentScreenSharePressureAgeMs;
@@ -612,6 +618,7 @@ public sealed partial class SessionRuntime : IDisposable, ISessionRuntimeScreenS
         chatService.MessageReceivedBeforeApproved += OnChatMessageReceivedBeforeApproved;
         chatService.StateChanged += OnChatStateChanged;
         fileTransferService.TransferChanged += OnFileTransferChanged;
+        preparationObservationBridge = GuiSmokeSessionPreparationBridge.TryStart(fileTransferService, () => role.ToString());
     }
 
     private static Task DefaultWatchdogDelayAsync(TimeSpan delay, CancellationToken ct) => Task.Delay(delay, ct);
@@ -763,11 +770,99 @@ public sealed partial class SessionRuntime : IDisposable, ISessionRuntimeScreenS
 
     public event EventHandler? ChatStateChanged;
     public event EventHandler? SessionSecurityStateChanged;
+    public event EventHandler? TransportAccelerationStateChanged;
     public event EventHandler<SessionFileTransferSnapshotChangedEventArgs>? FileTransferChanged;
     public event EventHandler? HelperListenerBootstrapSnapshotChanged;
 
     public SessionRuntimeState State => state;
     public TransportState TransportLifecycleState => transportState;
+    public BridgeBootstrapReadinessSnapshot BridgeBootstrapReadiness
+    {
+        get
+        {
+            var currentTransport = transport;
+            var snapshot = CaptureBridgeBootstrapReadinessSnapshot(currentTransport);
+            if (snapshot.HasValue)
+            {
+                return snapshot.Value;
+            }
+
+            if (lastBridgeBootstrapReadinessSnapshot is { } lastSnapshot)
+            {
+                return lastSnapshot;
+            }
+
+            return BridgeBootstrapReadinessSnapshot.Unavailable(
+                role.ToString(),
+                currentTransport is null ? "transport_unavailable" : "transport_readiness_not_supported");
+        }
+    }
+
+    private BridgeBootstrapReadinessSnapshot? CaptureBridgeBootstrapReadinessSnapshot(ISignalingTransport? currentTransport)
+    {
+        if (currentTransport is not IBridgeBootstrapReadinessSignalingTransport readinessTransport)
+        {
+            return null;
+        }
+
+        var snapshot = readinessTransport.GetBridgeBootstrapReadinessSnapshot();
+        lastBridgeBootstrapReadinessSnapshot = snapshot;
+        return snapshot;
+    }
+
+    private async Task WaitUntilHostReadyOrBridgeBootstrapFailureAsync(
+        ISignalingTransport currentTransport,
+        IHostReadySignalingTransport hostReadyTransport,
+        CancellationToken ct)
+    {
+        var readyTask = hostReadyTransport.WaitUntilHostReadyAsync(ct);
+
+        while (true)
+        {
+            if (readyTask.IsCompleted)
+            {
+                await readyTask.ConfigureAwait(false);
+                return;
+            }
+
+            var snapshot = CaptureBridgeBootstrapReadinessSnapshot(currentTransport);
+            if (snapshot is BridgeBootstrapReadinessSnapshot readySnapshot &&
+                !readySnapshot.ReadyEmitted &&
+                readySnapshot.TerminalFailure)
+            {
+                var reason = string.IsNullOrWhiteSpace(readySnapshot.FailureReason)
+                    ? "bridge_bootstrap_not_ready"
+                    : readySnapshot.FailureReason;
+                var lastError = string.IsNullOrWhiteSpace(readySnapshot.LastError)
+                    ? "(none)"
+                    : readySnapshot.LastError;
+                var message =
+                    $"nkn_bridge_bootstrap_not_ready: role={readySnapshot.Role}; generation={readySnapshot.Generation}; " +
+                    $"reason={reason}; ready_emitted=0; control_ready={(readySnapshot.ControlReady ? 1 : 0)}; " +
+                    $"media_ready={(readySnapshot.MediaReady ? 1 : 0)}; bulk_ready={(readySnapshot.BulkReady ? 1 : 0)}; last_error={lastError}";
+                NknRuntimeDiagnostics.SetLastError(message);
+                LocalOperationalLog.Warn(
+                    "Session",
+                    $"event=nkn_bridge_bootstrap_not_ready; subreason=host_ready_wait_bridge_bootstrap_failure; {message}");
+                throw new InvalidOperationException(message);
+            }
+
+            var delayTask = Task.Delay(TimeSpan.FromMilliseconds(250), ct);
+            var completed = await Task.WhenAny(readyTask, delayTask).ConfigureAwait(false);
+            if (ReferenceEquals(completed, readyTask))
+            {
+                await readyTask.ConfigureAwait(false);
+                return;
+            }
+
+            await delayTask.ConfigureAwait(false);
+        }
+    }
+
+
+    public bool IsTransportAccelerationActive => transportAccelerationActive;
+    public string TransportAccelerationStatusReason => transportAccelerationStatusReason;
+    internal TransportAccelerationStateChangedEventArgs TransportAccelerationPresentation => transportAccelerationPresentation;
 
     public SessionRuntimeRole Role => role;
 
@@ -934,8 +1029,8 @@ public sealed partial class SessionRuntime : IDisposable, ISessionRuntimeScreenS
             SessionPrivilegedActionKind.ApprovalGrant or SessionPrivilegedActionKind.ApprovalDeny => true,
             SessionPrivilegedActionKind.FileTransferStartSend or
             SessionPrivilegedActionKind.FileTransferAcceptIncoming or
-            SessionPrivilegedActionKind.FileTransferDeclineIncoming or
-            SessionPrivilegedActionKind.FileTransferCancel => TryAuthorizeFileTransferSend(),
+            SessionPrivilegedActionKind.FileTransferDeclineIncoming => TryAuthorizeFileTransferSend(),
+            SessionPrivilegedActionKind.FileTransferCancel => TryAuthorizeFileTransferAction(action.Operation),
             SessionPrivilegedActionKind.FileTransferPause or
             SessionPrivilegedActionKind.FileTransferResume => TryAuthorizeFileTransferAction(action.Operation),
             SessionPrivilegedActionKind.ClipboardSync or SessionPrivilegedActionKind.ClipboardApply => TryAuthorizeClipboardSync(),
@@ -1164,6 +1259,59 @@ public sealed partial class SessionRuntime : IDisposable, ISessionRuntimeScreenS
         return false;
     }
 
+    private bool TryAuthorizeExistingFileTransferControl(string transferId, string operation)
+    {
+        EnsureApprovalGrantActive();
+
+        var snapshot = fileTransferService.Snapshot;
+        var activeTransfer =
+            IsActiveFileTransferSnapshot(snapshot.Outbound, transferId) ? snapshot.Outbound :
+            IsActiveFileTransferSnapshot(snapshot.Inbound, transferId) ? snapshot.Inbound :
+            null;
+        if (activeTransfer is null)
+        {
+            return false;
+        }
+
+        if (currentSessionGrant is SessionGrant grant)
+        {
+            if ((grant.Capabilities & CapabilityGrant.FileTransfer) != CapabilityGrant.FileTransfer ||
+                !string.Equals(activeTransfer.SessionId, grant.SessionId.Value, StringComparison.Ordinal))
+            {
+                return false;
+            }
+
+            LogExistingFileTransferControlAuthorized(operation, activeTransfer, "active_grant");
+            return true;
+        }
+
+        if (state != SessionRuntimeState.Connected ||
+            sessionSecurityState.SessionId is not SessionId sessionId ||
+            sessionSecurityState.HelperAddress is null ||
+            !string.Equals(activeTransfer.SessionId, sessionId.Value, StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        LogExistingFileTransferControlAuthorized(operation, activeTransfer, "active_transfer_session_binding");
+        return true;
+    }
+
+    private static bool IsActiveFileTransferSnapshot(FileTransferTransferSnapshot? snapshot, string transferId)
+        => snapshot is not null &&
+           !snapshot.IsTerminal &&
+           string.Equals(snapshot.TransferId, transferId, StringComparison.Ordinal);
+
+    private static void LogExistingFileTransferControlAuthorized(
+        string operation,
+        FileTransferTransferSnapshot snapshot,
+        string reason)
+    {
+        LocalOperationalLog.Info(
+            "SessionSecurity",
+            $"event=file_transfer_existing_control_authorized; operation={operation}; reason={reason}; session_id={snapshot.SessionId}; transfer_id={snapshot.TransferId}; direction={snapshot.Direction}; state={snapshot.State}");
+    }
+
     internal FileTransferAccessResult ValidateInboundFileTransferMetadata(
         FileTransferDescriptor descriptor,
         FileTransferStoragePolicy storagePolicy)
@@ -1348,13 +1496,7 @@ public sealed partial class SessionRuntime : IDisposable, ISessionRuntimeScreenS
             $"event=file_transfer_destination_opened; role={role}; session_id={offer.SessionId}; transfer_id={offer.TransferId}; file_name_len={offer.FileName.Length}; final_path={plan.FinalPath}; temp_path={plan.TempPath}");
 
         return Task.FromResult(
-            new FileTransferReceiveDestination(
-                handle.Stream,
-                finalizeAsync: finalizeCt => handle.FinalizeAsync(finalizeCt),
-                dispose: handle.Dispose,
-                disposeAsync: () => handle.DisposeAsync(),
-                finalPath: plan.FinalPath,
-                safeFileName: plan.SafeFileName));
+            FileTransferReceiveDestination.FromGuardOwnedHandle(handle));
     }
 
     internal void LogRuntimeFileTransferSnapshotCore(SessionFileTransferSnapshot snapshot)
@@ -1374,7 +1516,7 @@ public sealed partial class SessionRuntime : IDisposable, ISessionRuntimeScreenS
             {
                 LocalOperationalLog.Info(
                     "Session",
-                    $"event=file_transfer_inbound_terminal; role={role}; session_id={inbound.SessionId}; transfer_id={inbound.TransferId}; state={inbound.State}; error_code={inbound.ErrorCode ?? "(none)"}; saved_path={inbound.SavedFilePath ?? "(none)"}");
+                    $"event=file_transfer_inbound_terminal; {FileTransferDiagnosticScopeEvidence.Format(inbound.SessionId, inbound.TransferId)}role={role}; session_id={inbound.SessionId}; transfer_id={inbound.TransferId}; state={inbound.State}; error_code={inbound.ErrorCode ?? "(none)"}; saved_path={inbound.SavedFilePath ?? "(none)"}");
             }
         }
 
@@ -1737,6 +1879,7 @@ public sealed partial class SessionRuntime : IDisposable, ISessionRuntimeScreenS
                 EnsureSessionSecurityTransport(nextTransport);
                 sessionCts = linkedCts;
                 transport = nextTransport;
+                CaptureBridgeBootstrapReadinessSnapshot(nextTransport);
                 role = SessionRuntimeRole.Helpee;
                 hostReady = false;
                 currentHelperTargetAddress = null;
@@ -1772,11 +1915,20 @@ public sealed partial class SessionRuntime : IDisposable, ISessionRuntimeScreenS
                 _ = RunHostAsync(nextTransport, linkedCts.Token);
                 if (nextTransport is IHostReadySignalingTransport hostReadyTransport)
                 {
-                    await hostReadyTransport.WaitUntilHostReadyAsync(linkedCts.Token).ConfigureAwait(false);
+                    await WaitUntilHostReadyOrBridgeBootstrapFailureAsync(nextTransport, hostReadyTransport, linkedCts.Token).ConfigureAwait(false);
                 }
 
                 hostReady = true;
                 SetState(SessionRuntimeState.Waiting, "Waiting for helper…");
+            }
+            catch (OperationCanceledException ex) when (!uiCt.IsCancellationRequested)
+            {
+                if (TryRecoverHelpeeHostReadyStartFailure(ex, "host_start_cancelled_recovering"))
+                {
+                    return;
+                }
+
+                throw;
             }
             catch (OperationCanceledException)
             {
@@ -1784,6 +1936,11 @@ public sealed partial class SessionRuntime : IDisposable, ISessionRuntimeScreenS
             }
             catch (Exception ex)
             {
+                if (TryRecoverHelpeeHostReadyStartFailure(ex, "host_start_sync_failed_recovering"))
+                {
+                    return;
+                }
+
                 HandleSynchronousStartFailure(ex, "host_start_sync_failed");
                 throw;
             }
@@ -1943,6 +2100,7 @@ public sealed partial class SessionRuntime : IDisposable, ISessionRuntimeScreenS
             EnsureSessionSecurityTransport(nextTransport);
             sessionCts = linkedCts;
             transport = nextTransport;
+            CaptureBridgeBootstrapReadinessSnapshot(nextTransport);
             role = SessionRuntimeRole.Helper;
             helperConnectOrigin = connectOrigin;
             helperShouldReturnToListenerWaiting =
@@ -2308,6 +2466,11 @@ public sealed partial class SessionRuntime : IDisposable, ISessionRuntimeScreenS
         string? reason = null,
         CancellationToken uiCt = default)
     {
+        if (TryAuthorizeExistingFileTransferControl(transferId, "file_transfer_cancel"))
+        {
+            return fileTransferHost.CancelTransferAsync(transferId, reason, uiCt);
+        }
+
         return privilegedCommandExecutor.ExecuteAsync(
             new SessionPrivilegedAction(SessionPrivilegedActionKind.FileTransferCancel, "file_transfer_cancel"),
             ct => fileTransferHost.CancelTransferAsync(transferId, reason, ct),
@@ -2332,6 +2495,11 @@ public sealed partial class SessionRuntime : IDisposable, ISessionRuntimeScreenS
         string? reason = null,
         CancellationToken uiCt = default)
     {
+        if (TryAuthorizeExistingFileTransferControl(transferId, "file_transfer_pause"))
+        {
+            return fileTransferHost.PauseTransferAsync(transferId, reason, uiCt);
+        }
+
         return privilegedCommandExecutor.ExecuteAsync(
             new SessionPrivilegedAction(SessionPrivilegedActionKind.FileTransferPause, "file_transfer_pause"),
             ct => fileTransferHost.PauseTransferAsync(transferId, reason, ct),
@@ -2360,6 +2528,11 @@ public sealed partial class SessionRuntime : IDisposable, ISessionRuntimeScreenS
         string? reason = null,
         CancellationToken uiCt = default)
     {
+        if (TryAuthorizeExistingFileTransferControl(transferId, "file_transfer_resume"))
+        {
+            return fileTransferHost.ResumeTransferAsync(transferId, reason, uiCt);
+        }
+
         return privilegedCommandExecutor.ExecuteAsync(
             new SessionPrivilegedAction(SessionPrivilegedActionKind.FileTransferResume, "file_transfer_resume"),
             ct => fileTransferHost.ResumeTransferAsync(transferId, reason, ct),

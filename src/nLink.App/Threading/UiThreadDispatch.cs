@@ -7,6 +7,9 @@ namespace NLink.App.Threading;
 
 internal static class UiThreadDispatch
 {
+    public static bool CheckAccess()
+        => Application.Current is null || Dispatcher.UIThread.CheckAccess();
+
     public static Task RunAsync(Action action)
     {
         if (Application.Current is null)

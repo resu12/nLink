@@ -72,14 +72,16 @@ internal sealed class BridgeProtocolClient
         Dictionary<string, object?>? payload,
         TimeSpan timeout,
         CancellationToken ct,
-        Action<int>? onSerialized = null)
+        Action<int>? onSerialized = null,
+        BridgeProtocolSubmissionContext? submission = null)
     {
         var wait = await SendCommandAsync(
             cmd,
             payload,
             pendingCommands,
             ct,
-            onSerialized).ConfigureAwait(false);
+            onSerialized,
+            submission).ConfigureAwait(false);
 
         await wait.Task.WaitAsync(timeout, ct).ConfigureAwait(false);
     }
@@ -89,21 +91,25 @@ internal sealed class BridgeProtocolClient
         Dictionary<string, object?>? payload,
         BridgeWaitKind waitKind,
         TimeSpan timeout,
-        CancellationToken ct)
+        CancellationToken ct,
+        BridgeProtocolSubmissionContext? submission = null)
     {
         var wait = await SendCommandAsync(
             cmd,
             payload,
             GetPendingMap(waitKind),
             ct,
-            onSerialized: null).ConfigureAwait(false);
+            onSerialized: null,
+            submission).ConfigureAwait(false);
 
         return await wait.Task.WaitAsync(timeout, ct).ConfigureAwait(false);
     }
 
-    public async Task<JsonElement> SendPingAndWaitPongAsync(TimeSpan timeout, CancellationToken ct)
+    public async Task<JsonElement> SendPingAndWaitPongAsync(
+        TimeSpan timeout,
+        CancellationToken ct,
+        BridgeProtocolSubmissionContext? submission = null)
     {
-        var writer = getWriter();
         var id = Interlocked.Increment(ref nextCommandId).ToString(System.Globalization.CultureInfo.InvariantCulture);
         var wait = new TaskCompletionSource<JsonElement>(TaskCreationOptions.RunContinuationsAsynchronously);
         if (!pendingPongResponses.TryAdd(id, wait))
@@ -119,7 +125,29 @@ internal sealed class BridgeProtocolClient
                 ["id"] = id,
             });
 
-            await writer.WriteJsonLineAsync(ping, ct).ConfigureAwait(false);
+            if (submission is null)
+            {
+                await getWriter()
+                    .WriteJsonLineAsync(ping, ct)
+                    .ConfigureAwait(false);
+            }
+            else
+            {
+                await submission.Gate.WaitAsync(ct).ConfigureAwait(false);
+                try
+                {
+                    var writer = submission.GetValidatedWriter();
+                    await writer
+                        .WriteJsonLineAsync(ping, ct)
+                        .ConfigureAwait(false);
+                    submission.ValidateAfterWrite(writer);
+                }
+                finally
+                {
+                    submission.Gate.Release();
+                }
+            }
+
             return await wait.Task.WaitAsync(timeout, ct).ConfigureAwait(false);
         }
         finally
@@ -221,9 +249,9 @@ internal sealed class BridgeProtocolClient
         Dictionary<string, object?>? payload,
         ConcurrentDictionary<string, TaskCompletionSource<JsonElement>> pendingMap,
         CancellationToken ct,
-        Action<int>? onSerialized)
+        Action<int>? onSerialized,
+        BridgeProtocolSubmissionContext? submission)
     {
-        var writer = getWriter();
         var id = Interlocked.Increment(ref nextCommandId).ToString(System.Globalization.CultureInfo.InvariantCulture);
         var wait = new TaskCompletionSource<JsonElement>(TaskCreationOptions.RunContinuationsAsynchronously);
         if (!pendingMap.TryAdd(id, wait))
@@ -251,7 +279,29 @@ internal sealed class BridgeProtocolClient
             var jsonlBytes = NknBridgePayloadAccounting.MeasureSerializedJsonlBytes(json);
             onCommandSerialized?.Invoke(cmd, jsonlBytes);
             onSerialized?.Invoke(jsonlBytes);
-            await writer.WriteJsonLineAsync(json, ct).ConfigureAwait(false);
+            if (submission is null)
+            {
+                await getWriter()
+                    .WriteJsonLineAsync(json, ct)
+                    .ConfigureAwait(false);
+            }
+            else
+            {
+                await submission.Gate.WaitAsync(ct).ConfigureAwait(false);
+                try
+                {
+                    var writer = submission.GetValidatedWriter();
+                    await writer
+                        .WriteJsonLineAsync(json, ct)
+                        .ConfigureAwait(false);
+                    submission.ValidateAfterWrite(writer);
+                }
+                finally
+                {
+                    submission.Gate.Release();
+                }
+            }
+
             return wait;
         }
         catch
@@ -385,6 +435,11 @@ internal sealed class BridgeProtocolClient
         return compact;
     }
 }
+
+internal sealed record BridgeProtocolSubmissionContext(
+    SemaphoreSlim Gate,
+    Func<BridgeStdioWriter> GetValidatedWriter,
+    Action<BridgeStdioWriter> ValidateAfterWrite);
 
 internal enum BridgeWaitKind
 {

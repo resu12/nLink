@@ -30,10 +30,15 @@ internal static class DiagnosticsExportBuilder
             "file_transfer_last_saved_path" => RedactPath(value),
             "screenshare_artifact_dir" => RedactPath(value),
             "screenshare_verdict_path" => RedactPath(value),
+            "wallet_path" => RedactPath(value),
+            "tuna_wallet_path" => RedactPath(value),
+            "wallet_address" => "[REDACTED]",
+            "tuna_wallet_address" => "[REDACTED]",
             "persistence_warning" => RedactFreeForm(value),
             "last_failure_message" => RedactFreeForm(value),
             "last_error" => RedactFreeForm(value),
             "last_disconnect_reason" => RedactFreeForm(value),
+            "tuna_wallet_last_failure" => RedactFreeForm(value),
             _ => value.Trim(),
         };
     }

@@ -915,7 +915,13 @@ internal sealed class WindowsH264ScreenCaptureSource : IScreenCaptureSource, ISc
                 else
                 {
                     Volatile.Write(ref rawSlotCoalescingActive, 0);
-                    nextPendingFrame = ClearPendingRawFrame_NoLock();
+                    var frameToEncode = ClearPendingRawFrame_NoLock();
+                    if (frameToEncode is null)
+                    {
+                        continue;
+                    }
+
+                    nextPendingFrame = frameToEncode;
                     Interlocked.Exchange(ref lastTransportEncodeStartedUtcMs, nowUtc.ToUnixTimeMilliseconds());
                     Interlocked.Exchange(ref lastEncodedStreamEpoch, nextPendingFrame.StreamEpoch);
 

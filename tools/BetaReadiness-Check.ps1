@@ -32,6 +32,16 @@ function Assert-PathExists {
     }
 }
 
+function Assert-PathNotExists {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][string]$Description
+    )
+    if (Test-Path $Path) {
+        throw "$Description must not be present: $Path"
+    }
+}
+
 function New-SectionResult {
     param(
         [string]$Name,
@@ -457,7 +467,8 @@ try {
             # LeakCheck already enforces growth intent with its own monotonic checkpoint gate
             # (--leak-growth-fail-percent). Disable generic baseline->last growth checks in ResourceGate
             # so this stage enforces cleanup/absolute ceilings + the dedicated monotonic leak gate.
-            dotnet run -c Release --no-build --project .\src\nLink.App -- --leak-check --cycles $LeakCheckCycles --transport devlocal --bridge-reuse-mode persession --delay-ms 0 --fail-on-gate --leak-growth-fail-percent 20 --resource-disable-growth-checks
+            # Reused peers must remain within the unchanged 12-validations/10-second security window.
+            dotnet run -c Release --no-build --project .\src\nLink.App -- --leak-check --cycles $LeakCheckCycles --transport devlocal --bridge-reuse-mode persession --delay-ms 1000 --fail-on-gate --leak-growth-fail-percent 20 --resource-disable-growth-checks
             if ($LASTEXITCODE -ne 0) { throw "leak check failed (exit $LASTEXITCODE)" }
         }
         $resourcesDir = Join-Path $repoRoot "artifacts\resources"
@@ -549,13 +560,17 @@ try {
         foreach ($p in @(
             (Join-Path $portableBridgeRid "node.exe"),
             (Join-Path $portableBridgeRid "index.js"),
-            (Join-Path $portableBridgeRid "node_modules"),
+            (Join-Path $portableBridgeRid "package-lock.json"),
+            (Join-Path $portableBridgeRid "bridge-dependencies.json"),
             (Join-Path $helperBridgeRid "node.exe"),
             (Join-Path $helperBridgeRid "index.js"),
-            (Join-Path $helperBridgeRid "node_modules")
+            (Join-Path $helperBridgeRid "package-lock.json"),
+            (Join-Path $helperBridgeRid "bridge-dependencies.json")
         )) {
             Assert-PathExists -Path $p -Description "Bridge bundle entry"
         }
+        Assert-PathNotExists -Path (Join-Path $portableBridgeRid "node_modules") -Description "Portable bridge node_modules"
+        Assert-PathNotExists -Path (Join-Path $helperBridgeRid "node_modules") -Description "Helper staging bridge node_modules"
 
         $checksumCheck = Verify-ChecksumsFile -ChecksumsPath $checksumsPath -AssetDir $releaseDir
         if (-not $checksumCheck.Passed) {

@@ -5,7 +5,15 @@ param(
     [switch]$RunResources,
     [switch]$RunLeakCheck,
     [switch]$RunBetaReadiness,
-    [string]$Runtime = "win-x64"
+    [switch]$RunFileTransferRouteAcceptanceGate,
+    [string]$Runtime = "win-x64",
+    [string]$FileTransferRouteAcceptanceWalletPath = ".\artifacts\tuna-poc\wallet-test-nkn.json",
+    [string]$FileTransferRouteAcceptanceWalletPassword = "",
+    [string]$FileTransferRouteAcceptanceArtifactRoot = "artifacts\filetransfer-route-acceptance",
+    [int]$FileTransferRouteAcceptanceTimeoutSeconds = 900,
+    [int]$FileTransferRouteAcceptanceProgressTimeoutSeconds = 180,
+    [int]$FileTransferRouteAcceptanceFallbackMaxAttempts = 2,
+    [bool]$FileTransferRouteAcceptanceAllowExternalTransportWarnings = $true
 )
 
 Set-StrictMode -Version Latest
@@ -29,6 +37,17 @@ function Assert-PathExists {
 
     if (-not (Test-Path $Path)) {
         throw "$Description not found: $Path"
+    }
+}
+
+function Assert-PathNotExists {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][string]$Description
+    )
+
+    if (Test-Path $Path) {
+        throw "$Description must not be present: $Path"
     }
 }
 
@@ -186,8 +205,10 @@ $resourceArtifacts = @()
 
 Push-Location $repoRoot
 try {
-    Invoke-Step -Name "Smoke tests (Category=Smoke)" -Action {
-        & powershell -ExecutionPolicy Bypass -File ".\tools\Test-Lanes.ps1" -Lane Smoke -Configuration Release
+    Invoke-Step -Name "Deterministic contract, analyzer, fake-acceptance, and smoke lanes" -Action {
+        & powershell -ExecutionPolicy Bypass -File ".\tools\Test-Lanes.ps1" `
+            -Lane CoreContract,FileTransferContract,FileTransferAnalyzer,FileTransferAcceptanceFake,Smoke `
+            -Configuration Release
         if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
     }
 
@@ -289,6 +310,39 @@ try {
         if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
     }
 
+    if ($RunFileTransferRouteAcceptanceGate) {
+        Invoke-Step -Name "File transfer route acceptance gate" -Action {
+            $acceptancePassword = $FileTransferRouteAcceptanceWalletPassword
+            if ([string]::IsNullOrWhiteSpace($acceptancePassword)) {
+                $acceptancePassword = [string]$env:NLINK_TUNA_TEST_WALLET_PASSWORD
+            }
+
+            if ([string]::IsNullOrWhiteSpace($acceptancePassword)) {
+                throw "Set NLINK_TUNA_TEST_WALLET_PASSWORD or pass -FileTransferRouteAcceptanceWalletPassword before installer creation."
+            }
+
+            $portableExe = Join-Path $repoRoot "artifacts\portable\nLink\win-x64\nLink.exe"
+            $packagedSidecar = Join-Path $repoRoot ("artifacts\portable\nLink\win-x64\tuna\{0}\nlink-tuna-sidecar.exe" -f $Runtime)
+            & powershell -ExecutionPolicy Bypass -File ".\tools\Run-FileTransferRouteAcceptance.ps1" `
+                -ExePath $portableExe `
+                -WalletPath $FileTransferRouteAcceptanceWalletPath `
+                -WalletPassword $acceptancePassword `
+                -SidecarPath $packagedSidecar `
+                -Runtime $Runtime `
+                -MatrixMode phase5-analyzer-gui-acceptance `
+                -StrictCampaignPreflight `
+                -ArtifactRoot $FileTransferRouteAcceptanceArtifactRoot `
+                -TimeoutSeconds $FileTransferRouteAcceptanceTimeoutSeconds `
+                -ProgressTimeoutSeconds $FileTransferRouteAcceptanceProgressTimeoutSeconds `
+                -FallbackMaxAttempts $FileTransferRouteAcceptanceFallbackMaxAttempts `
+                -AllowExternalTransportWarnings $FileTransferRouteAcceptanceAllowExternalTransportWarnings
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        }
+    }
+    else {
+        Write-Host "[PreRelease] File transfer route acceptance gate: SKIPPED (opt in with -RunFileTransferRouteAcceptanceGate)" -ForegroundColor Yellow
+    }
+
     Invoke-Step -Name "Build installer" -Action {
         & powershell -ExecutionPolicy Bypass -File ".\installer\Build-Installer.ps1" -Runtime $Runtime -CopyHelperAlias
         if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
@@ -314,11 +368,15 @@ $helperBridgeRid = Join-Path $helperStage (Join-Path "bridge" $Runtime)
 
 Assert-PathExists -Path (Join-Path $portableBridgeRid "index.js") -Description "Portable bridge index.js"
 Assert-PathExists -Path (Join-Path $portableBridgeRid "node.exe") -Description "Portable bridge node.exe"
-Assert-PathExists -Path (Join-Path $portableBridgeRid "node_modules") -Description "Portable bridge node_modules"
+Assert-PathExists -Path (Join-Path $portableBridgeRid "package-lock.json") -Description "Portable bridge package-lock.json"
+Assert-PathExists -Path (Join-Path $portableBridgeRid "bridge-dependencies.json") -Description "Portable bridge dependency evidence"
+Assert-PathNotExists -Path (Join-Path $portableBridgeRid "node_modules") -Description "Portable bridge node_modules"
 
 Assert-PathExists -Path (Join-Path $helperBridgeRid "index.js") -Description "Helper staging bridge index.js"
 Assert-PathExists -Path (Join-Path $helperBridgeRid "node.exe") -Description "Helper staging bridge node.exe"
-Assert-PathExists -Path (Join-Path $helperBridgeRid "node_modules") -Description "Helper staging bridge node_modules"
+Assert-PathExists -Path (Join-Path $helperBridgeRid "package-lock.json") -Description "Helper staging bridge package-lock.json"
+Assert-PathExists -Path (Join-Path $helperBridgeRid "bridge-dependencies.json") -Description "Helper staging bridge dependency evidence"
+Assert-PathNotExists -Path (Join-Path $helperBridgeRid "node_modules") -Description "Helper staging bridge node_modules"
 
 $portableZipAbs = (Resolve-Path $portableZip).Path
 $installerExeAbs = (Resolve-Path $installerExe).Path
@@ -338,6 +396,7 @@ Write-Host ("  Smoke tests: PASS")
 Write-Host ("  Format check: {0}" -f ($(if ($RunFormatCheck) { "NON-BLOCKING (see warnings above if drift detected)" } else { "SKIPPED" })))
 Write-Host ("  GUI smoke: {0}" -f ($(if ($RunGuiSmoke) { "PASS (scenarios: $GuiScenarios)" } else { "SKIPPED" })))
 Write-Host ("  Beta readiness: {0}" -f ($(if ($RunBetaReadiness) { "PASS" } else { "SKIPPED" })))
+Write-Host ("  File transfer route acceptance: {0}" -f ($(if ($RunFileTransferRouteAcceptanceGate) { "PASS" } else { "SKIPPED" })))
 Write-Host ("  Bridge runtime verified in portable stage: {0}" -f $portableBridgeRidAbs)
 Write-Host ("  Bridge runtime verified in helper stage: {0}" -f $helperBridgeRidAbs)
 Write-Host ""

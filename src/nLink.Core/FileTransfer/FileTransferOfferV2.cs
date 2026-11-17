@@ -24,4 +24,15 @@ public sealed record FileTransferOfferV2
 
     [JsonPropertyName("preferredDataProtocolVersion")]
     public int? PreferredDataProtocolVersion { get; init; }
+
+    [JsonPropertyName("fileTransferRoute")]
+    public string? FileTransferRoute { get; init; }
+
+    [JsonPropertyName("fallbackBootstrapCorrelationVersion")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public int? FallbackBootstrapCorrelationVersion { get; init; }
+
+    [JsonPropertyName("fallbackBootstrapIssuerId")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? FallbackBootstrapIssuerId { get; init; }
 }

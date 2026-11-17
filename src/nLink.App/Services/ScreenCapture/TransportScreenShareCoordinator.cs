@@ -54,7 +54,8 @@ internal sealed partial class TransportScreenShareCoordinator : IAsyncDisposable
     private const int ScreenShareFallbackBatchPayloadBudgetBytes = 60 * 1024;
     private const int StreamConfigBootstrapSendAttempts = 3;
     private const int MinAutoTuneFramesPerSecond = 2;
-    private const int NormalSenderFramesPerSecond = 8;
+    private const int NormalSenderFramesPerSecond = 15;
+    private const int TunaQualitySenderFramesPerSecond = 15;
     private const int ReducedSenderFramesPerSecond = 5;
     private const int CatchUpSenderFramesPerSecond = 3;
     private static readonly TimeSpan ScreenShareStartupWarmupDuration = TimeSpan.FromSeconds(3);
@@ -214,6 +215,9 @@ internal sealed partial class TransportScreenShareCoordinator : IAsyncDisposable
     private long bridgeBytesSent;
     private DateTimeOffset? lastSenderFreshnessKeyFrameRequestedUtc;
     private DateTimeOffset? remotePressureAppliedUtc;
+    private long transportRebindGeneration;
+    private long transportRebindPendingGeneration;
+    private string transportRebindReason = string.Empty;
     private bool lastLocalLaneCongestionActive;
     private bool lastLocalLaneSevereCongestionActive;
     private bool lastLocalLaneRecentDropActive;
@@ -273,6 +277,9 @@ internal sealed partial class TransportScreenShareCoordinator : IAsyncDisposable
     private ScreenShareVideoStreamConfigV1? bootstrapStreamConfig;
     private long bootstrapStreamConfigEpoch;
     private int bootstrapStreamConfigSendCount;
+    private bool streamConfigMissingResendPending;
+    private long streamConfigMissingRequestCount;
+    private long streamConfigMissingCachedResendCount;
     private bool disposed;
 #if DEBUG
     private Timer? snapshotTimer;

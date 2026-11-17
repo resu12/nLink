@@ -20,7 +20,7 @@ For external NKN delivery/topology work, open `external-topology-summary.txt` af
 powershell -ExecutionPolicy Bypass -File .\tools\ScreenShare-Ops.ps1 -Mode ExternalTopologyAudit -ArtifactDirs "artifacts\soak\<default>;artifacts\soak\<candidate>"
 ```
 
-For support capture, copy app Diagnostics first. The Diagnostics page reads existing screenshare evidence and includes a compact `Screenshare evidence` block when `screenshare-operator-verdict.txt` is available. For hangs, use Save Hang Report; hang report folders include `screenshare-evidence.txt`. Attach the full soak artifact only when that evidence points to one or support asks for raw retained analyzer output.
+For support capture, copy Options -> Diagnostics first. The Diagnostics tab reads existing screenshare evidence and includes a compact `Screenshare evidence` block when `screenshare-operator-verdict.txt` is available. For hangs, use Save Hang Report; hang report folders include `screenshare-evidence.txt`. Attach the full soak artifact only when that evidence points to one or support asks for raw retained analyzer output.
 
 Manual long-run screenshare soak is available from the app CLI and is not intended for CI.
 
@@ -91,7 +91,7 @@ The retained Track B analyzer chain is kept as closeout evidence for the parked 
 
 `AnalyzeRetained` also writes `external-topology-summary.txt` when enough live topology evidence is present. This keeps NKN route variance, RPC selection, and media fanout evidence separate from sender/helper tuning.
 
-The current promoted NKN topology default keeps control/bulk clients at 4 subclients and uses 8 media subclients. The `MediaFanout8` operator profile remains available for explicit confirmation runs.
+The current promoted NKN topology default keeps control at 4 subclients, bulk at 2 subclients, and media at 8 subclients. The leaner bulk default avoids the poor file-transfer efficiency previously observed when large file data was spread over a wider round-robin bulk client set. The `MediaFanout8` operator profile remains available for explicit confirmation runs.
 
 Keep and use these analyzers together when validating the final local screenshare boundary:
 

@@ -973,7 +973,7 @@ public sealed class MetricsAndReliabilityTests : CoreSmokeTestsBase
         Assert.DoesNotContain(snapshot.Counters, c => c.Name == "transport_failure_total" && c.Tags.FailureCategory == nameof(TransportFailureCategory.Unknown) && c.Value > 0);
     }
 
-[Trait("Category", "LegacySmoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public void UserErrorMapper_KeyMessages_AreShortAndUserFriendly()
     {
@@ -1034,6 +1034,33 @@ public sealed class MetricsAndReliabilityTests : CoreSmokeTestsBase
 
         Assert.Equal(TransportFailureCategory.HandshakeTimeout, failure.Category);
         Assert.True(failure.IsTransient);
+    }
+
+[Trait("Category", "LegacySmoke")]
+    [Theory]
+    [InlineData("nkn_bridge_bootstrap_not_ready: role=helpee; reason=bridge_transport_connect_failed_before_ready")]
+    [InlineData("bridge_transport_connect_failed_before_ready; ready_emitted=0; connect_failed=4")]
+    [InlineData("bridge_bootstrap_diagnostics_failure; last_error=bridge_connect_ready_timeout")]
+    public void TransportFailureMapper_MapsBridgeBootstrapNotReady_ToNonTransientBridgeStartFailure(string rawError)
+    {
+        var failure = TransportFailureMapper.FromSignals(rawError);
+
+        Assert.Equal(TransportFailureCategory.BridgeStartFailure, failure.Category);
+        Assert.False(failure.IsTransient);
+    }
+
+[Trait("Category", "LegacySmoke")]
+    [Fact]
+    public void TransportFailureMapper_FromException_PreservesBridgeBootstrapMarkerWhenRawErrorIsStale()
+    {
+        var failure = TransportFailureMapper.FromException(
+            new InvalidOperationException("nkn_bridge_bootstrap_not_ready: role=helpee; reason=bridge_transport_connect_failed_before_ready"),
+            rawError: "previous_disconnect_reason");
+
+        Assert.Equal(TransportFailureCategory.BridgeStartFailure, failure.Category);
+        Assert.False(failure.IsTransient);
+        Assert.Contains("nkn_bridge_bootstrap_not_ready", failure.RawError, StringComparison.Ordinal);
+        Assert.Contains("previous_disconnect_reason", failure.RawError, StringComparison.Ordinal);
     }
 
 [Trait("Category", "LegacySmoke")]
@@ -1112,6 +1139,7 @@ public sealed class MetricsAndReliabilityTests : CoreSmokeTestsBase
             var logger = new RollingFileLogger(logPath, maxFileBytes: 1024 * 1024);
             logger.WriteLine("app start | version=0.1.0-alpha.test");
 
+            Assert.Equal(20, logger.RetainedFileCount);
             Assert.True(File.Exists(logPath));
             var text = File.ReadAllText(logPath);
             Assert.Contains("app start", text, StringComparison.OrdinalIgnoreCase);
@@ -1142,6 +1170,40 @@ public sealed class MetricsAndReliabilityTests : CoreSmokeTestsBase
             var rotated = File.ReadAllText(Path.Combine(tempDir, "nlink.1.log"));
             Assert.Contains("second line", current, StringComparison.Ordinal);
             Assert.Contains("AAA", rotated, StringComparison.Ordinal);
+        }
+        finally
+        {
+            CleanupDirectoryIfExists(tempDir);
+        }
+    }
+
+[Trait("Category", "LegacySmoke")]
+    [Fact]
+    public void RollingFileLogger_DefaultRetention_KeepsTwentyTotalFiles()
+    {
+        var tempDir = Path.Combine(Path.GetTempPath(), "nlink-smoke-logs", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(tempDir);
+        var logPath = Path.Combine(tempDir, "nlink.log");
+
+        try
+        {
+            var logger = new RollingFileLogger(logPath, maxFileBytes: 1);
+
+            for (var i = 0; i < 25; i++)
+            {
+                logger.WriteLine("entry-" + i.ToString("D2"));
+            }
+
+            var retainedLogs = Directory.GetFiles(tempDir, "nlink*.log", SearchOption.TopDirectoryOnly);
+
+            Assert.Equal(20, logger.RetainedFileCount);
+            Assert.Equal(20, retainedLogs.Length);
+            Assert.True(File.Exists(logPath));
+            Assert.True(File.Exists(Path.Combine(tempDir, "nlink.1.log")));
+            Assert.True(File.Exists(Path.Combine(tempDir, "nlink.19.log")));
+            Assert.False(File.Exists(Path.Combine(tempDir, "nlink.20.log")));
+            Assert.Contains("entry-24", File.ReadAllText(logPath), StringComparison.Ordinal);
+            Assert.Contains("entry-23", File.ReadAllText(Path.Combine(tempDir, "nlink.1.log")), StringComparison.Ordinal);
         }
         finally
         {
@@ -1449,6 +1511,8 @@ public sealed class MetricsAndReliabilityTests : CoreSmokeTestsBase
     [Fact]
     public async Task ResourceBenchmarkRunner_LeakCheck_ShortRun_LeavesActiveCountersAtZero_AndWritesArtifacts()
     {
+        using var strictReleasePolicy = DisableUnsafeDeveloperModeForTests();
+        using var inviteMode = new EnvironmentOverride(InviteTokenServiceFactory.InviteModeEnvVar, InviteTokenServiceFactory.InviteModeIssuedSecret);
         var tempRoot = Path.Combine(Path.GetTempPath(), "nlink-resource-smoke-" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(tempRoot);
         var previousCwd = Environment.CurrentDirectory;
@@ -1466,18 +1530,21 @@ public sealed class MetricsAndReliabilityTests : CoreSmokeTestsBase
                     "--cycles", "50",
                     "--transport", "devlocal",
                     "--bridge-reuse-mode", "persession",
-                    "--delay-ms", "0",
+                    // Reuse the same peers without exceeding the 12-validations/10-second security window.
+                    "--delay-ms", "1000",
                     "--leak-growth-fail-percent", "1000"
                 },
                 stdout,
                 stderr,
                 CancellationToken.None);
 
-            Assert.Equal(0, exitCode);
+            Assert.True(exitCode == 0, stderr.ToString());
 
             var resourcesDir = Path.Combine(tempRoot, "artifacts", "resources");
             Assert.True(Directory.Exists(resourcesDir));
-            Assert.NotEmpty(Directory.GetFiles(resourcesDir, "leak-check-*.json", SearchOption.TopDirectoryOnly));
+            var reportPath = Assert.Single(Directory.GetFiles(resourcesDir, "leak-check-*.json", SearchOption.TopDirectoryOnly));
+            using var report = JsonDocument.Parse(await File.ReadAllTextAsync(reportPath));
+            Assert.Contains(report.RootElement.GetProperty("Notes").EnumerateArray(), note => note.GetString() == "cycles_succeeded=50");
             Assert.True(File.Exists(Path.Combine(resourcesDir, "leak-check-summary.txt")));
 
             var counters = ActiveRuntimeCounters.Snapshot();
@@ -1512,5 +1579,103 @@ public sealed class MetricsAndReliabilityTests : CoreSmokeTestsBase
             ActiveRuntimeCounters.ResetForTests();
         }
     }
+
+[Trait("Category", "LegacySmoke")]
+    [Fact]
+    public async Task ResourceBenchmarkRunner_DevLocalBenchmark_CompletesWithStrictHelperBinding()
+    {
+        using var strictReleasePolicy = DisableUnsafeDeveloperModeForTests();
+        using var inviteMode = new EnvironmentOverride(InviteTokenServiceFactory.InviteModeEnvVar, InviteTokenServiceFactory.InviteModeIssuedSecret);
+        var tempRoot = Path.Combine(Path.GetTempPath(), "nlink-resource-binding-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(tempRoot);
+        var previousCwd = Environment.CurrentDirectory;
+        try
+        {
+            Environment.CurrentDirectory = tempRoot;
+            var stdout = new StringWriter();
+            var stderr = new StringWriter();
+            var exitCode = await ResourceBenchmarkRunner.RunAsync(
+                new[] { "--resource-bench", "--transport", "devlocal", "--idle-seconds", "0", "--connected-idle-seconds", "0", "--final-idle-seconds", "0" },
+                stdout, stderr, CancellationToken.None);
+
+            Assert.True(exitCode == 0, stderr.ToString());
+            Assert.Contains("[resources] disconnecting", stdout.ToString(), StringComparison.Ordinal);
+            Assert.Contains("checkpoint=final_idle_end", stdout.ToString(), StringComparison.Ordinal);
+            Assert.Single(Directory.GetFiles(Path.Combine(tempRoot, "artifacts", "resources"), "resource-run-*.json"));
+        }
+        finally
+        {
+            Environment.CurrentDirectory = previousCwd;
+            Directory.Delete(tempRoot, recursive: true);
+            ActiveRuntimeCounters.ResetForTests();
+        }
+    }
+
+[Trait("Category", "LegacySmoke")]
+    [Theory]
+    [InlineData("matching", true)]
+    [InlineData("mismatched", false)]
+#if !DEBUG
+    [InlineData("missing", false)]
+#endif
+    public async Task ResourceBenchmarkRunner_Cycle_RequiresActualHelperBinding(string binding, bool expectedSuccess)
+    {
+        using var strictReleasePolicy = DisableUnsafeDeveloperModeForTests();
+        using var inviteMode = new EnvironmentOverride(InviteTokenServiceFactory.InviteModeEnvVar, InviteTokenServiceFactory.InviteModeIssuedSecret);
+        var helperAddress = new PeerAddress($"resource.helper.{Guid.NewGuid():N}");
+        using var helpee = new SessionRuntime(() => new DevLocalTransport($"resource.helpee.{Guid.NewGuid():N}"));
+        using var helper = new SessionRuntime(() => new DevLocalTransport(helperAddress.Value));
+        PeerAddress? boundHelperAddress = binding switch
+        {
+            "matching" => helperAddress,
+            "mismatched" => new PeerAddress("resource.helper.someone-else"),
+            _ => null
+        };
+        var helperConnected = false;
+        var helpeeConnected = false;
+        helper.StateChanged += (_, e) => helperConnected |= e.State == SessionRuntimeState.Connected;
+        helpee.StateChanged += (_, e) => helpeeConnected |= e.State == SessionRuntimeState.Connected;
+
+        var succeeded = await ResourceBenchmarkRunner.TryRunCycleAsync(helpee, helper, boundHelperAddress, CancellationToken.None);
+
+        Assert.Equal(expectedSuccess, succeeded);
+        Assert.Equal(expectedSuccess, helperConnected);
+        Assert.Equal(expectedSuccess, helpeeConnected);
+    }
+
+#if !DEBUG
+[Trait("Category", "LegacySmoke")]
+    [Fact]
+    public async Task ResourceBenchmarkRunner_LeakCheck_FailedCycleCannotProducePassingArtifact()
+    {
+        // A forbidden legacy configuration deterministically fails transport creation inside the cycle.
+        using var unsafeMode = EnableUnsafeDeveloperModeForTests();
+        using var inviteMode = new EnvironmentOverride(InviteTokenServiceFactory.InviteModeEnvVar, InviteTokenServiceFactory.InviteModeLegacySigned);
+        using var legacyOptIn = new EnvironmentOverride(InviteTokenServiceFactory.AllowInsecureLegacyInviteModeEnvVar, "0");
+        var tempRoot = Path.Combine(Path.GetTempPath(), "nlink-resource-failed-cycle-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(tempRoot);
+        var previousCwd = Environment.CurrentDirectory;
+        try
+        {
+            Environment.CurrentDirectory = tempRoot;
+            var stdout = new StringWriter();
+            var stderr = new StringWriter();
+            var exitCode = await ResourceBenchmarkRunner.RunAsync(
+                new[] { "--leak-check", "--cycles", "2", "--transport", "devlocal", "--delay-ms", "0", "--leak-growth-fail-percent", "1000" },
+                stdout, stderr, CancellationToken.None);
+
+            Assert.Equal(1, exitCode);
+            Assert.Contains("Leak check cycle 1 of 2 failed", stderr.ToString(), StringComparison.Ordinal);
+            Assert.DoesNotContain("checkpoint 2 captured", stdout.ToString(), StringComparison.Ordinal);
+            Assert.Empty(Directory.GetFiles(Path.Combine(tempRoot, "artifacts", "resources"), "leak-check*"));
+        }
+        finally
+        {
+            Environment.CurrentDirectory = previousCwd;
+            Directory.Delete(tempRoot, recursive: true);
+            ActiveRuntimeCounters.ResetForTests();
+        }
+    }
+#endif
 
 }

@@ -69,7 +69,7 @@ public static class TransportFailureMapper
         }
 
         return FromSignals(
-            rawError ?? ex.Message,
+            CombineSignalValues(rawError, ex.Message),
             exceptionType: ex.GetType().Name,
             lastDisconnectReason: lastDisconnectReason,
             fallbackMessage: ex.Message);
@@ -138,6 +138,18 @@ public static class TransportFailureMapper
                 exceptionType,
                 raw,
                 isTransient: true);
+        }
+
+        if (normalized.Contains("nkn_bridge_bootstrap_not_ready", StringComparison.Ordinal) ||
+            normalized.Contains("bridge_transport_connect_failed_before_ready", StringComparison.Ordinal) ||
+            normalized.Contains("bridge_bootstrap_diagnostics_failure", StringComparison.Ordinal))
+        {
+            return TransportFailure.Create(
+                TransportFailureCategory.BridgeStartFailure,
+                "Could not start the connection system",
+                exceptionType,
+                raw,
+                isTransient: false);
         }
 
         if (normalized.Contains("bridge_connect_ready_timeout", StringComparison.Ordinal) ||
@@ -234,6 +246,17 @@ public static class TransportFailureMapper
             exceptionType: ex.GetType().Name,
             rawError: combinedRaw,
             isTransient: isTransient);
+    }
+
+    private static string? CombineSignalValues(params string?[] values)
+    {
+        var parts = values
+            .Select(NormalizeSignalValue)
+            .Where(static value => !string.IsNullOrWhiteSpace(value))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+
+        return parts.Length == 0 ? null : string.Join(" | ", parts);
     }
 
     private static string? NormalizeSignalValue(string? value)

@@ -222,6 +222,13 @@
             <Setter Property="BorderThickness" Value="1"/>
         </Style>
 
+        <Style Selector="Button.activeScreenSharePresetButton">
+            <Setter Property="Background" Value="#F2C94C"/>
+            <Setter Property="Foreground" Value="#0B0F16"/>
+            <Setter Property="BorderBrush" Value="#EAB308"/>
+            <Setter Property="BorderThickness" Value="1"/>
+        </Style>
+
         <Style Selector="Button.linkButton">
             <Setter Property="Background" Value="Transparent"/>
             <Setter Property="Foreground" Value="{StaticResource AppMutedTextBrush}"/>

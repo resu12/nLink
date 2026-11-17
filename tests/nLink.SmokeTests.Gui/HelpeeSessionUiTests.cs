@@ -86,11 +86,15 @@ public sealed class HelpeeSessionUiTests : SessionHeaderAndBannerTestBase
             }, CreateNknTestConfig(), runtime);
             await WaitUntilAsync(() => string.Equals(helpee.ConnectionState, "Failed", StringComparison.Ordinal) && string.Equals(helpee.ConnectionStatus, "Protected seed storage could not be read.", StringComparison.Ordinal), TimeSpan.FromSeconds(2));
             var settledCreateCount = Volatile.Read(ref createCount);
+            Assert.Equal(1, settledCreateCount);
             await Task.Delay(250);
             Assert.Equal(settledCreateCount, Volatile.Read(ref createCount));
+            Assert.Equal("Protected seed storage could not be read.", runtime.StatusText);
             Assert.Equal("Protected seed storage could not be read.", helpee.ShareInviteStatusText);
             Assert.Equal("Failed", helpee.ConnectionState);
             Assert.True(helpee.ShowRetryAction);
+            Assert.False(helpee.HasShareInvite);
+            Assert.False(helpee.RequestHelpCommand.CanExecute(null));
         }
         finally
         {
@@ -283,7 +287,7 @@ public sealed class HelpeeSessionUiTests : SessionHeaderAndBannerTestBase
 
     [Trait("Category", "LegacySmoke")]
     [Fact]
-    public async Task HelpeeViewModel_HelperDisconnectsAfterAccept_ReturnsToStartingSetupState()
+    public async Task HelpeeViewModel_HelperDisconnectsAfterAccept_KeepsConnectionLostVisible()
     {
         using var unboundInviteOptIn = new EnvironmentOverride(NLink.App.Configuration.AppFeatureFlags.AllowInsecureUnboundPublicInvitesEnvVar, null);
         using var scriptedTransport = new ScriptedSignalingTransport(onHostByAddressAsync: _ => Task.CompletedTask, localPeerAddress: "helpee.helper.accepted.disconnect");
@@ -304,22 +308,23 @@ public sealed class HelpeeSessionUiTests : SessionHeaderAndBannerTestBase
         SetPrivateField(helpeeRuntime, "statusText", "Connection lost.");
         SetPrivateField(helpeeRuntime, "currentFlowSnapshot", helpeeRuntime.FlowSnapshot with
         {
-            Phase = SessionFlowPhase.HelpeeWaiting,
-            UiPhase = SessionUiPhase.Waiting,
+            Phase = SessionFlowPhase.Failed,
+            UiPhase = SessionUiPhase.Failed,
             Role = SessionRuntimeRole.Helpee,
             RuntimeState = SessionRuntimeState.Failed,
             TransportState = TransportState.Failed,
-            LastEndOrigin = SessionFlowEndOrigin.Remote,
-            TerminalKind = SessionTerminalKind.None,
-            TerminalStatusText = string.Empty,
-            FailureTitle = string.Empty,
-            FailureMessage = string.Empty,
-            FailureActionText = string.Empty,
+            LastEndOrigin = SessionFlowEndOrigin.Failed,
+            ApprovalActive = false,
+            TerminalKind = SessionTerminalKind.Failed,
+            TerminalStatusText = "Connection lost.",
+            FailureTitle = "Connection lost",
+            FailureMessage = "The session ended due to a connection problem.",
+            FailureActionText = "Retry",
             ShouldClearConversationUi = true,
             ShouldSuppressConnectedControls = true,
             DisplayStatusText = "Connection lost.",
-            DisplayConnectionState = "Waiting",
-            ShowRetryAction = false,
+            DisplayConnectionState = "Failed",
+            ShowRetryAction = true,
             ShowDiagnosticsAction = true,
             PostTerminalAction = SessionFlowPostTerminalAction.None,
             FailureReason = "transport_disconnected",
@@ -328,15 +333,113 @@ public sealed class HelpeeSessionUiTests : SessionHeaderAndBannerTestBase
         InvokePrivateMethod(helpee, "SyncFromRuntime");
 
         await WaitUntilAsync(
-            () => string.IsNullOrWhiteSpace(helpee.InviteHelperIdentityInput) &&
-                  !helpee.HasVerifiedInviteHelperIdentity &&
+            () => string.Equals(helpee.ConnectionState, "Failed", StringComparison.Ordinal) &&
+                  string.Equals(helpee.ConnectionStatus, "Connection lost.", StringComparison.Ordinal) &&
+                  helpee.ShowFailurePanel &&
                   !helpee.RequestHelpCommand.CanExecute(null) &&
-                  string.Equals(helpee.ConnectionState, "Waiting", StringComparison.Ordinal),
+                  !helpee.IsConnectedView,
             TimeSpan.FromSeconds(5));
 
-        Assert.Equal(string.Empty, helpee.InviteHelperIdentityInput);
-        Assert.False(helpee.HasVerifiedInviteHelperIdentity);
+        Assert.Equal("Failed", helpee.ConnectionState);
+        Assert.Equal("Connection lost.", helpee.ConnectionStatus);
+        Assert.True(helpee.ShowFailurePanel);
         Assert.False(helpee.CanRequestHelpAction);
+        Assert.False(helpee.RequestHelpCommand.CanExecute(null));
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public void HelpeeViewModel_AcceptedActiveSessionFailure_KeepsConnectionLostVisible()
+    {
+        using var runtime = new SessionRuntime(() => new ScriptedSignalingTransport());
+        var helperTarget = new PeerAddress("nlink-helper.accepted.active.failure");
+        using var helpee = new HelpeePageViewModel(cancelAction: static () => { }, CreateNknTestConfig(), runtime);
+
+        SetPrivateField(
+            runtime,
+            "<PendingOutboundHelpRequestDecision>k__BackingField",
+            new HelpRequestDecisionMessage(
+                "hr_accepted_active_failure",
+                new PeerAddress("helpee.accepted.active.failure"),
+                helperTarget,
+                Accepted: true,
+                Reason: null));
+        SetPrivateField(runtime, "state", SessionRuntimeState.Failed);
+        SetPrivateField(runtime, "transportState", TransportState.Failed);
+        SetPrivateField(runtime, "statusText", "Connection lost.");
+        SetPrivateField(runtime, "currentFlowSnapshot", runtime.FlowSnapshot with
+        {
+            Phase = SessionFlowPhase.Failed,
+            UiPhase = SessionUiPhase.Failed,
+            Role = SessionRuntimeRole.Helpee,
+            RuntimeState = SessionRuntimeState.Failed,
+            TransportState = TransportState.Failed,
+            LastEndOrigin = SessionFlowEndOrigin.Failed,
+            TerminalKind = SessionTerminalKind.Failed,
+            TerminalStatusText = "Connection lost.",
+            FailureTitle = "Connection lost",
+            FailureMessage = "Connection lost. Check the connection and try again.",
+            FailureActionText = "Try again",
+            ShouldClearConversationUi = true,
+            ShouldSuppressConnectedControls = true,
+            DisplayStatusText = "Connection lost.",
+            DisplayConnectionState = "Failed",
+            ShowRetryAction = true,
+            ShowDiagnosticsAction = true,
+            PostTerminalAction = SessionFlowPostTerminalAction.None,
+            FailureReason = "session_liveness_timeout",
+        });
+
+        InvokePrivateMethod(helpee, "SyncFromRuntime");
+
+        Assert.Equal(SessionUiPhase.Failed, helpee.EffectivePhase);
+        Assert.Equal("Failed", helpee.ConnectionState);
+        Assert.Equal("Connection lost.", helpee.ConnectionStatus);
+        Assert.Equal("Connection lost", helpee.HeaderStatusText);
+        Assert.True(helpee.ShowFailurePanel);
+        Assert.False(helpee.RequestHelpCommand.CanExecute(null));
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public void HelpeeViewModel_LivenessTimeoutBlocksAutomaticWaitingRestart()
+    {
+        using var runtime = new SessionRuntime(() => new ScriptedSignalingTransport());
+        using var helpee = new HelpeePageViewModel(cancelAction: static () => { }, CreateNknTestConfig(), runtime);
+
+        SetPrivateField(runtime, "state", SessionRuntimeState.Failed);
+        SetPrivateField(runtime, "transportState", TransportState.Failed);
+        SetPrivateField(runtime, "statusText", "Connection lost.");
+        SetPrivateField(runtime, "currentFlowSnapshot", runtime.FlowSnapshot with
+        {
+            Phase = SessionFlowPhase.Failed,
+            UiPhase = SessionUiPhase.Failed,
+            Role = SessionRuntimeRole.Helpee,
+            RuntimeState = SessionRuntimeState.Failed,
+            TransportState = TransportState.Failed,
+            LastEndOrigin = SessionFlowEndOrigin.Failed,
+            TerminalKind = SessionTerminalKind.Failed,
+            TerminalStatusText = "Connection lost.",
+            FailureTitle = "Connection lost",
+            FailureMessage = "The session ended due to a connection problem.",
+            FailureActionText = "Retry",
+            ShouldClearConversationUi = true,
+            ShouldSuppressConnectedControls = true,
+            DisplayStatusText = "Connection lost.",
+            DisplayConnectionState = "Failed",
+            ShowRetryAction = true,
+            ShowDiagnosticsAction = true,
+            PostTerminalAction = SessionFlowPostTerminalAction.None,
+            FailureReason = "session_liveness_timeout",
+        });
+
+        InvokePrivateMethod(helpee, "SyncFromRuntime");
+        InvokePrivateMethod(helpee, "RestartWaitingSession", false, false, null);
+
+        Assert.Equal(SessionUiPhase.Failed, helpee.EffectivePhase);
+        Assert.Equal("Failed", helpee.ConnectionState);
+        Assert.Equal("Connection lost.", helpee.ConnectionStatus);
+        Assert.True(helpee.ShowFailurePanel);
         Assert.False(helpee.RequestHelpCommand.CanExecute(null));
     }
 
@@ -608,10 +711,16 @@ public sealed class HelpeeSessionUiTests : SessionHeaderAndBannerTestBase
         var transportConfig = CreateDevLocalTestConfig();
         using var transport = new DevLocalTransport();
         var captureSource = new FakeScreenCaptureSource();
-        using var runtime = new SessionRuntime(() => transport);
+        using var runtime = new SessionRuntime(
+            () => transport, SessionRuntimeWatchdogOptions.Default,
+            transportScreenCaptureSourceFactory: () => new FakeScreenCaptureSource());
         using var helpee = new HelpeePageViewModel(cancelAction: static () =>
         {
-        }, transportConfig, runtime, screenCaptureSourceFactory: new FixedCaptureSourceFactory(captureSource));
+        }, transportConfig, runtime, openDiagnosticsAction: null, clipboardService: null,
+            shareMessageConfig: null, statusPresenter: null, incomingRequestTimeout: null,
+            uiStateStore: null, backAction: null,
+            screenCaptureSourceFactory: new FixedCaptureSourceFactory(captureSource), decodeFrame: null,
+            persistCaptureTargetToUserEnvironment: false);
         SetPrivateField(runtime, "transport", transport);
         SetPrivateField(runtime, "state", SessionRuntimeState.Connected);
         SetPrivateField(runtime, "transportState", TransportState.Connected);
@@ -630,6 +739,37 @@ public sealed class HelpeeSessionUiTests : SessionHeaderAndBannerTestBase
         using var document = JsonDocument.Parse(persisted!);
         Assert.Equal("Display", document.RootElement.GetProperty("mode").GetString());
         Assert.Equal(specificDisplay!.DisplayId, document.RootElement.GetProperty("displayId").GetString());
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public void CaptureTargetStore_ProcessOnlySave_PreservesUserPreference()
+    {
+        const string variable = "NLINK_FEATURE_SCREENCAP_TARGET";
+        using var processTarget = new EnvironmentOverride(variable, null);
+        var userTarget = Environment.GetEnvironmentVariable(variable, EnvironmentVariableTarget.User);
+        var selection = new ScreenCaptureTargetSelection(
+            ScreenCaptureTargetMode.Display, "fixture-display", null, default);
+
+        ScreenCaptureTargetStore.Save(selection, persistUserEnvironment: false);
+
+        Assert.Equal(selection, ScreenCaptureTargetStore.Load());
+        Assert.Equal(userTarget, Environment.GetEnvironmentVariable(variable, EnvironmentVariableTarget.User));
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public void HelpeePageViewModel_CaptureTargetPersistence_IsEnabledByDefault()
+    {
+        using var runtime = new SessionRuntime(() => new ScriptedSignalingTransport());
+        using var helpee = new HelpeePageViewModel(
+            cancelAction: static () => { }, CreateDevLocalTestConfig(), runtime,
+            screenCaptureSourceFactory: new FixedCaptureSourceFactory(new FakeScreenCaptureSource()));
+
+        var field = typeof(HelpeePageViewModel).GetField(
+            "persistCaptureTargetToUserEnvironment", BindingFlags.Instance | BindingFlags.NonPublic);
+        Assert.NotNull(field);
+        Assert.True(Assert.IsType<bool>(field!.GetValue(helpee)));
     }
 
     [Trait("Category", "LegacySmoke")]
@@ -803,14 +943,20 @@ public sealed class HelpeeSessionUiTests : SessionHeaderAndBannerTestBase
     {
         var transportConfig = CreateDevLocalTestConfig();
         using var transport = new DevLocalTransport();
-        using var runtime = new SessionRuntime(() => transport);
+        using var runtime = new SessionRuntime(
+            () => transport, SessionRuntimeWatchdogOptions.Default,
+            transportScreenCaptureSourceFactory: () => new FakeScreenCaptureSource());
         var failingSource = new FakeScreenCaptureSource
         {
             StartException = new InvalidOperationException("capture init failed"),
         };
         using var helpee = new HelpeePageViewModel(cancelAction: static () =>
         {
-        }, transportConfig, runtime, screenCaptureSourceFactory: new FixedCaptureSourceFactory(failingSource));
+        }, transportConfig, runtime, openDiagnosticsAction: null, clipboardService: null,
+            shareMessageConfig: null, statusPresenter: null, incomingRequestTimeout: null,
+            uiStateStore: null, backAction: null,
+            screenCaptureSourceFactory: new FixedCaptureSourceFactory(failingSource), decodeFrame: null,
+            persistCaptureTargetToUserEnvironment: false);
         SetPrivateField(runtime, "transport", transport);
         SetPrivateField(runtime, "state", SessionRuntimeState.Connected);
         SetPrivateField(runtime, "transportState", TransportState.Connected);
@@ -1147,22 +1293,25 @@ public sealed class HelpeeSessionUiTests : SessionHeaderAndBannerTestBase
 
     [Trait("Category", "LegacySmoke")]
     [Fact]
-    public void HelpeeViewModel_RemoteEndAfterConnectedSession_ClearsHelperIdentityInput()
+    public async Task HelpeeViewModel_RemoteEndAfterConnectedSession_ClearsHelperIdentityInput()
     {
         using var runtime = new SessionRuntime(() => new ScriptedSignalingTransport());
         using var helpee = new HelpeePageViewModel(cancelAction: static () =>
         {
         }, CreateNknTestConfig(), runtime);
+        await WaitUntilAsync(() => runtime.State == SessionRuntimeState.Waiting &&
+            runtime.FlowSnapshot.Phase == SessionFlowPhase.HelpeeWaiting, TimeSpan.FromSeconds(2));
         var helperIdentity = new PeerAddress("nlink-helper.connected.identity.clear");
         var helperTarget = new PeerAddress("nlink-helper.connected.target.clear");
         helpee.SetVerifiedInviteHelperIdentity(helperIdentity, helperTargetAddress: helperTarget, refreshInvite: false, normalizedInputOverride: HelperBootstrapQrPayload.Format(HelperBootstrapPayload.Create(helperTarget, helperId: HelperIdentityTokenCodec.Encode(helperIdentity))));
-        SetPrivateField(runtime, "state", SessionRuntimeState.Waiting);
-        SetPrivateField(runtime, "currentFlowSnapshot", BuildHelpeeWaitingFlow(runtime));
         Assert.False(string.IsNullOrWhiteSpace(helpee.InviteHelperIdentityInput));
         Assert.True(helpee.HasVerifiedInviteHelperIdentity);
         InvokePrivateMethod(helpee, "RestartWaitingSession", false, false, null);
         Assert.Equal(string.Empty, helpee.InviteHelperIdentityInput);
         Assert.False(helpee.HasVerifiedInviteHelperIdentity);
+        await WaitUntilAsync(() => runtime.State == SessionRuntimeState.Waiting &&
+            string.Equals(helpee.ConnectionStatus, "Waiting for helper…", StringComparison.Ordinal) &&
+            string.Equals(helpee.ConnectionState, "Waiting", StringComparison.Ordinal), TimeSpan.FromSeconds(2));
         Assert.Equal("Waiting for helper…", helpee.ConnectionStatus);
         Assert.Equal("Waiting", helpee.ConnectionState);
     }

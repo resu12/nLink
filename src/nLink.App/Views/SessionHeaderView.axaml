@@ -44,11 +44,95 @@
     <Grid ColumnDefinitions="Auto,*,Auto"
           ColumnSpacing="10"
           MinHeight="38">
-        <TextBlock Grid.Column="0"
-                   Classes="headerRole"
-                   Text="{Binding #Root.RoleText}"
-                   IsVisible="{Binding #Root.HasRoleText}"
-                   MaxLines="1"/>
+        <StackPanel Grid.Column="0"
+                    Orientation="Horizontal"
+                    Spacing="8"
+                    VerticalAlignment="Center"
+                    IsVisible="{Binding #Root.HasRoleText}">
+            <StackPanel Orientation="Horizontal"
+                        Spacing="0"
+                        VerticalAlignment="Center">
+                <Viewbox Width="20"
+                         Height="20"
+                         VerticalAlignment="Center"
+                         ToolTip.Tip="{Binding #Root.TunaPictogramTip}"
+                         RenderTransformOrigin="0.5,0.5">
+                    <Viewbox.RenderTransform>
+                        <ScaleTransform ScaleX="{Binding #Root.TunaPulseScale}"
+                                        ScaleY="{Binding #Root.TunaPulseScale}"/>
+                    </Viewbox.RenderTransform>
+                    <Canvas Width="24"
+                            Height="24">
+                        <Ellipse Canvas.Left="0"
+                                 Canvas.Top="2"
+                                 Width="24"
+                                 Height="20"
+                                 Fill="{Binding #Root.TunaGlowBrush}"
+                                 Opacity="{Binding #Root.TunaGlowOpacity}"/>
+                        <Ellipse Canvas.Left="2"
+                                 Canvas.Top="4"
+                                 Width="20"
+                                 Height="16"
+                                 Fill="{Binding #Root.TunaGlowBrush}"
+                                 Opacity="{Binding #Root.TunaInnerGlowOpacity}"/>
+                        <Path Data="M3,12 C6.4,6.7 14.4,6.2 20,12 C14.4,17.8 6.4,17.3 3,12 Z"
+                              Fill="{Binding #Root.TunaPictogramBrush}"
+                              Opacity="{Binding #Root.TunaPictogramOpacity}"/>
+                        <Path Data="M19,12 L23,8 L23,16 Z"
+                              Fill="{Binding #Root.TunaPictogramBrush}"
+                              Opacity="{Binding #Root.TunaPictogramOpacity}"/>
+                        <Path Data="M9,7.6 C10.6,10.2 10.6,13.8 9,16.4"
+                              Stroke="{StaticResource AppBackgroundBrush}"
+                              StrokeThickness="1.4"
+                              StrokeLineCap="Round"
+                              Opacity="{Binding #Root.TunaGillOpacity}"/>
+                        <Ellipse Canvas.Left="6.4"
+                                 Canvas.Top="10.1"
+                                 Width="2"
+                                 Height="2"
+                                 Fill="{StaticResource AppBackgroundBrush}"
+                                 Opacity="{Binding #Root.TunaGillOpacity}"/>
+                    </Canvas>
+                </Viewbox>
+
+                <Button Classes="compactButton"
+                        AutomationProperties.AutomationId="SessionHeader.TunaUnlockToggle"
+                        Width="30"
+                        MinWidth="0"
+                        Height="20"
+                        Padding="0"
+                        HorizontalContentAlignment="Left"
+                        VerticalContentAlignment="Center"
+                        Background="Transparent"
+                        BorderBrush="Transparent"
+                        BorderThickness="0"
+                        IsVisible="{Binding #Root.ShowTunaUnlockToggle}"
+                        IsEnabled="{Binding #Root.CanTunaUnlockToggle}"
+                        ToolTip.Tip="{Binding #Root.TunaUnlockTip}"
+                        Click="TunaUnlockToggle_Click">
+                    <Grid Width="30"
+                          Height="16"
+                          ClipToBounds="False">
+                        <Border Width="30"
+                                Height="16"
+                                CornerRadius="8"
+                                Background="{Binding #Root.TunaUnlockTrackBrush}"
+                                BorderBrush="{StaticResource AppCardBorderBrush}"
+                                BorderThickness="1"/>
+                        <Ellipse Width="12"
+                                 Height="12"
+                                 Margin="{Binding #Root.TunaUnlockThumbMargin}"
+                                 HorizontalAlignment="Left"
+                                 VerticalAlignment="Center"
+                                 Fill="{Binding #Root.TunaUnlockThumbBrush}"/>
+                    </Grid>
+                </Button>
+            </StackPanel>
+
+            <TextBlock Classes="headerRole"
+                       Text="{Binding #Root.RoleText}"
+                       MaxLines="1"/>
+        </StackPanel>
 
         <TextBlock Grid.Column="1"
                    Classes="headerStatus"

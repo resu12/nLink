@@ -402,6 +402,7 @@ internal sealed partial class TransportScreenShareCoordinator
             $"encoder_path={(string.IsNullOrWhiteSpace(sourceFreshnessMetrics.EncoderPath) ? "(none)" : sourceFreshnessMetrics.EncoderPath)}",
             $"encoder_profile={(string.IsNullOrWhiteSpace(sourceFreshnessMetrics.EncoderProfile) ? "(none)" : sourceFreshnessMetrics.EncoderProfile)}",
             $"capture_scale={ScreenShareQualitySettings.FormatScale(qualityState.CaptureScale)}",
+            $"quality_profile={qualityState.QualityProfile}",
             $"effective_quality_preset={(string.IsNullOrWhiteSpace(qualityState.EffectivePresetKey) ? "(none)" : qualityState.EffectivePresetKey)}",
             $"legacy_preset_migrated={(qualityState.LegacyHigherClarityPresetMigrated ? 1 : 0)}",
             $"source_superseded_pending_frames={sourceFreshnessMetrics.SupersededPendingRawFrameCount}",
@@ -643,7 +644,7 @@ internal sealed partial class TransportScreenShareCoordinator
         var qualityState = ScreenShareQualitySettings.GetCurrentEnvironmentState();
         LocalOperationalLog.Warn(
             "ScreenShareTransport",
-            $"event=screenshare_soft_scale_active; capture_scale={ScreenShareQualitySettings.FormatScale(qualityState.CaptureScale)}; effective_quality_preset={qualityState.EffectivePresetKey}; legacy_preset_migrated={(qualityState.LegacyHigherClarityPresetMigrated ? 1 : 0)}; message=scale_below_1_may_reduce_text_sharpness");
+            $"event=screenshare_soft_scale_active; capture_scale={ScreenShareQualitySettings.FormatScale(qualityState.CaptureScale)}; quality_profile={qualityState.QualityProfile}; effective_quality_preset={qualityState.EffectivePresetKey}; legacy_preset_migrated={(qualityState.LegacyHigherClarityPresetMigrated ? 1 : 0)}; message=scale_below_1_may_reduce_text_sharpness");
     }
 
 }

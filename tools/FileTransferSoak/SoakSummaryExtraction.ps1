@@ -74,13 +74,146 @@ function Select-FileTransferIdForAnalysis {
     return ''
 }
 
+function Get-FileTransferScopedNameIndex {
+    param([object[]]$Events)
+
+    $scopeKey = Get-FileTransferEventScopeKey -Events $Events
+    $cacheKey = "scope-name-index|$scopeKey"
+    if ($script:FileTransferRetainedEventQueryCache.ContainsKey($cacheKey)) {
+        return $script:FileTransferRetainedEventQueryCache[$cacheKey]
+    }
+
+    $index = $script:FileTransferRetainedEventIndex
+    if ($null -ne $index -and $scopeKey -eq $index.AllEventsScopeKey) {
+        $scopeIndex = [pscustomobject]@{
+            EventsByName = $index.EventsByName
+            EventCounts = $index.EventCounts
+        }
+        $script:FileTransferRetainedEventQueryCache[$cacheKey] = $scopeIndex
+        return $scopeIndex
+    }
+
+    $eventsByName = @{}
+    $eventCounts = @{}
+    foreach ($event in @($Events)) {
+        $name = [string]$event.EventName
+        if ([string]::IsNullOrWhiteSpace($name)) {
+            continue
+        }
+
+        if (-not $eventsByName.ContainsKey($name)) {
+            $eventsByName[$name] = New-Object System.Collections.Generic.List[object]
+            $eventCounts[$name] = 0
+        }
+
+        $eventsByName[$name].Add($event) | Out-Null
+        $eventCounts[$name] = [int]$eventCounts[$name] + 1
+    }
+
+    $scopeIndex = [pscustomobject]@{
+        EventsByName = $eventsByName
+        EventCounts = $eventCounts
+    }
+    $script:FileTransferRetainedEventQueryCache[$cacheKey] = $scopeIndex
+    return $scopeIndex
+}
+
+function Get-FileTransferScopedFieldAggregateIndex {
+    param([object[]]$Events)
+
+    $scopeKey = Get-FileTransferEventScopeKey -Events $Events
+    $cacheKey = "scope-field-index|$scopeKey"
+    if ($script:FileTransferRetainedEventQueryCache.ContainsKey($cacheKey)) {
+        return $script:FileTransferRetainedEventQueryCache[$cacheKey]
+    }
+
+    $index = $script:FileTransferRetainedEventIndex
+    if ($null -ne $index -and $scopeKey -eq $index.AllEventsScopeKey) {
+        $scopeIndex = [pscustomobject]@{
+            FieldMax = $index.FieldMax
+            FieldSum = $index.FieldSum
+        }
+        $script:FileTransferRetainedEventQueryCache[$cacheKey] = $scopeIndex
+        return $scopeIndex
+    }
+
+    $fieldMax = @{}
+    $fieldSum = @{}
+    foreach ($event in @($Events)) {
+        if ($null -eq $event.Fields) {
+            continue
+        }
+
+        foreach ($key in @($event.Fields.Keys)) {
+            $value = 0L
+            if (-not [long]::TryParse([string]$event.Fields[$key], [ref]$value)) {
+                continue
+            }
+
+            if (-not $fieldMax.ContainsKey($key) -or $value -gt [long]$fieldMax[$key]) {
+                $fieldMax[$key] = $value
+            }
+
+            if (-not $fieldSum.ContainsKey($key)) {
+                $fieldSum[$key] = 0L
+            }
+
+            $fieldSum[$key] = [long]$fieldSum[$key] + $value
+        }
+    }
+
+    $scopeIndex = [pscustomobject]@{
+        FieldMax = $fieldMax
+        FieldSum = $fieldSum
+    }
+    $script:FileTransferRetainedEventQueryCache[$cacheKey] = $scopeIndex
+    return $scopeIndex
+}
+
 function Get-FileTransferEventsByName {
     param(
         [object[]]$Events,
         [string[]]$Names
     )
 
-    return @($Events | Where-Object { $Names -contains $_.EventName })
+    if ($null -eq $Events -or $Events.Count -le 0 -or $null -eq $Names -or $Names.Count -le 0) {
+        return @()
+    }
+
+    $normalizedNames = @($Names | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+    if ($normalizedNames.Count -le 0) {
+        return @()
+    }
+
+    $scopeKey = Get-FileTransferEventScopeKey -Events $Events
+    $namesKey = @($normalizedNames | Sort-Object) -join ','
+    $cacheKey = "by-name|$scopeKey|$namesKey"
+    if ($script:FileTransferRetainedEventQueryCache.ContainsKey($cacheKey)) {
+        return @($script:FileTransferRetainedEventQueryCache[$cacheKey])
+    }
+
+    $nameIndex = Get-FileTransferScopedNameIndex -Events $Events
+    $eventsByName = [System.Collections.IDictionary]$nameIndex.PSObject.Properties['EventsByName'].Value
+    $collected = New-Object System.Collections.Generic.List[object]
+    foreach ($name in $normalizedNames) {
+        $nameText = [string]$name
+        if ($eventsByName.ContainsKey($nameText)) {
+            $bucket = $eventsByName.Item($nameText)
+            foreach ($event in $bucket) {
+                $collected.Add($event) | Out-Null
+            }
+        }
+    }
+
+    if ($normalizedNames.Count -gt 1) {
+        $result = @($collected.ToArray() | Sort-Object Sequence)
+    }
+    else {
+        $result = @($collected.ToArray())
+    }
+
+    $script:FileTransferRetainedEventQueryCache[$cacheKey] = @($result)
+    return @($result)
 }
 
 function Get-FileTransferTerminalDirection {
@@ -170,7 +303,1501 @@ function Get-FileTransferEventCount {
         [string]$Name
     )
 
-    return @($Events | Where-Object { $_.EventName -eq $Name }).Count
+    if ([string]::IsNullOrWhiteSpace($Name) -or $null -eq $Events -or $Events.Count -le 0) {
+        return 0
+    }
+
+    $nameIndex = Get-FileTransferScopedNameIndex -Events $Events
+    $eventCounts = [System.Collections.IDictionary]$nameIndex.PSObject.Properties['EventCounts'].Value
+    if ($eventCounts.ContainsKey($Name)) {
+        return [int]$eventCounts[$Name]
+    }
+
+    return 0
+}
+
+function Normalize-FileTransferRouteRuntimeProfile {
+    param([string]$Value)
+
+    if ([string]::IsNullOrWhiteSpace($Value)) {
+        return ''
+    }
+
+    $normalized = $Value.Trim().ToLowerInvariant()
+    switch ($normalized) {
+        'regular_nkn_v4_fast' { return 'regular_nkn_v4_fast' }
+        'file_tuna_v4_fast' { return 'file_tuna_v4_fast' }
+        'default_v6' { return 'default_v6' }
+        'default' { return 'default_v6' }
+        'primary_regular_nkn_bulk_v6' { return 'primary_regular_nkn_bulk_v6' }
+        'primaryregularnknbulkv6' { return 'primary_regular_nkn_bulk_v6' }
+        default { return $normalized }
+    }
+}
+
+function Get-FileTransferRouteExpectedProtocol {
+    param([string]$Route)
+
+    switch ($Route) {
+        'regular_nkn_v4_fast' { return '4' }
+        'file_tuna_v4' { return '4' }
+        'post_tuna_fallback_v6' { return '6' }
+        'diagnostic_regular_nkn_v6' { return '6' }
+        default { return '' }
+    }
+}
+
+function Get-FileTransferRouteExpectedRuntimeProfile {
+    param([string]$Route)
+
+    switch ($Route) {
+        'regular_nkn_v4_fast' { return 'regular_nkn_v4_fast' }
+        'file_tuna_v4' { return 'file_tuna_v4' }
+        'post_tuna_fallback_v6' { return 'default_v6' }
+        'diagnostic_regular_nkn_v6' { return 'primary_regular_nkn_bulk_v6' }
+        default { return '' }
+    }
+}
+
+function Test-FileTransferRouteRuntimeProfileMatches {
+    param(
+        [string]$Expected,
+        [string]$Actual
+    )
+
+    if ([string]::Equals($Expected, $Actual, [System.StringComparison]::OrdinalIgnoreCase)) {
+        return $true
+    }
+
+    $fileTunaRuntimeAliases = @('file_tuna_v4', 'file_tuna_v4_fast')
+    return $fileTunaRuntimeAliases -contains $Expected -and
+           $fileTunaRuntimeAliases -contains $Actual
+}
+
+function Get-FileTransferRouteExpectedBridgePolicy {
+    param([string]$Route)
+
+    switch ($Route) {
+        'regular_nkn_v4_fast' { return 'regular_nkn_v4_fast' }
+        'file_tuna_v4' { return 'tuna_strict' }
+        'post_tuna_fallback_v6' { return 'post_tuna_fallback_strict' }
+        'diagnostic_regular_nkn_v6' { return 'primary_regular_nkn_quiet' }
+        default { return '' }
+    }
+}
+
+function Get-FileTransferRouteEventKey {
+    param(
+        [Parameter(Mandatory = $true)]$Event,
+        [switch]$IncludeDirection
+    )
+
+    $transferId = if ([string]::IsNullOrWhiteSpace($Event.TransferId)) { '(none)' } else { [string]$Event.TransferId }
+    if (-not $IncludeDirection) {
+        return $transferId
+    }
+
+    $direction = Get-FileTransferRouteEventDirection -Event $Event
+    if ([string]::IsNullOrWhiteSpace($direction)) {
+        $direction = '(none)'
+    }
+
+    return ('{0}|{1}' -f $transferId, $direction.Trim().ToLowerInvariant())
+}
+
+function Get-FileTransferRouteEventDirection {
+    param([Parameter(Mandatory = $true)]$Event)
+
+    $direction = Get-FileTransferEventField -Event $Event -Name 'direction' -Default ''
+    if ([string]::Equals($direction, 'outbound', [System.StringComparison]::OrdinalIgnoreCase)) {
+        return 'outbound'
+    }
+
+    if ([string]::Equals($direction, 'inbound', [System.StringComparison]::OrdinalIgnoreCase)) {
+        return 'inbound'
+    }
+
+    $terminalDirection = Get-FileTransferTerminalDirection -Event $Event
+    if (-not [string]::IsNullOrWhiteSpace($terminalDirection)) {
+        return $terminalDirection
+    }
+
+    $role = Get-FileTransferEventField -Event $Event -Name 'role' -Default ''
+    if ([string]::Equals($role, 'sender', [System.StringComparison]::OrdinalIgnoreCase)) {
+        return 'outbound'
+    }
+
+    if ([string]::Equals($role, 'receiver', [System.StringComparison]::OrdinalIgnoreCase)) {
+        return 'inbound'
+    }
+
+    switch ($Event.EventName) {
+        'filetransfer_v4_sender_started' { return 'outbound' }
+        'filetransfer_v6_sender_started' { return 'outbound' }
+        'filetransfer_v4_receiver_started' { return 'inbound' }
+        'filetransfer_v6_receiver_started' { return 'inbound' }
+        default { return '' }
+    }
+}
+
+function Test-FileTransferRouteAwareEvent {
+    param([Parameter(Mandatory = $true)]$Event)
+
+    if ($Event.EventName -eq 'filetransfer_v4_receive_liveness_summary') {
+        return $false
+    }
+
+    if ($Event.EventName -eq 'filetransfer_normal_to_tuna_handoff_route_hint_deferred') {
+        return $false
+    }
+
+    if (Test-FileTransferDiagnosticFallbackRouteEvent -Event $Event) {
+        return $false
+    }
+
+    if (Test-FileTransferDiagnosticDataPathReceiveWithoutRouteAuthority -Event $Event) {
+        return $false
+    }
+
+    return $Event.EventName -eq 'filetransfer_route_selected' -or
+        ($null -ne $Event.Fields -and $Event.Fields.ContainsKey('route'))
+}
+
+function Test-FileTransferDiagnosticDataPathReceiveWithoutRouteAuthority {
+    param([Parameter(Mandatory = $true)]$Event)
+
+    if ($Event.EventName -ne 'filetransfer_data_path_receive_result') {
+        return $false
+    }
+
+    $route = Get-FileTransferEventField -Event $Event -Name 'route' -Default ''
+    if (-not ([string]::IsNullOrWhiteSpace($route) -or $route -eq '(none)')) {
+        return $false
+    }
+
+    $protocolVersion = Get-FileTransferEventField -Event $Event -Name 'protocol_version' -Default ''
+    if (-not ([string]::IsNullOrWhiteSpace($protocolVersion) -or $protocolVersion -eq '0' -or $protocolVersion -eq '(none)')) {
+        return $false
+    }
+
+    $direction = Get-FileTransferEventField -Event $Event -Name 'direction' -Default ''
+    if (-not ([string]::IsNullOrWhiteSpace($direction) -or $direction -eq '(none)')) {
+        return $false
+    }
+
+    $frameType = Get-FileTransferEventField -Event $Event -Name 'frame_type' -Default ''
+    if ($frameType -like 'filetransfer.chunk_batch.*' -or
+        $frameType -like 'filetransfer.repair*') {
+        return $false
+    }
+
+    $batchChunkCount = Get-FileTransferEventInt64Field -Event $Event -Name 'batch_chunk_count' -Default 0
+    $chunkCount = Get-FileTransferEventInt64Field -Event $Event -Name 'chunk_count' -Default 0
+    $sentChunkCount = Get-FileTransferEventInt64Field -Event $Event -Name 'sent_chunk_count' -Default 0
+    if ($batchChunkCount -gt 0 -or $chunkCount -gt 0 -or $sentChunkCount -gt 0) {
+        return $false
+    }
+
+    $batchProfile = Get-FileTransferEventField -Event $Event -Name 'batch_profile' -Default ''
+    if (-not [string]::IsNullOrWhiteSpace($batchProfile) -and
+        $batchProfile -ne '(none)' -and
+        ($batchProfile.StartsWith('v4_', [System.StringComparison]::OrdinalIgnoreCase) -or
+         $batchProfile.StartsWith('v6_', [System.StringComparison]::OrdinalIgnoreCase))) {
+        return $false
+    }
+
+    return $true
+}
+
+function Test-FileTransferDiagnosticFallbackRouteEvent {
+    param([Parameter(Mandatory = $true)]$Event)
+
+    $reason = Get-FileTransferEventField -Event $Event -Name 'reason' -Default ''
+    $authorityReason = Get-FileTransferEventField -Event $Event -Name 'authority_reason' -Default ''
+    $kind = Get-FileTransferEventField -Event $Event -Name 'kind' -Default ''
+
+    if (($Event.EventName -eq 'filetransfer_control_plane_delivery_result' -or
+         $Event.EventName -eq 'filetransfer_control_plane_delivery_observed') -and
+        [string]::Equals($kind, 'receiver_state', [System.StringComparison]::OrdinalIgnoreCase) -and
+        [string]::Equals($reason, 'chunk_batch_committed', [System.StringComparison]::OrdinalIgnoreCase)) {
+        return $true
+    }
+
+    if ($Event.EventName -eq 'filetransfer_fallback_leg_authority_completed' -and
+        [string]::Equals($authorityReason, 'chunk_batch_committed', [System.StringComparison]::OrdinalIgnoreCase)) {
+        return $true
+    }
+
+    switch ($Event.EventName) {
+        'filetransfer_route_hint_observed_without_publication_authority' { return $true }
+        'filetransfer_fallback_stale_proof_ignored' { return $true }
+        'filetransfer_clean_fallback_stale_proof_ignored' { return $true }
+        'filetransfer_fallback_stale_proof_replay_suppressed' { return $true }
+        'filetransfer_fallback_checkpoint_reissue_suppressed' { return $true }
+        'filetransfer_fallback_checkpoint_exchange_retired' { return $true }
+        'filetransfer_control_plane_send_retired_stale_generation' { return $true }
+        'filetransfer_coordinator_leg_mutation_rejected' { return $true }
+        'filetransfer_runtime_unlock_callback_rejected' { return $true }
+        'filetransfer_recovery_authority_rejected' { return $true }
+        'runtime_unlock_retry_dispatch_authority_rejected' { return $true }
+        'filetransfer_v6_post_tuna_fallback_control_coalesced' { return $true }
+        'filetransfer_post_tuna_fallback_control_plane_pressure_marked' { return $true }
+        'filetransfer_post_tuna_fallback_control_plane_pressure_cleared' { return $true }
+        'filetransfer_post_tuna_fallback_control_plane_pressure_stale_ignored' { return $true }
+        default { return $false }
+    }
+}
+
+function Test-FileTransferLegHistoryRouteEvent {
+    param([Parameter(Mandatory = $true)]$Event)
+
+    return $Event.EventName -eq 'filetransfer_leg_frozen' -or
+        $Event.EventName -eq 'filetransfer_clean_fallback_leg_frozen'
+}
+
+function Test-FileTransferLiveRouteEpochRouteEvent {
+    param([Parameter(Mandatory = $true)]$Event)
+
+    return $Event.EventName -eq 'filetransfer_live_route_epoch_started' -or
+        $Event.EventName -eq 'filetransfer_live_route_epoch_recovered' -or
+        $Event.EventName -eq 'filetransfer_live_route_epoch_terminal'
+}
+
+function Test-FileTransferRouteEventCanPrecedeSelection {
+    param([Parameter(Mandatory = $true)]$Event)
+
+    if ($Event.EventName -notin @(
+            'filetransfer_leg_started',
+            'filetransfer_clean_fallback_leg_started',
+            'filetransfer_fallback_leg_recovery_generation_started')) {
+        return $false
+    }
+
+    $reason = Get-FileTransferEventField -Event $Event -Name 'reason' -Default ''
+    $route = Get-FileTransferEventField -Event $Event -Name 'route' -Default ''
+    $protocolVersion = Get-FileTransferEventField -Event $Event -Name 'protocol_version' -Default ''
+    if ($reason -eq 'header_switch_off') {
+        return $route -eq 'post_tuna_fallback_v6' -and $protocolVersion -eq '6'
+    }
+
+    return $reason -eq 'new_transfer' -or
+        $reason -eq 'offer_received' -or
+        $reason -eq 'live_route_tuna_activated' -or
+        $reason -eq 'live_route_tuna_reactivated'
+}
+
+function Test-FileTransferFallbackLegStartRouteEvent {
+    param([Parameter(Mandatory = $true)]$Event)
+
+    if ($Event.EventName -notin @(
+            'filetransfer_leg_started',
+            'filetransfer_clean_fallback_leg_started',
+            'filetransfer_fallback_leg_recovery_generation_started')) {
+        return $false
+    }
+
+    $route = Get-FileTransferEventField -Event $Event -Name 'route' -Default ''
+    $protocolVersion = Get-FileTransferEventField -Event $Event -Name 'protocol_version' -Default ''
+    return [string]::Equals($route, 'post_tuna_fallback_v6', [System.StringComparison]::OrdinalIgnoreCase) -and
+        $protocolVersion -eq '6'
+}
+
+function Test-FileTransferFallbackLegStartRouteEventBeforeSelection {
+    param(
+        [Parameter(Mandatory = $true)]$Event,
+        [Parameter(Mandatory = $true)]$RouteSelectedEvents
+    )
+
+    if (-not (Test-FileTransferFallbackLegStartRouteEvent -Event $Event)) {
+        return $false
+    }
+
+    $transferKey = Get-FileTransferRouteEventKey -Event $Event
+    $direction = Get-FileTransferRouteEventDirection -Event $Event
+    $eventLiveRouteEpoch = Get-FileTransferEventInt64Field -Event $Event -Name 'live_route_epoch' -Default 0
+    $eventLegGeneration = Get-FileTransferEventInt64Field -Event $Event -Name 'leg_generation' -Default 0
+    if ($eventLiveRouteEpoch -le 0 -or $eventLegGeneration -le 0) {
+        return $false
+    }
+
+    $matchingSelections = @(
+        $RouteSelectedEvents |
+            Where-Object {
+                (Get-FileTransferRouteEventKey -Event $_) -eq $transferKey -and
+                [string]::Equals((Get-FileTransferEventField -Event $_ -Name 'route' -Default ''), 'post_tuna_fallback_v6', [System.StringComparison]::OrdinalIgnoreCase) -and
+                (Get-FileTransferEventField -Event $_ -Name 'protocol_version' -Default '') -eq '6' -and
+                ([string]::IsNullOrWhiteSpace($direction) -or
+                    [string]::Equals((Get-FileTransferRouteEventDirection -Event $_), $direction, [System.StringComparison]::OrdinalIgnoreCase)) -and
+                (Get-FileTransferEventInt64Field -Event $_ -Name 'live_route_epoch' -Default 0) -eq $eventLiveRouteEpoch -and
+                (Get-FileTransferEventInt64Field -Event $_ -Name 'leg_generation' -Default 0) -eq $eventLegGeneration
+            }
+    )
+
+    $matchingBefore = @($matchingSelections | Where-Object { $_.Sequence -le $Event.Sequence })
+    $matchingAfter = @($matchingSelections | Where-Object { $_.Sequence -gt $Event.Sequence })
+    return $matchingBefore.Count -eq 0 -and $matchingAfter.Count -gt 0
+}
+
+function Test-FileTransferFallbackAuthorityRouteEvent {
+    param([Parameter(Mandatory = $true)]$Event)
+
+    if ($Event.EventName -eq 'filetransfer_control_plane_delivery_result') {
+        $kind = Get-FileTransferEventField -Event $Event -Name 'kind' -Default ''
+        if ($kind -notin @('fallback_checkpoint_request', 'fallback_checkpoint_proof')) {
+            return $false
+        }
+
+        $route = Get-FileTransferEventField -Event $Event -Name 'route' -Default ''
+        return [string]::Equals($route, 'post_tuna_fallback_v6', [System.StringComparison]::OrdinalIgnoreCase)
+    }
+
+    if ($Event.EventName -notin @(
+            'filetransfer_fallback_leg_authority_started',
+            'filetransfer_fallback_leg_authority_bridge_recovery_requested',
+            'filetransfer_fallback_leg_authority_checkpoint_accepted',
+            'filetransfer_fallback_leg_authority_completed',
+            'filetransfer_fallback_checkpoint_requested',
+            'filetransfer_clean_fallback_checkpoint_requested',
+            'filetransfer_fallback_checkpoint_request_sent',
+            'filetransfer_fallback_checkpoint_proof_sent')) {
+        return $false
+    }
+
+    $route = Get-FileTransferEventField -Event $Event -Name 'route' -Default ''
+    return [string]::Equals($route, 'post_tuna_fallback_v6', [System.StringComparison]::OrdinalIgnoreCase)
+}
+
+function Test-FileTransferFallbackAuthorityRouteEventBeforeSelection {
+    param(
+        [Parameter(Mandatory = $true)]$Event,
+        [Parameter(Mandatory = $true)]$RouteSelectedEvents
+    )
+
+    if (-not (Test-FileTransferFallbackAuthorityRouteEvent -Event $Event)) {
+        return $false
+    }
+
+    $transferKey = Get-FileTransferRouteEventKey -Event $Event
+    $direction = Get-FileTransferRouteEventDirection -Event $Event
+    $eventLiveRouteEpoch = Get-FileTransferEventInt64Field -Event $Event -Name 'live_route_epoch' -Default 0
+    $matchingSelections = @(
+        $RouteSelectedEvents |
+            Where-Object {
+                $_.Sequence -le $Event.Sequence -and
+                (Get-FileTransferRouteEventKey -Event $_) -eq $transferKey -and
+                [string]::Equals((Get-FileTransferEventField -Event $_ -Name 'route' -Default ''), 'post_tuna_fallback_v6', [System.StringComparison]::OrdinalIgnoreCase) -and
+                ([string]::IsNullOrWhiteSpace($direction) -or
+                    [string]::Equals((Get-FileTransferRouteEventDirection -Event $_), $direction, [System.StringComparison]::OrdinalIgnoreCase)) -and
+                ($eventLiveRouteEpoch -le 0 -or
+                    (Get-FileTransferEventInt64Field -Event $_ -Name 'live_route_epoch' -Default 0) -eq $eventLiveRouteEpoch)
+            }
+    )
+
+    return $matchingSelections.Count -eq 0
+}
+
+function Test-FileTransferRouteEventSupersededBySelectedRoute {
+    param(
+        [Parameter(Mandatory = $true)]$Event,
+        [Parameter(Mandatory = $true)][string]$SelectedRoute,
+        [AllowEmptyString()][string]$ExpectedProtocol = ''
+    )
+
+    if ($Event.EventName -eq 'filetransfer_runtime_owner_stale_update_rejected') {
+        $currentRoute = Get-FileTransferEventField -Event $Event -Name 'current_route' -Default ''
+        if ([string]::IsNullOrWhiteSpace($currentRoute) -or
+            -not [string]::Equals($currentRoute, $SelectedRoute, [System.StringComparison]::OrdinalIgnoreCase)) {
+            return $false
+        }
+
+        $currentProtocol = Get-FileTransferEventField -Event $Event -Name 'current_protocol_version' -Default ''
+        if (-not [string]::IsNullOrWhiteSpace($currentProtocol) -and
+            -not [string]::IsNullOrWhiteSpace($ExpectedProtocol) -and
+            $currentProtocol -ne $ExpectedProtocol) {
+            return $false
+        }
+
+        return $true
+    }
+
+    $supersededByRoute = Get-FileTransferEventField -Event $Event -Name 'superseded_by_route' -Default ''
+    if ([string]::IsNullOrWhiteSpace($supersededByRoute) -or
+        -not [string]::Equals($supersededByRoute, $SelectedRoute, [System.StringComparison]::OrdinalIgnoreCase)) {
+        return $false
+    }
+
+    $supersededByProtocol = Get-FileTransferEventField -Event $Event -Name 'superseded_by_protocol_version' -Default ''
+    if (-not [string]::IsNullOrWhiteSpace($supersededByProtocol) -and
+        -not [string]::IsNullOrWhiteSpace($ExpectedProtocol) -and
+        $supersededByProtocol -ne $ExpectedProtocol) {
+        return $false
+    }
+
+    return $true
+}
+
+function Test-FileTransferControlPlaneRouteEventSupersededByNewerLiveEpoch {
+    param(
+        [Parameter(Mandatory = $true)]$Event,
+        [Parameter(Mandatory = $true)]$Selected
+    )
+
+    if ($Event.EventName -ne 'filetransfer_control_plane_delivery_result' -and
+        $Event.EventName -ne 'filetransfer_control_plane_delivery_observed') {
+        return $false
+    }
+
+    $eventRoute = Get-FileTransferEventField -Event $Event -Name 'route' -Default ''
+    if ([string]::IsNullOrWhiteSpace($eventRoute)) {
+        return $false
+    }
+
+    $eventLiveRouteEpoch = Get-FileTransferEventInt64Field -Event $Event -Name 'live_route_epoch' -Default 0
+    $selectedLiveRouteEpoch = Get-FileTransferEventInt64Field -Event $Selected -Name 'live_route_epoch' -Default 0
+    if ($eventLiveRouteEpoch -le 0 -or
+        $selectedLiveRouteEpoch -le 0 -or
+        $eventLiveRouteEpoch -ge $selectedLiveRouteEpoch) {
+        return $false
+    }
+
+    $expectedEventProtocol = Get-FileTransferRouteExpectedProtocol -Route $eventRoute
+    if ([string]::IsNullOrWhiteSpace($expectedEventProtocol)) {
+        return $false
+    }
+
+    $eventProtocol = Get-FileTransferEventField -Event $Event -Name 'protocol_version' -Default ''
+    if (-not [string]::IsNullOrWhiteSpace($eventProtocol) -and $eventProtocol -ne $expectedEventProtocol) {
+        return $false
+    }
+
+    return $true
+}
+
+function Get-FileTransferSelectedRouteForEvent {
+    param(
+        [Parameter(Mandatory = $true)]$Event,
+        [Parameter(Mandatory = $true)]$RouteSelectedEvents
+    )
+
+    $transferKey = Get-FileTransferRouteEventKey -Event $Event
+    $direction = Get-FileTransferRouteEventDirection -Event $Event
+    $eventRoute = Get-FileTransferEventField -Event $Event -Name 'route' -Default ''
+    $eventLiveRouteEpoch = Get-FileTransferEventInt64Field -Event $Event -Name 'live_route_epoch' -Default 0
+    $candidates = @(
+        $RouteSelectedEvents |
+            Where-Object {
+                $_.Sequence -le $Event.Sequence -and
+                (Get-FileTransferRouteEventKey -Event $_) -eq $transferKey
+            } |
+            Sort-Object Sequence
+    )
+    $routeMatchCandidates = $candidates
+    if (-not [string]::IsNullOrWhiteSpace($direction)) {
+        $routeMatchCandidates = @(
+            $candidates |
+                Where-Object {
+                    [string]::Equals((Get-FileTransferRouteEventDirection -Event $_), $direction, [System.StringComparison]::OrdinalIgnoreCase)
+                }
+        )
+    }
+
+    # The production commit path logs its transition before the matching selection.
+    # Bind only the exact coordinator publication; a route hint is not sufficient.
+    if ($Event.EventName -ceq 'filetransfer_route_transitioned' -and
+        (Get-FileTransferEventInt64Field $Event 'route_publication_generation' 0) -gt 0 -and
+        (Get-FileTransferEventField $Event 'new_route' '') -ceq $eventRoute -and
+        (Get-FileTransferEventField $Event 'new_protocol_version' '') -ceq (Get-FileTransferRouteExpectedProtocol $eventRoute) -and
+        $routeMatchCandidates.Count -gt 0 -and
+        (Get-FileTransferEventField $routeMatchCandidates[-1] 'route' '') -ceq (Get-FileTransferEventField $Event 'previous_route' '') -and
+        (Get-FileTransferEventField $routeMatchCandidates[-1] 'protocol_version' '') -ceq (Get-FileTransferEventField $Event 'previous_protocol_version' '')) {
+        $matchingPublications=@($RouteSelectedEvents | Where-Object {
+            $candidate=$_; $exact=$candidate.Sequence -gt $Event.Sequence -and
+                (Test-FileTransferProductionRouteEvidenceEvent $candidate) -and
+                (Get-FileTransferRouteEventKey $candidate) -ceq $transferKey -and
+                (Get-FileTransferRouteEventDirection $candidate) -ceq $direction
+            foreach ($name in @('route','protocol_version','live_route_epoch','route_publication_generation','runtime_generation',
+                    'terminal_generation','leg_generation','route_commit_generation','target_route','target_protocol_version',
+                    'target_transport','route_publication_action_kind','coordinator_decision_reason')) {
+                $value=Get-FileTransferEventField $Event $name ''
+                if ($value -cin @('', '(none)') -or $value -cne (Get-FileTransferEventField $candidate $name '')) { $exact=$false; break }
+            }
+            $exact
+        })
+        if ($matchingPublications.Count -eq 1) { return $matchingPublications[0] }
+    }
+
+    if (-not [string]::IsNullOrWhiteSpace($eventRoute) -and $eventLiveRouteEpoch -gt 0) {
+        $epochCandidates = @(
+            $routeMatchCandidates |
+                Where-Object {
+                    (Get-FileTransferEventInt64Field -Event $_ -Name 'live_route_epoch' -Default 0) -eq $eventLiveRouteEpoch -and
+                    [string]::Equals((Get-FileTransferEventField -Event $_ -Name 'route' -Default ''), $eventRoute, [System.StringComparison]::OrdinalIgnoreCase)
+                } |
+                Sort-Object Sequence
+        )
+        if ($epochCandidates.Count -gt 0) {
+            return $epochCandidates[-1]
+        }
+    }
+
+    if (-not [string]::IsNullOrWhiteSpace($eventRoute) -and $routeMatchCandidates.Count -gt 0) {
+        $eventRoutePublicationGeneration = Get-FileTransferEventInt64Field -Event $Event -Name 'route_publication_generation' -Default 0
+        if ($eventRoutePublicationGeneration -gt 0) {
+            $publicationCandidates = @(
+                $routeMatchCandidates |
+                    Where-Object {
+                        [string]::Equals((Get-FileTransferEventField -Event $_ -Name 'route' -Default ''), $eventRoute, [System.StringComparison]::OrdinalIgnoreCase) -and
+                        (Get-FileTransferEventInt64Field -Event $_ -Name 'route_publication_generation' -Default 0) -le $eventRoutePublicationGeneration
+                    } |
+                    Sort-Object @{ Expression = { Get-FileTransferEventInt64Field -Event $_ -Name 'route_publication_generation' -Default 0 } }, Sequence
+            )
+            if ($publicationCandidates.Count -gt 0) {
+                return $publicationCandidates[-1]
+            }
+        }
+
+        $latestCandidate = $routeMatchCandidates[-1]
+        $latestRoute = Get-FileTransferEventField -Event $latestCandidate -Name 'route' -Default ''
+        if ([string]::Equals($latestRoute, $eventRoute, [System.StringComparison]::OrdinalIgnoreCase)) {
+            return $latestCandidate
+        }
+    }
+
+    if (-not [string]::IsNullOrWhiteSpace($direction)) {
+        $directionCandidates = @(
+            $candidates |
+                Where-Object {
+                    [string]::Equals((Get-FileTransferRouteEventDirection -Event $_), $direction, [System.StringComparison]::OrdinalIgnoreCase)
+                } |
+                Sort-Object Sequence
+        )
+        if ($directionCandidates.Count -gt 0) {
+            return $directionCandidates[-1]
+        }
+    }
+
+    if ([string]::IsNullOrWhiteSpace($direction) -and $candidates.Count -gt 0) {
+        return $candidates[-1]
+    }
+
+    return $null
+}
+
+function Convert-FileTransferRouteTransitionToSelection {
+    param([Parameter(Mandatory = $true)]$Event)
+
+    $newRoute = Get-FileTransferEventField -Event $Event -Name 'new_route' -Default ''
+    if ([string]::IsNullOrWhiteSpace($newRoute)) {
+        return $null
+    }
+
+    $fields = @{}
+    if ($null -ne $Event.Fields) {
+        foreach ($key in @($Event.Fields.Keys)) {
+            $fields[$key] = $Event.Fields[$key]
+        }
+    }
+
+    $fields['route'] = $newRoute
+    $fields['protocol_version'] = Get-FileTransferEventField -Event $Event -Name 'new_protocol_version' -Default (Get-FileTransferEventField -Event $Event -Name 'protocol_version' -Default '')
+    $fields['runtime_profile'] = Get-FileTransferEventField -Event $Event -Name 'new_runtime_profile' -Default (Get-FileTransferEventField -Event $Event -Name 'runtime_profile' -Default '')
+    $fields['frame_family'] = Get-FileTransferEventField -Event $Event -Name 'new_frame_family' -Default (Get-FileTransferEventField -Event $Event -Name 'frame_family' -Default '')
+    $fields['file_tuna_active'] = if ($newRoute -eq 'file_tuna_v4') { '1' } else { '0' }
+    $fields['post_tuna_fallback_active'] = if ($newRoute -eq 'post_tuna_fallback_v6') { '1' } else { '0' }
+    $fields['diagnostic_regular_nkn_v6'] = if ($newRoute -eq 'diagnostic_regular_nkn_v6') { '1' } else { '0' }
+    $fields['transition_backed_route_selection'] = '1'
+
+    return [pscustomobject]@{
+        TimestampUtc = $Event.TimestampUtc
+        TimestampText = $Event.TimestampText
+        Level = $Event.Level
+        Source = $Event.Source
+        EventName = 'filetransfer_route_selected'
+        Fields = $fields
+        TransferId = $Event.TransferId
+        FilePath = $Event.FilePath
+        FileName = $Event.FileName
+        LineNumber = $Event.LineNumber
+        Sequence = $Event.Sequence
+        Message = $Event.Message
+        RawLine = $Event.RawLine
+    }
+}
+
+function Test-FileTransferProductionRouteEvidenceEvent {
+    param([AllowNull()]$Event)
+
+    if ($null -eq $Event) {
+        return $false
+    }
+
+    return (Get-FileTransferEventField `
+            -Event $Event `
+            -Name 'gui_authoritative_projection' `
+            -Default '0') -ne '1'
+}
+
+function Get-FileTransferCanonicalRouteSelectionEvents {
+    param([AllowEmptyCollection()][object[]]$Events = @())
+
+    [object[]]$selectedEvents = @(
+        Get-FileTransferEventsByName `
+            -Events $Events `
+            -Names @('filetransfer_route_selected') |
+            Where-Object { Test-FileTransferProductionRouteEvidenceEvent -Event $_ } |
+            Sort-Object Sequence, LineNumber
+    )
+    if ($selectedEvents.Count -gt 0) {
+        $canonicalEvents = New-Object System.Collections.Generic.List[object]
+        $latestFileTunaByScope = @{}
+        foreach ($selectedEvent in $selectedEvents) {
+            $route = Get-FileTransferEventField `
+                -Event $selectedEvent `
+                -Name 'route' `
+                -Default ''
+            if ($route -ne 'file_tuna_v4') {
+                $canonicalEvents.Add($selectedEvent) | Out-Null
+                continue
+            }
+
+            $scopeKey = Get-FileTransferRouteEventKey `
+                -Event $selectedEvent `
+                -IncludeDirection
+            if (-not $latestFileTunaByScope.ContainsKey($scopeKey)) {
+                $latestFileTunaByScope[$scopeKey] = $selectedEvent
+                $canonicalEvents.Add($selectedEvent) | Out-Null
+                continue
+            }
+
+            $previous = $latestFileTunaByScope[$scopeKey]
+            $strictlyNewer = $false
+            $regressed = $false
+            foreach ($fieldName in @(
+                    'live_route_epoch',
+                    'route_publication_generation',
+                    'leg_generation')) {
+                $previousText = Get-FileTransferEventField `
+                    -Event $previous `
+                    -Name $fieldName `
+                    -Default ''
+                $currentText = Get-FileTransferEventField `
+                    -Event $selectedEvent `
+                    -Name $fieldName `
+                    -Default ''
+                if ([string]::IsNullOrWhiteSpace($previousText) -and
+                    [string]::IsNullOrWhiteSpace($currentText)) {
+                    continue
+                }
+                if ([string]::IsNullOrWhiteSpace($previousText)) {
+                    # A newly populated component cannot prove advancement
+                    # over an unknown coordinator generation.
+                    continue
+                }
+                if ([string]::IsNullOrWhiteSpace($currentText)) {
+                    $regressed = $true
+                    break
+                }
+
+                $previousGeneration = Get-FileTransferEventInt64Field `
+                    -Event $previous `
+                    -Name $fieldName `
+                    -Default -1
+                $currentGeneration = Get-FileTransferEventInt64Field `
+                    -Event $selectedEvent `
+                    -Name $fieldName `
+                    -Default -1
+                if ($currentGeneration -lt $previousGeneration) {
+                    $regressed = $true
+                    break
+                }
+                if ($currentGeneration -gt $previousGeneration) {
+                    $strictlyNewer = $true
+                }
+            }
+
+            if ($regressed -or -not $strictlyNewer) {
+                continue
+            }
+
+            $latestFileTunaByScope[$scopeKey] = $selectedEvent
+            $canonicalEvents.Add($selectedEvent) | Out-Null
+        }
+
+        return @($canonicalEvents.ToArray())
+    }
+
+    return @(
+        $Events |
+            Where-Object {
+                $_.EventName -eq 'filetransfer_route_transitioned' -and
+                (Test-FileTransferProductionRouteEvidenceEvent -Event $_)
+            } |
+            ForEach-Object { Convert-FileTransferRouteTransitionToSelection -Event $_ } |
+            Where-Object { $null -ne $_ } |
+            Sort-Object Sequence, LineNumber
+    )
+}
+
+function Test-FileTransferRouteTerminalBetween {
+    param(
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyCollection()]
+        [object[]]$TerminalEvents,
+        [Parameter(Mandatory = $true)][string]$DirectionKey,
+        [Parameter(Mandatory = $true)][long]$AfterSequence,
+        [Parameter(Mandatory = $true)][long]$BeforeSequence
+    )
+
+    foreach ($terminal in @($TerminalEvents)) {
+        if ($terminal.Sequence -le $AfterSequence -or $terminal.Sequence -ge $BeforeSequence) {
+            continue
+        }
+
+        if ((Get-FileTransferRouteEventKey -Event $terminal -IncludeDirection) -eq $DirectionKey) {
+            return $true
+        }
+    }
+
+    return $false
+}
+
+function Test-FileTransferAllowedLiveFallbackRouteTransition {
+    param(
+        [Parameter(Mandatory = $true)]$Previous,
+        [Parameter(Mandatory = $true)]$Selected
+    )
+
+    $previousRoute = Get-FileTransferEventField -Event $Previous -Name 'route' -Default ''
+    $route = Get-FileTransferEventField -Event $Selected -Name 'route' -Default ''
+    $handoffKind = Get-FileTransferEventField -Event $Selected -Name 'handoff_kind' -Default ''
+    if ($previousRoute -eq 'file_tuna_v4' -and $route -eq 'post_tuna_fallback_v6') {
+        $postTunaFallbackActive = Get-FileTransferEventField -Event $Selected -Name 'post_tuna_fallback_active' -Default '0'
+        $fileTunaActive = Get-FileTransferEventField -Event $Selected -Name 'file_tuna_active' -Default '1'
+        return $handoffKind -eq 'tuna_to_normal_fallback' -and
+            $postTunaFallbackActive -eq '1' -and
+            $fileTunaActive -eq '0'
+    }
+
+    if ($route -eq 'post_tuna_fallback_v6') {
+        $postTunaFallbackActive = Get-FileTransferEventField -Event $Selected -Name 'post_tuna_fallback_active' -Default '0'
+        $fileTunaActive = Get-FileTransferEventField -Event $Selected -Name 'file_tuna_active' -Default '1'
+        $liveRouteEpoch = Get-FileTransferEventInt64Field -Event $Selected -Name 'live_route_epoch' -Default 0
+        return $handoffKind -eq 'tuna_to_normal_fallback' -and
+            $postTunaFallbackActive -eq '1' -and
+            $fileTunaActive -eq '0' -and
+            $liveRouteEpoch -gt 0
+    }
+
+    if ($previousRoute -eq 'regular_nkn_v4_fast' -and $route -eq 'file_tuna_v4') {
+        $postTunaFallbackActive = Get-FileTransferEventField -Event $Selected -Name 'post_tuna_fallback_active' -Default '1'
+        $fileTunaActive = Get-FileTransferEventField -Event $Selected -Name 'file_tuna_active' -Default '0'
+        return $handoffKind -eq 'normal_to_tuna_activation' -and
+            $postTunaFallbackActive -eq '0' -and
+            $fileTunaActive -eq '1'
+    }
+
+    if ($previousRoute -eq 'post_tuna_fallback_v6' -and $route -eq 'file_tuna_v4') {
+        $postTunaFallbackActive = Get-FileTransferEventField -Event $Selected -Name 'post_tuna_fallback_active' -Default '1'
+        $fileTunaActive = Get-FileTransferEventField -Event $Selected -Name 'file_tuna_active' -Default '0'
+        return $handoffKind -eq 'normal_to_tuna_activation' -and
+            $postTunaFallbackActive -eq '0' -and
+            $fileTunaActive -eq '1'
+    }
+
+    return $false
+}
+
+function Add-FileTransferRouteConsistencyFinding {
+    param(
+        [Parameter(Mandatory = $true)]$Findings,
+        [Parameter(Mandatory = $true)]$EvidenceEvents,
+        [Parameter(Mandatory = $true)][string]$Finding,
+        $Event
+    )
+
+    $Findings.Add($Finding) | Out-Null
+    if ($null -ne $Event) {
+        foreach ($existing in @($EvidenceEvents)) {
+            if ($existing.Sequence -eq $Event.Sequence) {
+                return
+            }
+        }
+
+        $EvidenceEvents.Add($Event) | Out-Null
+    }
+}
+
+function Add-FileTransferRouteSelfConsistencyFindings {
+    param(
+        [Parameter(Mandatory = $true)]$Findings,
+        [Parameter(Mandatory = $true)]$EvidenceEvents,
+        [Parameter(Mandatory = $true)]$Event,
+        [Parameter(Mandatory = $true)][string]$Context
+    )
+
+    $eventRoute = Get-FileTransferEventField -Event $Event -Name 'route' -Default ''
+    if ([string]::IsNullOrWhiteSpace($eventRoute)) {
+        return
+    }
+
+    $expectedProtocol = Get-FileTransferRouteExpectedProtocol -Route $eventRoute
+    if ([string]::IsNullOrWhiteSpace($expectedProtocol)) {
+        Add-FileTransferRouteConsistencyFinding -Findings $Findings -EvidenceEvents $EvidenceEvents -Finding ("{0} unknown route: {1}" -f $Context, (Format-FileTransferEvidenceLine -Event $Event)) -Event $Event
+        return
+    }
+
+    $eventProtocol = Get-FileTransferEventField -Event $Event -Name 'protocol_version' -Default ''
+    if (-not [string]::IsNullOrWhiteSpace($eventProtocol) -and $eventProtocol -ne $expectedProtocol) {
+        Add-FileTransferRouteConsistencyFinding -Findings $Findings -EvidenceEvents $EvidenceEvents -Finding ("{0} route protocol mismatch: route={1}; expected_protocol={2}; actual_protocol={3}; event={4}" -f $Context, $eventRoute, $expectedProtocol, $eventProtocol, (Format-FileTransferEvidenceLine -Event $Event)) -Event $Event
+    }
+
+    $expectedRuntimeProfile = Get-FileTransferRouteExpectedRuntimeProfile -Route $eventRoute
+    $eventRuntimeProfile = Normalize-FileTransferRouteRuntimeProfile -Value (Get-FileTransferEventField -Event $Event -Name 'runtime_profile' -Default '')
+    if (-not [string]::IsNullOrWhiteSpace($eventRuntimeProfile) -and
+        -not [string]::IsNullOrWhiteSpace($expectedRuntimeProfile) -and
+        -not (Test-FileTransferRouteRuntimeProfileMatches -Expected $expectedRuntimeProfile -Actual $eventRuntimeProfile)) {
+        Add-FileTransferRouteConsistencyFinding -Findings $Findings -EvidenceEvents $EvidenceEvents -Finding ("{0} route runtime mismatch: route={1}; expected_runtime={2}; actual_runtime={3}; event={4}" -f $Context, $eventRoute, $expectedRuntimeProfile, $eventRuntimeProfile, (Format-FileTransferEvidenceLine -Event $Event)) -Event $Event
+    }
+
+    $expectedBridgePolicy = Get-FileTransferRouteExpectedBridgePolicy -Route $eventRoute
+    $eventBridgePolicy = Get-FileTransferEventField -Event $Event -Name 'bridge_recovery_policy' -Default ''
+    if (-not [string]::IsNullOrWhiteSpace($eventBridgePolicy) -and -not [string]::IsNullOrWhiteSpace($expectedBridgePolicy) -and $eventBridgePolicy -ne $expectedBridgePolicy) {
+        Add-FileTransferRouteConsistencyFinding -Findings $Findings -EvidenceEvents $EvidenceEvents -Finding ("{0} route bridge policy mismatch: route={1}; expected_bridge_policy={2}; actual_bridge_policy={3}; event={4}" -f $Context, $eventRoute, $expectedBridgePolicy, $eventBridgePolicy, (Format-FileTransferEvidenceLine -Event $Event)) -Event $Event
+    }
+}
+
+function Get-FileTransferRouteConsistency {
+    param([object[]]$TransferEvents)
+
+    $routeSelectedEvents = @(
+        Get-FileTransferCanonicalRouteSelectionEvents -Events $TransferEvents
+    )
+    $routeStateEvents = @($routeSelectedEvents)
+    $routeAwareEvents = @(
+        $TransferEvents |
+            Where-Object {
+                (Test-FileTransferProductionRouteEvidenceEvent -Event $_) -and
+                (Test-FileTransferRouteAwareEvent -Event $_)
+            } |
+            Sort-Object Sequence, LineNumber
+    )
+    $terminalEvents = @(Get-FileTransferTerminalEvents -Events $TransferEvents | Sort-Object Sequence)
+    $findings = New-Object System.Collections.ArrayList
+    $evidenceEvents = New-Object System.Collections.ArrayList
+    $lastSelectedByDirectionKey = @{}
+
+    foreach ($selected in @($routeStateEvents)) {
+        $route = Get-FileTransferEventField -Event $selected -Name 'route' -Default ''
+        $directionKey = Get-FileTransferRouteEventKey -Event $selected -IncludeDirection
+        if ($lastSelectedByDirectionKey.ContainsKey($directionKey)) {
+            $previous = $lastSelectedByDirectionKey[$directionKey]
+            $previousRoute = Get-FileTransferEventField -Event $previous -Name 'route' -Default ''
+            if ($route -ne $previousRoute -and
+                -not (Test-FileTransferRouteTerminalBetween -TerminalEvents $terminalEvents -DirectionKey $directionKey -AfterSequence $previous.Sequence -BeforeSequence $selected.Sequence) -and
+                -not (Test-FileTransferAllowedLiveFallbackRouteTransition -Previous $previous -Selected $selected)) {
+                Add-FileTransferRouteConsistencyFinding -Findings $findings -EvidenceEvents $evidenceEvents -Finding ("route changed before prior terminal: transfer_direction={0}; previous_route={1}; new_route={2}; event={3}" -f $directionKey, $previousRoute, $route, (Format-FileTransferEvidenceLine -Event $selected)) -Event $selected
+            }
+        }
+
+        $lastSelectedByDirectionKey[$directionKey] = $selected
+
+        $expectedProtocol = Get-FileTransferRouteExpectedProtocol -Route $route
+        if ([string]::IsNullOrWhiteSpace($expectedProtocol)) {
+            Add-FileTransferRouteConsistencyFinding -Findings $findings -EvidenceEvents $evidenceEvents -Finding ("unknown route selected: {0}" -f (Format-FileTransferEvidenceLine -Event $selected)) -Event $selected
+            continue
+        }
+
+        $protocolVersion = Get-FileTransferEventField -Event $selected -Name 'protocol_version' -Default ''
+        if ($protocolVersion -ne $expectedProtocol) {
+            Add-FileTransferRouteConsistencyFinding -Findings $findings -EvidenceEvents $evidenceEvents -Finding ("route selected protocol mismatch: route={0}; expected_protocol={1}; event={2}" -f $route, $expectedProtocol, (Format-FileTransferEvidenceLine -Event $selected)) -Event $selected
+        }
+
+        $runtimeProfile = Normalize-FileTransferRouteRuntimeProfile -Value (Get-FileTransferEventField -Event $selected -Name 'runtime_profile' -Default '')
+        $expectedRuntimeProfile = Get-FileTransferRouteExpectedRuntimeProfile -Route $route
+        if (-not [string]::IsNullOrWhiteSpace($runtimeProfile) -and
+            -not (Test-FileTransferRouteRuntimeProfileMatches -Expected $expectedRuntimeProfile -Actual $runtimeProfile)) {
+            Add-FileTransferRouteConsistencyFinding -Findings $findings -EvidenceEvents $evidenceEvents -Finding ("route selected runtime mismatch: route={0}; expected_runtime={1}; actual_runtime={2}; event={3}" -f $route, $expectedRuntimeProfile, $runtimeProfile, (Format-FileTransferEvidenceLine -Event $selected)) -Event $selected
+        }
+
+        $bridgePolicy = Get-FileTransferEventField -Event $selected -Name 'bridge_recovery_policy' -Default ''
+        $expectedBridgePolicy = Get-FileTransferRouteExpectedBridgePolicy -Route $route
+        if (-not [string]::IsNullOrWhiteSpace($bridgePolicy) -and $bridgePolicy -ne $expectedBridgePolicy) {
+            Add-FileTransferRouteConsistencyFinding -Findings $findings -EvidenceEvents $evidenceEvents -Finding ("route selected bridge policy mismatch: route={0}; expected_bridge_policy={1}; actual_bridge_policy={2}; event={3}" -f $route, $expectedBridgePolicy, $bridgePolicy, (Format-FileTransferEvidenceLine -Event $selected)) -Event $selected
+        }
+
+        $diagnosticEnabled = Get-FileTransferEventField -Event $selected -Name 'diagnostic_regular_nkn_v6' -Default '0'
+        if ($route -eq 'diagnostic_regular_nkn_v6' -and $diagnosticEnabled -ne '1') {
+            Add-FileTransferRouteConsistencyFinding -Findings $findings -EvidenceEvents $evidenceEvents -Finding ("diagnostic route selected without diagnostic marker: {0}" -f (Format-FileTransferEvidenceLine -Event $selected)) -Event $selected
+        }
+    }
+
+    if ($routeAwareEvents.Count -gt 0 -and $routeStateEvents.Count -eq 0) {
+        Add-FileTransferRouteConsistencyFinding -Findings $findings -EvidenceEvents $evidenceEvents -Finding 'route-aware transfer events were present but no filetransfer_route_selected event was found' -Event $routeAwareEvents[0]
+    }
+
+    foreach ($event in @($TransferEvents | Sort-Object Sequence)) {
+        $frameType = Get-FileTransferEventField -Event $event -Name 'frame_type' -Default ''
+        $originalFrameType = Get-FileTransferEventField -Event $event -Name 'original_frame_type' -Default ''
+        $protocolVersion = Get-FileTransferEventField -Event $event -Name 'protocol_version' -Default ''
+        if ($event.EventName -like 'filetransfer_v5_*' -or
+            $frameType -like '*.v5' -or
+            $originalFrameType -like '*.v5' -or
+            $protocolVersion -eq '5') {
+            Add-FileTransferRouteConsistencyFinding -Findings $findings -EvidenceEvents $evidenceEvents -Finding ("obsolete_protocol_v5: {0}" -f (Format-FileTransferEvidenceLine -Event $event)) -Event $event
+        }
+    }
+
+    # The selector depends on sequence only through the eligible selection prefix.
+    # Keep both the prefix and query cache local; the original selector owns misses.
+    $routeEligibilityEvents = @($routeStateEvents | Sort-Object Sequence)
+    $routeEligibilityCount = 0
+    $routeSelectionCache = [System.Collections.Generic.Dictionary[object, object]]::new()
+    foreach ($event in @($routeAwareEvents)) {
+        if ($event.EventName -eq 'filetransfer_route_selected') {
+            continue
+        }
+
+        if (Test-FileTransferLegHistoryRouteEvent -Event $event) {
+            Add-FileTransferRouteSelfConsistencyFindings -Findings $findings -EvidenceEvents $evidenceEvents -Event $event -Context 'transfer leg history'
+            continue
+        }
+
+        if (Test-FileTransferLiveRouteEpochRouteEvent -Event $event) {
+            Add-FileTransferRouteSelfConsistencyFindings -Findings $findings -EvidenceEvents $evidenceEvents -Event $event -Context 'live route epoch'
+            continue
+        }
+
+        if (Test-FileTransferRouteEventCanPrecedeSelection -Event $event) {
+            Add-FileTransferRouteSelfConsistencyFindings -Findings $findings -EvidenceEvents $evidenceEvents -Event $event -Context 'preselection transfer leg'
+            continue
+        }
+
+        if (Test-FileTransferFallbackLegStartRouteEventBeforeSelection -Event $event -RouteSelectedEvents $routeStateEvents) {
+            Add-FileTransferRouteSelfConsistencyFindings -Findings $findings -EvidenceEvents $evidenceEvents -Event $event -Context 'fallback preselection transfer leg'
+            continue
+        }
+
+        if (Test-FileTransferFallbackAuthorityRouteEventBeforeSelection -Event $event -RouteSelectedEvents $routeStateEvents) {
+            Add-FileTransferRouteSelfConsistencyFindings -Findings $findings -EvidenceEvents $evidenceEvents -Event $event -Context 'fallback authority'
+            continue
+        }
+
+        while ($routeEligibilityCount -lt $routeEligibilityEvents.Count -and
+            $routeEligibilityEvents[$routeEligibilityCount].Sequence -le $event.Sequence) {
+            $routeEligibilityCount++
+        }
+        $routeSelectionKey = [System.Tuple[int, string, string, string, long, long]]::new(
+            $routeEligibilityCount,
+            (Get-FileTransferRouteEventKey -Event $event),
+            (Get-FileTransferRouteEventDirection -Event $event),
+            (Get-FileTransferEventField -Event $event -Name 'route' -Default ''),
+            (Get-FileTransferEventInt64Field -Event $event -Name 'live_route_epoch' -Default 0),
+            (Get-FileTransferEventInt64Field -Event $event -Name 'route_publication_generation' -Default 0))
+        if ($routeSelectionCache.ContainsKey($routeSelectionKey)) {
+            $selected = $routeSelectionCache[$routeSelectionKey]
+        }
+        else {
+            $selected = Get-FileTransferSelectedRouteForEvent -Event $event -RouteSelectedEvents $routeStateEvents
+            $routeSelectionCache[$routeSelectionKey] = $selected
+        }
+        if ($null -eq $selected) {
+            Add-FileTransferRouteConsistencyFinding -Findings $findings -EvidenceEvents $evidenceEvents -Finding ("route-aware event has no selected route: {0}" -f (Format-FileTransferEvidenceLine -Event $event)) -Event $event
+            continue
+        }
+
+        $selectedRoute = Get-FileTransferEventField -Event $selected -Name 'route' -Default ''
+        $expectedProtocol = Get-FileTransferRouteExpectedProtocol -Route $selectedRoute
+        $expectedRuntimeProfile = Get-FileTransferRouteExpectedRuntimeProfile -Route $selectedRoute
+        $expectedBridgePolicy = Get-FileTransferRouteExpectedBridgePolicy -Route $selectedRoute
+
+        $eventRoute = Get-FileTransferEventField -Event $event -Name 'route' -Default ''
+        $eventSupersededBySelectedRoute = Test-FileTransferRouteEventSupersededBySelectedRoute -Event $event -SelectedRoute $selectedRoute -ExpectedProtocol $expectedProtocol
+        $eventSupersededByNewerLiveRouteEpoch = Test-FileTransferControlPlaneRouteEventSupersededByNewerLiveEpoch -Event $event -Selected $selected
+        if (-not [string]::IsNullOrWhiteSpace($eventRoute) -and $eventRoute -ne $selectedRoute) {
+            if (-not $eventSupersededBySelectedRoute -and -not $eventSupersededByNewerLiveRouteEpoch) {
+                Add-FileTransferRouteConsistencyFinding -Findings $findings -EvidenceEvents $evidenceEvents -Finding ("route token mismatch: selected_route={0}; event_route={1}; event={2}" -f $selectedRoute, $eventRoute, (Format-FileTransferEvidenceLine -Event $event)) -Event $event
+            }
+        }
+
+        if ($eventSupersededBySelectedRoute -or $eventSupersededByNewerLiveRouteEpoch) {
+            Add-FileTransferRouteSelfConsistencyFindings -Findings $findings -EvidenceEvents $evidenceEvents -Event $event -Context 'superseded route event'
+            continue
+        }
+
+        $eventProtocol = Get-FileTransferEventField -Event $event -Name 'protocol_version' -Default ''
+        if (-not [string]::IsNullOrWhiteSpace($eventProtocol) -and -not [string]::IsNullOrWhiteSpace($expectedProtocol) -and $eventProtocol -ne $expectedProtocol) {
+            Add-FileTransferRouteConsistencyFinding -Findings $findings -EvidenceEvents $evidenceEvents -Finding ("route protocol mismatch: route={0}; expected_protocol={1}; actual_protocol={2}; event={3}" -f $selectedRoute, $expectedProtocol, $eventProtocol, (Format-FileTransferEvidenceLine -Event $event)) -Event $event
+        }
+
+        $eventRuntimeProfile = Normalize-FileTransferRouteRuntimeProfile -Value (Get-FileTransferEventField -Event $event -Name 'runtime_profile' -Default '')
+        if (-not [string]::IsNullOrWhiteSpace($eventRuntimeProfile) -and
+            -not [string]::IsNullOrWhiteSpace($expectedRuntimeProfile) -and
+            -not (Test-FileTransferRouteRuntimeProfileMatches -Expected $expectedRuntimeProfile -Actual $eventRuntimeProfile)) {
+            Add-FileTransferRouteConsistencyFinding -Findings $findings -EvidenceEvents $evidenceEvents -Finding ("route runtime mismatch: route={0}; expected_runtime={1}; actual_runtime={2}; event={3}" -f $selectedRoute, $expectedRuntimeProfile, $eventRuntimeProfile, (Format-FileTransferEvidenceLine -Event $event)) -Event $event
+        }
+
+        $eventBridgePolicy = Get-FileTransferEventField -Event $event -Name 'bridge_recovery_policy' -Default ''
+        if (-not [string]::IsNullOrWhiteSpace($eventBridgePolicy) -and -not [string]::IsNullOrWhiteSpace($expectedBridgePolicy) -and $eventBridgePolicy -ne $expectedBridgePolicy) {
+            Add-FileTransferRouteConsistencyFinding -Findings $findings -EvidenceEvents $evidenceEvents -Finding ("route bridge policy mismatch: route={0}; expected_bridge_policy={1}; actual_bridge_policy={2}; event={3}" -f $selectedRoute, $expectedBridgePolicy, $eventBridgePolicy, (Format-FileTransferEvidenceLine -Event $event)) -Event $event
+        }
+
+        if ($selectedRoute -eq 'regular_nkn_v4_fast' -and
+            ($event.EventName -eq 'filetransfer_v6_sender_started' -or $event.EventName -eq 'filetransfer_v6_receiver_started')) {
+            Add-FileTransferRouteConsistencyFinding -Findings $findings -EvidenceEvents $evidenceEvents -Finding ("regular NKN V4 route entered V6 runtime: {0}" -f (Format-FileTransferEvidenceLine -Event $event)) -Event $event
+        }
+
+        if (($selectedRoute -eq 'post_tuna_fallback_v6' -or $selectedRoute -eq 'diagnostic_regular_nkn_v6') -and
+            ($event.EventName -eq 'filetransfer_v4_sender_started' -or $event.EventName -eq 'filetransfer_v4_receiver_started')) {
+            Add-FileTransferRouteConsistencyFinding -Findings $findings -EvidenceEvents $evidenceEvents -Finding ("V6 route entered regular V4 runtime: route={0}; event={1}" -f $selectedRoute, (Format-FileTransferEvidenceLine -Event $event)) -Event $event
+        }
+
+        if ($selectedRoute -eq 'file_tuna_v4' -and
+            ($event.EventName -eq 'filetransfer_v6_sender_started' -or $event.EventName -eq 'filetransfer_v6_receiver_started')) {
+            Add-FileTransferRouteConsistencyFinding -Findings $findings -EvidenceEvents $evidenceEvents -Finding ("file Tuna V4 route entered V6 runtime: {0}" -f (Format-FileTransferEvidenceLine -Event $event)) -Event $event
+        }
+    }
+
+    $verdict = if ($findings.Count -gt 0) {
+        'fail'
+    }
+    elseif ($routeAwareEvents.Count -eq 0) {
+        'legacy'
+    }
+    else {
+        'pass'
+    }
+
+    return [pscustomobject]@{
+        Verdict = $verdict
+        RouteSelectedEvents = @($routeSelectedEvents)
+        RouteAwareEvents = @($routeAwareEvents)
+        Findings = @($findings.ToArray())
+        EvidenceEvents = @($evidenceEvents.ToArray())
+    }
+}
+
+function Get-FileTransferLiveRouteExpectation {
+    param([Parameter(Mandatory = $true)][string]$Route)
+
+    switch ($Route) {
+        'post_tuna_fallback_v6' {
+            return [pscustomobject]@{
+                Route = 'post_tuna_fallback_v6'
+                ProtocolVersion = '6'
+                HandoffKind = 'tuna_to_normal_fallback'
+                TargetTransport = 'regular_nkn'
+            }
+        }
+        'file_tuna_v4' {
+            return [pscustomobject]@{
+                Route = 'file_tuna_v4'
+                ProtocolVersion = '4'
+                HandoffKind = 'normal_to_tuna_activation'
+                TargetTransport = 'tuna'
+            }
+        }
+        default {
+            return $null
+        }
+    }
+}
+
+function Test-FileTransferLiveRouteEpochEventName {
+    param($Event)
+
+    if ($null -eq $Event) {
+        return $false
+    }
+
+    $eventName = [string]$Event.EventName
+    return [string]::Equals($eventName, 'filetransfer_live_route_epoch_started', [System.StringComparison]::OrdinalIgnoreCase) -or
+        [string]::Equals($eventName, 'filetransfer_live_route_epoch_recovered', [System.StringComparison]::OrdinalIgnoreCase)
+}
+
+function Test-FileTransferLiveRouteEpochMetadataComplete {
+    param($Event)
+
+    if (-not (Test-FileTransferLiveRouteEpochEventName -Event $Event)) {
+        return $false
+    }
+
+    $route = Get-FileTransferEventField -Event $Event -Name 'route' -Default ''
+    $protocolVersion = Get-FileTransferEventInt64Field -Event $Event -Name 'protocol_version' -Default 0
+    $handoffKind = Get-FileTransferEventField -Event $Event -Name 'handoff_kind' -Default ''
+    $targetTransport = Get-FileTransferEventField -Event $Event -Name 'target_transport' -Default ''
+    $liveRouteEpoch = Get-FileTransferEventInt64Field -Event $Event -Name 'live_route_epoch' -Default 0
+    $transferId = if ([string]::IsNullOrWhiteSpace([string]$Event.TransferId)) {
+        Get-FileTransferEventField -Event $Event -Name 'transfer_id' -Default ''
+    } else {
+        [string]$Event.TransferId
+    }
+    $sessionId = Get-FileTransferEventField -Event $Event -Name 'session_id' -Default ''
+
+    return -not [string]::IsNullOrWhiteSpace($route) -and
+        $route -ne '(unknown)' -and
+        $protocolVersion -gt 0 -and
+        -not [string]::IsNullOrWhiteSpace($handoffKind) -and
+        $handoffKind -ne '(none)' -and
+        -not [string]::IsNullOrWhiteSpace($targetTransport) -and
+        $targetTransport -ne '(none)' -and
+        $liveRouteEpoch -gt 0 -and
+        -not [string]::IsNullOrWhiteSpace($transferId) -and
+        $transferId -ne '(none)' -and
+        $transferId -ne '(unknown)' -and
+        -not [string]::IsNullOrWhiteSpace($sessionId) -and
+        $sessionId -ne '(none)' -and
+        $sessionId -ne '(unknown)'
+}
+
+function Test-FileTransferLiveRouteEpochEventMatches {
+    param(
+        [Parameter(Mandatory = $true)]$Event,
+        [Parameter(Mandatory = $true)]$Expectation,
+        [Parameter(Mandatory = $true)][string]$EventName
+    )
+
+    if ($Event.EventName -ne $EventName) {
+        return $false
+    }
+
+    return (Get-FileTransferEventField -Event $Event -Name 'route' -Default '') -eq $Expectation.Route -and
+        (Get-FileTransferEventField -Event $Event -Name 'protocol_version' -Default '') -eq $Expectation.ProtocolVersion -and
+        (Get-FileTransferEventField -Event $Event -Name 'handoff_kind' -Default '') -eq $Expectation.HandoffKind -and
+        (Get-FileTransferEventField -Event $Event -Name 'target_transport' -Default '') -eq $Expectation.TargetTransport
+}
+
+function Get-FileTransferLiveRouteEpochProof {
+    param(
+        [object[]]$TransferEvents,
+        [ValidateSet('None', 'SwitchOff', 'MultiToggle', 'RegularActivationCycle')]
+        [string]$Mode = 'None'
+    )
+
+    [object[]]$explicitEvents = @(
+        $TransferEvents |
+            Where-Object {
+                (Test-FileTransferProductionRouteEvidenceEvent -Event $_) -and
+                (Test-FileTransferLiveRouteEpochEventName -Event $_)
+            } |
+            Sort-Object Sequence, LineNumber
+    )
+    [object[]]$completeEvents = @(
+        $explicitEvents |
+            Where-Object { Test-FileTransferLiveRouteEpochMetadataComplete -Event $_ } |
+            Sort-Object Sequence
+    )
+    [object[]]$metadataMissingEvents = @(
+        $explicitEvents |
+            Where-Object { -not (Test-FileTransferLiveRouteEpochMetadataComplete -Event $_) } |
+            Sort-Object Sequence
+    )
+    [object[]]$transportOnlyEvents = @(
+        $TransferEvents |
+            Where-Object {
+                ([string]$_.EventName).StartsWith('filetransfer_v6_epoch_', [System.StringComparison]::OrdinalIgnoreCase) -or
+                ([string]$_.EventName).StartsWith('filetransfer_v6_transport_epoch_', [System.StringComparison]::OrdinalIgnoreCase)
+            } |
+            Sort-Object Sequence
+    )
+
+    [object[]]$routeSelectedEvents = @(
+        Get-FileTransferCanonicalRouteSelectionEvents -Events $TransferEvents
+    )
+    $selectedRouteSequence = @(
+        $routeSelectedEvents |
+            ForEach-Object { Get-FileTransferEventField -Event $_ -Name 'route' -Default '' } |
+            Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
+    )
+    $selectedRouteChanges = New-Object System.Collections.Generic.List[string]
+    foreach ($route in @($selectedRouteSequence)) {
+        if ($selectedRouteChanges.Count -eq 0 -or
+            -not [string]::Equals($selectedRouteChanges[$selectedRouteChanges.Count - 1], [string]$route, [System.StringComparison]::OrdinalIgnoreCase)) {
+            $selectedRouteChanges.Add([string]$route) | Out-Null
+        }
+    }
+
+    $findings = New-Object System.Collections.Generic.List[string]
+    $evidence = New-Object System.Collections.Generic.List[object]
+    foreach ($event in @($metadataMissingEvents)) {
+        $findings.Add(("live route epoch metadata missing: {0}" -f (Format-FileTransferEvidenceLine -Event $event))) | Out-Null
+        $evidence.Add($event) | Out-Null
+    }
+
+    $scopedCompleteEvents = @($completeEvents)
+    if ($Mode -ne 'None') {
+        [object[]]$expectedTransferIds = @(
+            $routeSelectedEvents |
+                ForEach-Object {
+                    if ([string]::IsNullOrWhiteSpace([string]$_.TransferId)) {
+                        Get-FileTransferEventField -Event $_ -Name 'transfer_id' -Default ''
+                    } else {
+                        [string]$_.TransferId
+                    }
+                } |
+                Where-Object {
+                    -not [string]::IsNullOrWhiteSpace($_) -and
+                    $_ -ne '(none)' -and
+                    $_ -ne '(unknown)' -and
+                    $_ -ne '(all)'
+                } |
+                Select-Object -Unique
+        )
+        [object[]]$expectedSessionIds = @(
+            $routeSelectedEvents |
+                ForEach-Object { Get-FileTransferEventField -Event $_ -Name 'session_id' -Default '' } |
+                Where-Object {
+                    -not [string]::IsNullOrWhiteSpace($_) -and
+                    $_ -ne '(none)' -and
+                    $_ -ne '(unknown)'
+                } |
+                Select-Object -Unique
+        )
+
+        if ($expectedTransferIds.Count -gt 1) {
+            $findings.Add(("live route proof is not single-transfer scoped: transfer_ids={0}" -f ($expectedTransferIds -join ','))) | Out-Null
+        }
+        elseif ($expectedTransferIds.Count -eq 1) {
+            $expectedTransferId = [string]$expectedTransferIds[0]
+            [object[]]$transferScopeMismatches = @(
+                $scopedCompleteEvents |
+                    Where-Object {
+                        $eventTransferId = if ([string]::IsNullOrWhiteSpace([string]$_.TransferId)) {
+                            Get-FileTransferEventField -Event $_ -Name 'transfer_id' -Default ''
+                        } else {
+                            [string]$_.TransferId
+                        }
+                        -not [string]::Equals($eventTransferId, $expectedTransferId, [System.StringComparison]::Ordinal)
+                    }
+            )
+            foreach ($event in @($transferScopeMismatches)) {
+                $findings.Add(("live route epoch transfer scope mismatch: expected_transfer_id={0}; {1}" -f $expectedTransferId, (Format-FileTransferEvidenceLine -Event $event))) | Out-Null
+                $evidence.Add($event) | Out-Null
+            }
+            $scopedCompleteEvents = @(
+                $scopedCompleteEvents |
+                    Where-Object {
+                        $eventTransferId = if ([string]::IsNullOrWhiteSpace([string]$_.TransferId)) {
+                            Get-FileTransferEventField -Event $_ -Name 'transfer_id' -Default ''
+                        } else {
+                            [string]$_.TransferId
+                        }
+                        [string]::Equals($eventTransferId, $expectedTransferId, [System.StringComparison]::Ordinal)
+                    }
+            )
+        }
+
+        if ($expectedSessionIds.Count -gt 1) {
+            $findings.Add(("live route proof is not single-session scoped: session_ids={0}" -f ($expectedSessionIds -join ','))) | Out-Null
+        }
+        elseif ($expectedSessionIds.Count -eq 1) {
+            $expectedSessionId = [string]$expectedSessionIds[0]
+            [object[]]$sessionScopeMismatches = @(
+                $scopedCompleteEvents |
+                    Where-Object {
+                        $eventSessionId = Get-FileTransferEventField -Event $_ -Name 'session_id' -Default ''
+                        -not [string]::Equals($eventSessionId, $expectedSessionId, [System.StringComparison]::Ordinal)
+                    }
+            )
+            foreach ($event in @($sessionScopeMismatches)) {
+                $findings.Add(("live route epoch session scope mismatch: expected_session_id={0}; {1}" -f $expectedSessionId, (Format-FileTransferEvidenceLine -Event $event))) | Out-Null
+                $evidence.Add($event) | Out-Null
+            }
+            $scopedCompleteEvents = @(
+                $scopedCompleteEvents |
+                    Where-Object {
+                        $eventSessionId = Get-FileTransferEventField -Event $_ -Name 'session_id' -Default ''
+                        [string]::Equals($eventSessionId, $expectedSessionId, [System.StringComparison]::Ordinal)
+                    }
+            )
+        }
+    }
+
+    # Parser sequence reflects file append order, but the coordinator epoch is
+    # the canonical live-route chronology.  Sort complete production epochs
+    # numerically so a late duplicate cannot reorder the route cycle.
+    $scopedCompleteEvents = @(
+        $scopedCompleteEvents |
+            Sort-Object `
+                @{ Expression = {
+                        Get-FileTransferEventInt64Field `
+                            -Event $_ `
+                            -Name 'live_route_epoch' `
+                            -Default 0
+                    } }, `
+                Sequence, LineNumber
+    )
+
+    $completedEpochRows = New-Object System.Collections.Generic.List[object]
+    [object[]]$scopedLiveEpochGroups = @(
+        $scopedCompleteEvents |
+            Group-Object {
+                $epoch = Get-FileTransferEventInt64Field -Event $_ -Name 'live_route_epoch' -Default 0
+                $route = Get-FileTransferEventField -Event $_ -Name 'route' -Default ''
+                $protocol = Get-FileTransferEventField -Event $_ -Name 'protocol_version' -Default ''
+                $handoff = Get-FileTransferEventField -Event $_ -Name 'handoff_kind' -Default ''
+                $target = Get-FileTransferEventField -Event $_ -Name 'target_transport' -Default ''
+                "{0}|{1}|{2}|{3}|{4}" -f $epoch, $route, $protocol, $handoff, $target
+            }
+    )
+    foreach ($group in @($scopedLiveEpochGroups)) {
+        [object[]]$events = @($group.Group | Sort-Object Sequence)
+        [object[]]$startedEvents = @($events | Where-Object { $_.EventName -eq 'filetransfer_live_route_epoch_started' })
+        [object[]]$recoveredEvents = @($events | Where-Object { $_.EventName -eq 'filetransfer_live_route_epoch_recovered' })
+        if ($startedEvents.Count -eq 0 -or $recoveredEvents.Count -eq 0) {
+            continue
+        }
+
+        $started = $null
+        $recovered = $null
+        foreach ($candidateStarted in @($startedEvents)) {
+            $candidateRecovered = @(
+                $recoveredEvents |
+                    Where-Object { $_.Sequence -gt $candidateStarted.Sequence } |
+                    Select-Object -First 1
+            )
+            if ($candidateRecovered.Count -gt 0) {
+                $started = $candidateStarted
+                $recovered = $candidateRecovered[0]
+                break
+            }
+        }
+
+        if ($null -eq $started -or $null -eq $recovered) {
+            continue
+        }
+
+        $completedEpochRows.Add([pscustomobject]@{
+            Epoch = Get-FileTransferEventInt64Field -Event $started -Name 'live_route_epoch' -Default 0
+            Route = Get-FileTransferEventField -Event $started -Name 'route' -Default ''
+            StartedSequence = [int64]$started.Sequence
+            RecoveredSequence = [int64]$recovered.Sequence
+        }) | Out-Null
+    }
+
+    $sequence = @(
+        $completedEpochRows |
+            Sort-Object Epoch, StartedSequence |
+            ForEach-Object { [string]$_.Route } |
+            Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
+    )
+    $routeChanges = New-Object System.Collections.Generic.List[string]
+    foreach ($route in @($sequence)) {
+        if ($routeChanges.Count -eq 0 -or
+            -not [string]::Equals($routeChanges[$routeChanges.Count - 1], [string]$route, [System.StringComparison]::OrdinalIgnoreCase)) {
+            $routeChanges.Add([string]$route) | Out-Null
+        }
+    }
+
+    $expectedRoutes = @()
+    if ($Mode -eq 'SwitchOff') {
+        $expectedRoutes = @('post_tuna_fallback_v6')
+    }
+    elseif ($Mode -eq 'MultiToggle') {
+        $expectedRoutes = @('post_tuna_fallback_v6', 'file_tuna_v4', 'post_tuna_fallback_v6')
+    }
+    elseif ($Mode -eq 'RegularActivationCycle') {
+        $expectedRoutes = @(
+            'file_tuna_v4',
+            'post_tuna_fallback_v6',
+            'file_tuna_v4',
+            'post_tuna_fallback_v6')
+        $expectedSelectedRouteChanges = @(
+            'regular_nkn_v4_fast',
+            'file_tuna_v4',
+            'post_tuna_fallback_v6',
+            'file_tuna_v4',
+            'post_tuna_fallback_v6')
+        $actualSelectedRouteChanges = $selectedRouteChanges.ToArray()
+        if (($actualSelectedRouteChanges -join ',') -ne ($expectedSelectedRouteChanges -join ',')) {
+            $findings.Add(("selected route changes mismatch: mode={0}; expected={1}; actual={2}" -f $Mode, ($expectedSelectedRouteChanges -join ','), ($(if ($actualSelectedRouteChanges.Count -gt 0) { $actualSelectedRouteChanges -join ',' } else { '(none)' })))) | Out-Null
+        }
+    }
+
+    $lastEpoch = 0L
+    $matchedRoutes = New-Object System.Collections.Generic.List[string]
+    foreach ($expectedRoute in @($expectedRoutes)) {
+        $expectation = Get-FileTransferLiveRouteExpectation -Route $expectedRoute
+        if ($null -eq $expectation) {
+            $findings.Add(("unsupported live route proof expectation: route={0}" -f $expectedRoute)) | Out-Null
+            continue
+        }
+
+        $started = $null
+        foreach ($event in @($scopedCompleteEvents)) {
+            $epoch = Get-FileTransferEventInt64Field -Event $event -Name 'live_route_epoch' -Default 0
+            if ($epoch -le $lastEpoch) {
+                continue
+            }
+
+            if (Test-FileTransferLiveRouteEpochEventMatches -Event $event -Expectation $expectation -EventName 'filetransfer_live_route_epoch_started') {
+                $started = $event
+                break
+            }
+        }
+
+        if ($null -eq $started) {
+            $findings.Add(("missing live route epoch started proof: route={0}; mode={1}; after_epoch={2}" -f $expectedRoute, $Mode, $lastEpoch)) | Out-Null
+            continue
+        }
+
+        $startedEpoch = Get-FileTransferEventInt64Field -Event $started -Name 'live_route_epoch' -Default 0
+        $recovered = $null
+        foreach ($event in @($scopedCompleteEvents)) {
+            if ($event.Sequence -le $started.Sequence) {
+                continue
+            }
+
+            $epoch = Get-FileTransferEventInt64Field -Event $event -Name 'live_route_epoch' -Default 0
+            if ($epoch -ne $startedEpoch) {
+                continue
+            }
+
+            if (Test-FileTransferLiveRouteEpochEventMatches -Event $event -Expectation $expectation -EventName 'filetransfer_live_route_epoch_recovered') {
+                $recovered = $event
+                break
+            }
+        }
+
+        if ($null -eq $recovered) {
+            $findings.Add(("missing live route epoch recovered proof: route={0}; mode={1}; live_route_epoch={2}" -f $expectedRoute, $Mode, $startedEpoch)) | Out-Null
+            $evidence.Add($started) | Out-Null
+            continue
+        }
+
+        $lastEpoch = $startedEpoch
+        $matchedRoutes.Add($expectedRoute) | Out-Null
+        $evidence.Add($started) | Out-Null
+        $evidence.Add($recovered) | Out-Null
+    }
+
+    if ($Mode -ne 'None' -and $expectedRoutes.Count -gt 0) {
+        $actualRouteChanges = $routeChanges.ToArray()
+        if (($actualRouteChanges -join ',') -ne ($expectedRoutes -join ',')) {
+            $findings.Add(("live route epoch route changes mismatch: mode={0}; expected={1}; actual={2}" -f $Mode, ($expectedRoutes -join ','), ($(if ($actualRouteChanges.Count -gt 0) { $actualRouteChanges -join ',' } else { '(none)' })))) | Out-Null
+        }
+    }
+
+    $verdict = 'not_required'
+    if ($Mode -ne 'None') {
+        $verdict = if ($findings.Count -eq 0 -and $matchedRoutes.Count -eq $expectedRoutes.Count) { 'pass' } else { 'fail' }
+    }
+    elseif ($metadataMissingEvents.Count -gt 0) {
+        $verdict = 'fail'
+    }
+
+    return [pscustomobject]@{
+        Mode = $Mode
+        Verdict = $verdict
+        ExplicitEventCount = $explicitEvents.Count
+        CompleteEventCount = $completeEvents.Count
+        MetadataMissingCount = $metadataMissingEvents.Count
+        TransportOnlyCount = $transportOnlyEvents.Count
+        Sequence = @($sequence)
+        RouteChanges = @($routeChanges.ToArray())
+        MatchedRouteChanges = @($matchedRoutes.ToArray())
+        Findings = @($findings.ToArray())
+        EvidenceEvents = @($evidence.ToArray())
+    }
 }
 
 function Get-FileTransferMaxField {
@@ -179,14 +1806,39 @@ function Get-FileTransferMaxField {
         [string]$FieldName
     )
 
+    if ([string]::IsNullOrWhiteSpace($FieldName) -or $null -eq $Events -or $Events.Count -le 0) {
+        return 0L
+    }
+
+    $scopeKey = Get-FileTransferEventScopeKey -Events $Events
+    $cacheKey = "max-field|$scopeKey|$FieldName"
+    if ($script:FileTransferRetainedEventQueryCache.ContainsKey($cacheKey)) {
+        return [long]$script:FileTransferRetainedEventQueryCache[$cacheKey]
+    }
+
+    $index = $script:FileTransferRetainedEventIndex
+    if ($null -ne $index) {
+        $fieldMax = [System.Collections.IDictionary]$index.PSObject.Properties['FieldMax'].Value
+        if ($scopeKey -eq $index.AllEventsScopeKey -and $fieldMax.ContainsKey($FieldName)) {
+            $cachedAllMax = [long]$fieldMax[$FieldName]
+            $script:FileTransferRetainedEventQueryCache[$cacheKey] = $cachedAllMax
+            return $cachedAllMax
+        }
+    }
+
     $max = 0L
     foreach ($event in @($Events)) {
-        $value = Get-FileTransferEventInt64Field -Event $event -Name $FieldName -Default 0
-        if ($value -gt $max) {
+        if ($null -eq $event.Fields -or -not $event.Fields.ContainsKey($FieldName)) {
+            continue
+        }
+
+        $value = 0L
+        if ([long]::TryParse([string]$event.Fields[$FieldName], [ref]$value) -and $value -gt $max) {
             $max = $value
         }
     }
 
+    $script:FileTransferRetainedEventQueryCache[$cacheKey] = $max
     return $max
 }
 
@@ -196,11 +1848,39 @@ function Get-FileTransferSumField {
         [string]$FieldName
     )
 
-    $sum = 0L
-    foreach ($event in @($Events)) {
-        $sum += Get-FileTransferEventInt64Field -Event $event -Name $FieldName -Default 0
+    if ([string]::IsNullOrWhiteSpace($FieldName) -or $null -eq $Events -or $Events.Count -le 0) {
+        return 0L
     }
 
+    $scopeKey = Get-FileTransferEventScopeKey -Events $Events
+    $cacheKey = "sum-field|$scopeKey|$FieldName"
+    if ($script:FileTransferRetainedEventQueryCache.ContainsKey($cacheKey)) {
+        return [long]$script:FileTransferRetainedEventQueryCache[$cacheKey]
+    }
+
+    $index = $script:FileTransferRetainedEventIndex
+    if ($null -ne $index) {
+        $fieldSum = [System.Collections.IDictionary]$index.PSObject.Properties['FieldSum'].Value
+        if ($scopeKey -eq $index.AllEventsScopeKey -and $fieldSum.ContainsKey($FieldName)) {
+            $cachedAllSum = [long]$fieldSum[$FieldName]
+            $script:FileTransferRetainedEventQueryCache[$cacheKey] = $cachedAllSum
+            return $cachedAllSum
+        }
+    }
+
+    $sum = 0L
+    foreach ($event in @($Events)) {
+        if ($null -eq $event.Fields -or -not $event.Fields.ContainsKey($FieldName)) {
+            continue
+        }
+
+        $value = 0L
+        if ([long]::TryParse([string]$event.Fields[$FieldName], [ref]$value)) {
+            $sum += $value
+        }
+    }
+
+    $script:FileTransferRetainedEventQueryCache[$cacheKey] = $sum
     return $sum
 }
 
@@ -321,7 +2001,8 @@ function New-FileTransferRetainedSummary {
         [object[]]$Events,
         [string[]]$LogFiles,
         [string]$RequestedTransferId = '',
-        [switch]$AllTransfers
+        [switch]$AllTransfers,
+        [switch]$ReportingOnly
     )
 
     $allEvents = @($Events | Sort-Object Sequence)
@@ -341,7 +2022,63 @@ function New-FileTransferRetainedSummary {
         $transferEvents = @($allEvents | Where-Object { $_.TransferId -eq $selectedTransferId })
     }
 
+    if ($transferEvents.Count -gt 0 -and -not [string]::IsNullOrWhiteSpace($selectedTransferId) -and $selectedTransferId -ne '(all)') {
+        [object[]]$selectedSessionIds = @(
+            $transferEvents |
+                ForEach-Object { Get-FileTransferEventField -Event $_ -Name 'session_id' -Default '' } |
+                Where-Object {
+                    -not [string]::IsNullOrWhiteSpace($_) -and
+                    $_ -ne '(none)' -and
+                    $_ -ne '(unknown)'
+                } |
+                Select-Object -Unique
+        )
+        if ($selectedSessionIds.Count -gt 0) {
+            [object[]]$orphanLiveRouteEvents = @(
+                $allEvents |
+                    Where-Object {
+                        (Test-FileTransferLiveRouteEpochEventName -Event $_) -and
+                        [string]::IsNullOrWhiteSpace([string]$_.TransferId) -and
+                        ($selectedSessionIds -contains (Get-FileTransferEventField -Event $_ -Name 'session_id' -Default ''))
+                    }
+            )
+            if ($orphanLiveRouteEvents.Count -gt 0) {
+                $transferEvents = @($transferEvents + $orphanLiveRouteEvents | Sort-Object Sequence)
+            }
+        }
+    }
+
     $terminalEvents = @(Get-FileTransferTerminalEvents -Events $transferEvents)
+    if ($terminalEvents.Count -eq 0 -and $transferEvents.Count -gt 0) {
+        [object[]]$terminalFallbackSessionIds = @(
+            $transferEvents |
+                ForEach-Object { Get-FileTransferEventField -Event $_ -Name 'session_id' -Default '' } |
+                Where-Object {
+                    -not [string]::IsNullOrWhiteSpace($_) -and
+                    $_ -ne '(none)' -and
+                    $_ -ne '(unknown)'
+                } |
+                Select-Object -Unique
+        )
+        if ($terminalFallbackSessionIds.Count -gt 0) {
+            [object[]]$sameSessionTerminalCandidates = @(
+                $allEvents |
+                    Where-Object {
+                        (Test-FileTransferTerminalEvent -Event $_) -and
+                        ($terminalFallbackSessionIds -contains (Get-FileTransferEventField -Event $_ -Name 'session_id' -Default ''))
+                    }
+            )
+            if ($sameSessionTerminalCandidates.Count -gt 0) {
+                $terminalEvents = @(Get-FileTransferTerminalEvents -Events $sameSessionTerminalCandidates)
+            }
+        }
+    }
+    if ($terminalEvents.Count -eq 0) {
+        [object[]]$allTerminalCandidates = @(Get-FileTransferTerminalEvents -Events $allEvents)
+        if ($allTerminalCandidates.Count -gt 0) {
+            $terminalEvents = @($allTerminalCandidates)
+        }
+    }
     $inboundTerminalEvents = @($terminalEvents | Where-Object { (Get-FileTransferTerminalDirection -Event $_) -eq 'inbound' })
     $outboundTerminalEvents = @($terminalEvents | Where-Object { (Get-FileTransferTerminalDirection -Event $_) -eq 'outbound' })
     $timestampedTransferEvents = @($transferEvents | Where-Object { $null -ne $_.TimestampUtc })
@@ -391,6 +2128,44 @@ function New-FileTransferRetainedSummary {
     $senderPipelineEvents = @(Get-FileTransferEventsByName -Events $transferEvents -Names @('filetransfer_v4_sender_pipeline_summary'))
     $senderFeedEvents = @(Get-FileTransferEventsByName -Events $transferEvents -Names @('filetransfer_v4_sender_feed_summary'))
     $senderCacheEvents = @(Get-FileTransferEventsByName -Events $transferEvents -Names @('filetransfer_sender_repair_cache_policy', 'filetransfer_sender_repair_cache_summary', 'filetransfer_sender_repair_cache_pressure_entered', 'filetransfer_sender_repair_cache_pressure_exited', 'filetransfer_sender_cache_exhausted', 'filetransfer_sender_repair_unavailable'))
+    $v4SenderPumpSummaryEvents = @(Get-FileTransferEventsByName -Events $transferEvents -Names @('filetransfer_v4_sender_pump_summary'))
+    $v4EfficiencyEvents = @(Get-FileTransferEventsByName -Events $transferEvents -Names @('filetransfer_v4_efficiency_summary'))
+    $chunkBatchTransportSummaryEvents = @(Get-FileTransferEventsByName -Events $transferEvents -Names @('filetransfer_chunk_batch_transport_summary'))
+    $v4OutboundEfficiencyEvents = @($v4EfficiencyEvents | Where-Object { (Get-FileTransferEventField -Event $_ -Name 'direction' -Default '') -eq 'outbound' })
+    $v4InboundEfficiencyEvents = @($v4EfficiencyEvents | Where-Object { (Get-FileTransferEventField -Event $_ -Name 'direction' -Default '') -eq 'inbound' })
+    $batchSentAsBatchCount = Get-FileTransferEventCount -Events $transferEvents -Name 'filetransfer_chunk_batch_sent_as_batch'
+    if ($batchSentAsBatchCount -eq 0) {
+        $batchSentAsBatchCount = [Math]::Max(
+            (Get-FileTransferMaxField -Events $v4SenderPumpSummaryEvents -FieldName 'batch_frames_sent_total'),
+            [Math]::Max(
+                (Get-FileTransferMaxField -Events $v4OutboundEfficiencyEvents -FieldName 'batch_frames_sent_total'),
+                (Get-FileTransferMaxField -Events $chunkBatchTransportSummaryEvents -FieldName 'batch_frames_sent_total')))
+    }
+    # Live NKN reporting needs observations, not another route/gate evaluation.
+    # Reuse the exact full-summary scope, time window and batch-counter fallback.
+    if ($ReportingOnly) {
+        return [pscustomobject]@{
+            AllEvents = @($allEvents)
+            TransferEvents = @($transferEvents)
+            GlobalEvents = @($globalEvents)
+            HasTerminalEvidence = ($terminalEvents.Count -gt 0)
+            FirstTimestamp = $firstTimestamp
+            LastTimestamp = $lastTimestamp
+            FrameTypeCounts = $frameTypeCounts
+            BatchSentAsBatchCount = $batchSentAsBatchCount
+            BatchSplitCount = Get-FileTransferEventCount -Events $transferEvents -Name 'filetransfer_chunk_batch_split_for_transport'
+            ReorderEventCount = Get-FileTransferEventCount -Events $transferEvents -Name 'filetransfer_reorder_pressure'
+            RequestTimeoutCount = Get-FileTransferEventCount -Events $transferEvents -Name 'filetransfer_request_timeout_detected'
+            RetryRequestedCount = Get-FileTransferEventCount -Events $transferEvents -Name 'filetransfer_chunk_retry_requested'
+            PayloadRejectedCount = Get-FileTransferEventCount -Events $transferEvents -Name 'filetransfer_transport_payload_rejected'
+            DataFrameDecodeFailedCount = Get-FileTransferEventCount -Events $transferEvents -Name 'filetransfer_data_frame_decode_failed'
+            MessageRejectedCount = Get-FileTransferEventCount -Events $transferEvents -Name 'filetransfer_message_rejected'
+        }
+    }
+    $receiverBufferWriteBatchCommittedCount = Get-FileTransferEventCount -Events $transferEvents -Name 'filetransfer_receiver_write_batch_committed'
+    if ($receiverBufferWriteBatchCommittedCount -eq 0) {
+        $receiverBufferWriteBatchCommittedCount = Get-FileTransferMaxField -Events $v4InboundEfficiencyEvents -FieldName 'sparse_write_batch_count_total'
+    }
     $receiverFeedbackEvents = @(Get-FileTransferEventsByName -Events $transferEvents -Names @('filetransfer_v4_receiver_feedback_pump_started', 'filetransfer_v4_receiver_feedback_enqueued', 'filetransfer_v4_receiver_feedback_coalesced', 'filetransfer_v4_receiver_feedback_sent', 'filetransfer_v4_receiver_feedback_summary', 'filetransfer_v4_receiver_feedback_failed'))
     $receiverFeedbackPumpStartedCount = Get-FileTransferEventCount -Events $transferEvents -Name 'filetransfer_v4_receiver_feedback_pump_started'
     $receiverFeedbackPumpModeEventCount = @(
@@ -404,6 +2179,7 @@ function New-FileTransferRetainedSummary {
     $liveMatrixIncompleteEvents = @(Get-FileTransferEventsByName -Events $transferEvents -Names @('filetransfer_live_matrix_incomplete'))
     $artifactSliceSummaryEvents = @(Get-FileTransferEventsByName -Events $allEvents -Names @('filetransfer_artifact_slice_summary'))
     $lastArtifactSliceSummary = @($artifactSliceSummaryEvents | Sort-Object Sequence | Select-Object -Last 1)
+    $routeConsistency = Get-FileTransferRouteConsistency -TransferEvents $transferEvents
     $cleanTerminalPair = $false
     if ($inboundTerminalEvents.Count -gt 0 -and $outboundTerminalEvents.Count -gt 0) {
         $cleanTerminalPair = $true
@@ -438,6 +2214,7 @@ function New-FileTransferRetainedSummary {
         TerminalEvents = @($terminalEvents)
         InboundTerminalEvents = @($inboundTerminalEvents)
         OutboundTerminalEvents = @($outboundTerminalEvents)
+        RouteConsistency = $routeConsistency
         HasTransferEvidence = ($transferEvents.Count -gt 0)
         HasTerminalEvidence = ($terminalEvents.Count -gt 0)
         FirstTimestamp = $firstTimestamp
@@ -468,7 +2245,7 @@ function New-FileTransferRetainedSummary {
         MaxBytesBeforeStartupExit = Get-FileTransferMaxField -Events $transferEvents -FieldName 'bytes_before_startup_exit'
         MaxStartupProbeWindowBytes = Get-FileTransferMaxField -Events $transferEvents -FieldName 'startup_probe_window_bytes'
         FirstRepairOrTimeoutBeforeStartupExitCount = @($transferEvents | Where-Object { (Get-FileTransferEventInt64Field -Event $_ -Name 'first_repair_or_timeout_before_startup_exit' -Default 0) -gt 0 }).Count
-        BatchSentAsBatchCount = Get-FileTransferEventCount -Events $transferEvents -Name 'filetransfer_chunk_batch_sent_as_batch'
+        BatchSentAsBatchCount = $batchSentAsBatchCount
         BatchSplitCount = Get-FileTransferEventCount -Events $transferEvents -Name 'filetransfer_chunk_batch_split_for_transport'
         PayloadBudgetCount = Get-FileTransferEventCount -Events $transferEvents -Name 'filetransfer_transport_payload_budget'
         PayloadRejectedCount = Get-FileTransferEventCount -Events $transferEvents -Name 'filetransfer_transport_payload_rejected'
@@ -483,7 +2260,7 @@ function New-FileTransferRetainedSummary {
         ReceiverBufferPressureEnteredCount = Get-FileTransferEventCount -Events $transferEvents -Name 'filetransfer_receiver_buffer_pressure_entered'
         ReceiverBufferPressureExitedCount = Get-FileTransferEventCount -Events $transferEvents -Name 'filetransfer_receiver_buffer_pressure_exited'
         ReceiverBufferGrantClampedCount = Get-FileTransferEventCount -Events $transferEvents -Name 'filetransfer_receiver_grant_clamped_for_buffer'
-        ReceiverBufferWriteBatchCommittedCount = Get-FileTransferEventCount -Events $transferEvents -Name 'filetransfer_receiver_write_batch_committed'
+        ReceiverBufferWriteBatchCommittedCount = $receiverBufferWriteBatchCommittedCount
         ReceiverSparseModeSelectedCount = Get-FileTransferEventCount -Events $transferEvents -Name 'filetransfer_receiver_sparse_mode_selected'
         ReceiverSparseWriteSummaryCount = Get-FileTransferEventCount -Events $transferEvents -Name 'filetransfer_receiver_sparse_write_summary'
         ReceiverSparseCommitSummaryCount = Get-FileTransferEventCount -Events $transferEvents -Name 'filetransfer_receiver_sparse_commit_summary'
@@ -542,6 +2319,7 @@ function New-FileTransferRetainedSummary {
         LastReceiverHighestChunk = if ($lastLiveProgressTimeout.Count -gt 0) { Get-FileTransferEventInt64Field -Event $lastLiveProgressTimeout[0] -Name 'receiver_highest_chunk' -Default 0 } else { 0 }
         LastProgressEventCount = if ($lastLiveProgressTimeout.Count -gt 0) { Get-FileTransferEventInt64Field -Event $lastLiveProgressTimeout[0] -Name 'progress_events' -Default 0 } else { 0 }
         TerminalMissingAfterProgressTimeout = $terminalMissingAfterProgressTimeout
+        TerminalStaleUpdateRejectedCount = Get-FileTransferEventCount -Events $transferEvents -Name 'filetransfer_terminal_stale_update_rejected'
         ArtifactSliceStartReason = if ($lastArtifactSliceSummary.Count -gt 0) { Get-FileTransferEventField -Event $lastArtifactSliceSummary[0] -Name 'artifact_slice_start_reason' -Default '' } else { '' }
         ArtifactSliceEndReason = if ($lastArtifactSliceSummary.Count -gt 0) { Get-FileTransferEventField -Event $lastArtifactSliceSummary[0] -Name 'artifact_slice_end_reason' -Default '' } else { '' }
         MaxReceiverPendingBytes = Get-FileTransferMaxField -Events $transferEvents -FieldName 'pending_bytes'

@@ -457,6 +457,143 @@ public sealed class NknScreenShareMediaChannelTests : ScreenCaptureAbstractionTe
 
     [Fact]
     [Trait("Category", "Smoke")]
+    public async Task NknSignalingTransport_ScreenShareStop_DeliversViaBulkDuplicate_WhenControlCopiesAreDropped()
+    {
+        FakeNknClient.ResetNetwork();
+        try
+        {
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(8));
+            var options = NknTransportOptions.Load();
+            var hostClient = new FakeNknClient("host.screenshare-stop-bulk.address");
+            var helperClient = new FakeNknClient("helper.screenshare-stop-bulk.address");
+            var hostIdentity = new NknIdentity("host-screenshare-stop-bulk-id", "host.screenshare-stop-bulk.address");
+            var helperIdentity = new NknIdentity("helper-screenshare-stop-bulk-id", "helper.screenshare-stop-bulk.address");
+            using var host = new NknSignalingTransport(hostClient, options, hostIdentity);
+            using var helper = new NknSignalingTransport(helperClient, options, helperIdentity);
+            var joinRequestRaised = new TaskCompletionSource<IncomingJoinRequestEventArgs>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var hostApproved = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var helperApproved = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var stopReceived = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var bulkStopReceived = new TaskCompletionSource<NknIncomingMessage>(TaskCreationOptions.RunContinuationsAsynchronously);
+            host.IncomingJoinRequest += (_, e) => joinRequestRaised.TrySetResult(e);
+            host.Approved += (_, _) => hostApproved.TrySetResult();
+            helper.Approved += (_, _) => helperApproved.TrySetResult();
+            host.ScreenShareStopped += (_, _) => stopReceived.TrySetResult();
+            hostClient.MessageReceived += (_, e) =>
+            {
+                if (e.Channel == NknBridgeChannel.Bulk &&
+                    EnvelopeCodec.TryDeserialize(e.Payload, out var env) &&
+                    env.Type == MsgType.ScreenShareStop)
+                {
+                    bulkStopReceived.TrySetResult(e);
+                }
+            };
+
+            await host.HostByAddressAsync(cts.Token);
+            var (rawToken, invite) = InviteTestFactory.CreateValidatedInvite(
+                new PeerAddress(host.LocalPeerAddress),
+                InviteCapabilities.Chat | InviteCapabilities.ScreenShare,
+                boundHelperAddress: new PeerAddress(helper.LocalPeerAddress));
+            await helper.JoinByInviteAsync(rawToken, invite, cts.Token);
+            var pendingJoin = await joinRequestRaised.Task.WaitAsync(TimeSpan.FromSeconds(6), cts.Token);
+            await pendingJoin.ApproveAsync(pendingJoin.CreateApprovalDecision(), cts.Token);
+            await hostApproved.Task.WaitAsync(TimeSpan.FromSeconds(3), cts.Token);
+            await helperApproved.Task.WaitAsync(TimeSpan.FromSeconds(3), cts.Token);
+
+            var authorizedSessionId = Assert.IsType<SessionId>(helper.CurrentSessionSecurityState.SessionId).Value;
+            var stopPayload = ScreenSharePayloadCodec.SerializeStop(new ScreenShareStopMessageV1 { SessionId = authorizedSessionId, Reason = "preview_stopped", });
+            helperClient.ShouldDeliverSendAsync = (destination, payload, _) =>
+            {
+                if (EnvelopeCodec.TryDeserialize(payload, out var env) &&
+                    env.Type == MsgType.ScreenShareStop &&
+                    string.Equals(destination, hostClient.ConnectedAddress, StringComparison.Ordinal))
+                {
+                    return Task.FromResult(false);
+                }
+
+                return Task.FromResult(true);
+            };
+
+            await helper.SendScreenSharePayloadAsync(stopPayload, cts.Token);
+            var receivedStop = await bulkStopReceived.Task.WaitAsync(TimeSpan.FromSeconds(3), cts.Token);
+            await stopReceived.Task.WaitAsync(TimeSpan.FromSeconds(3), cts.Token);
+
+            Assert.Equal(helperClient.ConnectedBulkAddress, receivedStop.Source);
+            Assert.Equal(NknBridgeChannel.Bulk, receivedStop.Channel);
+        }
+        finally
+        {
+            FakeNknClient.ResetNetwork();
+        }
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public async Task NknSignalingTransport_ScreenShareStop_IgnoresCallerCancellationForPeerVisibleStop()
+    {
+        FakeNknClient.ResetNetwork();
+        try
+        {
+            using var timeoutCts = new CancellationTokenSource(TimeSpan.FromSeconds(8));
+            var options = NknTransportOptions.Load();
+            var hostClient = new FakeNknClient("host.screenshare-stop-cancelled.address");
+            var helperClient = new FakeNknClient("helper.screenshare-stop-cancelled.address");
+            var hostIdentity = new NknIdentity("host-screenshare-stop-cancelled-id", "host.screenshare-stop-cancelled.address");
+            var helperIdentity = new NknIdentity("helper-screenshare-stop-cancelled-id", "helper.screenshare-stop-cancelled.address");
+            using var host = new NknSignalingTransport(hostClient, options, hostIdentity);
+            using var helper = new NknSignalingTransport(helperClient, options, helperIdentity);
+            var joinRequestRaised = new TaskCompletionSource<IncomingJoinRequestEventArgs>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var hostApproved = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var helperApproved = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var stopReceived = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var stopPayloadReceived = new TaskCompletionSource<NknIncomingMessage>(TaskCreationOptions.RunContinuationsAsynchronously);
+            host.IncomingJoinRequest += (_, e) => joinRequestRaised.TrySetResult(e);
+            host.Approved += (_, _) => hostApproved.TrySetResult();
+            helper.Approved += (_, _) => helperApproved.TrySetResult();
+            host.ScreenShareStopped += (_, _) => stopReceived.TrySetResult();
+            hostClient.MessageReceived += (_, e) =>
+            {
+                if (!e.IsTopic &&
+                    EnvelopeCodec.TryDeserialize(e.Payload, out var env) &&
+                    env.Type == MsgType.ScreenShareStop)
+                {
+                    stopPayloadReceived.TrySetResult(e);
+                }
+            };
+
+            await host.HostByAddressAsync(timeoutCts.Token);
+            var (rawToken, invite) = InviteTestFactory.CreateValidatedInvite(
+                new PeerAddress(host.LocalPeerAddress),
+                InviteCapabilities.Chat | InviteCapabilities.ScreenShare,
+                boundHelperAddress: new PeerAddress(helper.LocalPeerAddress));
+            await helper.JoinByInviteAsync(rawToken, invite, timeoutCts.Token);
+            var pendingJoin = await joinRequestRaised.Task.WaitAsync(TimeSpan.FromSeconds(6), timeoutCts.Token);
+            await pendingJoin.ApproveAsync(pendingJoin.CreateApprovalDecision(), timeoutCts.Token);
+            await hostApproved.Task.WaitAsync(TimeSpan.FromSeconds(3), timeoutCts.Token);
+            await helperApproved.Task.WaitAsync(TimeSpan.FromSeconds(3), timeoutCts.Token);
+
+            var authorizedSessionId = Assert.IsType<SessionId>(helper.CurrentSessionSecurityState.SessionId).Value;
+            var stopPayload = ScreenSharePayloadCodec.SerializeStop(new ScreenShareStopMessageV1 { SessionId = authorizedSessionId, Reason = "preview_stopped", });
+            using var canceledCallerCts = new CancellationTokenSource();
+            await canceledCallerCts.CancelAsync();
+
+            await helper.SendScreenSharePayloadAsync(stopPayload, canceledCallerCts.Token);
+            var receivedStop = await stopPayloadReceived.Task.WaitAsync(TimeSpan.FromSeconds(3), timeoutCts.Token);
+            await stopReceived.Task.WaitAsync(TimeSpan.FromSeconds(3), timeoutCts.Token);
+
+            Assert.True(
+                string.Equals(helperIdentity.Address, receivedStop.Source, StringComparison.Ordinal) ||
+                string.Equals(helperClient.ConnectedBulkAddress, receivedStop.Source, StringComparison.Ordinal));
+            Assert.True(receivedStop.Channel is NknBridgeChannel.Control or NknBridgeChannel.Bulk);
+        }
+        finally
+        {
+            FakeNknClient.ResetNetwork();
+        }
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
     public async Task NknSignalingTransport_ScreenShareStop_UsesControlChannel_WhileFrameSendIsBlockedOnMediaChannel()
     {
         FakeNknClient.ResetNetwork();
@@ -524,8 +661,10 @@ public sealed class NknScreenShareMediaChannelTests : ScreenCaptureAbstractionTe
             await stopSendTask.WaitAsync(TimeSpan.FromSeconds(3), cts.Token);
             releaseFirstSend.TrySetResult();
             await frameSendTask.WaitAsync(TimeSpan.FromSeconds(3), cts.Token);
-            Assert.Equal(helperIdentity.Address, receivedStop.Source);
-            Assert.Equal(NknBridgeChannel.Control, receivedStop.Channel);
+            Assert.True(
+                string.Equals(helperIdentity.Address, receivedStop.Source, StringComparison.Ordinal) ||
+                string.Equals(helperClient.ConnectedBulkAddress, receivedStop.Source, StringComparison.Ordinal));
+            Assert.True(receivedStop.Channel is NknBridgeChannel.Control or NknBridgeChannel.Bulk);
             Assert.True(EnvelopeCodec.TryDeserialize(receivedStop.Payload, out var env));
             Assert.Equal(MsgType.ScreenShareStop, env.Type);
         }
@@ -593,8 +732,10 @@ public sealed class NknScreenShareMediaChannelTests : ScreenCaptureAbstractionTe
             await helper.SendScreenSharePayloadAsync(stopPayload, cts.Token);
             var receivedStop = await stopPayloadReceived.Task.WaitAsync(TimeSpan.FromSeconds(3), cts.Token);
             await stopReceived.Task.WaitAsync(TimeSpan.FromSeconds(3), cts.Token);
-            Assert.Equal(helperIdentity.Address, receivedStop.Source);
-            Assert.Equal(NknBridgeChannel.Control, receivedStop.Channel);
+            Assert.True(
+                string.Equals(helperIdentity.Address, receivedStop.Source, StringComparison.Ordinal) ||
+                string.Equals(helperClient.ConnectedBulkAddress, receivedStop.Source, StringComparison.Ordinal));
+            Assert.True(receivedStop.Channel is NknBridgeChannel.Control or NknBridgeChannel.Bulk);
             Assert.True(Volatile.Read(ref droppedFirstStop) == 1);
             Assert.True(EnvelopeCodec.TryDeserialize(receivedStop.Payload, out var env));
             Assert.Equal(MsgType.ScreenShareStop, env.Type);

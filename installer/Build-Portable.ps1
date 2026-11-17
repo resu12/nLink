@@ -11,6 +11,7 @@ param(
     [ValidateSet("DownloadSize", "InstalledSize")]
     [string]$OptimizeFor = "DownloadSize",
     [switch]$SkipBridgeBundle,
+    [switch]$SkipTunaSidecarBundle,
     [switch]$CopyHelperAlias,
     [switch]$CopyHelpeeAlias,
     [switch]$LocalOnly
@@ -206,7 +207,8 @@ function Publish-ReleaseAssets {
 
 function Assert-BridgeBundleRuntime {
     param(
-        [Parameter(Mandatory = $true)][string]$BridgeDir
+        [Parameter(Mandatory = $true)][string]$BridgeDir,
+        [string]$ExpectedAppVersion = ""
     )
 
     if (-not (Test-Path $BridgeDir)) {
@@ -228,6 +230,25 @@ function Assert-BridgeBundleRuntime {
         $nodeExe = Join-Path $BridgeDir "node.exe"
         if (-not (Test-Path $nodeExe)) {
             throw "Bridge runtime not found. Run the bridge bundle build step first."
+        }
+
+        foreach ($requiredFile in @("package.json", "package-lock.json", "bridge-manifest.json", "bridge-dependencies.json")) {
+            if (-not (Test-Path (Join-Path $BridgeDir $requiredFile))) {
+                throw "Bridge runtime not found. Run the bridge bundle build step first."
+            }
+        }
+
+        if (-not [string]::IsNullOrWhiteSpace($ExpectedAppVersion)) {
+            $manifestPath = Join-Path $BridgeDir "bridge-manifest.json"
+            $manifest = Get-Content -Path $manifestPath -Raw | ConvertFrom-Json
+            $actualAppVersion = [string]$manifest.appVersion
+            if ($actualAppVersion -ne $ExpectedAppVersion) {
+                throw "Bridge runtime version mismatch: expected bridge-manifest.json appVersion '$ExpectedAppVersion', got '$actualAppVersion'. Rebuild the bridge bundle after changing VERSION: $manifestPath"
+            }
+        }
+
+        if (Test-Path (Join-Path $BridgeDir "node_modules")) {
+            throw "Bridge runtime must not ship node_modules. Rebuild the bridge bundle."
         }
     }
 }
@@ -261,6 +282,7 @@ function Assert-PortableStagePayload {
     param(
         [Parameter(Mandatory = $true)][string]$StageDir,
         [Parameter(Mandatory = $true)][string]$Runtime,
+        [string]$ExpectedAppVersion = "",
         [bool]$RequireBridge = $true
     )
 
@@ -275,7 +297,7 @@ function Assert-PortableStagePayload {
     }
 
     if ($RequireBridge) {
-        Assert-BridgeBundleRuntime -BridgeDir (Join-Path (Join-Path $StageDir "bridge") $Runtime)
+        Assert-BridgeBundleRuntime -BridgeDir (Join-Path (Join-Path $StageDir "bridge") $Runtime) -ExpectedAppVersion $ExpectedAppVersion
     }
 
     Assert-NoDebugOnlyPayload -StageDir $StageDir
@@ -301,11 +323,113 @@ function Ensure-PortableConfigFile {
     Write-Host "[nLink] Staged appsettings.json into portable output: $stageAppSettings" -ForegroundColor Green
 }
 
+function Build-TunaSidecarToPortable {
+    param(
+        [Parameter(Mandatory = $true)][string]$RepoRoot,
+        [Parameter(Mandatory = $true)][string]$PortableOutDir,
+        [Parameter(Mandatory = $true)][string]$Runtime,
+        [Parameter(Mandatory = $true)][string]$Version
+    )
+
+    if ($Runtime -ne "win-x64") {
+        throw "Tuna sidecar packaging currently supports only win-x64, got '$Runtime'."
+    }
+
+    $sidecarSourceDir = Join-Path $RepoRoot "tools\nkn-tuna-sidecar"
+    if (-not (Test-Path (Join-Path $sidecarSourceDir "go.mod"))) {
+        throw "Tuna sidecar source not found: $sidecarSourceDir"
+    }
+
+    $goCommand = Get-Command go -ErrorAction SilentlyContinue
+    if (-not $goCommand) {
+        throw "Go toolchain not found. Install Go; Tuna sidecar packaging is required for release and installer builds."
+    }
+
+    $destinationDir = Join-Path (Join-Path $PortableOutDir "tuna") $Runtime
+    New-Item -ItemType Directory -Force -Path $destinationDir | Out-Null
+    $destinationExe = Join-Path $destinationDir "nlink-tuna-sidecar.exe"
+
+    Write-Host "[nLink] Building Tuna sidecar verifier: $destinationExe" -ForegroundColor Cyan
+    Push-Location $sidecarSourceDir
+    try {
+        $previousGoos = $env:GOOS
+        $previousGoarch = $env:GOARCH
+        $env:GOOS = "windows"
+        $env:GOARCH = "amd64"
+        $ldflags = "-s -w -X main.sidecarVersion=$Version"
+        & go build -ldflags $ldflags -o $destinationExe .
+        if ($LASTEXITCODE -ne 0) {
+            exit $LASTEXITCODE
+        }
+    }
+    finally {
+        $env:GOOS = $previousGoos
+        $env:GOARCH = $previousGoarch
+        Pop-Location
+    }
+
+    if (-not (Test-Path $destinationExe)) {
+        throw "Tuna sidecar build did not produce expected executable: $destinationExe"
+    }
+
+    $versionLines = @(& $destinationExe version --jsonl)
+    if ($LASTEXITCODE -ne 0) {
+        throw "Tuna sidecar version probe failed for '$destinationExe'."
+    }
+
+    $versionEvent = $null
+    foreach ($line in $versionLines) {
+        if ([string]::IsNullOrWhiteSpace($line)) {
+            continue
+        }
+
+        $candidate = $line | ConvertFrom-Json
+        if ([string]$candidate.event -eq "sidecar_version") {
+            $versionEvent = $candidate
+            break
+        }
+    }
+
+    if ($null -eq $versionEvent) {
+        throw "Tuna sidecar version probe did not emit sidecar_version JSONL."
+    }
+
+    if ([string]$versionEvent.sidecarVersion -ne $Version) {
+        throw "Tuna sidecar version mismatch: expected '$Version', got '$($versionEvent.sidecarVersion)'."
+    }
+
+    if ([string]$versionEvent.runtime -ne $Runtime) {
+        throw "Tuna sidecar runtime mismatch: expected '$Runtime', got '$($versionEvent.runtime)'."
+    }
+
+    if ([int]$versionEvent.appProtocolVersion -ne 1 -or [int]$versionEvent.frameProtocolVersion -ne 1) {
+        throw "Tuna sidecar protocol mismatch: app='$($versionEvent.appProtocolVersion)', frame='$($versionEvent.frameProtocolVersion)'."
+    }
+
+    $manifestPath = Join-Path $destinationDir "tuna-sidecar-manifest.json"
+    $manifest = [ordered]@{
+        manifestVersion      = 1
+        appVersion           = $Version
+        sidecarVersion       = [string]$versionEvent.sidecarVersion
+        runtime              = $Runtime
+        appProtocolVersion   = [int]$versionEvent.appProtocolVersion
+        frameProtocolVersion = [int]$versionEvent.frameProtocolVersion
+        sidecarExeSha256     = Get-Sha256FileHash -Path $destinationExe
+        buildTimestampUtc    = [DateTimeOffset]::UtcNow.ToString("O")
+    }
+    $manifestJson = $manifest | ConvertTo-Json -Depth 4
+    [System.IO.File]::WriteAllText($manifestPath, $manifestJson, [System.Text.UTF8Encoding]::new($false))
+
+    Write-Host "[nLink] Bundled Tuna sidecar verifier: $destinationExe" -ForegroundColor Green
+    Write-Host "[nLink] Bundled Tuna sidecar manifest: $manifestPath" -ForegroundColor Green
+}
+
 function Copy-BridgeBundleToPortable {
     param(
         [Parameter(Mandatory = $true)][string]$BridgeDir,
         [Parameter(Mandatory = $true)][string]$PortableOutDir,
-        [Parameter(Mandatory = $true)][string]$Runtime
+        [Parameter(Mandatory = $true)][string]$Runtime,
+        [string]$ExpectedAppVersion = ""
     )
 
     $bridgeRoot = Join-Path $PortableOutDir "bridge"
@@ -321,7 +445,7 @@ function Copy-BridgeBundleToPortable {
     Invoke-WithRetry -OperationName "copy bundled bridge folder" -DelayMilliseconds 700 -Action {
         Copy-Item -Recurse -Force (Join-Path $BridgeDir "*") $destination
     }
-    Assert-BridgeBundleRuntime -BridgeDir $destination
+    Assert-BridgeBundleRuntime -BridgeDir $destination -ExpectedAppVersion $ExpectedAppVersion
     Write-Host "[nLink] Bundled bridge runtime into canonical portable: $destination" -ForegroundColor Green
 }
 
@@ -337,11 +461,15 @@ $bridgeBundleAbs = Join-Path $repoRoot $BridgeBundleDir
 $releasesRootAbs = Join-Path $repoRoot $ReleasesRootDir
 $helperAliasAbs = Join-Path $repoRoot $HelperAliasOutDir
 $helpeeAliasAbs = Join-Path $repoRoot $HelpeeAliasOutDir
+$bridgeBundleScriptPath = Join-Path $PSScriptRoot "Build-BridgeBundle.ps1"
 $verifyPackageManifestPath = Join-Path $repoRoot "build\verify-package-manifest.ps1"
 $packageManifestPath = Join-Path $repoRoot ("installer\package-manifest.{0}.txt" -f $Runtime)
 
 New-Item -ItemType Directory -Force -Path $canonicalOutAbs | Out-Null
 New-Item -ItemType Directory -Force -Path (Split-Path -Parent $zipOutAbs) | Out-Null
+if (-not $SkipBridgeBundle -and -not (Test-Path $bridgeBundleScriptPath)) {
+    throw "Bridge bundle build script not found: $bridgeBundleScriptPath"
+}
 if (-not $LocalOnly) {
     New-Item -ItemType Directory -Force -Path $releasesRootAbs | Out-Null
 }
@@ -383,16 +511,29 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 if (-not $SkipBridgeBundle) {
-    Assert-BridgeBundleRuntime -BridgeDir $bridgeBundleAbs
-    Copy-BridgeBundleToPortable -BridgeDir $bridgeBundleAbs -PortableOutDir $canonicalOutAbs -Runtime $Runtime
+    Write-Host "[nLink] Building bundled NKN bridge runtime..." -ForegroundColor Cyan
+    & $bridgeBundleScriptPath -Runtime $Runtime -OutDir $BridgeBundleDir
+    $bridgeBundleScriptSucceeded = $?
+    if (-not $bridgeBundleScriptSucceeded) {
+        $bridgeBundleExitCode = if ($null -ne $LASTEXITCODE -and $LASTEXITCODE -ne 0) { [int]$LASTEXITCODE } else { 1 }
+        exit $bridgeBundleExitCode
+    }
+
+    Assert-BridgeBundleRuntime -BridgeDir $bridgeBundleAbs -ExpectedAppVersion $resolvedVersion
+    Copy-BridgeBundleToPortable -BridgeDir $bridgeBundleAbs -PortableOutDir $canonicalOutAbs -Runtime $Runtime -ExpectedAppVersion $resolvedVersion
+    $global:LASTEXITCODE = 0
+}
+
+if (-not $SkipTunaSidecarBundle) {
+    Build-TunaSidecarToPortable -RepoRoot $repoRoot -PortableOutDir $canonicalOutAbs -Runtime $Runtime -Version $resolvedVersion
 }
 
 Ensure-PortableConfigFile -RepoRoot $repoRoot -StageDir $canonicalOutAbs
 
 # Safe size reduction in final artifact only (keep bin/obj untouched).
 Remove-StagedDebugFiles -RootDir $canonicalOutAbs
-Assert-PortableStagePayload -StageDir $canonicalOutAbs -Runtime $Runtime -RequireBridge:(-not $SkipBridgeBundle)
-& $verifyPackageManifestPath -StageDir $canonicalOutAbs -ManifestPath $packageManifestPath
+Assert-PortableStagePayload -StageDir $canonicalOutAbs -Runtime $Runtime -ExpectedAppVersion $resolvedVersion -RequireBridge:(-not $SkipBridgeBundle)
+& $verifyPackageManifestPath -StageDir $canonicalOutAbs -ManifestPath $packageManifestPath -ExpectedAppVersion $resolvedVersion
 
 if (Test-Path $zipOutAbs) {
     Invoke-WithRetry -OperationName "remove portable zip" -Action {
@@ -441,11 +582,13 @@ else {
 
 $bridgeRootAbs = Join-Path $canonicalOutAbs "bridge"
 $bridgeRidAbs = Join-Path $bridgeRootAbs $Runtime
-$nodeModulesAbs = Join-Path $bridgeRidAbs "node_modules"
+$bridgeScriptAbs = Join-Path $bridgeRidAbs "index.js"
+$bridgeNodeAbs = Join-Path $bridgeRidAbs "node.exe"
 
 $totalSizeBytes = Get-DirectorySizeBytes -RootDir $canonicalOutAbs
 $bridgeSizeBytes = Get-DirectorySizeBytes -RootDir $bridgeRootAbs
-$nodeModulesSizeBytes = Get-DirectorySizeBytes -RootDir $nodeModulesAbs
+$bridgeScriptSizeBytes = Get-PathSizeBytes -Path $bridgeScriptAbs
+$bridgeNodeSizeBytes = Get-PathSizeBytes -Path $bridgeNodeAbs
 $appExeSizeBytes = Get-PathSizeBytes -Path (Join-Path $canonicalOutAbs "nLink.exe")
 $ffmpegSizeBytes = Get-PathSizeBytes -Path (Join-Path $canonicalOutAbs "ffmpeg")
 $portableZipSizeBytes = Get-PathSizeBytes -Path $zipOutAbs
@@ -456,6 +599,8 @@ Write-Host ("  single-file compression: {0}" -f ($(if ($singleFileCompressionEna
 Write-Host ("  total output size: {0} ({1} bytes)" -f (Format-Size $totalSizeBytes), $totalSizeBytes)
 Write-Host ("  app executable size: {0} ({1} bytes)" -f (Format-Size $appExeSizeBytes), $appExeSizeBytes)
 Write-Host ("  bridge folder size: {0} ({1} bytes)" -f (Format-Size $bridgeSizeBytes), $bridgeSizeBytes)
+Write-Host ("  bridge/{0}/index.js size: {1} ({2} bytes)" -f $Runtime, (Format-Size $bridgeScriptSizeBytes), $bridgeScriptSizeBytes)
+Write-Host ("  bridge/{0}/node.exe size: {1} ({2} bytes)" -f $Runtime, (Format-Size $bridgeNodeSizeBytes), $bridgeNodeSizeBytes)
 Write-Host ("  ffmpeg folder size: {0} ({1} bytes)" -f (Format-Size $ffmpegSizeBytes), $ffmpegSizeBytes)
 Write-Host ("  portable ZIP size: {0} ({1} bytes)" -f (Format-Size $portableZipSizeBytes), $portableZipSizeBytes)
-Write-Host ("  bridge/{0}/node_modules size: {1} ({2} bytes)" -f $Runtime, (Format-Size $nodeModulesSizeBytes), $nodeModulesSizeBytes)
+Write-Host ("  bridge/{0}/node_modules shipped: 0" -f $Runtime)

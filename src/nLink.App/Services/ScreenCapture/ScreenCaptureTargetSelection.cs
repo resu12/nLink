@@ -77,7 +77,7 @@ internal static class ScreenCaptureTargetStore
         }
     }
 
-    public static void Save(ScreenCaptureTargetSelection selection)
+    public static void Save(ScreenCaptureTargetSelection selection, bool persistUserEnvironment = true)
     {
         var payload = new PersistedCaptureTarget
         {
@@ -92,7 +92,10 @@ internal static class ScreenCaptureTargetStore
 
         var json = JsonSerializer.Serialize(payload, JsonOptions);
         Environment.SetEnvironmentVariable(CaptureTargetEnvVar, json);
-        _ = PersistToUserEnvironmentAsync(json, selection.Describe());
+        if (persistUserEnvironment)
+        {
+            _ = PersistToUserEnvironmentAsync(json, selection.Describe());
+        }
     }
 
     private static async System.Threading.Tasks.Task PersistToUserEnvironmentAsync(string json, string selectionDescription)

@@ -3,6 +3,7 @@ using NLink.App.Services;
 using NLink.App.ViewModels;
 using NLink.Core;
 using NLink.Core.Diagnostics;
+using NLink.Core.Logging;
 using NLink.Infra.Nkn;
 
 namespace NLink.SmokeTests;
@@ -11,6 +12,201 @@ namespace NLink.SmokeTests;
 [Trait("Area", "Core")]
 public sealed class DiagnosticsRedactorTests
 {
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public void OperationalLogRedactor_Preserves_Long_Snake_Case_Diagnostic_Reasons()
+    {
+        var sample = "event=filetransfer_message_rejected; reason=post_terminal_late_sender_frame_canceled";
+
+        var redacted = SensitiveDataRedactor.Redact(sample);
+
+        Assert.Contains("event=filetransfer_message_rejected", redacted, StringComparison.Ordinal);
+        Assert.Contains("reason=post_terminal_late_sender_frame_canceled", redacted, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public void OperationalLogRedactor_PreservesCoordinatorAuthorityCorrelationIds()
+    {
+        const string authorityId = "fta2-repair_replay-0123456789abcdef01234567";
+        const string predecessorId = "fta2-repair_replay-89abcdef0123456701234567";
+        const string requestedPredecessorId = "fta2-runtime_unlock_retry_dispatch-0123456789abcdef01234567";
+        const string releaseAuthorityId = "fta2-recovery_liveness_lease-89abcdef0123456701234567";
+        const string retainedPredecessorId =
+            "fta2-repair_replay-fedcba987654321001234567:retained:0123456789abcdef0123456789abcdef";
+        const string currentSuccessorId =
+            "fta2-repair_replay-765432100123456789abcdef:current:fedcba9876543210fedcba9876543210";
+        const string currentAuthorityId =
+            "fta2-runtime_unlock_retry_dispatch-fedcba987654321001234567:current:0123456789abcdef0123456789abcdef";
+        var sample = $"authority_id={authorityId}; predecessor_authority_id={predecessorId}; " +
+                     $"requested_predecessor_authority_id={requestedPredecessorId}; " +
+                     $"release_authority_id={releaseAuthorityId}; " +
+                     $"retained_predecessor_authority_id={retainedPredecessorId}; " +
+                     $"current_authority_id={currentAuthorityId}; " +
+                     $"current_successor_authority_id={currentSuccessorId}; secret=do-not-keep";
+
+        var redacted = SensitiveDataRedactor.Redact(sample);
+
+        Assert.Contains($"authority_id={authorityId}", redacted, StringComparison.Ordinal);
+        Assert.Contains($"predecessor_authority_id={predecessorId}", redacted, StringComparison.Ordinal);
+        Assert.Contains(
+            $"requested_predecessor_authority_id={requestedPredecessorId}",
+            redacted,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            $"release_authority_id={releaseAuthorityId}",
+            redacted,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            $"retained_predecessor_authority_id={retainedPredecessorId}",
+            redacted,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            $"current_authority_id={currentAuthorityId}",
+            redacted,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            $"current_successor_authority_id={currentSuccessorId}",
+            redacted,
+            StringComparison.Ordinal);
+        Assert.Contains("[redacted]", redacted, StringComparison.Ordinal);
+        Assert.DoesNotContain("do-not-keep", redacted, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public void OperationalLogRedactor_PreservesReceiveRecoveryAuthorityCorrelationIds()
+    {
+        const string operationAuthorityId =
+            "fta2-receive_recovery_operation-0123456789abcdef0123456789abcdef";
+        const string livenessLeaseAuthorityId =
+            "fta2-recovery_liveness_lease-89abcdef0123456789abcdef01234567";
+        const string retryAuthorityId =
+            "fta2-runtime_unlock_retry_dispatch-fedcba9876543210fedcba9876543210";
+        var sample =
+            $"receive_recovery_operation_authority_id={operationAuthorityId}; " +
+            $"recovery_liveness_lease_authority_id={livenessLeaseAuthorityId}; " +
+            $"retry_authority_id={retryAuthorityId}; secret=arbitrary-secret-value";
+
+        var redacted = SensitiveDataRedactor.Redact(sample);
+
+        Assert.Contains(
+            $"receive_recovery_operation_authority_id={operationAuthorityId}",
+            redacted,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            $"recovery_liveness_lease_authority_id={livenessLeaseAuthorityId}",
+            redacted,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            $"retry_authority_id={retryAuthorityId}",
+            redacted,
+            StringComparison.Ordinal);
+        Assert.Contains("[redacted]", redacted, StringComparison.Ordinal);
+        Assert.DoesNotContain(
+            "arbitrary-secret-value",
+            redacted,
+            StringComparison.Ordinal);
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public void OperationalLogRedactor_PreservesOnlyProjectedCoordinatorSnapshotEvidence()
+    {
+        const string evidenceToken = "fte1-0123456789abcdef01234567";
+        const string hash =
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        const string payload =
+            "eyJjb29yZGluYXRvckluc3RhbmNlSWQiOiJmdGUxLTAxMjM0NTY3ODlhYmNkZWYwMTIzNDU2NyJ9";
+        var sample =
+            "event=filetransfer_coordinator_transition_snapshot; " +
+            $"coordinator_instance_id={evidenceToken}; session_id={evidenceToken}; " +
+            $"snapshot_catalog_hash={hash}; snapshot_sha256={hash}; " +
+            $"snapshot_payload={payload}; secret=do-not-keep";
+
+        var redacted = SensitiveDataRedactor.Redact(sample);
+
+        Assert.Contains(
+            $"coordinator_instance_id={evidenceToken}",
+            redacted,
+            StringComparison.Ordinal);
+        Assert.Contains($"snapshot_sha256={hash}", redacted, StringComparison.Ordinal);
+        Assert.Contains($"snapshot_payload={payload}", redacted, StringComparison.Ordinal);
+        Assert.DoesNotContain("do-not-keep", redacted, StringComparison.Ordinal);
+        Assert.Contains("[redacted]", redacted, StringComparison.Ordinal);
+
+        var unrelated = SensitiveDataRedactor.Redact(
+            $"event=unrelated; snapshot_payload={payload}");
+        Assert.Contains("snapshot_payload=[redacted]", unrelated, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public void OperationalLogRedactor_PreservesOnlyCanonicalCoordinatorOperationKeys()
+    {
+        const string authority = "fte1-0123456789abcdef01234567";
+        const string operationKey =
+            "regular_v4_frontier_repair_pressure|attempted_decision|" +
+            authority +
+            "|2|StageRegularV4FrontierRepairPressureBinding";
+        var canonical = SensitiveDataRedactor.Redact(
+            "event=filetransfer_coordinator_authority_effect; " +
+            $"operation_key={operationKey}; secret=do-not-keep");
+
+        Assert.Contains(
+            $"operation_key={operationKey}",
+            canonical,
+            StringComparison.Ordinal);
+        Assert.DoesNotContain("do-not-keep", canonical, StringComparison.Ordinal);
+
+        const string noAuthorityKey =
+            "receive_recovery|attempted_decision|(none)|0|" +
+            "EvaluateRuntimeUnlockInitialActivationReceiveRecoveryHold";
+        var noAuthority = SensitiveDataRedactor.Redact(
+            "event=filetransfer_coordinator_transition_snapshot; " +
+            $"operation_key={noAuthorityKey}");
+        Assert.Contains(
+            $"operation_key={noAuthorityKey}",
+            noAuthority,
+            StringComparison.Ordinal);
+
+        var malformedAuthority = SensitiveDataRedactor.Redact(
+            "event=filetransfer_coordinator_authority_effect; " +
+            "operation_key=regular_v4_frontier_repair_pressure|" +
+            "attempted_decision|raw-authority|2|" +
+            "StageRegularV4FrontierRepairPressureBinding");
+        Assert.DoesNotContain(
+            "StageRegularV4FrontierRepairPressureBinding",
+            malformedAuthority,
+            StringComparison.Ordinal);
+        Assert.Contains("[redacted]", malformedAuthority, StringComparison.Ordinal);
+
+        var negativeGeneration = SensitiveDataRedactor.Redact(
+            "event=filetransfer_coordinator_authority_effect; " +
+            $"operation_key=regular_v4_frontier_repair_pressure|" +
+            $"attempted_decision|{authority}|-1|" +
+            "StageRegularV4FrontierRepairPressureBinding");
+        Assert.DoesNotContain(
+            "StageRegularV4FrontierRepairPressureBinding",
+            negativeGeneration,
+            StringComparison.Ordinal);
+        Assert.Contains("[redacted]", negativeGeneration, StringComparison.Ordinal);
+
+        var extraComponent = SensitiveDataRedactor.Redact(
+            "event=filetransfer_coordinator_authority_effect; " +
+            $"operation_key={operationKey}|unexpected");
+        Assert.DoesNotContain(
+            operationKey,
+            extraComponent,
+            StringComparison.Ordinal);
+        Assert.Contains("[redacted]", extraComponent, StringComparison.Ordinal);
+
+        var unrelated = SensitiveDataRedactor.Redact(
+            $"event=unrelated; operation_key={operationKey}");
+        Assert.DoesNotContain(operationKey, unrelated, StringComparison.Ordinal);
+        Assert.Contains("[redacted]", unrelated, StringComparison.Ordinal);
+    }
+
     [Fact]
     [Trait("Category", "Smoke")]
     public void DiagnosticsRedactor_Redacts_Seeds_PrivateKeys_AndWalletSecrets()

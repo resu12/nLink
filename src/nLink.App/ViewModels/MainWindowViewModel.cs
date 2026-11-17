@@ -2,6 +2,7 @@ using System;
 using System.Threading.Tasks;
 using NLink.App.Configuration;
 using NLink.App.Services;
+using NLink.Core;
 using NLink.Core.Metrics;
 using NLink.Infra.Nkn;
 
@@ -9,7 +10,7 @@ namespace NLink.App.ViewModels;
 
 public class MainWindowViewModel : ViewModelBase, IDisposable
 {
-    private static readonly TimeSpan WindowClosePreparationTimeout = TimeSpan.FromSeconds(2);
+    private static readonly TimeSpan WindowClosePreparationTimeout = TimeSpan.FromSeconds(3);
     private readonly AppServiceRegistry services;
     private readonly TransportRuntimeConfig transportConfig;
     private readonly ShareMessageConfig shareMessageConfig;
@@ -22,11 +23,16 @@ public class MainWindowViewModel : ViewModelBase, IDisposable
     private readonly MetricsRegistry metricsRegistry;
     private readonly DebugMetricsPanelViewModel debugPanel;
     private readonly ResourceRuntimeTracker resourceRuntimeTracker;
+    private readonly ITunaWalletLinkStore? tunaWalletLinkStore;
+    private readonly ITunaWalletVerifier? tunaWalletVerifier;
+    private readonly ITunaRuntimePilotService? tunaRuntimePilotService;
     private readonly HangReportService hangReportService;
     private readonly UiFreezeWatchdog uiFreezeWatchdog;
     private readonly INetworkEventSource networkEventSource;
     private readonly NetworkResilienceCoordinator networkResilienceCoordinator;
     private readonly HomePageViewModel homePage;
+    private readonly object endSessionGate = new();
+    private Task? endSessionTask;
     private ViewModelBase? lastNonDiagnosticsPage;
     private ViewModelBase currentPage;
     private bool disposed;
@@ -34,13 +40,19 @@ public class MainWindowViewModel : ViewModelBase, IDisposable
     public MainWindowViewModel(AppServiceRegistry services)
     {
         this.services = services ?? throw new ArgumentNullException(nameof(services));
-        transportConfig = TransportRuntimeConfig.Select();
+        this.services.TryGet<ITunaRuntimePilotService>(out tunaRuntimePilotService);
+        Func<ISignalingTransport>? nknTransportFactory = tunaRuntimePilotService is null
+            ? null
+            : tunaRuntimePilotService.CreateNknTransport;
+        transportConfig = TransportRuntimeConfig.Select(nknTransportFactory);
         shareMessageConfig = this.services.GetRequired<ShareMessageConfig>();
         clipboardService = this.services.GetRequired<IClipboardService>();
         inviteShareService = this.services.GetRequired<IInviteShareService>();
         qrCodeService = this.services.GetRequired<IQrCodeService>();
         metricsRegistry = this.services.GetRequired<MetricsRegistry>();
         resourceRuntimeTracker = this.services.GetRequired<ResourceRuntimeTracker>();
+        this.services.TryGet<ITunaWalletLinkStore>(out tunaWalletLinkStore);
+        this.services.TryGet<ITunaWalletVerifier>(out tunaWalletVerifier);
         sessionRuntime = new SessionRuntime(
             transportConfig.CreateTransport,
             watchdogOptions: null,
@@ -115,19 +127,37 @@ public class MainWindowViewModel : ViewModelBase, IDisposable
 
     private void EndSessionOnly()
     {
-        _ = sessionRuntime.DisconnectAsync();
+        _ = GetOrStartEndSessionTask();
+    }
+
+    private Task GetOrStartEndSessionTask()
+    {
+        lock (endSessionGate)
+        {
+            if (endSessionTask is { IsCompleted: false })
+            {
+                return endSessionTask;
+            }
+
+            endSessionTask = sessionRuntime.DisconnectAsync();
+            return endSessionTask;
+        }
     }
 
     private void ShowDiagnosticsPage()
     {
         NavigateTo(new DiagnosticsPageViewModel(
+            ScreenShareEvidenceLocator.CreateDefault(),
             () => NavigateTo(lastNonDiagnosticsPage ?? homePage),
             transportConfig,
             shareMessageConfig,
             sessionRuntime,
             metricsRegistry,
             resourceRuntimeTracker,
-            hangReportService));
+            hangReportService,
+            tunaWalletLinkStore: tunaWalletLinkStore,
+            tunaWalletVerifier: tunaWalletVerifier,
+            tunaRuntimePilotService: tunaRuntimePilotService));
     }
 
     private void ShowHomePage()
@@ -184,7 +214,7 @@ public class MainWindowViewModel : ViewModelBase, IDisposable
         resourceRuntimeTracker.Dispose();
     }
 
-    public Task PrepareForWindowCloseAsync()
+    public async Task PrepareForWindowCloseAsync()
     {
         var closeAwarePage = CurrentPage as IWindowCloseAware;
         if (closeAwarePage is null && CurrentPage is DiagnosticsPageViewModel)
@@ -192,7 +222,30 @@ public class MainWindowViewModel : ViewModelBase, IDisposable
             closeAwarePage = lastNonDiagnosticsPage as IWindowCloseAware;
         }
 
-        return PreparePageForWindowCloseAsync(closeAwarePage);
+        await PrepareWindowCloseAsync(closeAwarePage, GetOrStartEndSessionTask, WindowClosePreparationTimeout)
+            .ConfigureAwait(false);
+    }
+
+    internal static async Task PrepareWindowCloseAsync(
+        IWindowCloseAware? closeAwarePage,
+        Func<Task> getOrStartEndSessionTask,
+        TimeSpan timeout)
+    {
+        ArgumentNullException.ThrowIfNull(getOrStartEndSessionTask);
+
+        // Let the page latch its close intent before disconnect emits terminal events.
+        var preparePage = PreparePageForWindowCloseAsync(closeAwarePage);
+        var endSession = getOrStartEndSessionTask();
+        try
+        {
+            await Task.WhenAll(endSession, preparePage)
+                .WaitAsync(timeout)
+                .ConfigureAwait(false);
+        }
+        catch
+        {
+            // Best-effort close path. App shutdown still proceeds.
+        }
     }
 
     internal static async Task PreparePageForWindowCloseAsync(IWindowCloseAware? closeAwarePage)

@@ -1,0 +1,271 @@
+# Frontier obligations across route supersession
+
+## Status and scope
+
+This document retains the original bounded proposal and its history. Separately
+approved version-2 neutral accounting is now implemented in the working tree;
+see the linked accounting contract for current verification. Completed-proof
+gates and archived results remain unchanged. Historical helper 11350 remains
+unresolved with `SourceSuperseded` diagnostic metadata and quartet
+`1/1/0/1`. That archived result is not a claim about the later bootstrap-ownership
+report and has not been replayed for this review.
+
+Current status reviewed against committed
+`dad138284a470342245dc2249c19ca32076c6f12` on 2026-09-13.
+The historical implementation entries below precede the separate accounting
+approval. The current follow-on closes the initiating retry evidence link and
+introduces neutral supersession without recovering stalled repair A.
+
+The [superseded-source accounting review](file-transfer-superseded-source-accounting-contract.md)
+specifies the implemented third disposition, exact peer/target/checkpoint proof,
+versioned count rules and unchanged completion gates. The first implementation
+gate on 2026-09-13 found a missing initiating retry-to-route proof reference.
+The separately approved evidence extension and version-2 accounting are now
+implemented and verified. A local diagnostic alone still cannot establish
+cross-peer eligibility, and archived results have not been reclassified. References below to
+uncommitted changes describe the historical 2026-09-12 review state; those changes
+are now included in the commit above.
+
+Latest bounded implementation: versioned Coordinator repair-owner evidence now
+binds the actual A/B grants and settlements. The rebuilt capture
+`artifacts/repair-owner-evidence-20260912/joined-repair-owner-01.log` proves
+`SourceSuperseded` using separate retained-leg, active-lease and durable-transition
+checkpoint roles. PS5/PS7 full/compact/direct/indexed/shared-GUI consumers retain
+`1/1/0/1`: A `SettledStalled`, B `StaleRejected`, obligation `Unresolved`.
+See [the implemented contract and evidence](file-transfer-checkpoint-role-and-repair-owner-rca.md#implemented-repair-owner-evidence-contract).
+Earlier capture-specific gaps below are historical, not the current producer state.
+
+The proposal separates four subjects which must not be collapsed into one
+"recovery" result:
+
+| Subject | Sufficient evidence | What it does not prove |
+|---|---|---|
+| Scheduled wake | Exact current wake, grant, delivery, dispatch and send | Successful repair or frontier progress |
+| Repair attempt A | Its exact immutable terminal settlement | Transfer of A's outcome to a successor |
+| Old source scope | Exact committed route replacement, current-owner retirement, applied disposition and publication with preserved durable checkpoint/data session | Cancellation or successful settlement of historical A |
+| Target route | Its own current Coordinator authority, peer-bound preparation/admission, checkpoint adoption and publication | Permission to accept old-source requests or borrow later progress for A |
+
+A request that was dispatched and then settled `SettledStalled` is not a missing
+wake. It is also not a successful repair. An exact successor B may later be
+retired by route replacement without changing A's settlement.
+
+## Proposed disposition, pending approval
+
+Recommend a distinct, neutral **superseded-source disposition** for the analyzer's
+source-bound progress obligation, once exact source retirement and target
+checkpoint ownership are established. It would not be `Recovered`, would not
+erase the stalled attempt, and would not waive unrelated transfer, route,
+evidence or finalization failures. No existing receipt is reinterpreted as a
+Coordinator cancellation of A: the longer-lived obligation is analyzer policy,
+not a separately issued runtime entity.
+
+The current `SourceSuperseded` diagnostic alone is insufficient to activate this
+proposal. Joined peer evidence and an explicit decision about classification and
+count accounting are prerequisites. Until that decision, the obligation stays
+unresolved. Do not move it into the recovered count, silently omit it from the
+distinct count, or manufacture a passing quartet.
+
+## Joined contract fixture
+
+The following is the required positive proof; the bounded joined-test result and
+its remaining verification limits are recorded below. The queued first-install test bridge forwards the
+actual paired-release request through service authorization, staging, receipt
+issuance, install confirmation and exact paired-release consumption. Only the
+sender installs; the receiver remains on its paired fallback source. An exact
+duplicate queue request does not dispatch twice or consume the release again.
+
+The negative confirmation path exposed a separate stale-state rollback defect.
+The approved fix now compensates from the exact current Coordinator state in
+both directions, preserves consumed release history and the exact predecessor,
+and clears only the failed transport proposal. Focused runtime and
+family-specific evidence tests pass; no historical obligation is marked
+recovered. See [the bounded RCA and results](file-transfer-retry-confirmation-rollback-rca.md).
+The new joined route-overlap fixture combines the A/B repair lineage,
+old-source request/replay rejection and target handoff. Its runtime assertions
+and the affected regression lane pass after the test-frame follow-up below.
+Publication-source admission now passes, but source supersession remains unproven;
+these are not a completed acceptance proof.
+
+Use one transfer and connected real test data-session queues. Starting fallback
+contexts may be controlled fixture inputs; completed route transitions, paired
+releases and repair settlements must be generated by the Coordinator/service
+paths being tested.
+
+1. Exchange the two actual Coordinator-issued yield proofs and validate their
+   exact peer/pair lineage. Writer-local Coordinator generations remain distinct.
+2. Generate the sender's PostFallback-to-Tuna preparation, drain, commit,
+   publication and disposition. A seeded committed sender is not this proof.
+3. Let the receiver's unchanged wake and rescue cadence dispatch A, settle A
+   stalled and install B. Deliver the receiver's actual emitted old-fallback
+   request through the sender's live receive queue, including one exact replay.
+4. Require both requests to be stale-rejected without a sender repair grant,
+   route mutation or progress. Rejection is correct behavior, not target failure.
+5. Complete the receiver's exact handoff. Its current B may retire; A must remain
+   stalled. Both target owners must preserve the durable frontier and their
+   respective data-session identities.
+6. Any subsequent target-route repair/progress must belong to its own current
+   authority and publication. It cannot retrospectively recover A.
+
+The two existing local route-overlap tests and synthetic analyzer fixtures remain
+useful controls, but do not together constitute this joined proof. A fake
+transport may supply physical observations; it may not manufacture Coordinator
+acceptance, an installed retry, a consumed paired release or a route commit.
+
+Safe confirmation failure is covered. The active-predecessor `Superseded`
+receipt and successful-confirmation terminal-effect gaps have also been fixed
+with exact family-specific lineage checks; they are no longer prerequisites
+awaiting implementation. See the implementation follow-up in
+[confirmed-supersession validation](file-transfer-confirmed-supersession-emission-validation.md).
+These checks do not reinterpret a stalled frontier repair as recovered.
+
+The newer
+[`JoinedFallbackRetry_InstalledServiceAuthorityDrivesRealOfferProbeAndAck` fixture](../../../tests/nLink.SmokeTests.Core/NknAccelerationTransportTests.JoinedRetryContinuation.cs)
+retains the actual exchanged offer/answer, semantic answer ACK and received
+probe/ACK. It binds both peers' final proof, Coordinator commit, applied
+disposition and `file_tuna_v4` publication to their own source authority.
+Writer-local generations remain distinct. The initial fallback baseline is
+explicit fixture state; subsequent authority comes from the real service and
+transport paths. Physical peers are fake, so this is not live-network, file-I/O
+or full route-cycle acceptance. This later continuation extends beyond the
+separate first-install bridge.
+
+The additional
+`JoinedFallbackRetry_StalledRepairAndOldSourceReplayRemainUnresolvedAcrossPeerHandoff`
+case now runs the unchanged grace/rescue cadence: A is dispatched and settles
+`SettledStalled`, then B is issued under the same receiver fallback publication.
+Its original requests traverse the real encrypted test transport and the sender's
+real receive supervisor. An exact captured B request is replayed at the decoded
+data-session queue boundary, not as a second encrypted network exchange. Exact
+correlation-bound rejection and unchanged sender authority, publication, repair
+state and progress are required before releasing the receiver's handoff.
+
+Both peers then require their actual Coordinator commit, applied disposition and
+`file_tuna_v4` publication. B retires `StaleRejected`; A remains stalled, including
+after late settlement attempts. Both target checkpoints remain `100/255` and
+retain their original data-session identities, generations and objects. The
+[local stalled-predecessor assertions](../../../tests/nLink.SmokeTests.Core/SessionFileTransferRouteOverlapRepairRetirementTests.cs)
+are reused within this run. Physical payload work is held by a test barrier; no
+target payload progress, file completion or SHA result is claimed. Real
+data-session replacement during staging remains untested and must not be
+simulated by direct state assignment.
+
+## Negative evidence and consumer selection
+
+Missing, foreign or ambiguous commit/disposition/publication, wrong peer binding,
+data-session replacement, pause/terminal poison, conflicting duplicates and
+A-to-B-to-A restoration must not establish supersession or target ownership.
+Rejected admission cannot supply positive authority; a state-neutral rejected
+callback does not by itself invalidate already-established current ownership.
+Byte-identical duplicates may coalesce only under the existing rules.
+
+Full, independently regenerated compact and shared GUI consumers must select
+the same exact candidate metadata. A later `SourceSuperseded` diagnostic cannot
+be attached to an earlier unresolved candidate that has no diagnostic. Absent
+and null optional metadata must remain absent/null through normal classification
+and formatting; they cannot become a recovered verdict.
+
+## Review verification, 2026-09-12
+
+The focused cross-host diagnostic consumer test and the joined retry continuation
+test pass against the reviewed tree. Absent/null/present metadata and mixed
+candidate selection are covered without invoking a full report. The two optional
+JSON guards correct PowerShell 5.1's empty output for present-but-null metadata
+to literal `null`, matching PowerShell 7. No runtime authority, classification,
+quartet or completed-proof rule changes in this slice.
+
+### Joined A/B/replay follow-up and remaining blockers
+
+The new joined case passes in `joined-overlap-09.trx` (1/1). The original joined
+continuation also passes in `joined-baseline-isolated.trx` (1/1); the later edit
+only adds a real receiver-state emission in the new case. The saved current-source
+capture is `artifacts/frontier-joined-overlap-20260912/joined-overlap-09.log`, SHA-256
+`06238BBE6106091DB2C5FB52208B2106DCFE152408E8413DE88F6959D108AA1C`.
+Strict snapshot and route verification pass under PowerShell 5 and 7, including
+full/independently regenerated compact evidence and cross-host parity. The shared
+GUI setup-classification parity check is not a frontier-stall admission check.
+
+The separate bounded frontier consumer check fails: expected unresolved quartet
+`1/1/0/1`, observed `0/0/0/0`, no admitted candidate. This is missing source
+admission, not recovery or an approved omission from counting. Both test peers
+share the process log writer. `New-FileTransferStallGraceCurrentSourceIndex`
+groups by writer/session/transfer, while
+`Get-FileTransferStallGracePublishedSourceAdmission` invalidates an established
+source on a later nonmatching publication, including the opposite direction.
+In writer `p42392r6a5294951f024b01`, receiver fallback publication sequence 55 is
+followed by sender Tuna publication 501 before receiver hold 559. The sender
+publication therefore invalidates the receiver's still-current source. A real
+receiver-state emission at 552 does not resolve that ownership partition issue.
+The input and writer identities were not rewritten or filtered to force admission.
+
+The next source-admission step at that point was to review the exact directional/Coordinator source-owner
+contract and add a same-writer, two-peer regression retaining both original
+histories. Any bounded fix must bind to validated Coordinator evidence and retain
+same-source ABA, conflict, pause/terminal and data-session poison checks. Do not
+solve this by simply ignoring foreign events, rewriting writer IDs or changing
+classification/count policy. The bounded follow-up below now resolves this first
+admission edge; the historical capture remains unchanged.
+
+The earlier broader relevant lane aborted. Isolating
+`JoinedFallbackYield_RejectedConfirmationCompensatesCurrentInstallWithoutReusingRelease`
+in a fresh normal Debug host reproduced a stack overflow at inbound
+`StartCoordinatorSnapshotStreamLocked`, reached from context construction before
+the compensation assertions; zero cases complete. A separate local retirement
+control crashed with zero completed cases but no retained stack, so the same
+cause is not established for that control. The original joined continuation's
+isolated pass does not waive either regression result.
+
+The subsequent measured test-frame fix supersedes that regression blocker:
+the shared joined async frame fell from 1,402,768 to 84,832 bytes, and the local
+handoff caller from 581,952 to 35,712 bytes. Whole-state assertions remain in
+synchronous helpers with the same captured values and sequence points. Both
+confirmation cases, the local stalled case and one affected 10-test lane pass.
+No stack/thread/JIT policy or runtime initialization/compensation change was made.
+See [the ownership and fixture-frame RCA](file-transfer-frontier-peer-ownership-rca.md)
+for measured limits and intermediate failures, and section 22 of
+[the bootstrap correlation contract](file-transfer-bootstrap-correlation-contract.md).
+
+Detailed run outcomes and the bounded RCA/fix plan are retained in
+`artifacts/frontier-joined-overlap-20260912/RESULTS.md`, with follow-up results in
+`artifacts/frontier-blockers-20260912/RESULTS.md`. The bare-direction and diagnostic-
+owner-stamp negative controls remain in force.
+
+### Exact publication binding follow-up
+
+The read-only version-1 publication reference is now implemented through the actual
+Core/Infra logging paths and the hold's current publication. Consumers require an
+exact accepted publication receipt and exact observed state from the existing
+validated authoritative snapshot; neither stamps nor a nearest-boundary match
+supply authority. Same-owner ABA, pause/terminal/data-session poison and ambiguous,
+missing or stale bindings remain rejected. Runtime authority tokens and the typed
+snapshot catalog are unchanged. See the [ownership RCA](file-transfer-frontier-peer-ownership-rca.md)
+for the producer/consumer contract and the separately corrected stale observer test.
+
+The rebuilt joined capture is `artifacts/publication-evidence-20260912/joined-evidence-01.log`,
+SHA-256 `0D47ADE187B1A72538DB12C22BBE9F15A3BEE08508841AAE1BEB8D6B8F7DD16D`.
+All nine emitted references bind. PS5/PS7 direct/indexed/full/compact/shared GUI
+frontier consumers agree on `1/1/0/1`: `DispatchedStalled`, source supersession
+unproven, obligation unresolved. Strict snapshot/route parity also passes. These
+are deterministic fake-peer and saved-evidence checks, not live acceptance.
+
+The downstream checkpoint-role review is complete: hold 561's retained-leg generation
+0, commit 812's durable generation 1, and the aggregate active lease are distinct
+subjects. A candidate mapping to the aggregate lease was withdrawn. Grants A/B lack
+exact repair-owner continuity bindings, and their snapshots have no typed repair
+operations. The [bounded RCA and fix contract](file-transfer-checkpoint-role-and-repair-owner-rca.md)
+requires versioned Coordinator repair-owner/retained-leg evidence before changing
+the comparison. This is not permission to recover A, reinterpret B or waive completion.
+
+The implementation and prior fixture changes remain uncommitted. Runtime decisions,
+acceptance policy and historical evidence are unchanged. Live attempts remain 12
+and retained reports 6. No full report, portable build, GUI, preflight or live NKN
+run was performed. Current results are in
+`artifacts/publication-evidence-20260912/RESULTS.md`.
+
+## Stop conditions
+
+Keep the current acceptance policy while validating this contract. A missing
+runtime edge, insufficient test transport, or missing cross-peer representation
+must be reported separately rather than filled by guessed authority. Any change
+to classification, quartet accounting or completed-proof acceptance needs an
+explicit follow-on approval. This phase includes no full retained report,
+portable rebuild, preflight or live scenario.

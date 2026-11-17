@@ -36,6 +36,12 @@ public sealed record FileTransferPanelItemViewModel(
     IAsyncRelayCommand<string?>? ResumeCommand,
     bool IsTerminal)
 {
+    public string SessionId { get; init; } = string.Empty;
+
+    public long ProgressBytes { get; init; }
+
+    public bool AnimateProgress { get; init; }
+
     public static FileTransferPanelItemViewModel? FromSnapshot(
         FileTransferTransferSnapshot? snapshot,
         IAsyncRelayCommand<string?>? acceptCommand = null,
@@ -50,7 +56,9 @@ public sealed record FileTransferPanelItemViewModel(
         }
 
         var fileSizeText = FormatByteSize(snapshot.FileSizeBytes);
-        var progressText = BuildProgressText(snapshot, fileSizeText);
+        var progressBytes = Math.Clamp(snapshot.PeerComparableProgressBytes ?? snapshot.ProgressBytes,
+            0L, Math.Max(0L, snapshot.FileSizeBytes));
+        var progressText = FormatProgressText(progressBytes, snapshot.FileSizeBytes);
         var showProgress = snapshot.State is FileTransferTransferState.AwaitingMetadata
             or FileTransferTransferState.PreparingMetadata
             or FileTransferTransferState.AwaitingStart
@@ -76,7 +84,7 @@ public sealed record FileTransferPanelItemViewModel(
             or FileTransferTransferState.Verifying;
         var canPauseResume = CanPauseResume(snapshot);
         var effectivePaused = snapshot.IsPaused || snapshot.IsPeerPaused;
-        var showPause = canPauseResume && !effectivePaused;
+        var showPause = canPauseResume && !effectivePaused && !snapshot.IsPauseBlockedByTransport;
         var showResume = canPauseResume && snapshot.IsPaused;
 
         return new FileTransferPanelItemViewModel(
@@ -86,7 +94,7 @@ public sealed record FileTransferPanelItemViewModel(
             snapshot.FileName,
             snapshot.FileSizeBytes,
             fileSizeText,
-            BuildVisibleProgressFraction(snapshot),
+            snapshot.FileSizeBytes <= 0 ? 0d : (double)progressBytes / snapshot.FileSizeBytes,
             progressText,
             BuildStatusText(snapshot),
             snapshot.SavedFilePath,
@@ -110,7 +118,14 @@ public sealed record FileTransferPanelItemViewModel(
             CancelCommand: showCancel ? cancelCommand : null,
             PauseCommand: showPause ? pauseCommand : null,
             ResumeCommand: showResume ? resumeCommand : null,
-            IsTerminal: snapshot.IsTerminal);
+            IsTerminal: snapshot.IsTerminal)
+        {
+            SessionId = snapshot.SessionId,
+            // Match the receiver's reporting basis; the sender still waits for its acknowledgment.
+            ProgressBytes = progressBytes,
+            AnimateProgress = !effectivePaused && snapshot.State is
+                FileTransferTransferState.Sending or FileTransferTransferState.Receiving,
+        };
     }
 
     private static string BuildStatusText(FileTransferTransferSnapshot snapshot)
@@ -212,47 +227,27 @@ public sealed record FileTransferPanelItemViewModel(
             FileTransferResultCodes.PayloadBudgetExceeded => "Transfer payload too large",
             FileTransferResultCodes.ReadFailed => "Couldn't read file",
             FileTransferResultCodes.TransportIncompatible => "Update nLink and retry",
+            FileTransferResultCodes.PeerDisconnected => "Peer disconnected",
+            FileTransferResultCodes.ControlChannelStalled => "Connection stalled",
             FileTransferResultCodes.TransportDisconnected => "Connection lost",
             FileTransferResultCodes.TransportDetached => "Transfer stopped",
             _ => snapshot.StatusMessage,
         };
     }
 
-    private static string BuildProgressText(FileTransferTransferSnapshot snapshot, string fileSizeText)
+    internal static string FormatProgressText(long bytes, long fileSizeBytes)
     {
-        if (snapshot.FileSizeBytes <= 0)
+        var fileSizeText = FormatByteSize(fileSizeBytes);
+        if (fileSizeBytes <= 0)
         {
             return fileSizeText;
         }
 
-        if (snapshot.Direction == FileTransferDirection.Outbound)
-        {
-            var sent = FormatByteSize(GetVisibleProgressBytes(snapshot));
-            return string.Create(
-                CultureInfo.InvariantCulture,
-                $"{sent} / {fileSizeText}");
-        }
-
-        var transferred = FormatByteSize(snapshot.BytesTransferred);
+        var transferred = FormatByteSize(Math.Clamp(bytes, 0L, fileSizeBytes));
         return string.Create(
             CultureInfo.InvariantCulture,
             $"{transferred} / {fileSizeText}");
     }
-
-    private static double BuildVisibleProgressFraction(FileTransferTransferSnapshot snapshot)
-    {
-        if (snapshot.FileSizeBytes <= 0)
-        {
-            return 0d;
-        }
-
-        return Math.Clamp((double)GetVisibleProgressBytes(snapshot) / snapshot.FileSizeBytes, 0d, 1d);
-    }
-
-    private static long GetVisibleProgressBytes(FileTransferTransferSnapshot snapshot)
-        => snapshot.Direction == FileTransferDirection.Outbound
-            ? Math.Max(0L, snapshot.BytesAcknowledgedByReceiver ?? snapshot.BytesTransferred)
-            : Math.Max(0L, snapshot.BytesTransferred);
 
     private static string? BuildSavedLocationText(FileTransferTransferSnapshot snapshot)
     {
@@ -284,8 +279,9 @@ public sealed record FileTransferPanelItemViewModel(
             unitIndex++;
         }
 
+        var format = unitIndex >= 2 ? "0.00" : "0.#";
         return string.Create(
             CultureInfo.InvariantCulture,
-            $"{value:0.#} {units[Math.Max(unitIndex, 0)]}");
+            $"{value.ToString(format, CultureInfo.InvariantCulture)} {units[Math.Max(unitIndex, 0)]}");
     }
 }

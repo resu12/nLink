@@ -65,6 +65,7 @@ public sealed class ConfigurationAndRunbookTests : CoreSmokeTestsBase
     {
         var previousSeqGate = Environment.GetEnvironmentVariable("NLINK_FEATURE_REMOTE_CONTROL_SEQ_GATE");
         var previousOptIn = Environment.GetEnvironmentVariable(FeatureFlags.AllowInsecureRemoteControlSeqGateOverrideEnvVar);
+        using var safeReleaseMode = DisableUnsafeDeveloperModeForTests();
 
         try
         {
@@ -75,6 +76,10 @@ public sealed class ConfigurationAndRunbookTests : CoreSmokeTestsBase
             Assert.False(FeatureFlags.RemoteControlSeqGateEnabled);
 #else
             Assert.True(FeatureFlags.RemoteControlSeqGateEnabled);
+            using (EnableUnsafeDeveloperModeForTests())
+            {
+                Assert.True(FeatureFlags.RemoteControlSeqGateEnabled);
+            }
 #endif
 
             Environment.SetEnvironmentVariable(FeatureFlags.AllowInsecureRemoteControlSeqGateOverrideEnvVar, "1");
@@ -87,6 +92,7 @@ public sealed class ConfigurationAndRunbookTests : CoreSmokeTestsBase
             {
                 Assert.False(FeatureFlags.RemoteControlSeqGateEnabled);
             }
+            Assert.True(FeatureFlags.RemoteControlSeqGateEnabled);
 #endif
         }
         finally
@@ -113,7 +119,11 @@ public sealed class ConfigurationAndRunbookTests : CoreSmokeTestsBase
         Assert.Contains("negotiated remote bulk endpoint", runbook, StringComparison.Ordinal);
         Assert.Contains("`64 KiB` payload cap", runbook, StringComparison.Ordinal);
         Assert.Contains("`196,606` body bytes before allocation", runbook, StringComparison.Ordinal);
-        Assert.Contains("live NKN file-transfer soak", runbook, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("run the route acceptance gate before installer creation", runbook, StringComparison.Ordinal);
+        Assert.Contains("verify regular NKN completion/integrity on route `regular_nkn_v4_fast` protocol `4`", runbook, StringComparison.Ordinal);
+        Assert.Contains("verify active Tuna completion/integrity on route `file_tuna_v4` protocol `4`", runbook, StringComparison.Ordinal);
+        Assert.Contains("verify live fallback completion/integrity on final route `post_tuna_fallback_v6` protocol `6` with explicit live-route epoch proof", runbook, StringComparison.Ordinal);
+        Assert.Contains("retain `filetransfer-live-nkn-summary.txt`, `filetransfer-live-nkn-cycles.jsonl`, and the retained log slice with the release evidence", runbook, StringComparison.Ordinal);
         Assert.Contains("preferred public release artifacts are Authenticode-signed before publish", runbook, StringComparison.Ordinal);
         Assert.Contains("unsigned public Windows artifacts are an accepted release exception", runbook, StringComparison.Ordinal);
         Assert.Contains("Authenticode status is `Valid`", runbook, StringComparison.Ordinal);
@@ -130,8 +140,8 @@ public sealed class ConfigurationAndRunbookTests : CoreSmokeTestsBase
     {
         var repoRoot = FindRepoRoot();
         var checklist = File.ReadAllText(Path.Combine(repoRoot, "docs", "release", "rc-validation-checklist.md"));
-        var releaseNotes = File.ReadAllText(Path.Combine(repoRoot, "docs", "releases", "0.6.2.md"));
-        var githubNotes = File.ReadAllText(Path.Combine(repoRoot, "docs", "releases", "0.6.2-github.md"));
+        var releaseNotes = File.ReadAllText(Path.Combine(repoRoot, "docs", "releases", "0.7.0.md"));
+        var githubNotes = File.ReadAllText(Path.Combine(repoRoot, "docs", "releases", "0.7.0-github.md"));
         var readme = File.ReadAllText(Path.Combine(repoRoot, "README.md"));
 
         Assert.Contains("NLINK_UNSAFE_DEVELOPER_MODE", checklist, StringComparison.Ordinal);
@@ -139,9 +149,16 @@ public sealed class ConfigurationAndRunbookTests : CoreSmokeTestsBase
         Assert.Contains("64 KiB", checklist, StringComparison.Ordinal);
         Assert.Contains("live NKN file-transfer soak", checklist, StringComparison.OrdinalIgnoreCase);
         Assert.Contains("bundled `bridge/win-x64/node.exe`", checklist, StringComparison.Ordinal);
+        Assert.Contains("package-lock.json", checklist, StringComparison.Ordinal);
+        Assert.Contains("bridge-dependencies.json", checklist, StringComparison.Ordinal);
+        Assert.Contains("no shipped `node_modules`", checklist, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("Node archive SHA-256", checklist, StringComparison.Ordinal);
         Assert.Contains("Unsigned public Windows artifacts are recorded as an accepted release exception", checklist, StringComparison.Ordinal);
 
-        Assert.Contains("V4-only", releaseNotes, StringComparison.Ordinal);
+        Assert.Contains("`regular_nkn_v4_fast`, protocol `4`", releaseNotes, StringComparison.Ordinal);
+        Assert.Contains("`file_tuna_v4`, protocol `4`", releaseNotes, StringComparison.Ordinal);
+        Assert.Contains("one-shot `post_tuna_fallback_v6`, protocol `6`", releaseNotes, StringComparison.Ordinal);
+        Assert.DoesNotContain("V6-only", releaseNotes, StringComparison.Ordinal);
         Assert.Contains("explicit accept/decline", releaseNotes, StringComparison.Ordinal);
         Assert.Contains("session envelope", releaseNotes, StringComparison.Ordinal);
         Assert.Contains("source/session validation", releaseNotes, StringComparison.Ordinal);
@@ -149,7 +166,11 @@ public sealed class ConfigurationAndRunbookTests : CoreSmokeTestsBase
         Assert.Contains("Release exception: Windows artifacts for this release are unsigned", releaseNotes, StringComparison.Ordinal);
         Assert.Contains("High quality", releaseNotes, StringComparison.Ordinal);
 
-        Assert.Contains("V4-only", githubNotes, StringComparison.Ordinal);
+        Assert.Contains("`regular_nkn_v4_fast` / protocol `4`", githubNotes, StringComparison.Ordinal);
+        Assert.Contains("`file_tuna_v4` / protocol `4`", githubNotes, StringComparison.Ordinal);
+        Assert.Contains("one-shot `post_tuna_fallback_v6` / protocol `6`", githubNotes, StringComparison.Ordinal);
+        Assert.Contains("active `file_tuna_v6` is not revived", githubNotes, StringComparison.Ordinal);
+        Assert.DoesNotContain("V6-only", githubNotes, StringComparison.Ordinal);
         Assert.Contains("explicit accept/decline", githubNotes, StringComparison.Ordinal);
         Assert.Contains("session envelope", githubNotes, StringComparison.Ordinal);
         Assert.Contains("Release exception: Windows artifacts for this release are unsigned", githubNotes, StringComparison.Ordinal);
@@ -157,14 +178,17 @@ public sealed class ConfigurationAndRunbookTests : CoreSmokeTestsBase
         Assert.Contains("NLINK_UNSAFE_DEVELOPER_MODE=1", readme, StringComparison.Ordinal);
         Assert.Contains("session envelope", readme, StringComparison.Ordinal);
         Assert.Contains("source/session validation", readme, StringComparison.Ordinal);
-        Assert.Contains("Release exception: Windows artifacts for `0.6.2` are unsigned", readme, StringComparison.Ordinal);
+        Assert.Contains("Release exception: Windows artifacts for `0.7.0` are unsigned", readme, StringComparison.Ordinal);
+        Assert.Contains("no shipped `node_modules`", readme, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("package-lock.json", readme, StringComparison.Ordinal);
+        Assert.Contains("bridge-dependencies.json", readme, StringComparison.Ordinal);
     }
 
 [Trait("Category", "LegacySmoke")]
     [Fact]
     public void SecurityAuditReport_TreatsFileTransferAsShippedAndResolved()
     {
-        var report = File.ReadAllText(Path.Combine(FindRepoRoot(), "SECURITY_AUDIT_REPORT.md"));
+        var report = File.ReadAllText(Path.Combine(FindRepoRoot(), "docs", "security", "audit-report.md"));
         var normalizedReport = report.Replace("\r\n", "\n", StringComparison.Ordinal);
 
         Assert.Contains("NLINK-SEC-001", report, StringComparison.Ordinal);
@@ -181,7 +205,42 @@ public sealed class ConfigurationAndRunbookTests : CoreSmokeTestsBase
         Assert.DoesNotContain("file transfer looks partially wired", report, StringComparison.OrdinalIgnoreCase);
     }
 
-[Trait("Category", "LegacySmoke")]
+    [Trait("Category", "LegacySmoke")]
+    [Fact]
+    public void BridgeSupplyChain_DocsAndScriptsRequireCleanLockedBundle()
+    {
+        var repoRoot = FindRepoRoot();
+        var bridgeScript = File.ReadAllText(Path.Combine(repoRoot, "installer", "Build-BridgeBundle.ps1"));
+        var readme = File.ReadAllText(Path.Combine(repoRoot, "README.md"));
+        var report = File.ReadAllText(Path.Combine(repoRoot, "docs", "security", "audit-report.md"));
+
+        Assert.Contains("ci --ignore-scripts --no-audit --no-fund", bridgeScript, StringComparison.Ordinal);
+        Assert.DoesNotContain("npm install", bridgeScript, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("PinnedNodeWinX64ArchiveSha256", bridgeScript, StringComparison.Ordinal);
+        Assert.Contains("nodeModulesShipped = $false", bridgeScript, StringComparison.Ordinal);
+        Assert.Contains("bridge-dependencies.json", bridgeScript, StringComparison.Ordinal);
+
+        Assert.DoesNotContain("artifacts/bridge/win-x64/node_modules", readme, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("bridge/win-x64/node_modules", readme, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("clean `npm ci`", readme, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("no shipped `node_modules`", readme, StringComparison.OrdinalIgnoreCase);
+
+        Assert.Contains("nodeModulesShipped=false", report, StringComparison.Ordinal);
+        Assert.Contains("nkn-sdk` `1.3.6", report, StringComparison.Ordinal);
+        Assert.DoesNotContain("committed `tools/nkn-bridge/node_modules`", report, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Trait("Category", "LegacySmoke")]
+    [Fact]
+    public void BridgeSupplyChain_NoGeneratedNodeRuntimeOrBridgeModulesAreTracked()
+    {
+        var repoRoot = FindRepoRoot();
+        var tracked = RunGitLsFiles(repoRoot, "tools/node", "tools/nkn-bridge/node_modules", "tools/nkn-bridge/.nlink-bundle");
+
+        Assert.Empty(tracked);
+    }
+
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public void AppAssembly_InformationalVersion_Matches_VERSION_File()
     {
@@ -197,7 +256,7 @@ public sealed class ConfigurationAndRunbookTests : CoreSmokeTestsBase
         Assert.Equal(expected, infoVersion);
     }
 
-[Trait("Category", "LegacySmoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public void Program_Parses_SelfTest_Argument()
     {
@@ -705,6 +764,39 @@ public sealed class ConfigurationAndRunbookTests : CoreSmokeTestsBase
             Environment.SetEnvironmentVariable(InviteTokenServiceFactory.AllowInsecureLegacyInviteModeEnvVar, previousOptIn);
             ReleaseOverridePolicy.ResetSuppressedOverridesForTests();
         }
+    }
+
+    private static string[] RunGitLsFiles(string repoRoot, params string[] paths)
+    {
+        var startInfo = new ProcessStartInfo
+        {
+            FileName = "git",
+            WorkingDirectory = repoRoot,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            UseShellExecute = false,
+        };
+        startInfo.ArgumentList.Add("ls-files");
+        foreach (var path in paths)
+        {
+            startInfo.ArgumentList.Add(path);
+        }
+
+        using var process = Process.Start(startInfo)
+            ?? throw new InvalidOperationException("Could not start git.");
+        var output = process.StandardOutput.ReadToEnd();
+        var error = process.StandardError.ReadToEnd();
+        process.WaitForExit();
+        if (process.ExitCode != 0)
+        {
+            throw new InvalidOperationException($"git ls-files failed with exit {process.ExitCode}: {error}");
+        }
+
+        return output
+            .Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries)
+            .Select(static line => line.Trim())
+            .Where(static line => line.Length > 0)
+            .ToArray();
     }
 
 }

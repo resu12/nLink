@@ -93,7 +93,7 @@ public sealed class TransportRuntimeConfig
 
     public string AllowStatusText => "Connected";
 
-    public static TransportRuntimeConfig Select()
+    public static TransportRuntimeConfig Select(Func<ISignalingTransport>? nknTransportFactory = null)
     {
         var (transportSetting, settingSource) = ReadTransportSetting();
         var normalizedSetting = string.IsNullOrWhiteSpace(transportSetting) ? "(not set)" : transportSetting.Trim();
@@ -153,7 +153,7 @@ public sealed class TransportRuntimeConfig
         }
 
         var config = useNkn
-            ? CreateNknConfig(bridgeBundled, bridgeProbeReason, buildMode, normalizedSetting, hasExplicitSetting, settingSource, forcedByEnvironment, autoSelected, startupWarningText, configurationErrorText)
+            ? CreateNknConfig(bridgeBundled, bridgeProbeReason, buildMode, normalizedSetting, hasExplicitSetting, settingSource, forcedByEnvironment, autoSelected, startupWarningText, configurationErrorText, nknTransportFactory)
             : CreateDevLocalConfig(bridgeBundled, bridgeProbeReason, buildMode, normalizedSetting, hasExplicitSetting, settingSource, forcedByEnvironment, autoSelected, startupWarningText, configurationErrorText);
 
         AppLog.Info(
@@ -172,7 +172,8 @@ public sealed class TransportRuntimeConfig
         bool forcedByEnvironment,
         bool autoSelected,
         string? startupWarningText,
-        string? configurationErrorText)
+        string? configurationErrorText,
+        Func<ISignalingTransport>? nknTransportFactory)
     {
         var policy = ReadBridgeReusePolicy();
         return new TransportRuntimeConfig(
@@ -191,7 +192,45 @@ public sealed class TransportRuntimeConfig
             startupWarningText: startupWarningText,
             configurationErrorText: configurationErrorText,
             bridgeReusePolicy: policy,
-            createTransport: static () => new NknSignalingTransport());
+            createTransport: () => CreateValidatedNknTransport(nknTransportFactory));
+    }
+
+    private static ISignalingTransport CreateValidatedNknTransport(Func<ISignalingTransport>? nknTransportFactory)
+    {
+        if (nknTransportFactory is null)
+        {
+            return new NknSignalingTransport();
+        }
+
+        ISignalingTransport? transport = null;
+        try
+        {
+            transport = nknTransportFactory();
+            if (transport is NknSignalingTransport)
+            {
+                return transport;
+            }
+
+            var transportType = transport?.GetType().Name ?? "(null)";
+            NknRuntimeDiagnostics.SetLastError($"NKN_TRANSPORT_FACTORY_INVALID: {transportType}");
+            AppLog.Warn($"event=nkn_transport_factory_invalid; transport_type={transportType}; fallback=plain_nkn");
+        }
+        catch (Exception ex)
+        {
+            NknRuntimeDiagnostics.SetLastError($"NKN_TRANSPORT_FACTORY_FAILED: {ex.GetType().Name}");
+            AppLog.Warn($"event=nkn_transport_factory_failed; error={ex.GetType().Name}; fallback=plain_nkn");
+        }
+
+        try
+        {
+            transport?.Dispose();
+        }
+        catch
+        {
+            // Best-effort cleanup for the invalid injected transport.
+        }
+
+        return new NknSignalingTransport();
     }
 
     private static TransportRuntimeConfig CreateDevLocalConfig(
@@ -261,6 +300,28 @@ public sealed class TransportRuntimeConfig
             var bridgeDir = Path.Combine(baseDir, "bridge", rid);
             var indexJs = Path.Combine(bridgeDir, "index.js");
             var nodeExe = Path.Combine(bridgeDir, RuntimeInformation.IsOSPlatform(OSPlatform.Windows) ? "node.exe" : "node");
+            var overrideBridge = ReleaseOverridePolicy.ReadUnsafeEnvironmentVariable("NLINK_NKN_BRIDGE_PATH", category: "bridge_runtime_path");
+            var overrideNode = ReleaseOverridePolicy.ReadUnsafeEnvironmentVariable("NLINK_NKN_NODE_PATH", category: "bridge_runtime_path");
+
+            if (!string.IsNullOrWhiteSpace(overrideBridge) ||
+                !string.IsNullOrWhiteSpace(overrideNode))
+            {
+                var resolvedBridge = string.IsNullOrWhiteSpace(overrideBridge)
+                    ? string.Empty
+                    : Path.GetFullPath(overrideBridge);
+                var resolvedNode = string.IsNullOrWhiteSpace(overrideNode)
+                    ? string.Empty
+                    : Path.GetFullPath(overrideNode);
+
+                if (File.Exists(resolvedBridge) && File.Exists(resolvedNode))
+                {
+                    reason = "unsafe_override_bridge_runtime";
+                    return true;
+                }
+
+                reason = MissingBridgeReason(resolvedBridge, resolvedNode);
+                return false;
+            }
 
             if (File.Exists(indexJs) && File.Exists(nodeExe))
             {

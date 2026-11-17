@@ -36,6 +36,11 @@ namespace NLink.SmokeTests;
 
 public abstract class CoreSmokeTestsBase
 {
+    private static readonly ConcurrentDictionary<int, string> OperationalLogCursorTokens = new();
+    private static readonly string OperationalLogProcessNonce =
+        Convert.ToHexString(RandomNumberGenerator.GetBytes(8)).ToLowerInvariant();
+    private static int nextOperationalLogCursorId;
+
 internal static IDisposable EnableUnsafeDeveloperModeForTests()
     => ReleaseOverridePolicy.OverrideUnsafeDeveloperModeForTests(true);
 
@@ -88,7 +93,8 @@ internal static async Task VerifyHandshakeAsync(bool approve)
         var invite = CreateValidatedInviteForTarget(
             new PeerAddress(hostAddress),
             out var rawToken,
-            InviteCapabilities.Chat);
+            InviteCapabilities.Chat,
+            boundHelperAddress: new PeerAddress(joiner.LocalPeerAddress));
         await WaitStepAsync("joiner join", joiner.JoinByInviteAsync(rawToken, invite, cts.Token), TimeSpan.FromSeconds(3));
         await WaitStepAsync("join request raised", joinRequestRaised.Task, TimeSpan.FromSeconds(3));
         Assert.NotNull(pendingJoinRequest);
@@ -444,7 +450,7 @@ function startSpam() {
   let n = 0;
   spamTimer = setInterval(() => {
     for (let i = 0; i < 50; i++) {
-      process.stderr.write('spam-line-' + (n++) + ' xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\\n');
+      process.stderr.write('spam-line-' + (n++) + ' xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n');
     }
   }, 5);
 }
@@ -459,6 +465,11 @@ rl.on('line', (line) => {
   let msg;
   try { msg = JSON.parse(line); } catch { emit({ event:'error', id:null, cmd:null, reason:'Invalid JSON' }); return; }
   if (msg.cmd === 'hello') { emit({ event:'hello_ok', id: msg.id ?? null, protocol: 2, sdk: 'mock-sdk@1.0.0' }); startSpam(); return; }
+  if (msg.cmd === 'connect') {
+    emit({ event:'ok', id: msg.id ?? null, cmd:'connect' });
+    emit({ event:'ready', protocol:2, channels:['control','media','bulk'], address:'mock.stderr.addr', controlAddress:'mock.stderr.addr', mediaAddress:'mock.stderr-media.addr', bulkAddress:'mock.stderr-bulk.addr', connectId: msg.connectId ?? null });
+    return;
+  }
   if ((msg.type === 'ping') || (msg.cmd === 'ping')) { emit({ type:'pong', id: msg.id ?? null, ts: Date.now() }); return; }
   if (msg.cmd === 'shutdown') {
     emit({ event:'ok', id: msg.id ?? null, cmd: 'shutdown' });
@@ -734,6 +745,11 @@ internal static Envelope BuildSecureFileTransferEnvelope<TMessage>(
             FileTransferCancelV1 cancel => FileTransferPayloadCodec.Serialize(cancel),
             FileTransferErrorV1 error => FileTransferPayloadCodec.Serialize(error),
             FileTransferCompleteV1 complete => FileTransferPayloadCodec.Serialize(complete),
+            FileTransferPauseControlV6 pauseControl => FileTransferPayloadCodec.Serialize(pauseControl),
+            FileTransferHeartbeatV6 heartbeat => FileTransferPayloadCodec.Serialize(heartbeat),
+            FileTransferTransportEpochV6 transportEpoch => FileTransferPayloadCodec.Serialize(transportEpoch),
+            FileTransferTransportProbeV6 transportProbe => FileTransferPayloadCodec.Serialize(transportProbe),
+            FileTransferRepairProofV6 repairProof => FileTransferPayloadCodec.Serialize(repairProof),
             _ => throw new ArgumentOutOfRangeException(nameof(message), "Unsupported file-transfer message."),
         };
 
@@ -756,6 +772,11 @@ internal static Envelope BuildSecureFileTransferEnvelope<TMessage>(
                         MsgType.FileTransferCancel => "file_transfer_cancel",
                         MsgType.FileTransferError => "file_transfer_error",
                         MsgType.FileTransferComplete => "file_transfer_complete",
+                        MsgType.FileTransferPauseControl => "file_transfer_pause_control",
+                        MsgType.FileTransferHeartbeat => "file_transfer_heartbeat",
+                        MsgType.FileTransferTransportEpoch => "file_transfer_transport_epoch",
+                        MsgType.FileTransferTransportProbe => "file_transfer_transport_probe",
+                        MsgType.FileTransferRepairProof => "file_transfer_repair_proof",
                         _ => throw new ArgumentOutOfRangeException(nameof(msgType), msgType, "Unsupported file-transfer message."),
                     },
                     SessionId: sessionId,
@@ -855,6 +876,7 @@ internal static Envelope BuildSecureLifecycleEnvelope(
                     MsgType.Approve => "approve",
                     MsgType.Reject => "reject",
                     MsgType.SessionEnd => "session_end",
+                    MsgType.SessionHeartbeat => "session_heartbeat",
                     _ => throw new ArgumentOutOfRangeException(nameof(msgType), msgType, "Unsupported lifecycle message."),
                 },
                 SessionId: sessionId,
@@ -1014,30 +1036,64 @@ internal static async Task<string> ApproveNknSessionAsync(
         NknSignalingTransport host,
         NknSignalingTransport helper,
         CancellationToken ct,
-        InviteCapabilities capabilities = InviteCapabilities.Chat)
+        InviteCapabilities capabilities = InviteCapabilities.Chat,
+        bool suppressAutomaticAccelerationNegotiation = false)
     {
-        var joinRequestRaised = new TaskCompletionSource<IncomingJoinRequestEventArgs>(TaskCreationOptions.RunContinuationsAsynchronously);
-        var hostApproved = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        var helperApproved = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var previousHostNegotiationScheduled = 0;
+        var previousHelperNegotiationScheduled = 0;
+        EventHandler<TransportSessionSecurityStateChangedEventArgs>? hostSuppressionHandler = null;
+        EventHandler<TransportSessionSecurityStateChangedEventArgs>? helperSuppressionHandler = null;
+        if (suppressAutomaticAccelerationNegotiation)
+        {
+            previousHostNegotiationScheduled = Convert.ToInt32(
+                GetPrivateField(host, "accelerationNegotiationScheduled"),
+                System.Globalization.CultureInfo.InvariantCulture);
+            previousHelperNegotiationScheduled = Convert.ToInt32(
+                GetPrivateField(helper, "accelerationNegotiationScheduled"),
+                System.Globalization.CultureInfo.InvariantCulture);
+            hostSuppressionHandler = (_, _) => SetPrivateField(host, "accelerationNegotiationScheduled", 1);
+            helperSuppressionHandler = (_, _) => SetPrivateField(helper, "accelerationNegotiationScheduled", 1);
+            host.SessionSecurityStateChanged += hostSuppressionHandler;
+            helper.SessionSecurityStateChanged += helperSuppressionHandler;
+            SetPrivateField(host, "accelerationNegotiationScheduled", 1);
+            SetPrivateField(helper, "accelerationNegotiationScheduled", 1);
+        }
 
-        host.IncomingJoinRequest += (_, e) => joinRequestRaised.TrySetResult(e);
-        host.Approved += (_, _) => hostApproved.TrySetResult();
-        helper.Approved += (_, _) => helperApproved.TrySetResult();
+        try
+        {
+            var joinRequestRaised = new TaskCompletionSource<IncomingJoinRequestEventArgs>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var hostApproved = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var helperApproved = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
 
-        await host.HostByAddressAsync(ct);
-        var invite = CreateValidatedInviteForTarget(
-            new PeerAddress(host.LocalPeerAddress),
-            out var rawToken,
-            capabilities,
-            boundHelperAddress: new PeerAddress(helper.LocalPeerAddress));
-        await helper.JoinByInviteAsync(rawToken, invite, ct);
+            host.IncomingJoinRequest += (_, e) => joinRequestRaised.TrySetResult(e);
+            host.Approved += (_, _) => hostApproved.TrySetResult();
+            helper.Approved += (_, _) => helperApproved.TrySetResult();
 
-        var pendingJoin = await joinRequestRaised.Task.WaitAsync(TimeSpan.FromSeconds(3), ct);
-        await pendingJoin.ApproveAsync(pendingJoin.CreateApprovalDecision(), ct);
-        await hostApproved.Task.WaitAsync(TimeSpan.FromSeconds(3), ct);
-        await helperApproved.Task.WaitAsync(TimeSpan.FromSeconds(3), ct);
+            await host.HostByAddressAsync(ct);
+            var invite = CreateValidatedInviteForTarget(
+                new PeerAddress(host.LocalPeerAddress),
+                out var rawToken,
+                capabilities,
+                boundHelperAddress: new PeerAddress(helper.LocalPeerAddress));
+            await helper.JoinByInviteAsync(rawToken, invite, ct);
 
-        return host.CurrentSessionSecurityState.SessionId!.Value.Value;
+            var pendingJoin = await joinRequestRaised.Task.WaitAsync(TimeSpan.FromSeconds(3), ct);
+            await pendingJoin.ApproveAsync(pendingJoin.CreateApprovalDecision(), ct);
+            await hostApproved.Task.WaitAsync(TimeSpan.FromSeconds(3), ct);
+            await helperApproved.Task.WaitAsync(TimeSpan.FromSeconds(3), ct);
+
+            return host.CurrentSessionSecurityState.SessionId!.Value.Value;
+        }
+        finally
+        {
+            if (suppressAutomaticAccelerationNegotiation)
+            {
+                host.SessionSecurityStateChanged -= hostSuppressionHandler;
+                helper.SessionSecurityStateChanged -= helperSuppressionHandler;
+                SetPrivateField(host, "accelerationNegotiationScheduled", previousHostNegotiationScheduled);
+                SetPrivateField(helper, "accelerationNegotiationScheduled", previousHelperNegotiationScheduled);
+            }
+        }
     }
 
 internal static List<string> FindOperationalLogLines(Func<string, bool> predicate)
@@ -1053,15 +1109,66 @@ internal static List<string> FindOperationalLogLines(Func<string, bool> predicat
 
 internal static int GetOperationalLogLength()
     {
-        return ReadOperationalLogText().Length;
+        var cursorId = Interlocked.Increment(ref nextOperationalLogCursorId);
+        if (cursorId <= 0)
+        {
+            throw new InvalidOperationException("The operational-log cursor generation was exhausted.");
+        }
+
+        var cursorToken =
+            $"event=smoke_test_operational_log_cursor; cursor_id=p{Environment.ProcessId}r{OperationalLogProcessNonce}n{cursorId};";
+        OperationalLogCursorTokens[cursorId] = cursorToken;
+        LocalOperationalLog.Info("SmokeTest", cursorToken);
+        return -cursorId;
     }
 
-internal static string ReadOperationalLogTail(int startIndex)
+    internal static string ReadOperationalLogTail(int startIndex)
     {
-        var logText = ReadOperationalLogText();
-        if (startIndex <= 0 || startIndex >= logText.Length)
+        if (startIndex < 0)
         {
-            return startIndex >= logText.Length ? string.Empty : logText;
+            var cursorId = -startIndex;
+            if (!OperationalLogCursorTokens.TryGetValue(cursorId, out var cursorToken))
+            {
+                throw new InvalidOperationException($"Unknown operational-log cursor '{cursorId}'.");
+            }
+
+            if (!LocalOperationalLog.TryReadRetainedTail(cursorToken, out var retainedTail))
+            {
+                var recentLogText = LocalOperationalLog.GetRecentLogText();
+                var recentCursorIndex = recentLogText.LastIndexOf(cursorToken, StringComparison.Ordinal);
+                if (recentCursorIndex >= 0)
+                {
+                    var cursorLineEnd = recentLogText.IndexOf('\n', recentCursorIndex);
+                    return cursorLineEnd < 0
+                        ? string.Empty
+                        : recentLogText[(cursorLineEnd + 1)..];
+                }
+
+                throw new InvalidOperationException(
+                    $"Operational-log cursor '{cursorId}' is missing from the retained log generations and recent in-memory log.");
+            }
+
+            return retainedTail;
+        }
+
+        var logText = ReadOperationalLogText();
+        if (startIndex <= 0)
+        {
+            return logText;
+        }
+
+        if (startIndex > logText.Length)
+        {
+            // The operational log can rotate between the initial length snapshot
+            // and the final read during long smoke-test filters. In that case
+            // the current contents are a better diagnostic tail than an empty
+            // string from a stale absolute offset.
+            return logText;
+        }
+
+        if (startIndex == logText.Length)
+        {
+            return string.Empty;
         }
 
         return logText[startIndex..];

@@ -1,19 +1,28 @@
 # nLink Docs
 
-Start here when you need current repo guidance. Historical release notes live under `docs/releases/` and are preserved as release records, not active process docs.
+Start here for current repo guidance. [0.7.0 hotfix revision 1](https://github.com/resu12/nLink/releases/tag/v0.7.0-hotfix.1) is published from `d235dcf1` with CI #103's exact artifacts. The original 0.7.0 release remains unchanged. [Hotfix revision 2](releases/0.7.0-hotfix.2.md) is an unreleased candidate; source-branch features and local builds are not published-release claims.
 
 ## Current Operator Guides
 
 - [`docs/test-lanes.md`](test-lanes.md): stable test lane matrix after the Track C project split.
 - [`docs/supportability.md`](supportability.md): support evidence checklist for bug reports, diagnostics, hang reports, logs, and screenshare evidence.
+- [`docs/screenshare-implementation.md`](screenshare-implementation.md): current H.264 screen-share capture, transport, decode, recovery, and diagnostics design.
 - [`docs/screenshare-operability.md`](screenshare-operability.md): screenshare-specific operator model and `ScreenShare-Ops.ps1` entry point.
+- [`docs/file-transfer-implementation.md`](file-transfer-implementation.md): current route-aware single-file transfer protocol, V4 regular/Tuna routes, controlled V6 fallback, lifecycle safety, and diagnostics design.
+- [`docs/file-transfer-operability.md`](file-transfer-operability.md): start here for file transfer/Tuna usage, support capture, operator triage, and the distinction between correctness and performance.
+- [`docs/nkn-tuna-implementation.md`](nkn-tuna-implementation.md): experimental NKN Tuna wallet, sidecar, session binding, runtime unlock, caps, and fallback design.
+- [`docs/file-transfer-soak.md`](file-transfer-soak.md): targeted local/live commands and the strict seven-scenario Phase 5 release gate.
+- [`docs/file-transfer-stabilization-protocol.md`](file-transfer-stabilization-protocol.md): coordinator-authority invariants and bounded remediation rules.
 - [`docs/screenshare-soak.md`](screenshare-soak.md): technical reference for local screenshare soak output and retained Track B evidence.
 - [`docs/screenshare-stabilization-protocol.md`](screenshare-stabilization-protocol.md): promotion rules for planned screenshare runtime behavior changes.
 
 ## Release And Validation
 
-- [`docs/RELEASING.md`](RELEASING.md): short release checklist.
-- [`docs/ReleaseRunbook.md`](ReleaseRunbook.md): detailed version-neutral release runbook.
+- [Published hotfix-1 notes](releases/0.7.0-hotfix.1.md) and [original 0.7.0 notes](releases/0.7.0.md).
+- [Hotfix-2 candidate notes](releases/0.7.0-hotfix.2.md) and [release-body draft](releases/0.7.0-hotfix.2-github.md).
+- [README screenshot provenance](images/README.md): captured version, privacy masks and pending replacements.
+- [`docs/ReleaseRunbook.md`](ReleaseRunbook.md): canonical release process, published package provenance, and historical candidate evidence.
+- [`docs/build-test-lock-avoidance.md`](build-test-lock-avoidance.md): Windows-safe build/test command shapes for avoiding generated-output locks during repeated manual runs.
 - [`docs/release/rc-validation-checklist.md`](release/rc-validation-checklist.md): active RC validation checklist.
 - [`docs/release/rc-guardrails.md`](release/rc-guardrails.md): RC guardrail workflow rules.
 - [`docs/BETA_HARDENING_EXTRAS.md`](BETA_HARDENING_EXTRAS.md): optional Windows hardening extras.
@@ -25,8 +34,11 @@ Start here when you need current repo guidance. Historical release notes live un
 - [`docs/BetaUxGate.md`](BetaUxGate.md): UX invariants for beta/release readiness.
 - [`docs/FIRST-RUN-PERFORMANCE.md`](FIRST-RUN-PERFORMANCE.md): first-run performance expectations.
 - [`docs/SessionUxContract.md`](SessionUxContract.md): session UI contract.
+- [Security audit and app-layer contract](security/audit-report.md): retained security findings, trust boundaries and dependency review; not a new audit of the latest build.
 
-## Historical Records
+## Historical And Experimental References
 
-- `docs/releases/**`: release notes and GitHub release bodies for shipped versions.
-- `docs/images/**`: screenshots used by README and release docs.
+- `docs/releases/**`: published release records plus explicitly marked candidate drafts. Old release notes are not current operating instructions.
+- [Historical archive](archive/README.md): file-transfer investigations and design notes, retained evidence summaries, and superseded screenshots. These are separated from current operator guidance; their original outcomes and limitations remain unchanged.
+- [`docs/tuna-poc-runbook.md`](tuna-poc-runbook.md): standalone synthetic benchmark, not authenticated nLink payload or release qualification.
+- `docs/images/**`: current README screenshots and provenance. Superseded captures are in [the image archive](archive/images/).

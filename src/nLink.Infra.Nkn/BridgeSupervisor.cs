@@ -30,6 +30,7 @@ internal sealed class BridgeSupervisor : IBridgeProcessRunner
     private WindowsKillOnCloseProcessJob? processLifetimeGuard;
     private bool forcedKillRequested;
     private long currentBridgeSpawnTicks;
+    private long currentProcessEpoch;
     private int trackedBridgePid;
     private long trackedBridgeStartTimeUtcFileTime;
 
@@ -211,6 +212,7 @@ internal sealed class BridgeSupervisor : IBridgeProcessRunner
             processLifetimeGuard = newProcessLifetimeGuard;
             forcedKillRequested = false;
             currentBridgeSpawnTicks = Stopwatch.GetTimestamp();
+            currentProcessEpoch = NextProcessEpoch(currentProcessEpoch);
             trackedBridgePid = newProcess.Id;
             trackedBridgeStartTimeUtcFileTime = SafeGetStartTimeUtcFileTime(newProcess);
             readerLoopCts = newReaderLoopCts;
@@ -234,6 +236,53 @@ internal sealed class BridgeSupervisor : IBridgeProcessRunner
             ExitReasonText: string.Empty));
 
         callbacks.Log($"Bridge process started (pid={newProcess.Id}, node={Path.GetFileName(nodePath)}, script={bridgePath})");
+    }
+
+    private static long NextProcessEpoch(long current)
+        => current <= 0 ? 1 : checked(current + 1);
+
+    public BridgeProcessEpochIdentity CurrentProcessIdentity
+    {
+        get
+        {
+            lock (gate)
+            {
+                if (process is null ||
+                    process.HasExited ||
+                    stdinWriter is null ||
+                    currentProcessEpoch <= 0)
+                {
+                    return default;
+                }
+
+                return new BridgeProcessEpochIdentity(
+                    currentProcessEpoch,
+                    process.Id,
+                    currentBridgeSpawnTicks);
+            }
+        }
+    }
+
+    public BridgeProcessSubmissionSnapshot GetActiveSubmissionSnapshotOrThrow()
+    {
+        lock (gate)
+        {
+            var writer = stdinWriter ??
+                         throw new InvalidOperationException("NKN bridge is not running.");
+            var currentProcess = process ??
+                                 throw new InvalidOperationException("NKN bridge is not running.");
+            if (currentProcess.HasExited || currentProcessEpoch <= 0)
+            {
+                throw new InvalidOperationException("NKN bridge process is not available.");
+            }
+
+            return new BridgeProcessSubmissionSnapshot(
+                writer,
+                new BridgeProcessEpochIdentity(
+                    currentProcessEpoch,
+                    currentProcess.Id,
+                    currentBridgeSpawnTicks));
+        }
     }
 
     private static void ScrubUnsafeBridgeEnvironment(IDictionary<string, string?> environment)
@@ -373,6 +422,39 @@ internal sealed class BridgeSupervisor : IBridgeProcessRunner
     {
         var snapshot = DetachProcessStateSnapshot();
         return CleanupDetachedProcessStateAsync(snapshot, waitForReaders, cleanupReason);
+    }
+
+    public async Task<BridgeProcessEpochCleanupResult?>
+        CleanupProcessEpochAsync(
+        BridgeProcessEpochIdentity expectedIdentity,
+        bool waitForReaders,
+        string cleanupReason)
+    {
+        if (expectedIdentity.IsDefault)
+        {
+            return null;
+        }
+
+        ProcessStateSnapshot snapshot;
+        lock (gate)
+        {
+            if (!TryGetTrackedProcessIdentityLocked(out var currentIdentity) ||
+                currentIdentity != expectedIdentity)
+            {
+                return null;
+            }
+
+            snapshot = DetachProcessStateSnapshotLocked();
+        }
+
+        var processTerminated = await CleanupDetachedProcessStateAsync(
+                snapshot,
+                waitForReaders,
+                cleanupReason)
+            .ConfigureAwait(false);
+        return new BridgeProcessEpochCleanupResult(
+            expectedIdentity,
+            processTerminated);
     }
 
     public void MarkForcedKillRequested()
@@ -529,28 +611,59 @@ internal sealed class BridgeSupervisor : IBridgeProcessRunner
     {
         lock (gate)
         {
-            var snapshot = new ProcessStateSnapshot(
-                process,
-                stdinWriter,
-                processLifetimeGuard,
-                stdoutReaderTask,
-                stderrReaderTask,
-                readerLoopCts,
-                trackedBridgePid,
-                trackedBridgeStartTimeUtcFileTime);
-
-            process = null;
-            stdinWriter = null;
-            processLifetimeGuard = null;
-            forcedKillRequested = false;
-            currentBridgeSpawnTicks = 0;
-            stdoutReaderTask = null;
-            stderrReaderTask = null;
-            readerLoopCts = null;
-            trackedBridgePid = 0;
-            trackedBridgeStartTimeUtcFileTime = 0;
-            return snapshot;
+            return DetachProcessStateSnapshotLocked();
         }
+    }
+
+    private bool TryGetTrackedProcessIdentityLocked(
+        out BridgeProcessEpochIdentity identity)
+    {
+        identity = default;
+        if (process is not { } currentProcess ||
+            currentProcessEpoch <= 0 ||
+            currentBridgeSpawnTicks <= 0)
+        {
+            return false;
+        }
+
+        try
+        {
+            identity = new BridgeProcessEpochIdentity(
+                currentProcessEpoch,
+                currentProcess.Id,
+                currentBridgeSpawnTicks);
+            return !identity.IsDefault;
+        }
+        catch
+        {
+            identity = default;
+            return false;
+        }
+    }
+
+    private ProcessStateSnapshot DetachProcessStateSnapshotLocked()
+    {
+        var snapshot = new ProcessStateSnapshot(
+            process,
+            stdinWriter,
+            processLifetimeGuard,
+            stdoutReaderTask,
+            stderrReaderTask,
+            readerLoopCts,
+            trackedBridgePid,
+            trackedBridgeStartTimeUtcFileTime);
+
+        process = null;
+        stdinWriter = null;
+        processLifetimeGuard = null;
+        forcedKillRequested = false;
+        currentBridgeSpawnTicks = 0;
+        stdoutReaderTask = null;
+        stderrReaderTask = null;
+        readerLoopCts = null;
+        trackedBridgePid = 0;
+        trackedBridgeStartTimeUtcFileTime = 0;
+        return snapshot;
     }
 
     private void CleanupDetachedProcessState(ProcessStateSnapshot snapshot, bool waitForReaders, string cleanupReason)
@@ -580,13 +693,21 @@ internal sealed class BridgeSupervisor : IBridgeProcessRunner
         }
     }
 
-    private async Task CleanupDetachedProcessStateAsync(ProcessStateSnapshot snapshot, bool waitForReaders, string cleanupReason)
+    private async Task<bool> CleanupDetachedProcessStateAsync(
+        ProcessStateSnapshot snapshot,
+        bool waitForReaders,
+        string cleanupReason)
     {
         try { snapshot.ReaderLoopCts?.Cancel(); } catch { }
         try { snapshot.ProcessLifetimeGuard?.Dispose(); } catch { }
+        var processTerminated = false;
         if (snapshot.Process is { } p)
         {
-            await TryKillDetachedBridgeProcessIfStillRunningAsync(p, cleanupReason).ConfigureAwait(false);
+            processTerminated =
+                await TryKillDetachedBridgeProcessIfStillRunningAsync(
+                        p,
+                        cleanupReason)
+                    .ConfigureAwait(false);
         }
         else
         {
@@ -606,6 +727,8 @@ internal sealed class BridgeSupervisor : IBridgeProcessRunner
             try { snapshot.Process.Exited -= OnBridgeProcessExited; } catch { }
             try { snapshot.Process.Dispose(); } catch { }
         }
+
+        return processTerminated;
     }
 
     private void TryKillDetachedBridgeProcessIfStillRunning(Process processToKill, string cleanupReason)
@@ -819,18 +942,20 @@ internal sealed class BridgeSupervisor : IBridgeProcessRunner
         }
     }
 
-    private async Task TryKillDetachedBridgeProcessIfStillRunningAsync(Process processToKill, string cleanupReason)
+    private async Task<bool> TryKillDetachedBridgeProcessIfStillRunningAsync(
+        Process processToKill,
+        string cleanupReason)
     {
         try
         {
             if (processToKill.HasExited)
             {
-                return;
+                return true;
             }
         }
         catch
         {
-            return;
+            return false;
         }
 
         try
@@ -842,11 +967,22 @@ internal sealed class BridgeSupervisor : IBridgeProcessRunner
             }
 
             processToKill.Kill(entireProcessTree: true);
-            _ = await WaitForProcessExitAsync(processToKill, TimeSpan.FromMilliseconds(ShutdownWaitMilliseconds)).ConfigureAwait(false);
+            var terminated = await WaitForProcessExitAsync(
+                    processToKill,
+                    TimeSpan.FromMilliseconds(ShutdownWaitMilliseconds))
+                .ConfigureAwait(false);
+            if (!terminated)
+            {
+                callbacks.Log(
+                    $"event=bridge_process_epoch_cleanup_termination_unconfirmed; pid={SafeGetPid(processToKill)}; reason={cleanupReason}");
+            }
+
+            return terminated;
         }
         catch (Exception ex)
         {
             callbacks.Log($"Bridge cleanup kill failed ({ex.GetType().Name})");
+            return false;
         }
     }
 
@@ -968,6 +1104,25 @@ internal sealed class BridgeSupervisor : IBridgeProcessRunner
         int TrackedPid,
         long TrackedStartTimeUtcFileTime);
 }
+
+internal readonly record struct BridgeProcessEpochIdentity(
+    long ProcessEpoch,
+    int ProcessId,
+    long SpawnTicks)
+{
+    public bool IsDefault =>
+        ProcessEpoch <= 0 ||
+        ProcessId <= 0 ||
+        SpawnTicks <= 0;
+}
+
+internal readonly record struct BridgeProcessEpochCleanupResult(
+    BridgeProcessEpochIdentity SourceIdentity,
+    bool ProcessTerminated);
+
+internal readonly record struct BridgeProcessSubmissionSnapshot(
+    BridgeStdioWriter Writer,
+    BridgeProcessEpochIdentity Identity);
 
 internal sealed class BridgeSupervisorCallbacks
 {

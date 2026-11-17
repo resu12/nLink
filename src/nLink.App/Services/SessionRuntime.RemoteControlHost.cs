@@ -59,6 +59,15 @@ public sealed partial class SessionRuntime
     private static readonly TimeSpan HelperRemoteScreenShareRecoveryReceiptRetryDelay = TimeSpan.FromMilliseconds(250);
     private static readonly TimeSpan HelperRemoteScreenShareCadenceStallTriggerWindow = TimeSpan.FromMilliseconds(800);
     private static readonly TimeSpan HelperRemoteScreenShareBridgeHealthQuarantineWindow = TimeSpan.FromMilliseconds(1500);
+    private static readonly TimeSpan[] ScreenShareTransportRebindKeyframeRetryDelays =
+    [
+        TimeSpan.Zero,
+        TimeSpan.FromMilliseconds(500),
+        TimeSpan.FromMilliseconds(1500),
+        TimeSpan.FromMilliseconds(3500),
+        TimeSpan.FromMilliseconds(7000),
+        TimeSpan.FromMilliseconds(12000),
+    ];
     private long helperRemoteLastReportedAppliedFrameEpoch = -1;
     private long helperRemoteLastReportedAppliedFrameId = -1;
     private HelperRemoteSessionSnapshot helperRemoteLastReportedSessionSnapshot = default;
@@ -1613,7 +1622,19 @@ public sealed partial class SessionRuntime
         [CallerLineNumber] int callerLineNumber = 0)
     {
         LogResetRequest("disconnect", callerMember, callerFilePath, callerLineNumber);
-        return ResetAsync(notifyRemoteSessionEnd: true);
+        lock (explicitDisconnectGate)
+        {
+            if (explicitDisconnectTask is { IsCompleted: false })
+            {
+                LocalOperationalLog.Info(
+                    "Session",
+                    "event=explicit_disconnect_reused; reason=disconnect_already_in_progress");
+                return explicitDisconnectTask;
+            }
+
+            explicitDisconnectTask = ResetAsync(notifyRemoteSessionEnd: true);
+            return explicitDisconnectTask;
+        }
     }
 
     public async Task FailAsync(string userStatusText)
@@ -1655,6 +1676,11 @@ public sealed partial class SessionRuntime
     {
         ObjectDisposedException.ThrowIf(disposed, this);
 
+        if (notifyRemoteSessionEnd)
+        {
+            await SendEarlyRemoteSessionEndNotificationsAsync().ConfigureAwait(false);
+        }
+
         await lifecycleGate.WaitAsync().ConfigureAwait(false);
         try
         {
@@ -1666,6 +1692,47 @@ public sealed partial class SessionRuntime
         }
     }
 
+    private async Task SendEarlyRemoteSessionEndNotificationsAsync()
+    {
+        var oldTransport = transport;
+        var oldRole = role;
+        var oldState = state;
+        LocalOperationalLog.Info(
+            "Session",
+            $"event=early_remote_session_end_notifications_started; role={oldRole}; state={oldState}; transport={(oldTransport is null ? "(none)" : oldTransport.GetType().Name)}");
+
+        var cancelTask = fileTransferService.CancelActiveTransfersForSessionEndAsync("session_end", CancellationToken.None);
+        var sessionEndTask = TrySendRemoteSessionEndAsync(oldTransport, oldRole, oldState);
+        LocalOperationalLog.Info(
+            "Session",
+            "event=early_remote_session_end_parallel_started; filetransfer_cancel=1; session_end=1");
+
+        await sessionEndTask.ConfigureAwait(false);
+
+        if (cancelTask.IsCompleted)
+        {
+            try
+            {
+                var transferCount = await cancelTask.ConfigureAwait(false);
+                LocalOperationalLog.Info(
+                    "Session",
+                    $"event=early_filetransfer_session_end_cancel_completed; transfer_count={transferCount}");
+            }
+            catch (Exception ex)
+            {
+                LocalOperationalLog.Warn(
+                    "Session",
+                    $"event=early_filetransfer_session_end_cancel_failed; error={ex.GetType().Name}");
+            }
+        }
+        else
+        {
+            LocalOperationalLog.Warn(
+                "Session",
+                "event=early_filetransfer_session_end_cancel_deferred; reason=session_end_started_first");
+        }
+    }
+
     public void Dispose()
     {
         if (disposed)
@@ -1673,6 +1740,7 @@ public sealed partial class SessionRuntime
             return;
         }
 
+        preparationObservationBridge?.Dispose();
         StopHelperRemoteScreenSharePressureTimer();
         CancelRemoteControlScreenChangedStatus();
         chatService.MessageReceived -= OnChatMessageReceived;
@@ -1845,11 +1913,21 @@ public sealed partial class SessionRuntime
                 lastDisconnectReason: nknSnapshot.LastDisconnectReason,
                 fallbackMessage: "Connection lost.");
 
-            if (ShouldQuietlyRecoverHelpeeHostStartFailure(failure) &&
-                TryScheduleQuietHelpeeRehost("host_start_failed_rehost"))
+            var bridgeBootstrapBeforeReady =
+                IsHelpeeBridgeBootstrapBeforeReadyFailure(failure) ||
+                IsCurrentHelpeeBridgeBootstrapBeforeReadyFailure(failure);
+            if (ShouldQuietlyRecoverHelpeeHostStartFailure(failure))
             {
-                LogTransportFailure(failure, "host_start_failed_recovering");
-                return;
+                var scheduled = TryScheduleQuietHelpeeRehost(
+                    "host_start_failed_rehost",
+                    bridgeBootstrapBeforeReady
+                        ? QuietHelpeeBridgeBootstrapRehostDelay
+                        : TimeSpan.Zero);
+                if (scheduled || Volatile.Read(ref quietHelpeeRehostInProgress) != 0)
+                {
+                    LogTransportFailure(failure, "host_start_failed_recovering");
+                    return;
+                }
             }
 
             var message = failure.Category == TransportFailureCategory.BridgeStartFailure && UserErrorMapper.IsNknStartFailure(lastError)
@@ -1927,11 +2005,31 @@ public sealed partial class SessionRuntime
 
             if (notifyRemoteSessionEnd)
             {
-                // Tell the peer the session is over before best-effort teardown work starts
-                // competing for transport state or outbound bandwidth.
+                // Tell the peer about session end immediately. Active transfer
+                // cancellation is still important evidence, but on a sick NKN
+                // path it must not consume the whole teardown budget before the
+                // session-end envelope has even started.
+                var sessionEndTask = TrySendRemoteSessionEndAsync(oldTransport, oldRole, oldState);
+                using (var fileTransferCancelCts = new CancellationTokenSource(TimeSpan.FromSeconds(2)))
+                {
+                    var fileTransferCancelTask = fileTransferService.CancelActiveTransfersForSessionEndAsync("session_end", fileTransferCancelCts.Token);
+                    LocalOperationalLog.Info(
+                        "Session",
+                        "event=reset_remote_session_end_parallel_started; filetransfer_cancel=1; session_end=1");
+                    try
+                    {
+                        await sessionEndTask.ConfigureAwait(false);
+                        await fileTransferCancelTask.ConfigureAwait(false);
+                    }
+                    catch
+                    {
+                        // Best-effort only. Session teardown must continue even if
+                        // either notification path cannot be sent.
+                    }
+                }
+
                 await TrySendPendingIncomingHelpRequestCancellationAsync(oldTransport, "helper_closed").ConfigureAwait(false);
                 await TrySendPendingOutboundHelpRequestCancellationAsync(oldTransport, "helpee_closed").ConfigureAwait(false);
-                await TrySendRemoteSessionEndAsync(oldTransport, oldRole, oldState).ConfigureAwait(false);
                 await TrySendRemoteControlStopAsync(oldTransport, oldControlState, oldControlRequestId, "session_end").ConfigureAwait(false);
                 await StopTransportScreenShareAsync(
                     notifyRemoteStop: oldRole == SessionRuntimeRole.Helpee &&
@@ -1973,6 +2071,7 @@ public sealed partial class SessionRuntime
             }
             ResetRemoteControlState("reset_core");
             CancelWatchdog();
+            CancelSessionLivenessWatchdog("reset_core");
 
             if (oldTransport is not null)
             {
@@ -2056,6 +2155,7 @@ public sealed partial class SessionRuntime
         }
         finally
         {
+            Interlocked.Exchange(ref fileTransferSessionEndInferenceStarted, 0);
             resetInProgress = false;
         }
     }
@@ -2113,6 +2213,96 @@ public sealed partial class SessionRuntime
         }
 
         ApplyTransportSecurityState(e.State);
+    }
+
+    private void OnTransportAccelerationStateChanged(object? sender, TransportAccelerationStateChangedEventArgs e)
+    {
+        if (!IsFromCurrentTransport(sender))
+        {
+            return;
+        }
+
+        var wasActive = transportAccelerationActive;
+        SetTransportAccelerationActive(e.IsActive, e.Reason, e.PendingFileTransfer);
+        if (wasActive && !e.IsActive && ShouldStartScreenShareTransportRebindForAccelerationReason(e.Reason))
+        {
+            BeginScreenShareTransportRebindRecovery(e.Reason);
+        }
+    }
+
+    private void SetTransportAccelerationActive(
+        bool isActive,
+        string reason,
+        TransportAccelerationPendingFileTransfer? pendingFileTransfer = null)
+    {
+        var normalizedReason = string.IsNullOrWhiteSpace(reason) ? "unknown" : reason.Trim();
+        lock (transportAccelerationPresentationGate)
+        {
+            // Compare raw status so a repeated notification for the same exact
+            // attempt cannot revive its already-settled display reason.
+            if (transportAccelerationActive == isActive &&
+                string.Equals(transportAccelerationStatusReason, normalizedReason, StringComparison.Ordinal) &&
+                transportAccelerationPresentation.PendingFileTransfer == pendingFileTransfer)
+            {
+                return;
+            }
+
+            transportAccelerationActive = isActive;
+            transportAccelerationStatusReason = normalizedReason;
+            transportAccelerationPresentation = new(isActive, normalizedReason, pendingFileTransfer);
+            SettleFinishedFileAccelerationPresentation(latestFileTransferSnapshot);
+        }
+        TransportAccelerationStateChanged?.Invoke(this, EventArgs.Empty);
+    }
+
+    // Called under the presentation gate. Retain only the display settlement;
+    // raw transport state, coordinator authority, and runtime policy are untouched.
+    private void SettleFinishedFileAccelerationPresentation(SessionFileTransferSnapshot snapshot)
+    {
+        var status = transportAccelerationPresentation;
+        if (!status.IsActive && status.Reason == "runtime_unlock_pending_route_commit" &&
+            TunaHeaderStateProjector.HasFinishedPendingTransfer(snapshot, status.PendingFileTransfer))
+        {
+            transportAccelerationPresentation = new(false, "file_transfer_tuna_idle", status.PendingFileTransfer);
+        }
+    }
+
+    private static bool ShouldStartScreenShareTransportRebindForAccelerationReason(string? reason)
+    {
+        if (string.IsNullOrWhiteSpace(reason))
+        {
+            return false;
+        }
+
+        var normalized = reason.Trim();
+        return normalized.StartsWith("remote_", StringComparison.OrdinalIgnoreCase) ||
+               normalized.StartsWith("sidecar_", StringComparison.OrdinalIgnoreCase) ||
+               normalized.Contains("switch_off", StringComparison.OrdinalIgnoreCase) ||
+               normalized.Contains("user_locked", StringComparison.OrdinalIgnoreCase) ||
+               normalized.Contains("runtime_disabled", StringComparison.OrdinalIgnoreCase) ||
+               normalized.Contains("cap_reached", StringComparison.OrdinalIgnoreCase) ||
+               normalized.Contains("tuna_send_", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private void BeginScreenShareTransportRebindRecovery(string reason)
+    {
+        var normalizedReason = string.IsNullOrWhiteSpace(reason)
+            ? "tuna_fallback"
+            : reason.Trim();
+        if (!IsSessionScreenShareActive())
+        {
+            return;
+        }
+
+        if (transportScreenShareCoordinator.IsActive)
+        {
+            _ = transportScreenShareCoordinator.BeginTransportRebindRecovery(normalizedReason);
+        }
+
+        if (screenShareControlHost.RemoteScreenShareActive)
+        {
+            BeginHelperRemoteScreenShareTransportRebindRecovery(normalizedReason);
+        }
     }
 
     private void ApplyTransportSecurityState(SessionSecurityState transportState)
@@ -2247,10 +2437,42 @@ public sealed partial class SessionRuntime
             return;
         }
 
+        if (ShouldExtendExpiredGrantForActiveSession(grant))
+        {
+            var extendedGrant = grant with
+            {
+                ExpiresAtUtc = nowProvider().Add(SessionSecurityDefaults.GrantLifetime),
+            };
+            currentSessionGrant = extendedGrant;
+            SetSessionSecurityState(sessionSecurityState.WithApproval(extendedGrant));
+            LocalOperationalLog.Info(
+                "SessionSecurity",
+                $"event=approval_grant_extended_for_active_session; session_id={extendedGrant.SessionId.Value}; helper_identity={extendedGrant.HelperIdentity.Value}; capabilities={extendedGrant.Capabilities}; expires_at_utc={extendedGrant.ExpiresAtUtc:O}");
+            return;
+        }
+
         currentSessionGrant = null;
         pendingApprovalRequest = null;
         SetSessionSecurityState(sessionSecurityState.WithApprovalExpired());
         HandleGrantInvalidated("approval_expired");
+    }
+
+    private bool ShouldExtendExpiredGrantForActiveSession(SessionGrant grant)
+    {
+        if (disposed ||
+            resetInProgress ||
+            state != SessionRuntimeState.Connected)
+        {
+            return false;
+        }
+
+        return sessionSecurityState.SessionId == grant.SessionId &&
+               sessionSecurityState.HelperAddress == grant.HelperIdentity &&
+               sessionSecurityState.InviteValidated &&
+               sessionSecurityState.HandshakeCompleted &&
+               sessionSecurityState.HandshakeState == SessionHandshakeState.Verified &&
+               sessionSecurityState.ApprovalGranted &&
+               (sessionSecurityState.ApprovedCapabilities & grant.Capabilities) == grant.Capabilities;
     }
 
     private bool TryCreateGrantFromTransportState(SessionSecurityState transportState, out SessionGrant grant)
@@ -2532,6 +2754,7 @@ public sealed partial class SessionRuntime
             "transport_approved"));
         TransitionTo(TransportState.Connected, "transport_approved");
         SetState(SessionRuntimeState.Connected, "Connected");
+        StartSessionLivenessWatchdog("transport_approved");
         Approved?.Invoke(this, EventArgs.Empty);
     }
 
@@ -2665,13 +2888,20 @@ public sealed partial class SessionRuntime
             return;
         }
 
+        if (TryDeferTransportDisconnectedForActiveFileTransferRecovery())
+        {
+            return;
+        }
+
+        CancelSessionLivenessWatchdog("transport_disconnected");
+
         // A transport-level disconnect often follows an explicit SessionEnd envelope.
         // In that case the user-facing state/message was already handled in OnRemoteSessionEnded.
         // Do not clear the remote-end marker or overwrite the helper UI with a generic error.
         if (lastDisconnectWasRemoteEnd)
         {
             InvalidateSessionSecurity("remote_session_end");
-            QueueDetachFileTransferTransport();
+            QueueTerminalizeAndDetachFileTransferTransportForPeerSessionEnd("remote_session_end");
             PublishSessionFlowEvent(new SessionFlowEvent(
                 SessionFlowEventKind.RemoteEndReceived,
                 role,
@@ -2741,7 +2971,7 @@ public sealed partial class SessionRuntime
                 {
                     LogTransportFailure(failure, "transport_disconnected");
                 }
-                QueueDetachFileTransferTransport();
+                QueueTerminalizeAndDetachFileTransferTransportForPeerDisconnected("transport_disconnected");
                 Disconnected?.Invoke(this, EventArgs.Empty);
                 return;
             }
@@ -2762,7 +2992,7 @@ public sealed partial class SessionRuntime
             LogTransportFailure(failure, "transport_disconnected");
         }
 
-        QueueDetachFileTransferTransport();
+        QueueTerminalizeAndDetachFileTransferTransportForPeerDisconnected("transport_disconnected");
         Disconnected?.Invoke(this, EventArgs.Empty);
     }
 
@@ -2778,17 +3008,28 @@ public sealed partial class SessionRuntime
             return;
         }
 
+        HandlePeerEndedSession("remote_session_end", sender);
+    }
+
+    private void HandlePeerEndedSession(string reason, object? teardownSender = null)
+    {
+        if (disposed || resetInProgress || remoteSessionEndHandling)
+        {
+            return;
+        }
+
+        CancelSessionLivenessWatchdog(reason);
         if (remoteControlSessionState.ControlState != ControlState.Off)
         {
             MarkRemoteControlStopPriority(
-                "remote_session_ended",
+                reason,
                 remoteControlSessionState.CurrentControlRequestId,
                 remoteControlSessionState.ControllerPeerId);
         }
         ApplyRemoteControlReducerTransition(
             new RemoteControlReducerEvent(
                 RemoteControlReducerEventKind.SystemDisconnect,
-                "remote_session_ended",
+                reason,
                 RequestId: remoteControlSessionState.CurrentControlRequestId,
                 PeerId: remoteControlSessionState.ControllerPeerId));
         allowTransportScreenShareAutoStart = false;
@@ -2799,13 +3040,15 @@ public sealed partial class SessionRuntime
             role,
             state,
             transportState,
-            "remote_session_end"));
-        QueueDetachFileTransferTransport();
+            reason));
         RemoteSessionEnded?.Invoke(this, EventArgs.Empty);
         RunCountedBackgroundTask(
             () => transportScreenShareCoordinator.HandleDisconnectedAsync(),
             countAsTransportTask: false);
-        NotifyLocalScreenShareStoppedForTeardown("remote_session_ended", sender);
+        if (teardownSender is not null)
+        {
+            NotifyLocalScreenShareStoppedForTeardown(reason, teardownSender);
+        }
 
         var message = role switch
         {
@@ -2820,13 +3063,19 @@ public sealed partial class SessionRuntime
             {
                 try
                 {
-                    SessionTimeline.Record("SessionEndReceived", "remote_end");
-                    SessionTimeline.Record("Disconnected", "remote_end");
+                    var timelineReason = string.Equals(reason, "remote_session_end", StringComparison.Ordinal)
+                        ? "remote_end"
+                        : reason;
+                    SessionTimeline.Record("SessionEndReceived", timelineReason);
+                    SessionTimeline.Record("Disconnected", timelineReason);
+                    await TerminalizeAndDetachFileTransferTransportForPeerSessionEndAsync(reason).ConfigureAwait(false);
                     await ResetAsync(notifyRemoteSessionEnd: false).ConfigureAwait(false);
+                    lastDisconnectWasRemoteEnd = true;
                     // A just-closed helper session can leave the old NKN bridge in a stale state
                     // for passive hosting. Force a fresh listener transport before relistening.
                     DiscardCachedBridgeTransport();
                     await StartHelperListeningAsync(CancellationToken.None).ConfigureAwait(false);
+                    lastDisconnectWasRemoteEnd = true;
                 }
                 catch
                 {
@@ -2834,6 +3083,7 @@ public sealed partial class SessionRuntime
                 }
                 finally
                 {
+                    lastDisconnectWasRemoteEnd = true;
                     remoteSessionEndHandling = false;
                 }
             });
@@ -2844,8 +3094,12 @@ public sealed partial class SessionRuntime
         {
             try
             {
-                SessionTimeline.Record("SessionEndReceived", "remote_end");
-                SessionTimeline.Record("Disconnected", "remote_end");
+                var timelineReason = string.Equals(reason, "remote_session_end", StringComparison.Ordinal)
+                    ? "remote_end"
+                    : reason;
+                SessionTimeline.Record("SessionEndReceived", timelineReason);
+                SessionTimeline.Record("Disconnected", timelineReason);
+                await TerminalizeAndDetachFileTransferTransportForPeerSessionEndAsync(reason).ConfigureAwait(false);
                 await FailAsync(message).ConfigureAwait(false);
                 Disconnected?.Invoke(this, EventArgs.Empty);
             }
@@ -2927,6 +3181,7 @@ public sealed partial class SessionRuntime
         lastScreenShareStopSuppressedLogTick = 0;
         CancelRemoteControlScreenShareStopGrace("screenshare_frame_resumed");
         screenShareControlHost.ObserveAcceptedFrame(e);
+        ObserveHelperRemoteScreenShareTransportRebindFrameApplied(e);
         try
         {
             TrackHelperRemoteScreenShareAcceptedFrameCore(e);
@@ -4071,7 +4326,6 @@ public sealed partial class SessionRuntime
         helperRemoteCurrentPressureEpochWarmupTicks = 0;
         helperRemoteCurrentPressureEpochBeforeFirstVisibleApplyTicks = 0;
         helperRemoteCurrentPressureEpochAfterVisibleRecoveryFrameTicks = 0;
-        helperRemoteCurrentPressureEpochAfterVisibleRecoveryFrameSuppressedDueToSuccessCount = 0;
         helperRemotePostRecoveryHealthyLastHeadAdvanceUtc = nowUtc;
         if (!alreadyLatched)
         {
@@ -4662,7 +4916,6 @@ public sealed partial class SessionRuntime
         helperRemoteCurrentPressureEpochWarmupTicks = 0;
         helperRemoteCurrentPressureEpochBeforeFirstVisibleApplyTicks = 0;
         helperRemoteCurrentPressureEpochAfterVisibleRecoveryFrameTicks = 0;
-        helperRemoteCurrentPressureEpochAfterVisibleRecoveryFrameSuppressedDueToSuccessCount = 0;
         helperRemoteCurrentPressureEpochSlowApplyCadenceTicks = 0;
         helperRemoteCurrentPressureEpochHighFrameAgeTicks = 0;
         helperRemoteCurrentPressureEpochHighFrameAgeSuppressedDueToVisibleProgressCount = 0;
@@ -4706,20 +4959,9 @@ public sealed partial class SessionRuntime
         helperRemoteContinuityRecoveryEpoch = 0;
         helperRemoteContinuityRecoveryStartedUtc = default;
         helperRemoteContinuityRecoveryTimeoutSent = false;
-        helperRemotePostRecoveryStabilizationActive = false;
-        helperRemotePostRecoveryStabilizationStartedUtc = default;
         helperRemotePostRecoveryAgeGraceEpoch = 0;
         helperRemotePostRecoveryAgeGraceUntilUtc = default;
         helperRemotePostRecoveryHealthySignalSent = false;
-        helperRemotePostRecoverySettleWindowTimedOut = false;
-        helperRemotePostRecoverySettleWindowSucceeded = false;
-        helperRemoteRecoveryWindowActive = false;
-        helperRemoteRecoveryWindowProgressed = false;
-        helperRemoteRecoveryWindowSucceeded = false;
-        helperRemoteRecoveryWindowEpoch = 0;
-        helperRemoteRecoveryWindowRecoveryFrameId = -1;
-        helperRemoteRecoveryWindowLastContiguousFrameId = -1;
-        helperRemoteRecoveryWindowContiguousFollowerApplyCount = 0;
         helperRemoteRecoveryWindowAbortReason = string.Empty;
         helperRemoteLastRecoveryKeyframeRequestUtc = default;
         helperRemoteLastRecoveryKeyframeRequestEpoch = 0;
@@ -4768,7 +5010,6 @@ public sealed partial class SessionRuntime
         helperRemoteCurrentPressureEpochWarmupTicks = 0;
         helperRemoteCurrentPressureEpochBeforeFirstVisibleApplyTicks = 0;
         helperRemoteCurrentPressureEpochAfterVisibleRecoveryFrameTicks = 0;
-        helperRemoteCurrentPressureEpochAfterVisibleRecoveryFrameSuppressedDueToSuccessCount = 0;
         helperRemoteCurrentPressureEpochSlowApplyCadenceTicks = 0;
         helperRemoteCurrentPressureEpochHighFrameAgeTicks = 0;
         helperRemoteCurrentPressureEpochHighFrameAgeSuppressedDueToVisibleProgressCount = 0;
@@ -4807,25 +5048,9 @@ public sealed partial class SessionRuntime
         helperRemoteContinuityRecoveryEpoch = 0;
         helperRemoteContinuityRecoveryStartedUtc = default;
         helperRemoteContinuityRecoveryTimeoutSent = false;
-        helperRemotePostRecoveryStabilizationActive = false;
-        helperRemotePostRecoveryStabilizationStartedUtc = default;
         helperRemotePostRecoveryAgeGraceEpoch = 0;
         helperRemotePostRecoveryAgeGraceUntilUtc = default;
         helperRemotePostRecoveryHealthySignalSent = false;
-        helperRemotePostRecoverySettleWindowTimedOut = false;
-        helperRemotePostRecoverySettleWindowSucceeded = false;
-        helperRemotePostRecoverySettleWindowCount = 0;
-        helperRemotePostRecoverySettleWindowSuccessCount = 0;
-        helperRemotePostRecoverySettleWindowTimeoutCount = 0;
-        helperRemoteRecoveryWindowActive = false;
-        helperRemoteRecoveryWindowProgressed = false;
-        helperRemoteRecoveryWindowSucceeded = false;
-        helperRemoteRecoveryWindowProgressedCount = 0;
-        helperRemoteRecoveryWindowSuccessCount = 0;
-        helperRemoteRecoveryWindowEpoch = 0;
-        helperRemoteRecoveryWindowRecoveryFrameId = -1;
-        helperRemoteRecoveryWindowLastContiguousFrameId = -1;
-        helperRemoteRecoveryWindowContiguousFollowerApplyCount = 0;
         helperRemoteRecoveryWindowAbortReason = string.Empty;
         helperRemoteLastRecoveryKeyframeRequestUtc = default;
         helperRemoteLastRecoveryKeyframeRequestEpoch = 0;
@@ -4892,7 +5117,6 @@ public sealed partial class SessionRuntime
             helperRemoteCurrentPressureEpochWarmupTicks = 0;
             helperRemoteCurrentPressureEpochBeforeFirstVisibleApplyTicks = 0;
             helperRemoteCurrentPressureEpochAfterVisibleRecoveryFrameTicks = 0;
-            helperRemoteCurrentPressureEpochAfterVisibleRecoveryFrameSuppressedDueToSuccessCount = 0;
             helperRemoteCurrentPressureEpochSlowApplyCadenceTicks = 0;
             helperRemoteCurrentPressureEpochHighFrameAgeTicks = 0;
             helperRemoteCurrentPressureEpochHighFrameAgeSuppressedDueToVisibleProgressCount = 0;
@@ -4933,20 +5157,9 @@ public sealed partial class SessionRuntime
             helperRemoteContinuityRecoveryEpoch = 0;
             helperRemoteContinuityRecoveryStartedUtc = default;
             helperRemoteContinuityRecoveryTimeoutSent = false;
-            helperRemotePostRecoveryStabilizationActive = false;
-            helperRemotePostRecoveryStabilizationStartedUtc = default;
             helperRemotePostRecoveryAgeGraceEpoch = 0;
             helperRemotePostRecoveryAgeGraceUntilUtc = default;
             helperRemotePostRecoveryHealthySignalSent = false;
-            helperRemotePostRecoverySettleWindowTimedOut = false;
-            helperRemotePostRecoverySettleWindowSucceeded = false;
-            helperRemoteRecoveryWindowActive = false;
-            helperRemoteRecoveryWindowProgressed = false;
-            helperRemoteRecoveryWindowSucceeded = false;
-            helperRemoteRecoveryWindowEpoch = 0;
-            helperRemoteRecoveryWindowRecoveryFrameId = -1;
-            helperRemoteRecoveryWindowLastContiguousFrameId = -1;
-            helperRemoteRecoveryWindowContiguousFollowerApplyCount = 0;
             helperRemoteRecoveryWindowAbortReason = string.Empty;
             helperRemoteLastRecoveryKeyframeRequestUtc = default;
             helperRemoteLastRecoveryKeyframeRequestEpoch = 0;
@@ -5355,6 +5568,91 @@ public sealed partial class SessionRuntime
         }
 
         screenShareControlHost.NotifyRemoteScreenShareStopped("transport_screen_share_stopped", sender, localStop: false);
+    }
+
+    private void BeginHelperRemoteScreenShareTransportRebindRecovery(string reason)
+    {
+        if (disposed ||
+            role != SessionRuntimeRole.Helper ||
+            state != SessionRuntimeState.Connected ||
+            !screenShareControlHost.RemoteScreenShareActive)
+        {
+            return;
+        }
+
+        var streamEpoch = Math.Max(
+            1,
+            Math.Max(
+                Interlocked.Read(ref helperRemoteScreenShareLastAcceptedEpoch),
+                helperRemoteLastReportedSessionSnapshot.CurrentEpoch));
+        var generation = Interlocked.Increment(ref helperRemoteTransportRebindGeneration);
+        var normalizedReason = string.IsNullOrWhiteSpace(reason)
+            ? "tuna_fallback"
+            : reason.Trim();
+        var activeSessionId = currentSessionGrant?.SessionId.Value ?? sessionSecurityState.SessionId?.Value ?? sessionId;
+        helperRemoteTransportRebindSessionId = string.IsNullOrWhiteSpace(activeSessionId) ? string.Empty : activeSessionId;
+        LocalOperationalLog.Info(
+            "ScreenShareTransport",
+            $"event=screenshare_transport_rebind_generation_started; direction=inbound; session_id={(string.IsNullOrWhiteSpace(activeSessionId) ? "(none)" : activeSessionId)}; stream_epoch={streamEpoch}; reason={normalizedReason}; rebind_generation={generation}");
+
+        RunCountedBackgroundTask(
+            async () =>
+            {
+                foreach (var delay in ScreenShareTransportRebindKeyframeRetryDelays)
+                {
+                    if (delay > TimeSpan.Zero)
+                    {
+                        await Task.Delay(delay).ConfigureAwait(false);
+                    }
+
+                    if (disposed ||
+                        state != SessionRuntimeState.Connected ||
+                        !screenShareControlHost.RemoteScreenShareActive ||
+                        Interlocked.Read(ref helperRemoteTransportRebindRecoveredGeneration) >= generation)
+                    {
+                        return;
+                    }
+
+                    LocalOperationalLog.Info(
+                        "ScreenShareTransport",
+                        $"event=screenshare_transport_rebind_keyframe_requested; direction=inbound; session_id={(string.IsNullOrWhiteSpace(activeSessionId) ? "(none)" : activeSessionId)}; stream_epoch={streamEpoch}; reason={normalizedReason}; rebind_generation={generation}; retry_delay_ms={(long)delay.TotalMilliseconds}");
+                    LocalOperationalLog.Info(
+                        "ScreenShareTransport",
+                        $"event=screenshare_tuna_handoff_keyframe_requested; direction=inbound; session_id={(string.IsNullOrWhiteSpace(activeSessionId) ? "(none)" : activeSessionId)}; stream_epoch={streamEpoch}; reason={normalizedReason}; rebind_generation={generation}; retry_delay_ms={(long)delay.TotalMilliseconds}");
+                    RequestHelperRemoteRecoveryKeyframe(
+                        streamEpoch,
+                        "transport_rebind_recovery_" + normalizedReason,
+                        currentEpochNeedMoreInputCount: 0);
+                }
+            },
+            countAsTransportTask: false);
+    }
+
+    private void ObserveHelperRemoteScreenShareTransportRebindFrameApplied(ScreenShareFrameCompletedEventArgs e)
+    {
+        var generation = Interlocked.Read(ref helperRemoteTransportRebindGeneration);
+        var expectedSessionId = helperRemoteTransportRebindSessionId;
+        if (generation <= 0 ||
+            string.IsNullOrWhiteSpace(expectedSessionId) ||
+            !string.Equals(expectedSessionId, e.SessionId, StringComparison.Ordinal) ||
+            Interlocked.Read(ref helperRemoteTransportRebindRecoveredGeneration) >= generation)
+        {
+            return;
+        }
+
+        Interlocked.Exchange(ref helperRemoteTransportRebindRecoveredGeneration, generation);
+        LocalOperationalLog.Info(
+            "ScreenShareTransport",
+            $"event=screenshare_transport_rebind_frame_applied; direction=inbound; session_id={e.SessionId ?? GetSessionIdForLog()}; stream_epoch={e.StreamEpoch}; frame_id={e.FrameId}; is_keyframe={(e.IsKeyFrame ? 1 : 0)}; rebind_generation={generation}");
+        LocalOperationalLog.Info(
+            "ScreenShareTransport",
+            $"event=screenshare_tuna_handoff_nkn_frame_applied; direction=inbound; session_id={e.SessionId ?? GetSessionIdForLog()}; stream_epoch={e.StreamEpoch}; frame_id={e.FrameId}; is_keyframe={(e.IsKeyFrame ? 1 : 0)}; rebind_generation={generation}");
+        LocalOperationalLog.Info(
+            "ScreenShareTransport",
+            $"event=screenshare_transport_rebind_recovered; direction=inbound; session_id={e.SessionId ?? GetSessionIdForLog()}; stream_epoch={e.StreamEpoch}; frame_id={e.FrameId}; rebind_generation={generation}");
+        LocalOperationalLog.Info(
+            "ScreenShareTransport",
+            $"event=screenshare_tuna_handoff_recovered; direction=inbound; session_id={e.SessionId ?? GetSessionIdForLog()}; stream_epoch={e.StreamEpoch}; frame_id={e.FrameId}; rebind_generation={generation}");
     }
 
     private void RequestHelperRemoteRecoveryKeyframe(
@@ -7739,6 +8037,18 @@ public sealed partial class SessionRuntime
             return false;
         }
 
+        if (IsHelpeeBridgeBootstrapBeforeReadyFailure(failure) &&
+            connectAttempt < MaxQuietHelpeeBridgeBootstrapRehostConnectAttempt)
+        {
+            return true;
+        }
+
+        if (IsCurrentHelpeeBridgeBootstrapBeforeReadyFailure(failure) &&
+            connectAttempt < MaxQuietHelpeeBridgeBootstrapRehostConnectAttempt)
+        {
+            return true;
+        }
+
         return failure.IsTransient || failure.Category is
             TransportFailureCategory.BridgeUnresponsive or
             TransportFailureCategory.UnexpectedProcessExit or
@@ -7746,10 +8056,78 @@ public sealed partial class SessionRuntime
             TransportFailureCategory.UserCancelled;
     }
 
-    private bool TryScheduleQuietHelpeeRehost(string reason)
+    private static bool IsHelpeeBridgeBootstrapBeforeReadyFailure(TransportFailure failure)
+    {
+        return failure.Category == TransportFailureCategory.BridgeStartFailure &&
+               (failure.RawError.Contains("nkn_bridge_bootstrap_not_ready", StringComparison.OrdinalIgnoreCase) ||
+                failure.RawError.Contains("bridge_transport_connect_failed_before_ready", StringComparison.OrdinalIgnoreCase));
+    }
+
+    private bool IsCurrentHelpeeBridgeBootstrapBeforeReadyFailure(TransportFailure failure)
+    {
+        if (failure.Category == TransportFailureCategory.UserCancelled ||
+            role != SessionRuntimeRole.Helpee ||
+            transport is not NknSignalingTransport)
+        {
+            return false;
+        }
+
+        var snapshot = BridgeBootstrapReadiness;
+        if (snapshot.ReadyEmitted ||
+            !snapshot.TerminalFailure ||
+            snapshot.Role.IndexOf("helpee", StringComparison.OrdinalIgnoreCase) < 0)
+        {
+            return false;
+        }
+
+        return snapshot.FailureReason.Contains("host_ready_connect_failed", StringComparison.OrdinalIgnoreCase) ||
+               snapshot.FailureReason.Contains("bridge_transport_connect_failed_before_ready", StringComparison.OrdinalIgnoreCase) ||
+               snapshot.FailureReason.Contains("bridge_bootstrap_diagnostics_failure", StringComparison.OrdinalIgnoreCase) ||
+               snapshot.LastError.Contains("bridge_transport_connect_failed_before_ready", StringComparison.OrdinalIgnoreCase) ||
+               snapshot.LastError.Contains("connecttonodetimeouterror", StringComparison.OrdinalIgnoreCase) ||
+               snapshot.LastError.Contains("rpctimeouterror", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private bool TryRecoverHelpeeHostReadyStartFailure(Exception ex, string reason)
+    {
+        var nknSnapshot = NknRuntimeDiagnostics.Snapshot();
+        var rawStartFailure = ((nknSnapshot.LastError ?? string.Empty) + " " + ex.Message).Trim();
+        if (rawStartFailure.Contains("transport_unavailable", StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        var failure = TransportFailureMapper.FromException(
+            ex,
+            nknSnapshot.LastError,
+            nknSnapshot.LastDisconnectReason);
+        if (!ShouldQuietlyRecoverHelpeeHostStartFailure(failure))
+        {
+            return false;
+        }
+
+        var bridgeBootstrapBeforeReady =
+            IsHelpeeBridgeBootstrapBeforeReadyFailure(failure) ||
+            IsCurrentHelpeeBridgeBootstrapBeforeReadyFailure(failure);
+        var scheduled = TryScheduleQuietHelpeeRehost(
+            reason,
+            bridgeBootstrapBeforeReady
+                ? QuietHelpeeBridgeBootstrapRehostDelay
+                : TimeSpan.Zero);
+        if (!scheduled && Volatile.Read(ref quietHelpeeRehostInProgress) == 0)
+        {
+            return false;
+        }
+
+        LogTransportFailure(failure, reason);
+        return true;
+    }
+
+    private bool TryScheduleQuietHelpeeRehost(string reason, TimeSpan restartDelay = default)
     {
         if (Interlocked.Exchange(ref quietHelpeeRehostInProgress, 1) != 0)
         {
+            Interlocked.Exchange(ref quietHelpeeRehostPending, 1);
             return false;
         }
 
@@ -7762,6 +8140,11 @@ public sealed partial class SessionRuntime
         {
             try
             {
+                if (restartDelay > TimeSpan.Zero)
+                {
+                    await Task.Delay(restartDelay).ConfigureAwait(false);
+                }
+
                 await ResetAsync(notifyRemoteSessionEnd: false).ConfigureAwait(false);
                 await StartHelpeeAsync(CancellationToken.None).ConfigureAwait(false);
             }
@@ -7772,6 +8155,10 @@ public sealed partial class SessionRuntime
             finally
             {
                 Interlocked.Exchange(ref quietHelpeeRehostInProgress, 0);
+                if (!disposed && Interlocked.Exchange(ref quietHelpeeRehostPending, 0) != 0)
+                {
+                    TryScheduleQuietHelpeeRehost(reason, restartDelay);
+                }
             }
         });
 
@@ -7804,6 +8191,11 @@ public sealed partial class SessionRuntime
             BridgeLifecycleEventKind.Spawned => "bridge_spawned",
             BridgeLifecycleEventKind.Ready => "bridge_ready",
             BridgeLifecycleEventKind.Exited => "bridge_exited",
+            BridgeLifecycleEventKind.ReceiveStallRecoveryStarted => "bridge_receive_stall_recovery_started",
+            BridgeLifecycleEventKind.ReceiveStallRecoveryCompleted => "bridge_receive_stall_recovery_completed",
+            BridgeLifecycleEventKind.ReceiveStallRecoveryReceiveResumed => "bridge_receive_stall_recovery_receive_resumed",
+            BridgeLifecycleEventKind.ReceiveStallRecoveryExhausted => "bridge_receive_stall_recovery_exhausted",
+            BridgeLifecycleEventKind.ReceiveStallRecoveryDeferred => "bridge_receive_stall_recovery_deferred",
             _ => "bridge_unknown"
         };
 
@@ -7838,6 +8230,82 @@ public sealed partial class SessionRuntime
             connectAttempt,
             transportKind,
             sessionIdForLog));
+
+        ObserveSessionLivenessBridgeRecoveryEvent(e);
+
+        if (e.Kind == BridgeLifecycleEventKind.ReceiveStallRecoveryExhausted)
+        {
+            HandleBridgeReceiveStallRecoveryExhausted(e);
+        }
+    }
+
+    private void HandleBridgeReceiveStallRecoveryExhausted(BridgeLifecycleEvent e)
+    {
+        if (disposed || resetInProgress || remoteSessionEndHandling)
+        {
+            return;
+        }
+
+        var shouldSurface = role is SessionRuntimeRole.Helper or SessionRuntimeRole.Helpee &&
+                            state is SessionRuntimeState.Waiting
+                                or SessionRuntimeState.IncomingJoinRequest
+                                or SessionRuntimeState.Connecting
+                                or SessionRuntimeState.Connected;
+        if (!shouldSurface)
+        {
+            return;
+        }
+
+        var reason = string.IsNullOrWhiteSpace(e.ExitReasonText)
+            ? "receive_stall_recovery_exhausted"
+            : e.ExitReasonText;
+        var bridgeReason = reason
+            .Replace(';', '_')
+            .Replace('\r', '_')
+            .Replace('\n', '_')
+            .Trim();
+        if (TryDeferBridgeReceiveStallRecoveryExhaustedForActiveRecovery(e, bridgeReason))
+        {
+            return;
+        }
+
+        var sessionIdSnapshot = GetApprovedSessionIdForLiveness();
+        if (!string.IsNullOrWhiteSpace(sessionIdSnapshot) &&
+            TrySuppressBridgeReceiveStallRecoveryExhaustedForActiveFileTransferDeferral(
+                sessionIdSnapshot,
+                bridgeReason,
+                nowProvider()))
+        {
+            return;
+        }
+
+        if (!string.IsNullOrWhiteSpace(sessionIdSnapshot) &&
+            TrySuppressBridgeReceiveStallRecoveryExhaustedForSiblingDeferral(
+                sessionIdSnapshot,
+                bridgeReason,
+                nowProvider()))
+        {
+            return;
+        }
+
+        LocalOperationalLog.Warn(
+            "Session",
+            $"event=peer_liveness_visible_disconnect; reason=receive_stall_recovery_exhausted; bridge_reason={bridgeReason}; role={role}; state={state}; transport_state={transportState}; run_id={GetRunIdForLog()}; session_id={GetSessionIdForLog()}; scenario={GetScenarioForLog()}");
+
+        lastDisconnectWasRemoteEnd = false;
+        pendingJoinRequest = null;
+        InvalidateSessionSecurity("receive_stall_recovery_exhausted");
+        SessionTimeline.Record("Disconnected", "connection_lost");
+        PublishSessionFlowEvent(new SessionFlowEvent(
+            SessionFlowEventKind.TransportDisconnected,
+            role,
+            state,
+            transportState,
+            "receive_stall_recovery_exhausted"));
+        TransitionTo(TransportState.Failed, "receive_stall_recovery_exhausted");
+        SetState(SessionRuntimeState.Failed, "Connection lost.");
+        QueueTerminalizeAndDetachFileTransferTransportForPeerDisconnected("receive_stall_recovery_exhausted");
+        Disconnected?.Invoke(this, EventArgs.Empty);
     }
 
     private void OnChatMessageReceived(object? sender, ChatMessageEventArgs e)
@@ -7867,8 +8335,20 @@ public sealed partial class SessionRuntime
 
     private void OnFileTransferChanged(object? sender, SessionFileTransferSnapshotChangedEventArgs e)
     {
+        lock (transportAccelerationPresentationGate)
+        {
+            latestFileTransferSnapshot = e.Snapshot;
+            // Observe terminal proof before a subsequent transfer replaces the
+            // snapshot or either page coalesces its queued UI refresh.
+            SettleFinishedFileAccelerationPresentation(e.Snapshot);
+        }
+        ObserveFileTransferPeerVisibleProgressForSessionLiveness(e.Snapshot);
+        ObserveFileTransferTerminalProofForSessionLiveness(e.Snapshot);
+        RequestSessionLivenessHeartbeatAfterFileTransferTerminal(e.Snapshot);
         var screenShareActive = IsSessionScreenShareActive();
         fileTransferHost.LogSnapshot(e.Snapshot);
+        _ = TryHandlePeerSessionEndFromFileTransferCancel(e.Snapshot);
+
         fileTransferService.SetSessionScreenShareDegraded(
             screenShareActive &&
             !string.Equals(transportScreenShareCoordinator.GetMetricsSnapshot().FreshnessMode, "normal", StringComparison.Ordinal));
@@ -7879,6 +8359,39 @@ public sealed partial class SessionRuntime
             screenShareActive && (fileTransferService.IsCatchUpOnlyPressureActive || mixedV4TransferActive));
         FileTransferChanged?.Invoke(this, e);
     }
+
+    private bool TryHandlePeerSessionEndFromFileTransferCancel(SessionFileTransferSnapshot snapshot)
+    {
+        if (disposed || resetInProgress || remoteSessionEndHandling)
+        {
+            return false;
+        }
+
+        if (!IsPeerSessionEndCancel(snapshot.Outbound) &&
+            !IsPeerSessionEndCancel(snapshot.Inbound))
+        {
+            return false;
+        }
+
+        if (Interlocked.Exchange(ref fileTransferSessionEndInferenceStarted, 1) != 0)
+        {
+            return true;
+        }
+
+        LocalOperationalLog.Warn(
+            "Session",
+            "event=remote_session_end_inferred_from_filetransfer_cancel; reason=filetransfer_session_end_cancel");
+        HandlePeerEndedSession("filetransfer_session_end_cancel");
+        return true;
+    }
+
+    private static bool IsPeerSessionEndCancel(FileTransferTransferSnapshot? transfer)
+        => transfer is
+           {
+               State: FileTransferTransferState.Canceled,
+               ErrorCode: FileTransferResultCodes.CanceledRemote,
+               StatusMessage: "session_end"
+           };
 
     private void OnScreenShareSenderDegradedModeChanged(object? sender, ScreenShareSenderDegradedModeChangedEventArgs e)
     {
@@ -7919,6 +8432,108 @@ public sealed partial class SessionRuntime
         fileTransferHost.QueueDetachTransport();
     }
 
+    private void QueueTerminalizeAndDetachFileTransferTransportForPeerSessionEnd(string reason)
+    {
+        if (IsDisposedForFileTransferHost)
+        {
+            return;
+        }
+
+        RunFileTransferBackgroundTask(async () =>
+        {
+            await TerminalizeAndDetachFileTransferTransportForPeerSessionEndAsync(reason).ConfigureAwait(false);
+        });
+    }
+
+    private void QueueTerminalizeAndDetachFileTransferTransportForPeerDisconnected(string reason)
+    {
+        if (IsDisposedForFileTransferHost)
+        {
+            return;
+        }
+
+        RunFileTransferBackgroundTask(async () =>
+        {
+            await TerminalizeAndDetachFileTransferTransportForPeerDisconnectedAsync(reason).ConfigureAwait(false);
+        });
+    }
+
+    private bool TryDeferTransportDisconnectedForActiveFileTransferRecovery()
+    {
+        if (state != SessionRuntimeState.Connected ||
+            transportState != TransportState.Connected)
+        {
+            return false;
+        }
+
+        var sessionIdSnapshot = GetApprovedSessionIdForLiveness();
+        if (string.IsNullOrWhiteSpace(sessionIdSnapshot) ||
+            !TryGetValidFileTransferRecoveryLivenessSnapshot(
+                sessionIdSnapshot,
+                nowProvider(),
+                out var snapshot))
+        {
+            return false;
+        }
+
+        if (!fileTransferService.TryAuthorizeRecoveryLivenessDeferral(
+                snapshot,
+                "transport_disconnected_filetransfer_recovery",
+                snapshot.LivenessDeferralDeadlineUtc,
+                out var livenessGrant) ||
+            livenessGrant is null)
+        {
+            LocalOperationalLog.Warn(
+                "Session",
+                $"event=transport_disconnected_filetransfer_recovery_not_deferred; session_id={sessionIdSnapshot}; transfer_id={snapshot.TransferId}; route={snapshot.RouteToken}; protocol_version={snapshot.ProtocolVersion}; live_route_epoch={snapshot.LiveRouteEpoch}; leg_generation={snapshot.TransferLegGeneration}; bridge_recovery_generation={snapshot.BridgeRecoveryGeneration}; transport_epoch={snapshot.TransportEpoch}; authority_reason={SanitizeSessionLivenessReason(snapshot.AuthorityReason)}; recovery_state={snapshot.State.ToString().ToLowerInvariant()}; reason=recovery_liveness_lease_rejected; role={role}; run_id={GetRunIdForLog()}; scenario={GetScenarioForLog()}");
+            return false;
+        }
+
+        LocalOperationalLog.Warn(
+            "Session",
+            $"event=transport_disconnected_deferred_for_filetransfer_recovery; session_id={sessionIdSnapshot}; transfer_id={snapshot.TransferId}; route={snapshot.RouteToken}; protocol_version={snapshot.ProtocolVersion}; live_route_epoch={snapshot.LiveRouteEpoch}; leg_generation={snapshot.TransferLegGeneration}; bridge_recovery_generation={snapshot.BridgeRecoveryGeneration}; transport_epoch={snapshot.TransportEpoch}; checkpoint_request_id={SanitizeSessionLivenessReason(snapshot.CheckpointRequestId ?? "(none)")}; authority_reason={SanitizeSessionLivenessReason(snapshot.AuthorityReason)}; recovery_state={snapshot.State.ToString().ToLowerInvariant()}; liveness_deferral_deadline_utc_ms={livenessGrant.LivenessDeferralDeadlineUtc.ToUnixTimeMilliseconds()}; recovery_liveness_lease_generation={livenessGrant.LeaseGeneration}; role={role}; run_id={GetRunIdForLog()}; scenario={GetScenarioForLog()}");
+        return true;
+    }
+
+    private async Task TerminalizeAndDetachFileTransferTransportForPeerSessionEndAsync(string reason)
+    {
+        try
+        {
+            await fileTransferService.TerminalizeActiveTransfersForPeerSessionEndAsync(reason, CancellationToken.None).ConfigureAwait(false);
+        }
+        catch (ObjectDisposedException)
+        {
+            return;
+        }
+
+        DetachFileTransferTransportBestEffort();
+    }
+
+    private async Task TerminalizeAndDetachFileTransferTransportForPeerDisconnectedAsync(string reason)
+    {
+        try
+        {
+            await fileTransferService.TerminalizeActiveTransfersForPeerDisconnectedAsync(reason, CancellationToken.None).ConfigureAwait(false);
+        }
+        catch (ObjectDisposedException)
+        {
+            return;
+        }
+
+        DetachFileTransferTransportBestEffort();
+    }
+
+    private void DetachFileTransferTransportBestEffort()
+    {
+        try
+        {
+            fileTransferService.DetachTransport();
+        }
+        catch (ObjectDisposedException)
+        {
+        }
+    }
+
     private static FileTransferStoragePolicy CreateInboundFileTransferStoragePolicy(FileTransferIncomingOffer offer)
     {
         return new FileTransferStoragePolicy(GetDefaultInboundFileTransferRootDirectory());
@@ -7926,6 +8541,12 @@ public sealed partial class SessionRuntime
 
     internal static string GetDefaultInboundFileTransferRootDirectory()
     {
+        var testOverrideRoot = Environment.GetEnvironmentVariable("NLINK_FILE_TRANSFER_TEST_INBOUND_ROOT");
+        if (!string.IsNullOrWhiteSpace(testOverrideRoot))
+        {
+            return Path.GetFullPath(testOverrideRoot.Trim());
+        }
+
         if (OperatingSystem.IsWindows() &&
             TryGetWindowsKnownFolderPath(WindowsDownloadsKnownFolderId, out var downloadsPath))
         {
@@ -8631,7 +9252,11 @@ public sealed partial class SessionRuntime
 
     private void BeginConnectAttempt(SessionRuntimeRole nextRole, string connectTargetKey)
     {
-        lastDisconnectWasRemoteEnd = false;
+        if (!remoteSessionEndHandling)
+        {
+            lastDisconnectWasRemoteEnd = false;
+        }
+
         allowTransportScreenShareAutoStart = true;
         if (remoteControlSessionState.ControlState != ControlState.Off)
         {
@@ -10243,6 +10868,11 @@ public sealed partial class SessionRuntime
             CancelWatchdog();
         }
 
+        if (nextState != SessionRuntimeState.Connected)
+        {
+            CancelSessionLivenessWatchdog($"session_state_{nextState}");
+        }
+
         LocalOperationalLog.Info(
             "Session",
             $"state={state}; role={role}; status={SanitizeStatusForLog(statusText)}");
@@ -10314,7 +10944,9 @@ public sealed partial class SessionRuntime
     private static async Task TrySendRemoteSessionEndAsync(
         ISignalingTransport? oldTransport,
         SessionRuntimeRole oldRole,
-        SessionRuntimeState oldState)
+        SessionRuntimeState oldState,
+        string reason = "user_exit",
+        TimeSpan? timeout = null)
     {
         if (oldTransport is NknSignalingTransport pendingJoinTransport &&
             oldState == SessionRuntimeState.Connecting &&
@@ -10324,10 +10956,15 @@ public sealed partial class SessionRuntime
             try
             {
                 await pendingJoinTransport.SendPendingJoinCancelAsync(pendingJoinCts.Token).ConfigureAwait(false);
+                LocalOperationalLog.Info(
+                    "Session",
+                    "event=remote_session_end_sent; mode=pending_join_cancel; result=success");
             }
-            catch
+            catch (Exception ex)
             {
-                // Best-effort only.
+                LocalOperationalLog.Warn(
+                    "Session",
+                    $"event=remote_session_end_sent; mode=pending_join_cancel; result=failed; error={ex.GetType().Name}");
             }
 
             return;
@@ -10335,18 +10972,26 @@ public sealed partial class SessionRuntime
 
         if (!ShouldNotifyRemoteSessionEnd(oldTransport, oldRole, oldState))
         {
+            LocalOperationalLog.Info(
+                "Session",
+                $"event=remote_session_end_skipped; role={oldRole}; state={oldState}; transport={(oldTransport is null ? "(none)" : oldTransport.GetType().Name)}");
             return;
         }
 
         var nknTransport = (NknSignalingTransport)oldTransport!;
-        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(2));
+        using var cts = new CancellationTokenSource(timeout ?? DisposeOperationTimeout);
         try
         {
-            await nknTransport.SendSessionEndAsync(cts.Token).ConfigureAwait(false);
+            await nknTransport.SendSessionEndAsync(reason, cts.Token).ConfigureAwait(false);
+            LocalOperationalLog.Info(
+                "Session",
+                $"event=remote_session_end_sent; mode=session_end; result=success; reason={reason}");
         }
-        catch
+        catch (Exception ex)
         {
-            // Best-effort only.
+            LocalOperationalLog.Warn(
+                "Session",
+                $"event=remote_session_end_sent; mode=session_end; result=failed; reason={reason}; error={ex.GetType().Name}");
         }
     }
 

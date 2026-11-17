@@ -2,7 +2,7 @@ using NLink.Infra.Nkn;
 
 namespace NLink.SmokeTests;
 
-internal sealed class FakeNknClient : INknClient, IAuthoritativeConnectedAddressSource
+internal sealed class FakeNknClient : INknClient, IAuthoritativeConnectedAddressSource, IRuntimeUnlockRetryPriorityNknClient
 {
     private static readonly object Gate = new();
     private static readonly Dictionary<string, FakeNknClient> ClientsByAddress = new(StringComparer.Ordinal);
@@ -19,6 +19,11 @@ internal sealed class FakeNknClient : INknClient, IAuthoritativeConnectedAddress
     private bool disposed;
 
     public Func<string, byte[], CancellationToken, Task>? BeforeSendAsync { get; set; }
+
+    public Func<string, byte[], NknBridgeChannel, CancellationToken, Task>? BeforeSendCoreAsync { get; set; }
+
+    public Func<string, byte[], NknBridgeChannel, CancellationToken, Task>?
+        BeforeRuntimeUnlockRetryPrioritySendAsync { get; set; }
 
     public Func<string, byte[], CancellationToken, Task<bool>>? ShouldDeliverSendAsync { get; set; }
 
@@ -244,6 +249,23 @@ internal sealed class FakeNknClient : INknClient, IAuthoritativeConnectedAddress
         await SendCoreAsync(destination, payload, NknBridgeChannel.Bulk, ct).ConfigureAwait(false);
     }
 
+    public async Task SendRuntimeUnlockRetryControlAsync(
+        string destination,
+        byte[] payload,
+        NknBridgeChannel channel,
+        CancellationToken ct)
+    {
+        var beforePrioritySend = BeforeRuntimeUnlockRetryPrioritySendAsync;
+        if (beforePrioritySend is not null)
+        {
+            await beforePrioritySend(destination, payload, channel, ct)
+                .ConfigureAwait(false);
+        }
+
+        await SendCoreAsync(destination, payload, channel, ct)
+            .ConfigureAwait(false);
+    }
+
     private async Task SendCoreAsync(string destination, byte[] payload, NknBridgeChannel channel, CancellationToken ct)
     {
         ct.ThrowIfCancellationRequested();
@@ -254,6 +276,12 @@ internal sealed class FakeNknClient : INknClient, IAuthoritativeConnectedAddress
         if (beforeSendAsync is not null)
         {
             await beforeSendAsync(destination, payload, ct).ConfigureAwait(false);
+        }
+
+        var beforeSendCoreAsync = BeforeSendCoreAsync;
+        if (beforeSendCoreAsync is not null)
+        {
+            await beforeSendCoreAsync(destination, payload, channel, ct).ConfigureAwait(false);
         }
 
         var shouldDeliverSendAsync = ShouldDeliverSendAsync;

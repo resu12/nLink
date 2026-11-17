@@ -2,6 +2,7 @@ using NLink.App.Services;
 using NLink.App.Services.RemoteControl;
 using NLink.Core;
 using NLink.Core.Diagnostics;
+using NLink.Core.FileTransfer;
 using NLink.Core.RemoteControl;
 using NLink.Core.SessionConnect;
 using NLink.Core.SessionSecurity;
@@ -86,7 +87,7 @@ internal sealed class CountingRemoteInputInjector : IRemoteInputInjector
     }
 }
 
-internal sealed class ScriptedSignalingTransport : ISignalingTransport, IAddressTargetSignalingTransport, IInviteTargetSignalingTransport, IAddressHostSignalingTransport, ILocalPeerAddressSignalingTransport, ISessionSecuritySignalingTransport, IRemoteControlCapabilityProvider, IRemoteControlSignalingTransport, IHelpRequestSignalingTransport
+internal sealed class ScriptedSignalingTransport : ISignalingTransport, IAddressTargetSignalingTransport, IInviteTargetSignalingTransport, IAddressHostSignalingTransport, ILocalPeerAddressSignalingTransport, ISessionSecuritySignalingTransport, ISessionLivenessSignalingTransport, ISessionRecoveryStateContract, ITransportAccelerationStatus, IRemoteControlCapabilityProvider, IRemoteControlSignalingTransport, IHelpRequestSignalingTransport, IFileTransferReceiveRecoveryController, IFileTransferRecoveryLivenessState
 {
     private readonly Func<string, CancellationToken, Task> onJoinByAddressAsync;
     private readonly Func<string, ValidatedInviteV1, CancellationToken, Task> onJoinByInviteAsync;
@@ -103,7 +104,11 @@ internal sealed class ScriptedSignalingTransport : ISignalingTransport, IAddress
     private readonly Func<ControlInputAckV1, CancellationToken, Task> onSendControlAckAsync;
     private readonly Func<ControlStateSnapshotV1, CancellationToken, Task> onSendControlStateSnapshotAsync;
     private readonly Func<ControlDisplayInfoMessageV1, CancellationToken, Task> onSendControlDisplayInfoAsync;
+    private readonly Func<SessionHeartbeatMessage, CancellationToken, Task> onSendSessionHeartbeatAsync;
+    private readonly Action<FileTransferReceiveRecoveryRequest> onRequestFileTransferReceiveRecovery;
     private SessionSecurityState currentSessionSecurityState = SessionSecurityState.Empty;
+    private SessionRecoveryContractSnapshot? sessionRecoveryContractSnapshot;
+    private FileTransferRecoveryLivenessSnapshot? fileTransferRecoveryLivenessSnapshot;
 
     public ScriptedSignalingTransport(
         Func<string, CancellationToken, Task>? onJoinByAddressAsync = null,
@@ -122,6 +127,8 @@ internal sealed class ScriptedSignalingTransport : ISignalingTransport, IAddress
         Func<ControlInputAckV1, CancellationToken, Task>? onSendControlAckAsync = null,
         Func<ControlStateSnapshotV1, CancellationToken, Task>? onSendControlStateSnapshotAsync = null,
         Func<ControlDisplayInfoMessageV1, CancellationToken, Task>? onSendControlDisplayInfoAsync = null,
+        Func<SessionHeartbeatMessage, CancellationToken, Task>? onSendSessionHeartbeatAsync = null,
+        Action<FileTransferReceiveRecoveryRequest>? onRequestFileTransferReceiveRecovery = null,
         bool localSupportsRemoteControl = true,
         bool remoteSupportsRemoteControl = true)
     {
@@ -141,6 +148,8 @@ internal sealed class ScriptedSignalingTransport : ISignalingTransport, IAddress
         this.onSendControlAckAsync = onSendControlAckAsync ?? ((_, _) => Task.CompletedTask);
         this.onSendControlStateSnapshotAsync = onSendControlStateSnapshotAsync ?? ((_, _) => Task.CompletedTask);
         this.onSendControlDisplayInfoAsync = onSendControlDisplayInfoAsync ?? ((_, _) => Task.CompletedTask);
+        this.onSendSessionHeartbeatAsync = onSendSessionHeartbeatAsync ?? ((_, _) => Task.CompletedTask);
+        this.onRequestFileTransferReceiveRecovery = onRequestFileTransferReceiveRecovery ?? (_ => { });
         LocalSupportsRemoteControl = localSupportsRemoteControl;
         RemoteSupportsRemoteControl = remoteSupportsRemoteControl;
     }
@@ -167,7 +176,12 @@ internal sealed class ScriptedSignalingTransport : ISignalingTransport, IAddress
     public event EventHandler<RemoteControlAckReceivedEventArgs>? RemoteControlAckReceived;
     public event EventHandler<RemoteControlStateSnapshotReceivedEventArgs>? RemoteControlStateSnapshotReceived;
     public event EventHandler<RemoteControlDisplayInfoReceivedEventArgs>? RemoteControlDisplayInfoReceived;
+    public event EventHandler<SessionLivenessProofEventArgs>? SessionLivenessProofReceived;
+    public event EventHandler<TransportAccelerationStateChangedEventArgs>? TransportAccelerationStateChanged;
     public SessionSecurityState CurrentSessionSecurityState => currentSessionSecurityState;
+    public bool IsTransportAccelerationActive { get; private set; }
+    public bool ShouldUseFileTransferV6ForAcceleration { get; private set; }
+    public string TransportAccelerationStatusReason { get; private set; } = "test_regular_nkn";
 
     public void Dispose()
     {
@@ -192,6 +206,38 @@ internal sealed class ScriptedSignalingTransport : ISignalingTransport, IAddress
     public Task SendControlAckAsync(ControlInputAckV1 message, CancellationToken ct) => onSendControlAckAsync(message, ct);
     public Task SendControlStateSnapshotAsync(ControlStateSnapshotV1 message, CancellationToken ct) => onSendControlStateSnapshotAsync(message, ct);
     public Task SendControlDisplayInfoAsync(ControlDisplayInfoMessageV1 message, CancellationToken ct) => onSendControlDisplayInfoAsync(message, ct);
+    public Task SendSessionHeartbeatAsync(SessionHeartbeatMessage message, CancellationToken ct) => onSendSessionHeartbeatAsync(message, ct);
+    public void RequestFileTransferReceiveRecovery(FileTransferReceiveRecoveryRequest request) => onRequestFileTransferReceiveRecovery(request);
+
+    public bool TryGetActiveSessionRecoveryContract(string sessionId, out SessionRecoveryContractSnapshot snapshot)
+    {
+        snapshot = default!;
+        var current = sessionRecoveryContractSnapshot;
+        if (current is null ||
+            !string.Equals(current.SessionId, sessionId?.Trim(), StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        snapshot = current;
+        return true;
+    }
+
+    public bool TryGetActiveFileTransferRecoveryLivenessSnapshot(
+        string sessionId,
+        out FileTransferRecoveryLivenessSnapshot snapshot)
+    {
+        snapshot = default!;
+        var current = fileTransferRecoveryLivenessSnapshot;
+        if (current is null ||
+            !string.Equals(current.SessionId, sessionId?.Trim(), StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        snapshot = current;
+        return true;
+    }
 
     public void RaiseDisconnected()
     {
@@ -207,6 +253,49 @@ internal sealed class ScriptedSignalingTransport : ISignalingTransport, IAddress
 
         currentSessionSecurityState = nextState;
         SessionSecurityStateChanged?.Invoke(this, new TransportSessionSecurityStateChangedEventArgs(nextState));
+    }
+
+    public void InjectSessionLivenessProof(
+        string sessionId,
+        long generation = 1,
+        long sequence = 1,
+        string proofKind = "heartbeat_received",
+        string lane = "control")
+    {
+        SessionLivenessProofReceived?.Invoke(
+            this,
+            new SessionLivenessProofEventArgs(
+                sessionId,
+                generation,
+                sequence,
+                DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+                proofKind,
+                lane));
+    }
+
+    public void SetTransportAccelerationForTests(
+        bool isActive,
+        string reason,
+        bool shouldUseFileTransferV6ForAcceleration = false)
+    {
+        IsTransportAccelerationActive = isActive;
+        ShouldUseFileTransferV6ForAcceleration = shouldUseFileTransferV6ForAcceleration;
+        TransportAccelerationStatusReason = string.IsNullOrWhiteSpace(reason) ? "unknown" : reason.Trim();
+        TransportAccelerationStateChanged?.Invoke(
+            this,
+            new TransportAccelerationStateChangedEventArgs(
+                IsTransportAccelerationActive,
+                TransportAccelerationStatusReason));
+    }
+
+    public void SetSessionRecoveryContractForTests(SessionRecoveryContractSnapshot? snapshot)
+    {
+        sessionRecoveryContractSnapshot = snapshot;
+    }
+
+    public void SetFileTransferRecoveryLivenessSnapshotForTests(FileTransferRecoveryLivenessSnapshot? snapshot)
+    {
+        fileTransferRecoveryLivenessSnapshot = snapshot;
     }
 
     public void InjectIncomingControlRequest(ControlRequestMessageV1 message, string? peerId)

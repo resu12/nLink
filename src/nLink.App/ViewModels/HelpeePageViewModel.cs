@@ -34,6 +34,7 @@ namespace NLink.App.ViewModels;
 
 public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanelBindings, IWindowCloseAware
 {
+
     private enum HelpeeConnectionViewState
     {
         Waiting,
@@ -46,8 +47,12 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
     private static readonly TimeSpan DefaultIncomingRequestTimeout = SessionApprovalTimeouts.DefaultHumanDecisionTimeout;
     private static readonly TimeSpan RecoveryTransientThrottle = TimeSpan.FromSeconds(2);
     private static readonly TimeSpan DefaultInviteLifetime = TimeSpan.FromMinutes(15);
+    private static readonly TimeSpan DefaultInviteBootstrapTimeout = TimeSpan.FromSeconds(30);
+    private static readonly TimeSpan DefaultNknInviteBootstrapTimeout = TimeSpan.FromSeconds(90);
     private static readonly TimeSpan PeerEndedNoticeDuration = TimeSpan.FromSeconds(4);
     private static readonly TimeSpan TransportScreenShareRetryDelay = TimeSpan.FromMilliseconds(300);
+    private const int FileTransferUiRefreshMinIntervalMs = 125;
+    private const int FileTransferUiRefreshCoalescedLogThreshold = 8;
 #if DEBUG
     private static readonly TimeSpan PreviewSnapshotInterval = TimeSpan.FromSeconds(10);
 #endif
@@ -70,12 +75,15 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
     private readonly IInviteTokenFactory inviteTokenFactory;
     private readonly IQrCodeService qrCodeService;
     private readonly SessionUiStateStore? uiStateStore;
+    private readonly bool persistCaptureTargetToUserEnvironment;
     private bool hasIncomingRequest;
     private bool isRequestAllowed;
     private bool showChatNotice;
     private string connectionStatus = "Waiting for helper…";
     private string connectionState = "Waiting";
     private HelpeeConnectionViewState connectionViewState = HelpeeConnectionViewState.Waiting;
+    private bool isTunaActive;
+    private string tunaStatusReason = "inactive";
     private string chatDraft = string.Empty;
     private string failureTitle = string.Empty;
     private string failureMessage = string.Empty;
@@ -86,6 +94,10 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
     private bool showPeerEndedNotice;
     private string peerEndedNoticeText = string.Empty;
     private string lastPeerEndedNoticeKey = string.Empty;
+    private int fileTransferUiRefreshScheduled;
+    private int fileTransferUiRefreshPendingCount;
+    private int fileTransferUiRefreshUrgent;
+    private long lastFileTransferUiRefreshUtcMs;
     private bool hasUiRecoveryTransient;
     private string uiRecoveryTransientText = string.Empty;
     private bool uiRecoveryTransientCanCancel;
@@ -131,8 +143,10 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
     private readonly DispatcherTimer peerEndedNoticeTimer;
     private CancellationTokenSource? incomingRequestTimeoutCts;
     private readonly TimeSpan incomingRequestTimeout;
+    private readonly TimeSpan inviteBootstrapTimeout;
     private bool startupBlocked;
     private bool startupFailureBlocksAutoRestart;
+    private bool inviteBootstrapBridgeBeforeReadyRetryActive;
     private bool autoRegeneratingAfterDisconnect;
     private UserFacingStatus bannerStatus = UserFacingStatus.IdleStatus;
     private UserFacingStatus presenterBannerStatus = UserFacingStatus.IdleStatus;
@@ -176,6 +190,7 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
     private bool remoteControlDebugPanelExpanded;
     private bool disposed;
     private int windowCloseDisconnectStarted;
+    private long inviteBootstrapGeneration;
 #if DEBUG
     private Timer? previewSnapshotTimer;
     private int previewSnapshotTickInFlight;
@@ -194,7 +209,8 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
         Action? backAction = null,
         IScreenCaptureSourceFactory? screenCaptureSourceFactory = null,
         IInviteShareService? inviteShareService = null,
-        IQrCodeService? qrCodeService = null)
+        IQrCodeService? qrCodeService = null,
+        TimeSpan? inviteBootstrapTimeout = null)
         : this(
             cancelAction,
             transportConfig,
@@ -209,7 +225,8 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
             screenCaptureSourceFactory,
             decodeFrame: null,
             inviteShareService: inviteShareService,
-            qrCodeService: qrCodeService)
+            qrCodeService: qrCodeService,
+            inviteBootstrapTimeout: inviteBootstrapTimeout)
     {
     }
 
@@ -227,13 +244,16 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
         IScreenCaptureSourceFactory? screenCaptureSourceFactory,
         Func<byte[], Bitmap>? decodeFrame,
         IInviteShareService? inviteShareService = null,
-        IQrCodeService? qrCodeService = null)
+        IQrCodeService? qrCodeService = null,
+        TimeSpan? inviteBootstrapTimeout = null,
+        bool persistCaptureTargetToUserEnvironment = true)
     {
         this.cancelAction = cancelAction;
         this.backAction = backAction ?? cancelAction;
         this.openDiagnosticsAction = openDiagnosticsAction;
         this.transportConfig = transportConfig;
         this.sessionRuntime = sessionRuntime;
+        this.persistCaptureTargetToUserEnvironment = persistCaptureTargetToUserEnvironment;
         this.statusPresenter = statusPresenter ?? new StatusPresenter(sessionRuntime);
         ownsStatusPresenter = statusPresenter is null;
         this.clipboardService = clipboardService;
@@ -242,6 +262,8 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
         RefreshAutomaticIdentityRecoveryWarning();
         inviteTokenFactory = ConnectInputResolverFactory.CreateInviteTokenFactory();
         this.incomingRequestTimeout = incomingRequestTimeout ?? DefaultIncomingRequestTimeout;
+        this.inviteBootstrapTimeout = inviteBootstrapTimeout ??
+            (transportConfig.IsDevLocal ? DefaultInviteBootstrapTimeout : DefaultNknInviteBootstrapTimeout);
         this.uiStateStore = uiStateStore;
         shareInviteExpiryTimer = new DispatcherTimer
         {
@@ -272,6 +294,7 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
 
         sessionRuntime.FlowSnapshotChanged += OnFlowSnapshotChanged;
         sessionRuntime.SessionSecurityStateChanged += OnSessionSecurityStateChanged;
+        sessionRuntime.TransportAccelerationStateChanged += OnTransportAccelerationStateChanged;
         sessionRuntime.TransientStatusChanged += OnTransientStatusChanged;
         sessionRuntime.IncomingJoinRequestAvailable += OnIncomingJoinRequestAvailable;
         sessionRuntime.HelpRequestDecisionAvailable += OnHelpRequestDecisionAvailable;
@@ -344,6 +367,7 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
         InitializeCaptureTargetSelection();
         ApplySessionBannerPolicy();
         UpdateUiFromSnapshot();
+        SyncTunaActiveFromRuntime();
     }
 
     public string ShareInvite => shareInviteText;
@@ -715,6 +739,18 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
     public string SecondaryActionText => IsConnectedView ? "Disconnect" : "Refresh invite";
 
     public string HeaderStatusText => BuildHeaderStatusText();
+
+    public bool IsTunaActive
+    {
+        get => isTunaActive;
+        private set => SetProperty(ref isTunaActive, value);
+    }
+
+    public string TunaStatusReason
+    {
+        get => tunaStatusReason;
+        private set => SetProperty(ref tunaStatusReason, string.IsNullOrWhiteSpace(value) ? "inactive" : value.Trim());
+    }
 
     public string FailureTitle
     {
@@ -1287,6 +1323,7 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
 
         sessionRuntime.FlowSnapshotChanged -= OnFlowSnapshotChanged;
         sessionRuntime.SessionSecurityStateChanged -= OnSessionSecurityStateChanged;
+        sessionRuntime.TransportAccelerationStateChanged -= OnTransportAccelerationStateChanged;
         sessionRuntime.TransientStatusChanged -= OnTransientStatusChanged;
         sessionRuntime.IncomingJoinRequestAvailable -= OnIncomingJoinRequestAvailable;
         sessionRuntime.HelpRequestDecisionAvailable -= OnHelpRequestDecisionAvailable;
@@ -1348,6 +1385,13 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
         bool preservePeerEndedNotice,
         string? preservedPeerEndedText = null)
     {
+        if (ShouldKeepVisibleTerminalFailureBeforeAutoRestart())
+        {
+            AppLog.Info("Helpee waiting-session restart blocked; reason=visible_terminal_failure");
+            ApplyTerminalPresentationFromFlow(sessionRuntime.FlowSnapshot);
+            return;
+        }
+
         autoRegeneratingAfterDisconnect = false;
         localEndCommandInFlight = false;
         lastAppliedPostTerminalActionKey = string.Empty;
@@ -1436,7 +1480,7 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
     {
         RefreshCaptureDisplayOptions();
         var selection = BuildSelectedCaptureTargetSelection();
-        ScreenCaptureTargetStore.Save(selection);
+        ScreenCaptureTargetStore.Save(selection, persistCaptureTargetToUserEnvironment);
     }
 
     private ScreenCaptureTargetSelection BuildSelectedCaptureTargetSelection()
@@ -1469,8 +1513,27 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
             ConnectionState = "Waiting";
         });
 
-        StartHosting();
+        StartHosting(allowAfterVisibleTerminalFailure: true);
         EnsureInviteSnapshot(forceNewToken: true);
+    }
+
+    private bool ShouldKeepVisibleTerminalFailureBeforeAutoRestart()
+    {
+        if (disposed)
+        {
+            return false;
+        }
+
+        var flow = sessionRuntime.FlowSnapshot;
+        if (flow.TerminalKind == SessionTerminalKind.Failed &&
+            (string.Equals(flow.FailureReason, "session_liveness_timeout", StringComparison.Ordinal) ||
+             string.Equals(flow.TerminalStatusText, "Connection lost.", StringComparison.Ordinal)))
+        {
+            return true;
+        }
+
+        return sessionRuntime.State == SessionRuntimeState.Failed &&
+               string.Equals(sessionRuntime.StatusText, "Connection lost.", StringComparison.Ordinal);
     }
 
     private void ShowPeerEndedNotice(string text)
@@ -2235,8 +2298,20 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
             preservePeerEndedNotice: false);
     }
 
-    private void StartHosting()
+    private void StartHosting(bool allowAfterVisibleTerminalFailure = false)
     {
+        if (disposed || Volatile.Read(ref windowCloseDisconnectStarted) != 0)
+        {
+            return;
+        }
+
+        if (!allowAfterVisibleTerminalFailure &&
+            ShouldKeepVisibleTerminalFailureBeforeAutoRestart())
+        {
+            AppLog.Info("Helpee hosting auto-restart blocked; reason=visible_terminal_failure");
+            return;
+        }
+
         PrepareForNewSession();
         EnsureInviteSnapshot(forceNewToken: false);
 
@@ -2251,29 +2326,116 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
         LogReliability(SessionReliabilityStage.DiscoveryStarted);
 
         AppLog.Info($"Helpee hosting using {transportConfig.Key} with address-native mode");
+        StartInviteBootstrapReadinessWatchdog(Interlocked.Increment(ref inviteBootstrapGeneration));
         _ = StartHostingAsync();
+    }
+
+    private void StartInviteBootstrapReadinessWatchdog(long generation)
+    {
+        if (inviteBootstrapTimeout <= TimeSpan.Zero)
+        {
+            return;
+        }
+
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                await Task.Delay(inviteBootstrapTimeout).ConfigureAwait(false);
+            }
+            catch
+            {
+                return;
+            }
+
+            if (disposed || generation != Volatile.Read(ref inviteBootstrapGeneration))
+            {
+                return;
+            }
+
+            var shouldFail = false;
+            await UiThreadDispatch.RunAsync(() =>
+            {
+                shouldFail =
+                    !disposed &&
+                    generation == Volatile.Read(ref inviteBootstrapGeneration) &&
+                    !HasShareInvite &&
+                    !HasIncomingRequest &&
+                    !IsRequestAllowed &&
+                    IsInvitePreparationStatus(ShareInviteStatusText);
+            }).ConfigureAwait(false);
+
+            if (!shouldFail)
+            {
+                return;
+            }
+
+            await SurfaceInviteBootstrapFailureAsync(
+                "Helpee invite bootstrap watchdog expired before a local address became ready.",
+                "helpee_invite_bootstrap_watchdog_expired").ConfigureAwait(false);
+        });
     }
 
     private async Task StartHostingAsync()
     {
+        var generation = Volatile.Read(ref inviteBootstrapGeneration);
+        using var bootstrapCts = inviteBootstrapTimeout > TimeSpan.Zero
+            ? new CancellationTokenSource(inviteBootstrapTimeout)
+            : new CancellationTokenSource();
         try
         {
             await sessionRuntime.ResetAsync();
-            await sessionRuntime.StartHelpeeAsync(CancellationToken.None);
+            // Reset may have yielded while the window began closing.
+            if (disposed || Volatile.Read(ref windowCloseDisconnectStarted) != 0)
+            {
+                return;
+            }
+
+            await sessionRuntime.StartHelpeeAsync(bootstrapCts.Token);
             await UiThreadDispatch.RunAsync(() =>
             {
+                inviteBootstrapBridgeBeforeReadyRetryActive = false;
                 RefreshAutomaticIdentityRecoveryWarning();
                 EnsureInviteSnapshot(forceNewToken: false);
             });
         }
+        catch (OperationCanceledException) when (bootstrapCts.IsCancellationRequested)
+        {
+            await SurfaceInviteBootstrapFailureAsync(
+                "Helpee invite bootstrap timed out before a local address became ready.",
+                "helpee_invite_bootstrap_timeout_after_helper_identity");
+        }
         catch (OperationCanceledException)
         {
-            // No-op.
+            if (!disposed && !HasShareInvite)
+            {
+                await SurfaceInviteBootstrapFailureAsync(
+                    "Helpee invite bootstrap was cancelled before a local address became ready.",
+                    "helpee_invite_bootstrap_cancelled_before_ready");
+            }
         }
-        catch
+        catch (Exception ex)
         {
             if (!HasIncomingRequest && !IsRequestAllowed)
             {
+                var bridgeReadiness = sessionRuntime.BridgeBootstrapReadiness;
+                if (!IsProtectedSeedStorageReadFailure(sessionRuntime.StatusText) &&
+                    !bridgeReadiness.ReadyEmitted &&
+                    (bridgeReadiness.TerminalFailure ||
+                     ex.Message.Contains("nkn_bridge_bootstrap_not_ready", StringComparison.OrdinalIgnoreCase)))
+                {
+                    if (ShouldRetryInviteBootstrapBridgeBeforeReady(ex, bridgeReadiness, generation))
+                    {
+                        await RetryInviteBootstrapBridgeBeforeReadyAsync(generation, bridgeReadiness).ConfigureAwait(false);
+                        return;
+                    }
+
+                    await SurfaceInviteBootstrapFailureAsync(
+                        "Helpee invite bootstrap failed before the local NKN bridge became ready.",
+                        "helpee_invite_bootstrap_bridge_not_ready");
+                    return;
+                }
+
                 await UiThreadDispatch.RunAsync(() =>
                 {
                     RefreshAutomaticIdentityRecoveryWarning();
@@ -2290,13 +2452,142 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
                     ConnectionState = sessionRuntime.State is SessionRuntimeState.Failed or SessionRuntimeState.Disconnected
                         ? "Failed"
                         : "Disconnected";
-                    if (!HasShareInvite || IsProtectedSeedStorageReadFailure(message))
+                    if (!HasShareInvite ||
+                        IsProtectedSeedStorageReadFailure(message) ||
+                        IsInvitePreparationStatus(ShareInviteStatusText))
                     {
                         UpdateShareInviteStatusText(message);
                     }
+
+                    AppLog.Warn($"Helpee hosting failed before invite readiness; status={message}; runtime_state={sessionRuntime.State}; invite_status={ShareInviteStatusText}");
                 });
             }
         }
+    }
+
+    private bool ShouldRetryInviteBootstrapBridgeBeforeReady(
+        Exception ex,
+        BridgeBootstrapReadinessSnapshot bridgeReadiness,
+        long generation)
+    {
+        if (disposed ||
+            startupFailureBlocksAutoRestart ||
+            generation != Volatile.Read(ref inviteBootstrapGeneration) ||
+            HasShareInvite ||
+            HasIncomingRequest ||
+            IsRequestAllowed ||
+            inviteBootstrapTimeout <= TimeSpan.Zero ||
+            bridgeReadiness.ReadyEmitted)
+        {
+            return false;
+        }
+
+        if (string.Equals(bridgeReadiness.FailureReason, "transport_unavailable", StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        return bridgeReadiness.TerminalFailure ||
+               ex.Message.Contains("nkn_bridge_bootstrap_not_ready", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private async Task RetryInviteBootstrapBridgeBeforeReadyAsync(
+        long generation,
+        BridgeBootstrapReadinessSnapshot bridgeReadiness)
+    {
+        AppLog.Warn(
+            $"event=helpee_invite_bootstrap_bridge_before_ready_retry; generation={generation}; failure_reason={bridgeReadiness.FailureReason}; last_error={bridgeReadiness.LastError}; retry_delay_ms=1000");
+
+        await UiThreadDispatch.RunAsync(() =>
+        {
+            inviteBootstrapBridgeBeforeReadyRetryActive = true;
+            ClearFailurePresentation();
+            ConnectionState = "Waiting";
+            ConnectionStatus = "Preparing invite…";
+            if (uiStateStore is not null)
+            {
+                uiStateStore.SetPhase(SessionUiPhase.Connecting, "HelpeeInviteBootstrap:BridgeBeforeReadyRetry");
+            }
+
+            OnPropertyChanged(nameof(HeaderStatusText));
+            RefreshCommandStates();
+        }).ConfigureAwait(false);
+
+        try
+        {
+            await Task.Delay(TimeSpan.FromSeconds(1)).ConfigureAwait(false);
+        }
+        catch
+        {
+            return;
+        }
+
+        var shouldRestartHosting = false;
+        await UiThreadDispatch.RunAsync(() =>
+        {
+            shouldRestartHosting =
+                !disposed &&
+                generation == Volatile.Read(ref inviteBootstrapGeneration) &&
+                !HasShareInvite &&
+                !HasIncomingRequest &&
+                !IsRequestAllowed &&
+                IsInvitePreparationStatus(ShareInviteStatusText);
+        }).ConfigureAwait(false);
+
+        if (!shouldRestartHosting)
+        {
+            return;
+        }
+
+        AppLog.Warn(
+            $"event=helpee_invite_bootstrap_bridge_before_ready_rehost; generation={generation}; failure_reason={bridgeReadiness.FailureReason}; last_error={bridgeReadiness.LastError}");
+        _ = StartHostingAsync();
+    }
+
+    private async Task SurfaceInviteBootstrapFailureAsync(string message, string reason)
+    {
+        Interlocked.Increment(ref inviteBootstrapGeneration);
+        inviteBootstrapBridgeBeforeReadyRetryActive = false;
+        startupFailureBlocksAutoRestart = true;
+        autoRegeneratingAfterDisconnect = false;
+        var bridgeReadiness = sessionRuntime.BridgeBootstrapReadiness;
+        var bridgeNotReady = !bridgeReadiness.ReadyEmitted;
+        var eventName = bridgeNotReady ? "nkn_bridge_bootstrap_not_ready" : reason;
+        var subreason = bridgeNotReady
+            ? string.Equals(reason, "helpee_invite_bootstrap_bridge_not_ready", StringComparison.Ordinal)
+                ? "helpee_invite_host_before_bridge_ready"
+                : reason
+            : reason;
+
+        try
+        {
+            await sessionRuntime.FailAsync("Could not prepare invite. Refresh invite and try again.").ConfigureAwait(false);
+        }
+        catch (ObjectDisposedException)
+        {
+            return;
+        }
+
+        await UiThreadDispatch.RunAsync(() =>
+        {
+            RefreshAutomaticIdentityRecoveryWarning();
+            UpdateShareAddressText(string.Empty);
+            UpdateShareInviteText(string.Empty);
+            UpdateShareInviteRawTokenText(string.Empty);
+            UpdateShareInviteStatusText("Could not prepare invite. Refresh invite and try again.");
+            shareInviteExpiresAtUtc = DateTimeOffset.MinValue;
+            shareInviteAutoRefreshTriggered = false;
+            UpdateShareInviteExpiryText(string.Empty);
+            RefreshShareQrBitmaps();
+            ConnectionStatus = "Could not prepare invite. Refresh invite and try again.";
+            ConnectionState = "Failed";
+            AppLog.Warn(
+                $"event={eventName}; subreason={subreason}; failure_reason={bridgeReadiness.FailureReason}; last_error={bridgeReadiness.LastError}; " +
+                $"ready_emitted={(bridgeReadiness.ReadyEmitted ? 1 : 0)}; control_ready={(bridgeReadiness.ControlReady ? 1 : 0)}; media_ready={(bridgeReadiness.MediaReady ? 1 : 0)}; bulk_ready={(bridgeReadiness.BulkReady ? 1 : 0)}; " +
+                $"bootstrap_role={bridgeReadiness.Role}; bootstrap_generation={bridgeReadiness.Generation}; terminal_failure={(bridgeReadiness.TerminalFailure ? 1 : 0)}; " +
+                $"verified_helper={(HasVerifiedInviteHelperIdentity ? 1 : 0)}; runtime_state={sessionRuntime.State}; transport_state={sessionRuntime.TransportLifecycleState}; invite_status={ShareInviteStatusText}; message={message}");
+            RefreshCommandStates();
+        });
     }
 
     private void EnsureInviteSnapshot(bool forceNewToken)
@@ -2309,7 +2600,7 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
             UpdateShareAddressText(string.Empty);
             UpdateShareInviteText(string.Empty);
             UpdateShareInviteRawTokenText(string.Empty);
-            UpdateShareInviteStatusText(startupFailureBlocksAutoRestart && IsProtectedSeedStorageReadFailure(sessionRuntime.StatusText)
+            UpdateShareInviteStatusText(startupFailureBlocksAutoRestart && !string.IsNullOrWhiteSpace(sessionRuntime.StatusText)
                 ? sessionRuntime.StatusText
                 : "Preparing invite…");
             shareInviteExpiresAtUtc = DateTimeOffset.MinValue;
@@ -2327,6 +2618,7 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
             string.Equals(lastInviteHelperIdentityForToken, boundHelperIdentity, StringComparison.Ordinal) &&
             !string.IsNullOrWhiteSpace(shareInviteText))
         {
+            inviteBootstrapBridgeBeforeReadyRetryActive = false;
             UpdateShareInviteStatusText("Invite ready");
             return;
         }
@@ -2388,6 +2680,7 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
 
         UpdateShareInviteText(created.Token!);
         UpdateShareInviteRawTokenText(created.Token!);
+        inviteBootstrapBridgeBeforeReadyRetryActive = false;
         UpdateShareInviteStatusText("Invite ready");
         shareInviteExpiresAtUtc = DateTimeOffset.FromUnixTimeMilliseconds(created.Payload!.ExpiresAtUtcMs);
         shareInviteAutoRefreshTriggered = false;
@@ -3090,7 +3383,85 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
             return;
         }
 
-        _ = UiThreadDispatch.RunAsync(() => UpdateUiFromSnapshot("file_transfer_changed"));
+        ScheduleFileTransferUiRefresh(e as SessionFileTransferSnapshotChangedEventArgs);
+    }
+
+    private void ScheduleFileTransferUiRefresh(SessionFileTransferSnapshotChangedEventArgs? e)
+    {
+        if (disposed)
+        {
+            return;
+        }
+
+        Interlocked.Increment(ref fileTransferUiRefreshPendingCount);
+        if (IsUrgentFileTransferSnapshot(e?.Snapshot))
+        {
+            Volatile.Write(ref fileTransferUiRefreshUrgent, 1);
+        }
+
+        if (Interlocked.CompareExchange(ref fileTransferUiRefreshScheduled, 1, 0) != 0)
+        {
+            return;
+        }
+
+        _ = RunFileTransferUiRefreshLoopAsync();
+    }
+
+    private async Task RunFileTransferUiRefreshLoopAsync()
+    {
+        try
+        {
+            while (!disposed)
+            {
+                var urgent = Interlocked.Exchange(ref fileTransferUiRefreshUrgent, 0) != 0;
+                if (!urgent)
+                {
+                    var elapsedMs = Environment.TickCount64 - Volatile.Read(ref lastFileTransferUiRefreshUtcMs);
+                    var delayMs = FileTransferUiRefreshMinIntervalMs - Math.Max(0, elapsedMs);
+                    if (delayMs > 0)
+                    {
+                        await Task.Delay((int)delayMs).ConfigureAwait(false);
+                    }
+                }
+
+                var coalescedCount = Interlocked.Exchange(ref fileTransferUiRefreshPendingCount, 0);
+                if (coalescedCount > 0)
+                {
+                    await UiThreadDispatch.RunAsync(() =>
+                    {
+                        if (disposed)
+                        {
+                            return;
+                        }
+
+                        // Read current service state on dispatch, not an event captured before queuing.
+                        UpdateUiFromSnapshot(coalescedCount > 1 ? "file_transfer_changed_coalesced" : "file_transfer_changed");
+                    }).ConfigureAwait(false);
+                    Volatile.Write(ref lastFileTransferUiRefreshUtcMs, Environment.TickCount64);
+                    if (coalescedCount >= FileTransferUiRefreshCoalescedLogThreshold)
+                    {
+                        LocalOperationalLog.Info(
+                            "HelpeeUi",
+                            $"event=file_transfer_ui_refresh_coalesced; role=Helpee; coalesced_count={coalescedCount}; min_interval_ms={FileTransferUiRefreshMinIntervalMs}");
+                    }
+                }
+
+                if (Volatile.Read(ref fileTransferUiRefreshPendingCount) == 0)
+                {
+                    Interlocked.Exchange(ref fileTransferUiRefreshScheduled, 0);
+                    if (Volatile.Read(ref fileTransferUiRefreshPendingCount) == 0 ||
+                        Interlocked.CompareExchange(ref fileTransferUiRefreshScheduled, 1, 0) != 0)
+                    {
+                        return;
+                    }
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            Interlocked.Exchange(ref fileTransferUiRefreshScheduled, 0);
+            LocalOperationalLog.Warn("HelpeeUi", $"event=file_transfer_ui_refresh_failed; role=Helpee; error={ex.GetType().Name}");
+        }
     }
 
     private void OnRemoteControlStateChanged(object? sender, EventArgs e)
@@ -3274,6 +3645,28 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
         }
 
         _ = UiThreadDispatch.RunAsync(SyncFromRuntime);
+    }
+
+    private void OnTransportAccelerationStateChanged(object? sender, EventArgs e)
+    {
+        if (disposed)
+        {
+            return;
+        }
+
+        _ = UiThreadDispatch.RunAsync(SyncTunaActiveFromRuntime);
+    }
+
+    private void SyncTunaActiveFromRuntime()
+    {
+        var status = sessionRuntime.TransportAccelerationPresentation;
+        var projection = TunaHeaderStateProjector.FromSnapshot(
+            sessionRuntime.FileTransferSnapshot,
+            status.IsActive,
+            status.Reason,
+            status.PendingFileTransfer);
+        IsTunaActive = projection.IsActive;
+        TunaStatusReason = projection.StatusReason;
     }
 
     private void OnTransientStatusChanged(object? sender, SessionRuntimeTransientStatusChangedEventArgs e)
@@ -3532,6 +3925,7 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
                     ? transportConfig.HelpeeDisconnectedText
                     : flow.TerminalStatusText;
                 ConnectionState = "Failed";
+                UpdateShareInviteStatusText(ConnectionStatus);
                 break;
             default:
                 ClearPeerEndedNotice();
@@ -3633,6 +4027,8 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
         return sessionRuntime.PendingOutboundHelpRequestDecision is { Accepted: true } &&
                flow.Role == SessionRuntimeRole.Helpee &&
                !flow.ApprovalActive &&
+               flow.TerminalKind == SessionTerminalKind.None &&
+               !string.Equals(flow.FailureReason, "session_liveness_timeout", StringComparison.Ordinal) &&
                flow.RuntimeState is SessionRuntimeState.Failed or SessionRuntimeState.Disconnected or SessionRuntimeState.Rejected &&
                flow.Phase is SessionFlowPhase.HelpeeWaiting or SessionFlowPhase.Failed or SessionFlowPhase.Ended &&
                flow.LastEndOrigin is SessionFlowEndOrigin.Remote or SessionFlowEndOrigin.Failed or SessionFlowEndOrigin.Rejected;
@@ -3920,6 +4316,24 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
         UpdateUiFromSnapshot("refresh");
     }
 
+    private static bool IsUrgentFileTransferSnapshot(SessionFileTransferSnapshot? snapshot)
+        => IsUrgentFileTransferItem(snapshot?.Inbound) ||
+           IsUrgentFileTransferItem(snapshot?.Outbound);
+
+    private static bool IsUrgentFileTransferItem(FileTransferTransferSnapshot? snapshot)
+        => snapshot is not null &&
+           (snapshot.IsTerminal ||
+            snapshot.State is FileTransferTransferState.Offering
+                or FileTransferTransferState.AwaitingAcceptance
+                or FileTransferTransferState.PendingDecision
+                or FileTransferTransferState.AwaitingMetadata
+                or FileTransferTransferState.PreparingMetadata
+                or FileTransferTransferState.AwaitingStart
+                or FileTransferTransferState.AwaitingCompletion
+                or FileTransferTransferState.Verifying ||
+            snapshot.IsPaused ||
+            snapshot.IsPeerPaused);
+
     private void UpdateUiFromSnapshot(string source)
     {
         bool nextChatEnabled;
@@ -4020,6 +4434,7 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
         CanEndSession = nextCanEndSession;
         CanOpenDiagnostics = nextCanOpenDiagnostics;
         CanSendFiles = nextCanSendFiles;
+        SyncTunaActiveFromRuntime();
 
         RefreshCommandStates();
         LogCurrentChatPanelState(source);
@@ -4357,6 +4772,13 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
 
     private SessionUiPhase GetEffectivePhase()
     {
+        if (inviteBootstrapBridgeBeforeReadyRetryActive &&
+            !startupFailureBlocksAutoRestart &&
+            IsInvitePreparationStatus(ShareInviteStatusText))
+        {
+            return SessionUiPhase.Connecting;
+        }
+
         return sessionRuntime.FlowSnapshot.UiPhase;
     }
 
@@ -4675,6 +5097,18 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
     {
         return !string.IsNullOrWhiteSpace(message) &&
                message.Contains("Protected seed storage could not be read.", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool IsInvitePreparationStatus(string? message)
+    {
+        if (string.IsNullOrWhiteSpace(message))
+        {
+            return true;
+        }
+
+        var normalized = message.Trim();
+        return normalized.Contains("Preparing invite", StringComparison.OrdinalIgnoreCase) ||
+               normalized.Contains("Updating invite", StringComparison.OrdinalIgnoreCase);
     }
 
     private void PromoteProtectedSeedStorageStartupFailureIfNeeded()
