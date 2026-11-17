@@ -16,12 +16,6 @@ Minimal `.NET 8` / Avalonia desktop app for Windows with deterministic smoke tes
 - [Windows x64 portable ZIP](https://github.com/resu12/nLink/releases/download/v0.7.0-hotfix.2/nLink-Portable-win-x64-0.7.0.zip)
 - [SHA256SUMS.txt](https://github.com/resu12/nLink/releases/download/v0.7.0-hotfix.2/SHA256SUMS.txt)
 
-Hotfix 2 adds idle Tuna startup/re-establishment fixes, authenticated-session cleanup and listener-lifetime safeguards, a transfer-safe Tuna indicator, wallet unlock/cancellation safeguards, a “Preparing helper address…” state, and wallet feedback that stays visible while scrolling. It includes hotfix 1's screen-sharing encoder startup fix.
-
-All eight required [CI #108 jobs](https://github.com/resu12/nLink/actions/runs/43920671484), including installer smoke, and RC Guardrails passed. Public downloads were verified against their checksums and the exact CI artifact pins. Optional GUI smoke was skipped; these results do not claim new live Tuna, same-version upgrade or performance qualification. See the [published release notes](https://github.com/resu12/nLink/releases/tag/v0.7.0-hotfix.2) for scope and limits.
-
-**The Windows app and installer are unsigned**, under an explicit hotfix-2 exception. Windows may show publisher or SmartScreen warnings. Checksums identify the downloads but do not replace a digital signature. The [original 0.7.0 release](https://github.com/resu12/nLink/releases/tag/v0.7.0) and [hotfix 1](https://github.com/resu12/nLink/releases/tag/v0.7.0-hotfix.1), including their assets and checksums, remain unchanged.
-
 ## Quick Start (Windows)
 
 1. Download the Installer (recommended) or Portable ZIP from [hotfix 2's release page](https://github.com/resu12/nLink/releases/tag/v0.7.0-hotfix.2). A source-branch version is not necessarily a published release.
