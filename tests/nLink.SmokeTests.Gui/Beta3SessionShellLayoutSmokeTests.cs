@@ -323,6 +323,67 @@ public sealed class Beta3SessionShellLayoutSmokeTests : Beta3DefaultUiSmokeTestB
     }
 
     [Theory]
+    [InlineData("replacement")]
+    [InlineData("empty")]
+    [InlineData("expired-empty")]
+    [InlineData("same-funded")]
+    [InlineData("error")]
+    public async Task SessionHeader_TooltipOpeningRechecksSharedWallet(string change)
+    {
+        await fixture.Session.Dispatch(async () =>
+        {
+            var root = Directory.CreateTempSubdirectory("nlink-wallet-hover-");
+            var header = new SessionHeaderView { RoleText = "Helper" };
+            var window = new Window { Content = header };
+            try
+            {
+                window.Show();
+                await FlushUiAsync();
+                var prefs = new JsonTunaRuntimePreferenceStore(() => Path.Combine(root.FullName, "prefs.json"));
+                prefs.Save(new TunaRuntimePreferenceState { Enabled = true });
+                var path = Path.Combine(root.FullName, "link.json");
+                var store = new JsonTunaWalletLinkStore(() => path);
+                var peer = new JsonTunaWalletLinkStore(() => path);
+                var runtime = new TunaRuntimePilotService(prefs,
+                    new JsonTunaUsageAccountingStore(() => Path.Combine(root.FullName, "usage.json")), store, new TunaWalletSidecarVerifier());
+                var wallet = TunaWalletLinkState.Linked(Path.Combine(root.FullName, "wallet"), DateTimeOffset.UtcNow)
+                    .WithValidationResult(TunaWalletValidationResult.Ok("wallet", "payer-a", "1"), DateTimeOffset.UtcNow);
+                Assert.True(await store.SaveAsync(wallet));
+                runtime.UnlockForNextSession(wallet, "fixture".ToCharArray());
+                SetPrivateField(header, "subscribedTunaRuntime", runtime);
+                var message = change == "error" ? "Fixture error." : "Fixture unlock succeeded.";
+                InvokePrivate(header, "SetTunaUnlockResult", new TunaRuntimeUnlockResult(change != "error", runtime.RuntimeStatus,
+                    message, false, TimeSpan.Zero), wallet);
+                InvokePrivate(header, "ApplyTunaUnlockToggleState", true, true, true, "", runtime.RuntimeStatus);
+                var toggle = Assert.IsType<Button>(FindFirstVisibleControlByAutomationId(window, "SessionHeader.TunaUnlockToggle"));
+                Assert.Equal(message, ToolTip.GetTip(toggle));
+
+                var updated = change == "replacement"
+                    ? TunaWalletLinkState.Linked(wallet.WalletPath!, DateTimeOffset.UtcNow)
+                    : wallet;
+                updated = updated.WithValidationResult(TunaWalletValidationResult.Ok("wallet",
+                    change == "replacement" ? "payer-b" : "payer-a", change is "same-funded" or "replacement" ? "2" : "0"), DateTimeOffset.UtcNow);
+                Assert.True(await peer.SaveAsync(updated));
+                if (change == "expired-empty")
+                    SetPrivateField(header, "tunaUnlockMessageUntilUtc", DateTimeOffset.UtcNow.AddSeconds(-1));
+                Assert.Equal(message, ToolTip.GetTip(toggle)); // Peer write sent no local UI notification.
+                toggle.RaiseEvent(new Avalonia.Interactivity.CancelRoutedEventArgs(ToolTip.ToolTipOpeningEvent, toggle));
+
+                if (change is "error" or "same-funded") Assert.Equal(message, ToolTip.GetTip(toggle));
+                else
+                {
+                    var tip = Assert.IsType<string>(ToolTip.GetTip(toggle));
+                    Assert.NotEqual(message, tip);
+                    Assert.DoesNotContain("unlocked", tip, StringComparison.OrdinalIgnoreCase);
+                }
+                Assert.True(updated.IsSameValidationAs(await peer.LoadAsync()));
+            }
+            finally { window.Close(); root.Delete(recursive: true); }
+            return true;
+        }, CancellationToken.None);
+    }
+
+    [Theory]
     [InlineData("lock")]
     [InlineData("disable")]
     [InlineData("replacement")]

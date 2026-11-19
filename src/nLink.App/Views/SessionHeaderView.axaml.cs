@@ -574,6 +574,22 @@ public partial class SessionHeaderView : UserControl
         SetAndRaise(TunaPulseScaleProperty, ref tunaPulseScale, nextScale);
     }
 
+    private void TunaUnlockToggle_ToolTipOpening(object? sender, CancelRoutedEventArgs e)
+    {
+        var pending = GetPendingTunaUnlockMessage();
+        var runtime = subscribedTunaRuntime;
+        var status = runtime?.RuntimeStatus ?? tunaRuntimeStatus;
+        if ((pending is null || tunaUnlockMessageWallet is not null) &&
+            (tunaUnlockMessageWallet is not null || status == "waiting_for_approved_session" || tunaRuntimeStatus == "waiting_for_approved_session"))
+        {
+            // HasSessionUnlock checks the shared wallet record, not just the retained password.
+            var unlocked = runtime?.HasSessionUnlock == true;
+            if (!unlocked && tunaUnlockMessageWallet is not null) SetTunaUnlockMessage(string.Empty);
+            tunaRuntimeStatus = DisplayedRuntimeStatus(status, unlocked);
+        }
+        UpdateTunaVisualState();
+    }
+
     private async void TunaUnlockToggle_Click(object? sender, RoutedEventArgs e)
     {
         if (tunaUnlockBusy)
@@ -702,10 +718,11 @@ public partial class SessionHeaderView : UserControl
         await Dispatcher.UIThread.InvokeAsync(() =>
         {
             if (version != Volatile.Read(ref tunaUnlockRefreshVersion)) return;
+            var status = DisplayedRuntimeStatus(state.RuntimeStatus, state.IsOn);
             var presentation = TunaStatusPresentationMapper.FromState(
                 TunaActive,
                 TunaStatusReason,
-                state.RuntimeStatus,
+                status,
                 state.IsOn,
                 FileUsesRegularNkn);
             var tip = GetPendingTunaUnlockMessage(state.PromptWallet) ?? presentation.Text;
@@ -714,9 +731,12 @@ public partial class SessionHeaderView : UserControl
                 state.CanToggle && !tunaUnlockBusy,
                 state.IsOn,
                 tip,
-                state.RuntimeStatus);
+                status);
         });
     }
+
+    private static string DisplayedRuntimeStatus(string status, bool unlocked)
+        => !unlocked && status == "waiting_for_approved_session" ? "locked" : status;
 
     private void ApplyTunaUnlockToggleState(bool show, bool canToggle, bool unlocked, string tip, string runtimeStatus)
     {
