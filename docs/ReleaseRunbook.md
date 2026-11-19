@@ -4,6 +4,12 @@ This runbook describes the version-neutral steps to ship `v<version>` from a cle
 
 It is the canonical release process; use [rc-validation-checklist.md](release/rc-validation-checklist.md) for sign-off. A successful build, source checkpoint, or operator-analyzer PASS does not by itself qualify a release. Do not tag or publish before mandatory security/route proofs, payload provenance, packaging checks, and CI sign-off are established.
 
+## 0.7.1 Beta Readiness decision (2026-11-19)
+
+- [ ] **Case 10323 — known, unpassed.** [`CanonicalFallback_RequiresOriginalHandoffsBeyondOldOriginCap`](../tests/nLink.SmokeTests.Core/FrontierPayloadPrimaryTests.cs) (`host: "pwsh"`). X7 observed persistence and handoff but reached the 600-second watchdog without a downstream verdict. X8 stopped at host preflight and did not run the test.
+
+The release owner accepted this unresolved risk for **0.7.1 only** and stopped troubleshooting it for this release. This is not a pass, a fix, or a waiver for any future release. Keep the test enabled with its existing 600-second timeout and assertions. All other gates and failures retain their normal disposition.
+
 ## Published 0.7.0 Hotfix Revision 1 (2026-11-15)
 
 [`v0.7.0-hotfix.1`](https://github.com/resu12/nLink/releases/tag/v0.7.0-hotfix.1) is published at `d235dcf144c626b42d0a159c9aa7d18882f06c7d`, using CI #103's exact validated portable, installer and checksum file. The application version remains `0.7.0`. The original release below is preserved, not replaced.
