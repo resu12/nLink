@@ -204,12 +204,12 @@ public partial class DiagnosticsPageView : UserControl
         }
     }
 
-    private async void OnValidateTunaWalletPasswordRequested(object? sender, EventArgs e)
+    private async void OnValidateTunaWalletPasswordRequested(object? sender, TunaWalletLinkState expectedWallet)
     {
         char[]? password = null;
         try
         {
-            if (subscribedViewModel is null ||
+            if (sender is not DiagnosticsPageViewModel vm || !ReferenceEquals(vm, subscribedViewModel) ||
                 TopLevel.GetTopLevel(this) is not Window owner)
             {
                 return;
@@ -221,7 +221,8 @@ public partial class DiagnosticsPageView : UserControl
                 return;
             }
 
-            await subscribedViewModel.ValidateTunaWalletAsync(password);
+            if (ReferenceEquals(vm, subscribedViewModel))
+                await vm.ValidateTunaWalletAsync(expectedWallet, password);
         }
         finally
         {
@@ -232,12 +233,12 @@ public partial class DiagnosticsPageView : UserControl
         }
     }
 
-    private async void OnUnlockTunaRuntimePasswordRequested(object? sender, EventArgs e)
+    private async void OnUnlockTunaRuntimePasswordRequested(object? sender, TunaWalletLinkState expectedWallet)
     {
         char[]? password = null;
         try
         {
-            if (subscribedViewModel is null ||
+            if (sender is not DiagnosticsPageViewModel vm || !ReferenceEquals(vm, subscribedViewModel) ||
                 TopLevel.GetTopLevel(this) is not Window owner)
             {
                 return;
@@ -249,7 +250,8 @@ public partial class DiagnosticsPageView : UserControl
                 return;
             }
 
-            await subscribedViewModel.UnlockTunaRuntimeAsync(password);
+            if (ReferenceEquals(vm, subscribedViewModel))
+                await vm.UnlockTunaRuntimeAsync(expectedWallet, password);
         }
         finally
         {

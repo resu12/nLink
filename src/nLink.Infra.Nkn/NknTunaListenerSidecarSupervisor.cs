@@ -1,5 +1,7 @@
 using System.Diagnostics;
 using System.Globalization;
+using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json;
 using NLink.Core.Logging;
 
@@ -10,6 +12,19 @@ internal sealed class NknTunaListenerSidecarOptions
     public required string SidecarExePath { get; init; }
 
     public required string WalletPath { get; init; }
+
+    public string? ExpectedPayerAddress { get; init; }
+
+    internal bool TryAddWalletArguments(ProcessStartInfo start)
+    {
+        if (string.IsNullOrWhiteSpace(ExpectedPayerAddress)) return false;
+        start.ArgumentList.Add("--wallet");
+        start.ArgumentList.Add(WalletPath);
+        start.ArgumentList.Add("--expected-payer-sha256");
+        start.ArgumentList.Add(Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(ExpectedPayerAddress))));
+        start.ArgumentList.Add("--password-stdin");
+        return true;
+    }
 
     public required Func<char[]?> TakeWalletPassword { get; init; }
 
@@ -353,9 +368,12 @@ internal sealed class NknTunaListenerSidecarSupervisor : INknTunaListenerSidecar
         };
 
         nextProcess.StartInfo.ArgumentList.Add("listen");
-        nextProcess.StartInfo.ArgumentList.Add("--wallet");
-        nextProcess.StartInfo.ArgumentList.Add(options.WalletPath);
-        nextProcess.StartInfo.ArgumentList.Add("--password-stdin");
+        if (!options.TryAddWalletArguments(nextProcess.StartInfo))
+        {
+            nextProcess.Dispose();
+            SetStartupStatus(expectedStopGeneration, ct, "wallet_payer_missing");
+            return null;
+        }
         nextProcess.StartInfo.ArgumentList.Add("--allow-remote");
         nextProcess.StartInfo.ArgumentList.Add(request.ExpectedRemotePeer.Trim());
         nextProcess.StartInfo.ArgumentList.Add("--max-price-nkn-per-mb");

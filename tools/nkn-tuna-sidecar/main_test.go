@@ -3,13 +3,19 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"io"
 	"net"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	nkn "github.com/nknorg/nkn-sdk-go"
 )
 
 func TestBridgeTerminalReasonMapsCloseClasses(t *testing.T) {
@@ -341,6 +347,50 @@ func TestDialOptionalLocalBridgeCaps(t *testing.T) {
 	}
 	if cfg.maxDurationSec != 456 {
 		t.Fatalf("dial maxDurationSec = %d, want 456", cfg.maxDurationSec)
+	}
+}
+
+func TestListenLoadsOnlyApprovedPayerAtSamePath(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "wallet.json")
+	makeWallet := func() string {
+		t.Helper()
+		account, err := nkn.NewAccount(nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		w, err := nkn.NewWallet(account, &nkn.WalletConfig{Password: "fixture"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		document, err := w.ToJSON()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(document), 0600); err != nil {
+			t.Fatal(err)
+		}
+		return w.Address()
+	}
+	approved := makeWallet()
+	hash := sha256.Sum256([]byte(approved))
+	args := []string{modeListen, "--wallet", path, "--password-stdin", "--allow-remote", "peer", "--max-price-nkn-per-mb", "0.1",
+		"--max-total-mib", "1", "--max-duration-sec", "10", "--expected-payer-sha256", strings.ToUpper(hex.EncodeToString(hash[:]))}
+	cfg, err := parseArgs(args)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if w, err := loadLinkedWallet(cfg, "fixture"); err != nil || w.Address() != approved {
+		t.Fatal("matching wallet was not accepted")
+	}
+	makeWallet()
+	if w, err := loadLinkedWallet(cfg, "fixture"); w != nil || err == nil || err.Error() != "listener wallet does not match the approved payer" {
+		t.Fatal("same-password replacement was not rejected")
+	}
+	for _, invalid := range []string{"", "01", strings.Repeat("zz", 32)} {
+		args[len(args)-1] = invalid
+		if _, err := parseArgs(args); err == nil {
+			t.Fatal("invalid explicit payer binding accepted")
+		}
 	}
 }
 

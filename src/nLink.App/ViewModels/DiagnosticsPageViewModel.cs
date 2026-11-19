@@ -346,7 +346,7 @@ public sealed class DiagnosticsPageViewModel : ViewModelBase, IDisposable
                 MaxDurationSec = current.MaxDurationSec,
                 AllowDegradedProviderReady = current.AllowDegradedProviderReady,
                 LastRuntimeStatus = value ? "locked" : "off",
-            });
+            }, disablingFromCheckbox: !value);
         }
     }
 
@@ -673,8 +673,8 @@ public sealed class DiagnosticsPageViewModel : ViewModelBase, IDisposable
 
     public event EventHandler<string>? CopyReliabilityLogRequested;
     public event EventHandler? LinkTunaWalletRequested;
-    public event EventHandler? ValidateTunaWalletPasswordRequested;
-    public event EventHandler? UnlockTunaRuntimePasswordRequested;
+    internal event EventHandler<TunaWalletLinkState>? ValidateTunaWalletPasswordRequested;
+    internal event EventHandler<TunaWalletLinkState>? UnlockTunaRuntimePasswordRequested;
     public event EventHandler<string>? CopyTunaWalletAddressRequested;
 
     public event EventHandler<string>? OpenLogsFolderRequested;
@@ -713,8 +713,8 @@ public sealed class DiagnosticsPageViewModel : ViewModelBase, IDisposable
         try
         {
             var state = TunaWalletLinkState.Linked(walletPath, nowProvider());
-            await SaveTunaWalletStateAsync(state, ct, replacingLink: true);
-            copyFeedback.Show("Wallet linked");
+            var linked = await SaveTunaWalletStateAsync(state, ct, expectedValidation: null);
+            copyFeedback.Show(linked ? "Wallet linked" : "Stop the paid Tuna listener before changing wallets.");
         }
         catch (Exception ex)
         {
@@ -723,45 +723,71 @@ public sealed class DiagnosticsPageViewModel : ViewModelBase, IDisposable
         }
     }
 
-    public async Task ValidateTunaWalletAsync(char[]? password, CancellationToken ct = default)
-    {
-        if (!tunaWalletState.IsLinked || string.IsNullOrWhiteSpace(tunaWalletState.WalletPath))
-        {
-            copyFeedback.Show("Link a wallet first");
-            return;
-        }
+    public Task ValidateTunaWalletAsync(char[]? password, CancellationToken ct = default)
+        => ValidateTunaWalletAsync(tunaWalletState, password, ct);
 
+    internal async Task ValidateTunaWalletAsync(TunaWalletLinkState expectedWallet, char[]? password, CancellationToken ct = default)
+    {
+        var checkingWallet = tunaWalletState;
         if (password is null || password.Length == 0)
         {
             copyFeedback.Show("Password required");
             return;
         }
 
-        if (isTunaWalletValidating)
-        {
-            return;
-        }
-
-        SetTunaWalletValidating(true);
+        var ownsValidation = false;
         try
         {
+            if (!checkingWallet.IsLinked || string.IsNullOrWhiteSpace(checkingWallet.WalletPath))
+            {
+                copyFeedback.Show("Link a wallet first");
+                return;
+            }
+            if (isTunaWalletValidating || !expectedWallet.IsSameValidationAs(checkingWallet)) return;
+            ownsValidation = true;
+            SetTunaWalletValidating(true);
+            if (tunaWalletLinkStore is not null)
+            {
+                var current = await LoadTunaWalletStateAsync(ct);
+                ct.ThrowIfCancellationRequested();
+                if (!ReferenceEquals(checkingWallet, tunaWalletState)) return;
+                if (!checkingWallet.IsSameValidationAs(current))
+                {
+                    PublishWalletIfCurrent(checkingWallet, current, "Wallet changed. Balance check discarded.");
+                    return;
+                }
+            }
             var result = tunaWalletVerifier is null
-                ? TunaWalletValidationResult.Fail("verifier_service_missing", tunaWalletState.WalletFileName)
-                : await tunaWalletVerifier.ValidateAsync(tunaWalletState.WalletPath, password, ct);
-            var nextState = tunaWalletState.WithValidationResult(result, nowProvider());
-            await SaveTunaWalletStateAsync(nextState, ct);
+                ? TunaWalletValidationResult.Fail("verifier_service_missing", checkingWallet.WalletFileName)
+                : await tunaWalletVerifier.ValidateAsync(checkingWallet.WalletPath, password, ct);
+            var nextState = checkingWallet.WithValidationResult(result, nowProvider());
+            if (!await SaveTunaWalletStateAsync(nextState, ct, checkingWallet))
+            {
+                if (ReferenceEquals(tunaWalletState, checkingWallet))
+                {
+                    var latest = await LoadTunaWalletStateAsync(ct);
+                    ct.ThrowIfCancellationRequested();
+                    PublishWalletIfCurrent(checkingWallet, latest, "Wallet changed. Balance check discarded.");
+                }
+                return;
+            }
             copyFeedback.Show(result.Success
                 ? (nextState.Status == TunaWalletLinkStatus.VerifiedFunded ? "Wallet verified" : "Wallet is empty")
                 : "Wallet validation failed");
         }
+        catch (Exception ex) when (JsonTunaWalletLinkStore.IsStorageError(ex))
+        {
+            if (ReferenceEquals(checkingWallet, tunaWalletState))
+                copyFeedback.Show("Couldn't confirm the wallet balance. Check access to nLink's wallet settings.");
+        }
         finally
         {
             Array.Clear(password);
-            SetTunaWalletValidating(false);
+            if (ownsValidation) SetTunaWalletValidating(false);
         }
     }
 
-    public async Task UnlockTunaRuntimeAsync(char[]? password, CancellationToken ct = default)
+    internal async Task UnlockTunaRuntimeAsync(TunaWalletLinkState expectedWallet, char[]? password, CancellationToken ct = default)
     {
         if (tunaRuntimePilotService is null)
         {
@@ -785,16 +811,30 @@ public sealed class DiagnosticsPageViewModel : ViewModelBase, IDisposable
             return;
         }
 
+        var selection = tunaWalletState;
+        if (!expectedWallet.IsSamePayerLinkAs(selection))
+        {
+            Array.Clear(password);
+            return;
+        }
         SetTunaWalletValidating(true);
         try
         {
-            var result = await tunaRuntimePilotService
-                .UnlockForSessionAsync(password, TunaRuntimeUnlockSource.Options, ct)
-                .ConfigureAwait(false);
-            tunaWalletState = await LoadTunaWalletStateAsync(ct).ConfigureAwait(false);
-            copyFeedback.Show(result.Message);
-            RefreshTunaRuntimeProperties();
-            RefreshTunaWalletProperties();
+            var result = await tunaRuntimePilotService.UnlockForSessionAsync(password, TunaRuntimeUnlockSource.Options, expectedWallet, ct);
+            if (!ReferenceEquals(tunaWalletState, selection)) return;
+            var latest = await LoadTunaWalletStateAsync(ct);
+            ct.ThrowIfCancellationRequested();
+            var resultApplies = expectedWallet.IsSamePayerLinkAs(latest) &&
+                (!result.Success || latest.Status == TunaWalletLinkStatus.VerifiedFunded);
+            string? message = resultApplies ? result.Message : "Wallet changed.";
+            if (resultApplies && result.Success && !tunaRuntimePilotService.HoldsUnlockFor(latest))
+                message = null; // Keep any newer lock/disable feedback.
+            PublishWalletIfCurrent(selection, latest, message);
+        }
+        catch (Exception ex) when (JsonTunaWalletLinkStore.IsStorageError(ex))
+        {
+            if (ReferenceEquals(selection, tunaWalletState))
+                copyFeedback.Show("Couldn't confirm the wallet unlock. Check access to nLink's wallet settings.");
         }
         finally
         {
@@ -832,7 +872,7 @@ public sealed class DiagnosticsPageViewModel : ViewModelBase, IDisposable
         }
     }
 
-    private async Task<TunaWalletLinkState> LoadTunaWalletStateAsync(CancellationToken ct)
+    private async Task<TunaWalletLinkState> LoadTunaWalletStateAsync(CancellationToken ct, bool tolerateReadFailure = false)
     {
         if (tunaWalletLinkStore is null)
         {
@@ -843,28 +883,43 @@ public sealed class DiagnosticsPageViewModel : ViewModelBase, IDisposable
         {
             return await tunaWalletLinkStore.LoadAsync(ct).ConfigureAwait(false);
         }
-        catch
+        catch when (tolerateReadFailure)
         {
             return TunaWalletLinkState.Unlinked;
         }
     }
 
-    private async Task SaveTunaWalletStateAsync(TunaWalletLinkState state, CancellationToken ct, bool replacingLink = false)
+    private async Task<bool> SaveTunaWalletStateAsync(TunaWalletLinkState state, CancellationToken ct, TunaWalletLinkState? expectedValidation)
     {
         if (tunaRuntimePilotService is not null)
         {
-            await (replacingLink
-                ? tunaRuntimePilotService.ReplaceWalletLinkAsync(state, ct)
-                : tunaRuntimePilotService.SaveWalletLinkAsync(state, ct));
+            if (expectedValidation is null)
+            {
+                if (!await tunaRuntimePilotService.TryReplaceWalletLinkAsync(state, ct)) return false;
+            }
+            else if (!await tunaRuntimePilotService.TrySaveWalletValidationAsync(expectedValidation, state, ct))
+            {
+                return false;
+            }
         }
-        else if (tunaWalletLinkStore is not null)
+        else if (tunaWalletLinkStore is not null && !await tunaWalletLinkStore.SaveAsync(state, ct, expectedValidation))
         {
-            await tunaWalletLinkStore.SaveAsync(state, ct);
+            return false;
         }
 
-        tunaWalletState = state;
+        if (expectedValidation is null) tunaWalletState = state;
+        else if (!ReferenceEquals(Interlocked.CompareExchange(ref tunaWalletState, state, expectedValidation), expectedValidation)) return false;
         RefreshTunaWalletProperties();
         RefreshTunaRuntimeProperties();
+        return true;
+    }
+
+    private void PublishWalletIfCurrent(TunaWalletLinkState expected, TunaWalletLinkState latest, string? message)
+    {
+        if (!ReferenceEquals(Interlocked.CompareExchange(ref tunaWalletState, latest, expected), expected)) return;
+        RefreshTunaWalletProperties();
+        RefreshTunaRuntimeProperties();
+        if (message is not null) copyFeedback.Show(message);
     }
 
     private void SetTunaWalletValidating(bool value)
@@ -1014,9 +1069,17 @@ public sealed class DiagnosticsPageViewModel : ViewModelBase, IDisposable
         }
     }
 
-    private void SaveTunaRuntimePreferences(TunaRuntimePreferenceState state)
+    private void SaveTunaRuntimePreferences(TunaRuntimePreferenceState state, bool disablingFromCheckbox = false)
     {
-        tunaRuntimePilotService?.SavePreferences(state);
+        try
+        {
+            tunaRuntimePilotService?.SavePreferences(state);
+        }
+        catch (Exception ex) when (disablingFromCheckbox && !IsTunaRuntimeEnabled &&
+                                   ex is IOException or UnauthorizedAccessException or System.Security.SecurityException)
+        {
+            copyFeedback.Show("Tuna is off for this session, but the setting couldn't be saved.");
+        }
         RefreshTunaRuntimeProperties();
     }
 
@@ -1062,14 +1125,14 @@ public sealed class DiagnosticsPageViewModel : ViewModelBase, IDisposable
 
     private void RequestValidateTunaWallet()
     {
-        ValidateTunaWalletPasswordRequested?.Invoke(this, EventArgs.Empty);
+        ValidateTunaWalletPasswordRequested?.Invoke(this, tunaWalletState);
     }
 
     private bool CanValidateTunaWallet() => tunaWalletState.IsLinked && !isTunaWalletValidating;
 
     private void RequestUnlockTunaRuntime()
     {
-        UnlockTunaRuntimePasswordRequested?.Invoke(this, EventArgs.Empty);
+        UnlockTunaRuntimePasswordRequested?.Invoke(this, tunaWalletState);
     }
 
     private bool CanUnlockTunaRuntime()
@@ -1101,21 +1164,15 @@ public sealed class DiagnosticsPageViewModel : ViewModelBase, IDisposable
 
     internal async Task UnlinkTunaWalletAsync(CancellationToken ct = default)
     {
+        var selection = tunaWalletState;
         try
         {
-            if (tunaRuntimePilotService is not null)
-            {
-                await tunaRuntimePilotService.UnlinkWalletAsync(ct);
-            }
-            else if (tunaWalletLinkStore is not null)
-            {
-                await tunaWalletLinkStore.ClearAsync(ct);
-            }
-
-            tunaWalletState = TunaWalletLinkState.Unlinked;
-            RefreshTunaWalletProperties();
-            RefreshTunaRuntimeProperties();
-            copyFeedback.Show("Wallet unlinked");
+            var cleared = tunaRuntimePilotService is not null
+                ? await tunaRuntimePilotService.TryUnlinkWalletAsync(selection, ct)
+                : tunaWalletLinkStore is not null && await tunaWalletLinkStore.TryClearAsync(selection, ct);
+            var latest = cleared ? TunaWalletLinkState.Unlinked : await LoadTunaWalletStateAsync(ct, tolerateReadFailure: true);
+            ct.ThrowIfCancellationRequested();
+            PublishWalletIfCurrent(selection, latest, cleared ? "Wallet unlinked" : "Wallet changed. Current wallet was not unlinked.");
         }
         catch (Exception ex)
         {

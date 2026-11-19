@@ -323,6 +323,50 @@ public sealed class Beta3SessionShellLayoutSmokeTests : Beta3DefaultUiSmokeTestB
     }
 
     [Theory]
+    [InlineData("lock")]
+    [InlineData("disable")]
+    [InlineData("replacement")]
+    [InlineData("refreshed-empty")]
+    public async Task SessionHeader_DropsCachedUnlockSuccessWhenOwnerChanges(string change)
+    {
+        await fixture.Session.Dispatch(() =>
+        {
+            var root = Directory.CreateTempSubdirectory("nlink-wallet-tip-");
+            try
+            {
+                var prefs = new JsonTunaRuntimePreferenceStore(() => Path.Combine(root.FullName, "preferences.json"));
+                prefs.Save(new TunaRuntimePreferenceState { Enabled = true });
+                var runtime = new TunaRuntimePilotService(prefs,
+                    new JsonTunaUsageAccountingStore(() => Path.Combine(root.FullName, "usage.json")),
+                    new JsonTunaWalletLinkStore(() => Path.Combine(root.FullName, "link.json")), new TunaWalletSidecarVerifier());
+                var wallet = TunaWalletLinkState.Linked(Path.Combine(root.FullName, "wallet"), DateTimeOffset.UtcNow)
+                    .WithValidationResult(TunaWalletValidationResult.Ok("wallet", "payer-a", "1"), DateTimeOffset.UtcNow);
+                runtime.UnlockForNextSession(wallet, "fixture".ToCharArray());
+                var header = new SessionHeaderView();
+                SetPrivateField(header, "subscribedTunaRuntime", runtime);
+                var result = new TunaRuntimeUnlockResult(true, runtime.RuntimeStatus, "Fixture unlock succeeded.", false, TimeSpan.Zero);
+                InvokePrivate(header, "SetTunaUnlockResult", result, wallet);
+                InvokePrivate(header, "ApplyTunaUnlockToggleState", true, true, true, "", runtime.RuntimeStatus);
+                Assert.Equal(result.Message, header.TunaUnlockTip);
+
+                if (change == "disable") runtime.SavePreferences(new TunaRuntimePreferenceState { Enabled = false });
+                else if (change == "lock") runtime.ClearSessionUnlock();
+                else if (change == "refreshed-empty") InvokePrivate(header, "GetPendingTunaUnlockMessage",
+                    wallet.WithValidationResult(TunaWalletValidationResult.Ok("wallet", "payer-a", "0"), DateTimeOffset.UtcNow));
+                else runtime.UnlockForNextSession(wallet.WithValidationResult(
+                    TunaWalletValidationResult.Ok("wallet", "payer-b", "1"), DateTimeOffset.UtcNow), "replacement".ToCharArray());
+                InvokePrivate(header, "ApplyTunaUnlockToggleState", true, true, change == "replacement", "", runtime.RuntimeStatus);
+                Assert.NotEqual(result.Message, header.TunaUnlockTip);
+                InvokePrivate(header, "SetTunaUnlockResult", result with { Success = false, Message = "Fixture error." }, wallet);
+                InvokePrivate(header, "UpdateTunaVisualState");
+                Assert.Equal("Fixture error.", header.TunaUnlockTip);
+            }
+            finally { root.Delete(recursive: true); }
+            return Task.FromResult(true);
+        }, CancellationToken.None);
+    }
+
+    [Theory]
     [InlineData("Helper")]
     [InlineData("Helpee")]
     [Trait("Category", "Smoke")]

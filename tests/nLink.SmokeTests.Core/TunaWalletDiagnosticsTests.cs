@@ -15,6 +15,1418 @@ namespace NLink.SmokeTests;
 [Trait("Area", "Core")]
 public sealed class TunaWalletDiagnosticsTests
 {
+    private const string VerifiedFixturePayer = "NKN0123456789PUBLICADDRESS";
+
+    [Theory]
+    [InlineData(false, "write")]
+    [InlineData(true, "write")]
+    [InlineData(false, "initial-read")]
+    [InlineData(true, "initial-read")]
+    [InlineData(false, "conditional-read")]
+    [InlineData(true, "conditional-read")]
+    public async Task DiagnosticsTunaWallet_OptionsReportsWalletStorageFailure(bool unlock, string failure)
+    {
+        var root = CreateTempRoot();
+        try
+        {
+            var verifier = new FakeTunaWalletVerifier(TunaWalletValidationResult.Ok("wallet", VerifiedFixturePayer, "7"));
+            var context = await CreateVerifiedRuntimeContextAsync(root, verifier);
+            var store = new BlockingWalletSave(context.WalletStore);
+            var runtime = new TunaRuntimePilotService(context.PreferenceStore, context.UsageStore, store, verifier);
+            using var page = CreateViewModel(store, verifier, runtime);
+            var wallet = await store.LoadAsync();
+            var statePath = Path.Combine(root, "tuna-wallet-link.json");
+            if (failure == "initial-read")
+            {
+                await File.WriteAllTextAsync(statePath, "{");
+                store.ReleaseSave.TrySetResult();
+            }
+            else if (failure == "conditional-read")
+            {
+                store.DuringSave = () => File.Open(statePath, FileMode.Open, FileAccess.Read, FileShare.None);
+                store.ReleaseSave.TrySetResult();
+            }
+            else store.ReleaseSave.SetException(new IOException("fixture-private-wallet-path"));
+            var before = await File.ReadAllBytesAsync(statePath);
+            var password = "fixture".ToCharArray();
+            if (unlock) await page.UnlockTunaRuntimeAsync(wallet, password);
+            else await page.ValidateTunaWalletAsync(wallet, password);
+
+            Assert.Equal(unlock ? "Couldn't confirm the wallet unlock. Check access to nLink's wallet settings."
+                : "Couldn't confirm the wallet balance. Check access to nLink's wallet settings.", page.CopyFeedbackText);
+            Assert.True(page.ShowCopyFeedback);
+            Assert.Equal(VerifiedFixturePayer, page.TunaWalletAddress);
+            Assert.False(page.IsTunaWalletValidating);
+            Assert.False(runtime.HasSessionUnlock);
+            Assert.Equal(failure == "initial-read" ? 0 : 1, verifier.PasswordsSeen.Count);
+            Assert.Equal(failure != "initial-read", store.SaveEntered.Task.IsCompleted);
+            Assert.Equal(before, await File.ReadAllBytesAsync(statePath));
+            Assert.All(password, c => Assert.Equal('\0', c));
+        }
+        finally { DeleteTempRoot(root); }
+    }
+
+    [Theory]
+    [InlineData("unlock_validating")]
+    [InlineData("waiting_for_approved_session")]
+    public async Task DiagnosticsTunaWallet_UnlockPreferenceWriteFailureLeavesRuntimeLocked(string failStatus)
+    {
+        var root = CreateTempRoot();
+        try
+        {
+            var verifier = new FakeTunaWalletVerifier(TunaWalletValidationResult.Ok("wallet", VerifiedFixturePayer, "1"));
+            var context = await CreateVerifiedRuntimeContextAsync(root, verifier);
+            var prefs = new FailingStopPreferenceStore(context.PreferenceStore) { FailStatus = failStatus };
+            var runtime = new TunaRuntimePilotService(prefs, context.UsageStore, context.WalletStore, verifier);
+            using var page = CreateViewModel(context.WalletStore, verifier, runtime);
+            var password = "fixture".ToCharArray();
+            await page.UnlockTunaRuntimeAsync(OpenUnlockPrompt(page), password);
+
+            Assert.Equal(1, prefs.FailedWrites);
+            Assert.Equal(failStatus == "unlock_validating" ? 0 : 1, verifier.PasswordsSeen.Count);
+            Assert.Equal("Couldn't confirm the wallet unlock. Check access to nLink's wallet settings.", page.CopyFeedbackText);
+            Assert.False(runtime.HasSessionUnlock);
+            Assert.False((await runtime.GetUnlockStateAsync()).IsOn);
+            Assert.Equal("locked", runtime.RuntimeStatus);
+            Assert.False(RuntimeListenerOptions(runtime).CanTakeWalletPassword!());
+            Assert.False(page.IsTunaWalletValidating);
+            Assert.All(password, c => Assert.Equal('\0', c));
+        }
+        finally { DeleteTempRoot(root); }
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task DiagnosticsTunaWallet_RevokedDuringRefreshDoesNotPublishUnlock(bool disable)
+    {
+        var root = CreateTempRoot();
+        try
+        {
+            var verifier = new FakeTunaWalletVerifier(TunaWalletValidationResult.Ok("wallet", VerifiedFixturePayer, "1"));
+            var context = await CreateVerifiedRuntimeContextAsync(root, verifier);
+            var blocked = new BlockingWalletLoad(context.WalletStore);
+            using var page = CreateViewModel(blocked, verifier, context.RuntimeService);
+            var original = OpenUnlockPrompt(page);
+            blocked.BlockNextLoad = 1;
+            var pending = page.UnlockTunaRuntimeAsync(original, "fixture".ToCharArray());
+            try
+            {
+                await blocked.Entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+                Assert.True(context.RuntimeService.HasSessionUnlock);
+                if (disable) page.IsTunaRuntimeEnabled = false;
+                else await context.RuntimeService.LockOrStopForSessionAsync("user_locked", TunaRuntimeUnlockSource.Header);
+            }
+            finally { blocked.Release.TrySetResult(); }
+            await pending.WaitAsync(TimeSpan.FromSeconds(5));
+            var latest = await context.WalletStore.LoadAsync();
+            Assert.True(original.IsSamePayerLinkAs(latest));
+            Assert.Equal(TunaWalletLinkStatus.VerifiedFunded, latest.Status);
+            Assert.False(context.RuntimeService.HasSessionUnlock);
+            Assert.NotEqual("Tuna unlocked for the next approved session.", page.CopyFeedbackText);
+        }
+        finally { DeleteTempRoot(root); }
+    }
+
+    [Theory]
+    [InlineData("other-funded")]
+    [InlineData("same-empty")]
+    [InlineData("same-failed")]
+    [InlineData("same-funded")]
+    public async Task DiagnosticsTunaWallet_UnlockFeedbackRequiresRefreshedFundedPayer(string refreshed)
+    {
+        var root = CreateTempRoot();
+        try
+        {
+            var verifier = new FakeTunaWalletVerifier(TunaWalletValidationResult.Ok("wallet", VerifiedFixturePayer, "1"));
+            var context = await CreateVerifiedRuntimeContextAsync(root, verifier);
+            var blocked = new BlockingWalletLoad(context.WalletStore);
+            using var page = CreateViewModel(blocked, verifier, context.RuntimeService);
+            var original = OpenUnlockPrompt(page);
+            blocked.BlockNextLoad = 1;
+            var pending = page.UnlockTunaRuntimeAsync(original, "fixture".ToCharArray());
+            try
+            {
+                await blocked.Entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+                Assert.True(context.RuntimeService.HasSessionUnlock);
+                var peer = new JsonTunaWalletLinkStore(() => Path.Combine(root, "tuna-wallet-link.json"));
+                var current = await peer.LoadAsync();
+                Assert.True(original.IsSamePayerLinkAs(current));
+                var updated = current.WithValidationResult(refreshed == "same-failed" ? TunaWalletValidationResult.Fail("lookup_failed")
+                    : TunaWalletValidationResult.Ok("wallet", refreshed == "other-funded" ? "payer-b" : VerifiedFixturePayer,
+                        refreshed == "same-empty" ? "0" : "5"), DateTimeOffset.UtcNow);
+                Assert.True(await peer.SaveAsync(updated, expectedValidation: current));
+            }
+            finally { blocked.Release.TrySetResult(); }
+            await pending.WaitAsync(TimeSpan.FromSeconds(5));
+            Assert.Equal(refreshed == "same-funded" ? "Tuna unlocked for the next approved session." : "Wallet changed.", page.CopyFeedbackText);
+            Assert.Equal(refreshed switch { "other-funded" => "payer-b", "same-failed" => "(not verified)", _ => VerifiedFixturePayer },
+                page.TunaWalletAddress);
+            Assert.Equal(refreshed == "same-funded", context.RuntimeService.HasSessionUnlock);
+        }
+        finally { DeleteTempRoot(root); }
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task DiagnosticsTunaWallet_DisableCheckboxReportsSessionOnlyWhenSaveFails(bool failSave)
+    {
+        var root = CreateTempRoot();
+        try
+        {
+            var verifier = new FakeTunaWalletVerifier(TunaWalletValidationResult.Fail("unused"));
+            var context = await CreateVerifiedRuntimeContextAsync(root, verifier);
+            var prefs = new FailingStopPreferenceStore(context.PreferenceStore);
+            var runtime = new TunaRuntimePilotService(prefs, context.UsageStore, context.WalletStore, verifier);
+            var control = new RecordingTransportAccelerationControl();
+            SetPrivateField(runtime, "currentTransportControl", control);
+            runtime.UnlockForNextSession(await context.WalletStore.LoadAsync(), "fixture".ToCharArray());
+            Assert.True(RuntimeListenerOptions(runtime).BeginUsageAttemptIfCurrent!("checkbox-owner", () => true));
+            using var page = CreateViewModel(context.WalletStore, verifier, runtime);
+            Assert.True(page.IsTunaRuntimeEnabled);
+            prefs.FailWrites = failSave;
+
+            page.IsTunaRuntimeEnabled = false;
+
+            Assert.False(page.IsTunaRuntimeEnabled);
+            Assert.Equal("off", runtime.RuntimeStatus);
+            Assert.False(runtime.HasSessionUnlock);
+            Assert.Equal(failSave, context.PreferenceStore.Load().Enabled);
+            Assert.Equal(failSave, page.CopyFeedback.IsVisible);
+            if (failSave)
+                Assert.Equal("Tuna is off for this session, but the setting couldn't be saved.", page.CopyFeedback.Text);
+            await WaitUntilAsync(() => control.StopCalls == 1, TimeSpan.FromSeconds(3));
+        }
+        finally { DeleteTempRoot(root); }
+    }
+
+    [Theory]
+    [InlineData("unlink")]
+    [InlineData("lock")]
+    [InlineData("disable")]
+    public async Task TunaRuntimeWallet_PreferenceWriteFailureStillStopsOwner(string operation)
+    {
+        var root = CreateTempRoot();
+        try
+        {
+            var verifier = new FakeTunaWalletVerifier(TunaWalletValidationResult.Fail("unused"));
+            var context = await CreateVerifiedRuntimeContextAsync(root, verifier);
+            var prefs = new FailingStopPreferenceStore(context.PreferenceStore);
+            var runtime = new TunaRuntimePilotService(prefs, context.UsageStore, context.WalletStore, verifier);
+            var control = new RecordingTransportAccelerationControl();
+            SetPrivateField(runtime, "currentTransportControl", control);
+            var wallet = await context.WalletStore.LoadAsync();
+            runtime.UnlockForNextSession(wallet, "fixture".ToCharArray());
+            var options = RuntimeListenerOptions(runtime);
+            Assert.True(options.BeginUsageAttemptIfCurrent!("paid-owner", () => true));
+            options.UsageSink!.RecordPayment(new NknTunaPaymentTelemetry(0.25m, 0.25m, 100, null));
+            var lastPersisted = context.PreferenceStore.Load().LastRuntimeStatus;
+            prefs.FailWrites = true;
+
+            if (operation == "unlink") Assert.True(await runtime.TryUnlinkWalletAsync(wallet, CancellationToken.None));
+            else if (operation == "lock") Assert.True((await runtime.LockOrStopForSessionAsync("test_lock", TunaRuntimeUnlockSource.Header)).Success);
+            else Assert.Throws<IOException>(() => runtime.SavePreferences(new TunaRuntimePreferenceState { Enabled = false }));
+
+            var terminal = operation == "disable" ? "off" : "locked";
+            await WaitUntilAsync(() =>
+            {
+                lock (control.StopReasons) return control.StopReasons.Count != 0 && runtime.RuntimeStatus == terminal;
+            }, TimeSpan.FromSeconds(3));
+            Assert.Equal(1, control.StopCalls);
+            Assert.False(runtime.HasSessionUnlock);
+            Assert.Equal(operation != "unlink", (await context.WalletStore.LoadAsync()).IsLinked);
+            Assert.Equal(lastPersisted, context.PreferenceStore.Load().LastRuntimeStatus);
+            Assert.True(context.PreferenceStore.Load().Enabled);
+            Assert.Equal(operation == "disable" ? 1 : 2, prefs.FailedWrites);
+            var reason = operation == "disable" ? "runtime_disabled" : operation == "lock" ? "test_lock" : "wallet_unlinked";
+            Assert.Equal(reason, Assert.Single(control.StopReasons));
+            options.UsageSink.RecordIncomplete("late");
+            var closed = Assert.Single(context.UsageStore.Load().SessionRecords);
+            Assert.Equal(reason, closed.StopReason);
+            Assert.Equal("paid-owner", closed.SessionRunId);
+            Assert.Equal(0.25m, closed.PaidNkn);
+            var log = LocalOperationalLog.GetRecentLogText();
+            Assert.Contains($"event=tuna_stop_preferences_persist_failed; status={terminal}; error=IOException", log);
+            Assert.DoesNotContain("fixture-private-preference-path", log);
+        }
+        finally { DeleteTempRoot(root); }
+    }
+
+    private sealed class FailingStopPreferenceStore(ITunaRuntimePreferenceStore inner) : ITunaRuntimePreferenceStore
+    {
+        public bool FailWrites;
+        public string? FailStatus;
+        public int FailedWrites;
+        public TunaRuntimePreferenceState Load() => inner.Load();
+        public void Save(TunaRuntimePreferenceState state)
+        {
+            if (!FailWrites && (FailStatus is null || state.LastRuntimeStatus != FailStatus)) { inner.Save(state); return; }
+            Interlocked.Increment(ref FailedWrites);
+            throw new IOException("fixture-private-preference-path");
+        }
+    }
+
+    [Theory]
+    [InlineData(false, "0")]
+    [InlineData(true, "5")]
+    public async Task TunaRuntimeWallet_StaleUnlockCannotOverwriteNewerFundedBalance(bool blockSave, string oldBalance)
+    {
+        var root = CreateTempRoot();
+        var verifier = new BlockingTunaWalletVerifier(TunaWalletValidationResult.Ok("wallet", VerifiedFixturePayer, oldBalance));
+        try
+        {
+            var context = await CreateVerifiedRuntimeContextAsync(root, verifier);
+            var store = new BlockingWalletSave(context.WalletStore);
+            var runtime = new TunaRuntimePilotService(context.PreferenceStore, context.UsageStore, store, verifier);
+            if (blockSave) verifier.Release();
+            else store.ReleaseSave.TrySetResult();
+            var wallet = await store.LoadAsync();
+            var password = "fixture".ToCharArray();
+            var pending = runtime.UnlockForSessionAsync(password, TunaRuntimeUnlockSource.Options, wallet);
+            var newer = wallet.WithValidationResult(TunaWalletValidationResult.Ok("wallet", VerifiedFixturePayer, "7"), DateTimeOffset.UtcNow);
+            try
+            {
+                await (blockSave ? store.SaveEntered.Task : verifier.Entered).WaitAsync(TimeSpan.FromSeconds(5));
+                var peer = new JsonTunaWalletLinkStore(() => Path.Combine(root, "tuna-wallet-link.json"));
+                Assert.True(await peer.SaveAsync(newer, expectedValidation: wallet));
+            }
+            finally { verifier.Release(); store.ReleaseSave.TrySetResult(); }
+            Assert.False((await pending.WaitAsync(TimeSpan.FromSeconds(5))).Success);
+            Assert.Equal(JsonSerializer.Serialize(newer), JsonSerializer.Serialize(await store.LoadAsync()));
+            Assert.False(runtime.HasSessionUnlock);
+            Assert.All(password, c => Assert.Equal('\0', c));
+        }
+        finally { verifier.Release(); DeleteTempRoot(root); }
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task TunaWalletStore_IdenticalChecksStillInvalidatePriorSnapshot(bool success)
+    {
+        var root = CreateTempRoot();
+        try
+        {
+            var path = Path.Combine(root, "state.json");
+            var store = new JsonTunaWalletLinkStore(() => path);
+            var peer = new JsonTunaWalletLinkStore(() => path);
+            var instant = DateTimeOffset.UnixEpoch;
+            var result = success ? TunaWalletValidationResult.Ok("wallet", VerifiedFixturePayer, "1") : TunaWalletValidationResult.Fail("lookup_failed");
+            var first = TunaWalletLinkState.Linked(Path.Combine(root, "wallet.json"), instant).WithValidationResult(result, instant);
+            Assert.True(await store.SaveAsync(first));
+            var before = await store.LoadAsync();
+            var second = before.WithValidationResult(result, instant);
+            Assert.True(await peer.SaveAsync(second, expectedValidation: before));
+            var stale = before.WithValidationResult(TunaWalletValidationResult.Ok("wallet", VerifiedFixturePayer, "9"), instant);
+            Assert.False(await store.SaveAsync(stale, expectedValidation: before));
+            Assert.NotNull(before.ValidationRevision);
+            Assert.NotNull(second.ValidationRevision);
+            Assert.NotEqual(before.ValidationRevision, second.ValidationRevision);
+            Assert.True(second.IsSameValidationAs(await store.LoadAsync()));
+            Assert.False(before.IsSameValidationAs(second));
+        }
+        finally { DeleteTempRoot(root); }
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task DiagnosticsTunaWallet_FailedBalanceUnlinkStopsOnlyLastVerifiedOwner(bool differentPayer)
+    {
+        var root = CreateTempRoot();
+        try
+        {
+            var verifier = new FakeTunaWalletVerifier(TunaWalletValidationResult.Fail("lookup_failed", "wallet"));
+            var context = await CreateVerifiedRuntimeContextAsync(root, verifier);
+            var runtime = context.RuntimeService;
+            var control = new RecordingTransportAccelerationControl();
+            SetPrivateField(runtime, "currentTransportControl", control);
+            var wallet = await context.WalletStore.LoadAsync();
+            runtime.UnlockForNextSession(wallet, "test".ToCharArray());
+            var listener = RuntimeListenerOptions(runtime);
+            Assert.True(listener.BeginUsageAttemptIfCurrent!("owner", () => true));
+            listener.StatusChanged!("active");
+            listener.UsageSink!.RecordPayment(new NknTunaPaymentTelemetry(0.25m, 0.25m, 100, null));
+            if (differentPayer)
+                await context.WalletStore.SaveAsync(wallet.WithValidationResult(
+                    TunaWalletValidationResult.Ok("wallet", "other-payer", "1"), DateTimeOffset.UtcNow));
+            using var page = CreateViewModel(context.WalletStore, verifier, runtime);
+            await page.ValidateTunaWalletAsync("test".ToCharArray());
+            await page.ValidateTunaWalletAsync("test".ToCharArray()); // A second failure must not lose ownership.
+            Assert.Equal(TunaWalletLinkStatus.ValidationFailed, (await context.WalletStore.LoadAsync()).Status);
+            Assert.Equal("(not verified)", page.TunaWalletAddress);
+            Assert.False(listener.CanTakeWalletPassword!());
+            await page.UnlinkTunaWalletAsync();
+            Assert.False((await context.WalletStore.LoadAsync()).IsLinked);
+            if (differentPayer)
+            {
+                Assert.Null(Assert.Single(context.UsageStore.Load().SessionRecords).EndedUtc);
+                listener.UsageSink.RecordSummary(new NknTunaSessionUsageTelemetry(100, "completed", true, 0.25m, PaymentEventCount: 1));
+            }
+            else
+            {
+                Assert.False(runtime.HasSessionUnlock);
+                await WaitUntilAsync(() => control.StopCalls == 1 && runtime.RuntimeStatus == "locked", TimeSpan.FromSeconds(2));
+                Assert.Equal("wallet_unlinked", Assert.Single(control.StopReasons));
+            }
+            var record = Assert.Single(context.UsageStore.Load().SessionRecords);
+            Assert.Equal("owner", record.SessionRunId);
+            Assert.NotNull(record.EndedUtc);
+            Assert.Equal(differentPayer, record.CompletedFromSummary);
+            Assert.Equal(0.25m, record.PaidNkn);
+            Assert.Equal(differentPayer ? 0 : 1, control.StopCalls);
+        }
+        finally { DeleteTempRoot(root); }
+    }
+
+    [Theory]
+    [InlineData(true, true)]
+    [InlineData(false, true)]
+    [InlineData(true, false)]
+    [InlineData(false, false)]
+    [InlineData(true, true, true)]
+    public async Task DiagnosticsTunaWallet_DelayedBalanceCannotOverwritePeerPayer(bool useRuntime, bool success, bool samePayer = false)
+    {
+        var root = CreateTempRoot();
+        var blocked = new BlockingTunaWalletVerifier(success ? TunaWalletValidationResult.Ok("wallet", VerifiedFixturePayer, "9")
+            : TunaWalletValidationResult.Fail("lookup_failed", "wallet"));
+        try
+        {
+            var context = await CreateVerifiedRuntimeContextAsync(root, blocked);
+            using var page = CreateViewModel(context.WalletStore, blocked, useRuntime ? context.RuntimeService : null);
+            var peerStore = new JsonTunaWalletLinkStore(() => Path.Combine(root, "tuna-wallet-link.json"));
+            var peerPayer = samePayer ? VerifiedFixturePayer : "peer-payer";
+            var peerVerifier = new FakeTunaWalletVerifier(TunaWalletValidationResult.Ok("wallet", peerPayer, "7"));
+            using var peer = CreateViewModel(peerStore, peerVerifier);
+            var original = await peerStore.LoadAsync();
+            var pending = page.ValidateTunaWalletAsync("first".ToCharArray());
+            try
+            {
+                await blocked.Entered.WaitAsync(TimeSpan.FromSeconds(5));
+                await peer.ValidateTunaWalletAsync("second".ToCharArray());
+            }
+            finally { blocked.Release(); }
+            await pending.WaitAsync(TimeSpan.FromSeconds(5));
+            var current = await peerStore.LoadAsync();
+            Assert.True(original.IsSameLinkAs(current));
+            Assert.Equal(peerPayer, current.WalletAddress);
+            Assert.Equal("7", current.BalanceNkn);
+            Assert.Equal(peerPayer, page.TunaWalletAddress);
+            Assert.Equal("Wallet changed. Balance check discarded.", page.CopyFeedbackText);
+
+            var password = "stale-prompt".ToCharArray();
+            await page.ValidateTunaWalletAsync(original, password);
+            Assert.Single(blocked.PasswordsSeen);
+            Assert.All(password, c => Assert.Equal('\0', c));
+        }
+        finally { blocked.Release(); DeleteTempRoot(root); }
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task TunaRuntimeListenerSupervisor_RefreshesIdleWalletBindingWithoutRetiringOwner(bool newLink)
+    {
+        var root = CreateTempRoot();
+        try
+        {
+            var context = await CreateListenerSupervisorRuntimeContextAsync(root);
+            var runtime = context.RuntimeService;
+            var owner = await context.WalletStore.LoadAsync();
+            runtime.UnlockForNextSession(owner, "test".ToCharArray());
+            using var outer = runtime.CreateRuntimeListenerSupervisorForTests();
+            var get = outer.GetType().GetMethod("GetOrCreateSupervisor", BindingFlags.Instance | BindingFlags.NonPublic)!;
+            object? Select(bool idle) => get.Invoke(outer, [idle, CancellationToken.None, 0L]);
+            var peer = (newLink ? TunaWalletLinkState.Linked(owner.WalletPath!, owner.LinkedUtc!.Value) : owner)
+                .WithValidationResult(TunaWalletValidationResult.Ok("wallet", newLink ? owner.WalletAddress! : "peer-payer", "1"), DateTimeOffset.UtcNow);
+            await context.WalletStore.SaveAsync(peer);
+            var idlePeer = Assert.IsType<NknTunaListenerSidecarSupervisor>(Select(true));
+            Assert.False(idlePeer.CanOfferListener);
+            await context.WalletStore.SaveAsync(owner);
+            var restored = Assert.IsType<NknTunaListenerSidecarSupervisor>(Select(true));
+            Assert.NotSame(idlePeer, restored);
+            Assert.True(restored.CanOfferListener);
+            var options = (NknTunaListenerSidecarOptions)typeof(NknTunaListenerSidecarSupervisor)
+                .GetField("options", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(restored)!;
+            Assert.True(options.BeginUsageAttemptIfCurrent!("owner", () => true));
+            await context.WalletStore.SaveAsync(peer);
+            Assert.Null(Select(false)); // Accounting may already be open before the child publishes readiness.
+            var ready = new TaskCompletionSource<NknTunaListenerSidecarEndpoint>();
+            SetPrivateField(restored, "pendingReady", ready);
+            Assert.Null(Select(true));
+            Assert.Null(Select(false));
+            Assert.False(ready.Task.IsCompleted);
+            options.UsageSink!.RecordPayment(new NknTunaPaymentTelemetry(0.25m, 0.25m, 100, null));
+            options.UsageSink.RecordSummary(new NknTunaSessionUsageTelemetry(100, "completed", true, 0.25m, PaymentEventCount: 1));
+            var record = Assert.Single(context.UsageStore.Load().SessionRecords);
+            Assert.Equal("owner", record.SessionRunId);
+            Assert.True(record.CompletedFromSummary);
+            Assert.Equal(0.25m, record.PaidNkn);
+        }
+        finally { DeleteTempRoot(root); }
+    }
+
+    [Fact]
+    public async Task TunaRuntimeWalletRelink_PreservesOpenRunAndAllowsReplacementAfterSummary()
+    {
+        var root = CreateTempRoot();
+        try
+        {
+            var verifier = new FakeTunaWalletVerifier(TunaWalletValidationResult.Ok("wallet", "address", "1"));
+            var context = await CreateVerifiedRuntimeContextAsync(root, verifier);
+            var runtime = context.RuntimeService;
+            using var vm = CreateViewModel(context.WalletStore, verifier, runtime);
+            var original = await context.WalletStore.LoadAsync();
+            runtime.UnlockForNextSession(original, "test-only".ToCharArray());
+            var source = CreateListenerAdoptionSnapshot();
+            var control = new BoundCapControl { CurrentSource = source };
+            SetPrivateField(runtime, "currentTransportControl", control);
+            var options = RuntimeListenerOptions(runtime);
+            Assert.True(options.BeginUsageAttemptIfCurrent!(source.ProcessRunId, () => true));
+            options.UsageSink!.RecordPayment(new NknTunaPaymentTelemetry(0.25m, 0.25m, 100, null));
+
+            var replacement = Path.Combine(root, "replacement.json");
+            await vm.LinkTunaWalletAsync(replacement);
+            Assert.Equal(JsonSerializer.Serialize(original), JsonSerializer.Serialize(await context.WalletStore.LoadAsync()));
+            Assert.True(runtime.HasSessionUnlock);
+            options.UsageSink.RecordPayment(new NknTunaPaymentTelemetry(0.5m, 0.75m, 200, null));
+            options.UsageSink.RecordSummary(new NknTunaSessionUsageTelemetry(256, "completed", true, 0.75m, PaymentEventCount: 2));
+            var record = Assert.Single(context.UsageStore.Load().SessionRecords);
+            Assert.Equal(source.ProcessRunId, record.SessionRunId);
+            Assert.True(record.CompletedFromSummary);
+            Assert.Equal(256, record.BytesMoved);
+            Assert.Equal(0.75m, record.PaidNkn);
+            Assert.Equal(2, record.PaymentEventCount);
+            options.ListenerCapHandoffRequested!("byte_cap_reached", source);
+            await runtime.ListenerCapStopForTests!.WaitAsync(TimeSpan.FromSeconds(5));
+            Assert.Equal(1, control.BoundStops);
+            Assert.Equal(0, control.UnboundStops);
+
+            await vm.LinkTunaWalletAsync(replacement);
+            Assert.Equal(replacement, (await context.WalletStore.LoadAsync()).WalletPath);
+            Assert.False(runtime.HasSessionUnlock);
+            Assert.Equal(record, Assert.Single(context.UsageStore.Load().SessionRecords));
+        }
+        finally { DeleteTempRoot(root); }
+    }
+
+    [Fact]
+    public async Task TunaRuntimeWalletRelink_BlockedSaveRejectsPaidStartup()
+    {
+        var root = CreateTempRoot();
+        try
+        {
+            var verifier = new FakeTunaWalletVerifier(TunaWalletValidationResult.Ok("wallet", "address", "1"));
+            var context = await CreateVerifiedRuntimeContextAsync(root, verifier);
+            var store = new BlockingWalletSave(context.WalletStore);
+            var runtime = new TunaRuntimePilotService(context.PreferenceStore, context.UsageStore, store, verifier);
+            runtime.UnlockForNextSession(await store.LoadAsync(), "test-only".ToCharArray());
+            using var supervisor = runtime.CreateRuntimeListenerSupervisorForTests();
+            using var retiring = runtime.CreateRuntimeListenerSupervisorForTests(
+                new RecordingTunaListenerSidecarSupervisor(CreateListenerAdoptionSnapshot()));
+            Assert.True(supervisor.CanOfferListener);
+            var old = RuntimeListenerOptions(runtime);
+            var next = TunaWalletLinkState.Linked(Path.Combine(root, "replacement.json"), DateTimeOffset.UtcNow);
+            var saving = runtime.TryReplaceWalletLinkAsync(next, CancellationToken.None);
+            try
+            {
+                await store.SaveEntered.Task.WaitAsync(TimeSpan.FromSeconds(2));
+                Assert.False(supervisor.CanOfferListener);
+                Assert.False(retiring.CanOfferListener);
+                var current = RuntimeListenerOptions(runtime);
+                Assert.False(old.BeginUsageAttemptIfCurrent!("stale-run", () => true));
+                Assert.False(current.CanTakeWalletPassword!());
+                Assert.Null(current.TakeWalletPasswordIfCurrent!(() => true));
+                Assert.False(current.BeginUsageAttemptIfCurrent!("new-run", () => true));
+            }
+            finally { store.ReleaseSave.TrySetResult(); }
+            Assert.True(await saving.WaitAsync(TimeSpan.FromSeconds(2)));
+            Assert.Empty(context.UsageStore.Load().SessionRecords);
+            Assert.False(runtime.HasSessionUnlock);
+            Assert.False(supervisor.CanOfferListener);
+            Assert.True(retiring.CanOfferListener); // An existing listener does not require a retained password.
+        }
+        finally { DeleteTempRoot(root); }
+    }
+
+    [Theory]
+    [InlineData(true, false)]
+    [InlineData(true, true)]
+    [InlineData(false, false)]
+    [InlineData(false, true)]
+    public async Task DiagnosticsTunaWallet_DelayedBalanceCannotVerifyReplacement(bool useRuntime, bool samePathFromOtherPage)
+    {
+        var root = CreateTempRoot();
+        var verifier = new BlockingTunaWalletVerifier(TunaWalletValidationResult.Ok("wallet-a", "address-a", "3"));
+        try
+        {
+            var context = await CreateVerifiedRuntimeContextAsync(root, verifier);
+            var runtime = useRuntime ? context.RuntimeService : null;
+            using var page = CreateViewModel(context.WalletStore, verifier, runtime);
+            // A relink need not have a distinct clock reading, even at the same path.
+            var original = await context.WalletStore.LoadAsync();
+            using var other = CreateViewModel(context.WalletStore, verifier, runtime, () => original.LinkedUtc!.Value);
+            var changingPage = samePathFromOtherPage ? other : page;
+            var replacementPath = samePathFromOtherPage ? context.WalletPath : Path.Combine(root, "wallet-b.json");
+            var password = "test-only".ToCharArray();
+            var pending = page.ValidateTunaWalletAsync(password);
+            try
+            {
+                await verifier.Entered.WaitAsync(TimeSpan.FromSeconds(2));
+                await changingPage.LinkTunaWalletAsync(replacementPath);
+            }
+            finally { verifier.Release(); }
+            await pending.WaitAsync(TimeSpan.FromSeconds(2));
+
+            var stored = await context.WalletStore.LoadAsync();
+            Assert.Equal(replacementPath, stored.WalletPath);
+            if (samePathFromOtherPage) Assert.Equal(original.LinkedUtc, stored.LinkedUtc);
+            Assert.Equal(TunaWalletLinkStatus.LinkedUnverified, stored.Status);
+            Assert.Null(stored.WalletAddress);
+            Assert.Null(stored.BalanceNkn);
+            Assert.Null(stored.LastVerifiedUtc);
+            Assert.True(changingPage.NeedsTunaWalletBalanceCheck);
+            Assert.True(page.NeedsTunaWalletBalanceCheck);
+            Assert.Equal(Path.GetFileName(replacementPath), page.TunaWalletFileName);
+            Assert.Equal("(not verified)", page.TunaWalletAddress);
+            Assert.All(password, c => Assert.Equal('\0', c));
+        }
+        finally { verifier.Release(); DeleteTempRoot(root); }
+    }
+
+    [Fact]
+    public async Task TunaRuntimeWallet_PeerRelinkRequiresItsOwnUnlockEvenAtTheSamePath()
+    {
+        var root = CreateTempRoot();
+        try
+        {
+            var verifier = new FakeTunaWalletVerifier(TunaWalletValidationResult.Ok("wallet", "address", "1"));
+            var context = await CreateVerifiedRuntimeContextAsync(root, verifier);
+            var runtime = context.RuntimeService;
+            var original = await context.WalletStore.LoadAsync();
+            runtime.UnlockForNextSession(original, "first-password".ToCharArray());
+            var old = RuntimeListenerOptions(runtime);
+            using var supervisor = runtime.CreateRuntimeListenerSupervisorForTests();
+            Assert.True(supervisor.CanOfferListener);
+
+            var peer = new JsonTunaWalletLinkStore(() => Path.Combine(root, "tuna-wallet-link.json"));
+            var replacement = TunaWalletLinkState.Linked(original.WalletPath!, original.LinkedUtc!.Value)
+                .WithValidationResult(TunaWalletValidationResult.Ok("wallet", "address", "1"), DateTimeOffset.UtcNow);
+            await peer.SaveAsync(replacement);
+            var next = RuntimeListenerOptions(runtime);
+            Assert.False(supervisor.CanOfferListener);
+            foreach (var options in new[] { old, next })
+            {
+                Assert.False(options.CanTakeWalletPassword!());
+                Assert.Null(options.TakeWalletPassword());
+                Assert.Null(options.TakeWalletPasswordIfCurrent!(() => true));
+                Assert.False(options.BeginUsageAttemptIfCurrent!("wrong-wallet", () => true));
+            }
+            Assert.Empty(context.UsageStore.Load().SessionRecords);
+            runtime.UnlockForNextSession(replacement, "second-password".ToCharArray());
+            Assert.Null(old.TakeWalletPasswordIfCurrent!(() => true));
+            var current = RuntimeListenerOptions(runtime);
+            var password = Assert.IsType<char[]>(current.TakeWalletPasswordIfCurrent!(() => true));
+            try { Assert.Equal("second-password".ToCharArray(), password); }
+            finally { Array.Clear(password); }
+            Assert.True(current.BeginUsageAttemptIfCurrent!("right-wallet", () => true));
+        }
+        finally { DeleteTempRoot(root); }
+    }
+
+    private static TunaWalletLinkState OpenUnlockPrompt(DiagnosticsPageViewModel page)
+    {
+        TunaWalletLinkState? selection = null;
+        void Capture(object? sender, TunaWalletLinkState wallet) => selection = wallet;
+        page.UnlockTunaRuntimePasswordRequested += Capture;
+        try { page.UnlockTunaRuntimeCommand.Execute(null); }
+        finally { page.UnlockTunaRuntimePasswordRequested -= Capture; }
+        return Assert.IsType<TunaWalletLinkState>(selection);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task DiagnosticsTunaWallet_PromptForOldLinkDoesNotVerifyReplacement(bool localReselection)
+    {
+        var root = CreateTempRoot();
+        try
+        {
+            var verifier = new FakeTunaWalletVerifier(TunaWalletValidationResult.Ok("wallet", "new-address", "1"));
+            var context = await CreateVerifiedRuntimeContextAsync(root, verifier);
+            using var page = CreateViewModel(context.WalletStore, verifier, context.RuntimeService);
+            var original = OpenUnlockPrompt(page);
+            var peer = new JsonTunaWalletLinkStore(() => Path.Combine(root, "tuna-wallet-link.json"));
+            if (localReselection) await page.LinkTunaWalletAsync(original.WalletPath);
+            var replacement = (localReselection ? await peer.LoadAsync() : TunaWalletLinkState.Linked(original.WalletPath!, original.LinkedUtc!.Value))
+                .WithValidationResult(TunaWalletValidationResult.Ok("wallet", "new-address", "1"), DateTimeOffset.UtcNow);
+            await peer.SaveAsync(replacement);
+            var password = "shared-fixture-password".ToCharArray();
+            await page.UnlockTunaRuntimeAsync(original, password);
+            Assert.Empty(verifier.PasswordsSeen);
+            Assert.All(password, c => Assert.Equal('\0', c));
+            Assert.False(context.RuntimeService.HasSessionUnlock);
+            Assert.Equal(localReselection ? "(not verified)" : "new-address", page.TunaWalletAddress);
+            Assert.Equal(localReselection ? "Wallet linked" : "Wallet changed.", page.CopyFeedbackText);
+            Assert.Equal(replacement.LastVerifiedUtc, (await peer.LoadAsync()).LastVerifiedUtc);
+        }
+        finally { DeleteTempRoot(root); }
+    }
+
+    [Fact]
+    public async Task TunaRuntimeWallet_ListenerStartsDuringUnlockSaveKeepsAccounting()
+    {
+        var root = CreateTempRoot();
+        try
+        {
+            var verifier = new FakeTunaWalletVerifier(TunaWalletValidationResult.Ok("wallet", VerifiedFixturePayer, "1"));
+            var context = await CreateVerifiedRuntimeContextAsync(root, verifier);
+            var store = new BlockingWalletSave(context.WalletStore);
+            var runtime = new TunaRuntimePilotService(context.PreferenceStore, context.UsageStore, store, verifier);
+            var wallet = await store.LoadAsync();
+            runtime.UnlockForNextSession(wallet, "owner-password".ToCharArray());
+            var listener = RuntimeListenerOptions(runtime);
+            var pending = runtime.UnlockForSessionAsync("fixture".ToCharArray(), TunaRuntimeUnlockSource.Header, wallet);
+            try
+            {
+                await store.SaveEntered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+                Assert.True(listener.BeginUsageAttemptIfCurrent!("save-owner", () => true));
+            }
+            finally { store.ReleaseSave.TrySetResult(); }
+            Assert.False((await pending.WaitAsync(TimeSpan.FromSeconds(5))).Success);
+            Assert.True((await runtime.GetUnlockStateAsync()).IsOn);
+            listener.UsageSink!.RecordPayment(new NknTunaPaymentTelemetry(0.25m, 0.25m, 100, null));
+            listener.UsageSink.RecordSummary(new NknTunaSessionUsageTelemetry(100, "completed", true, 0.25m, PaymentEventCount: 1));
+            var summary = Assert.Single(context.UsageStore.Load().SessionRecords);
+            Assert.True(summary.CompletedFromSummary);
+            Assert.Equal("save-owner", summary.SessionRunId);
+            Assert.Equal(0.25m, summary.PaidNkn);
+        }
+        finally { DeleteTempRoot(root); }
+    }
+
+    [Fact]
+    public async Task TunaRuntimeWallet_ListenerArgumentsAndUnlinkAreBoundToCurrentPayer()
+    {
+        var root = CreateTempRoot();
+        try
+        {
+            var context = await CreateVerifiedRuntimeContextAsync(root, new FakeTunaWalletVerifier(TunaWalletValidationResult.Fail("unused", "wallet")));
+            var runtime = context.RuntimeService;
+            var prior = await context.WalletStore.LoadAsync();
+            var current = prior.WithValidationResult(TunaWalletValidationResult.Ok("wallet", "abc", "1"), DateTimeOffset.UtcNow);
+            Assert.True(await context.WalletStore.SaveAsync(current, expectedValidation: prior));
+            runtime.UnlockForNextSession(current, "fixture".ToCharArray());
+            // A peer's balance refresh can change the payer without changing this local listener generation.
+            Assert.True(await context.WalletStore.SaveAsync(prior, expectedValidation: current));
+            var staleOptions = RuntimeListenerOptions(runtime);
+            Assert.True(await context.WalletStore.SaveAsync(current, expectedValidation: prior));
+            Assert.False(staleOptions.CanTakeWalletPassword!());
+            Assert.Null(staleOptions.TakeWalletPassword());
+            var listener = RuntimeListenerOptions(runtime);
+            var start = new ProcessStartInfo();
+            Assert.True(listener.TryAddWalletArguments(start));
+            Assert.Equal(new[] { "--wallet", current.WalletPath, "--expected-payer-sha256",
+                "BA7816BF8F01CFEA414140DE5DAE2223B00361A396177A9CB410FF61F20015AD", "--password-stdin" }, start.ArgumentList.ToArray());
+            Assert.True(listener.BeginUsageAttemptIfCurrent!("current-payer", () => true));
+            Assert.False(await runtime.TryUnlinkWalletAsync(prior, CancellationToken.None));
+            Assert.True(current.IsSamePayerLinkAs(await context.WalletStore.LoadAsync()));
+            Assert.True(runtime.HasSessionUnlock);
+            listener.UsageSink!.RecordSummary(new NknTunaSessionUsageTelemetry(1, "completed", true, 0m));
+            Assert.True(Assert.Single(context.UsageStore.Load().SessionRecords).CompletedFromSummary);
+        }
+        finally { DeleteTempRoot(root); }
+    }
+
+    [Fact]
+    public async Task TunaRuntimeWallet_VerifiedPayerMismatchDoesNotSaveOrRetainCredential()
+    {
+        var root = CreateTempRoot();
+        try
+        {
+            var verifier = new FakeTunaWalletVerifier(TunaWalletValidationResult.Ok("wallet", "different-payer", "10"));
+            var context = await CreateVerifiedRuntimeContextAsync(root, verifier);
+            var runtime = context.RuntimeService;
+            var original = (await runtime.GetUnlockStateAsync()).PromptWallet;
+            runtime.UnlockForNextSession(original, "previous-password".ToCharArray());
+            var password = "shared-password".ToCharArray();
+            var result = await runtime.UnlockForSessionAsync(password, TunaRuntimeUnlockSource.Header, original);
+            Assert.False(result.Success);
+            Assert.Single(verifier.PasswordsSeen);
+            Assert.All(password, c => Assert.Equal('\0', c));
+            Assert.Equal(JsonSerializer.Serialize(original), JsonSerializer.Serialize(await context.WalletStore.LoadAsync()));
+            Assert.False(runtime.HasSessionUnlock);
+            Assert.False((await runtime.GetUnlockStateAsync()).IsOn);
+        }
+        finally { DeleteTempRoot(root); }
+    }
+
+    [Theory]
+    [InlineData(true, "mismatch")]
+    [InlineData(false, "mismatch")]
+    [InlineData(true, "valid")]
+    [InlineData(true, "empty")]
+    [InlineData(true, "failed")]
+    public async Task TunaRuntimeWallet_PayerMismatchPreservesAlreadyOwnedRun(bool startsDuringVerification, string outcome)
+    {
+        var root = CreateTempRoot();
+        var verifier = new BlockingTunaWalletVerifier(outcome == "failed" ? TunaWalletValidationResult.Fail("invalid_password", "wallet")
+            : TunaWalletValidationResult.Ok("wallet", outcome == "mismatch" ? "different-payer" : VerifiedFixturePayer, outcome == "empty" ? "0" : "1"));
+        try
+        {
+            var context = await CreateVerifiedRuntimeContextAsync(root, verifier);
+            var runtime = context.RuntimeService;
+            var wallet = await context.WalletStore.LoadAsync();
+            runtime.UnlockForNextSession(wallet, "owner-password".ToCharArray());
+            var listener = RuntimeListenerOptions(runtime);
+            if (!startsDuringVerification) Assert.True(listener.BeginUsageAttemptIfCurrent!("owner-run", () => true));
+            var attempt = runtime.UnlockForSessionAsync("fixture".ToCharArray(), TunaRuntimeUnlockSource.Header, wallet);
+            try
+            {
+                if (startsDuringVerification)
+                {
+                    await verifier.Entered.WaitAsync(TimeSpan.FromSeconds(5));
+                    Assert.True(listener.BeginUsageAttemptIfCurrent!("owner-run", () => true));
+                }
+            }
+            finally { verifier.Release(); }
+            Assert.False((await attempt.WaitAsync(TimeSpan.FromSeconds(5))).Success);
+            Assert.Equal(startsDuringVerification ? 1 : 0, verifier.PasswordsSeen.Count);
+            Assert.Equal(!startsDuringVerification || outcome == "valid", runtime.HasSessionUnlock);
+            Assert.True((await runtime.GetUnlockStateAsync()).IsOn); // The actual listener still owns its run.
+            listener.UsageSink!.RecordPayment(new NknTunaPaymentTelemetry(0.25m, 0.25m, 100, null));
+            listener.UsageSink.RecordSummary(new NknTunaSessionUsageTelemetry(100, "completed", true, 0.25m, PaymentEventCount: 1));
+            var summary = Assert.Single(context.UsageStore.Load().SessionRecords);
+            Assert.True(summary.CompletedFromSummary);
+            Assert.Equal("owner-run", summary.SessionRunId);
+            Assert.Equal(0.25m, summary.PaidNkn);
+        }
+        finally { verifier.Release(); DeleteTempRoot(root); }
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task TunaRuntimeWallet_PayerChangedOnSameLinkCannotBeUnlocked(bool beforeSubmission)
+    {
+        var root = CreateTempRoot();
+        try
+        {
+            var verifier = new FakeTunaWalletVerifier(TunaWalletValidationResult.Ok("wallet",
+                beforeSubmission ? "changed-payer" : VerifiedFixturePayer, "10"));
+            var context = await CreateVerifiedRuntimeContextAsync(root, verifier);
+            var store = new BlockingWalletSave(context.WalletStore);
+            var runtime = new TunaRuntimePilotService(context.PreferenceStore, context.UsageStore, store, verifier);
+            var original = (await runtime.GetUnlockStateAsync()).PromptWallet;
+            var changed = original.WithValidationResult(TunaWalletValidationResult.Ok("wallet", "changed-payer", "5"), DateTimeOffset.UtcNow);
+            if (beforeSubmission)
+            {
+                await context.WalletStore.SaveAsync(changed);
+                store.ReleaseSave.TrySetResult();
+            }
+            var password = "shared-password".ToCharArray();
+            var unlock = runtime.UnlockForSessionAsync(password, TunaRuntimeUnlockSource.Options, original);
+            if (!beforeSubmission)
+            {
+                try
+                {
+                    await store.SaveEntered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+                    await context.WalletStore.SaveAsync(changed);
+                }
+                finally { store.ReleaseSave.TrySetResult(); }
+            }
+            Assert.False((await unlock.WaitAsync(TimeSpan.FromSeconds(5))).Success);
+            Assert.Equal(beforeSubmission ? 0 : 1, verifier.PasswordsSeen.Count);
+            Assert.All(password, c => Assert.Equal('\0', c));
+            Assert.Equal(JsonSerializer.Serialize(changed), JsonSerializer.Serialize(await context.WalletStore.LoadAsync()));
+            Assert.False(runtime.HasSessionUnlock);
+        }
+        finally { DeleteTempRoot(root); }
+    }
+
+    [Theory]
+    [InlineData(true, false)]
+    [InlineData(false, false)]
+    [InlineData(true, true)]
+    [InlineData(false, true)]
+    [InlineData(false, true, true)]
+    public async Task TunaRuntimeWallet_UnlinkCanceledAtWriteGateRevokesOnlyOwner(bool matches, bool active, bool changedPayer = false)
+    {
+        var root = CreateTempRoot();
+        try
+        {
+            var verifier = new FakeTunaWalletVerifier(TunaWalletValidationResult.Fail("unused", "wallet"));
+            var context = await CreateVerifiedRuntimeContextAsync(root, verifier);
+            var store = new BlockingWalletSave(context.WalletStore);
+            var runtime = new TunaRuntimePilotService(context.PreferenceStore, context.UsageStore, store, verifier);
+            var wallet = await store.LoadAsync();
+            var other = changedPayer ? wallet.WithValidationResult(TunaWalletValidationResult.Ok("wallet", "other-payer", "1"), DateTimeOffset.UtcNow)
+                : TunaWalletLinkState.Linked(wallet.WalletPath!, wallet.LinkedUtc!.Value);
+            runtime.UnlockForNextSession(wallet, "owner-password".ToCharArray());
+            if (active) Assert.True(RuntimeListenerOptions(runtime).BeginUsageAttemptIfCurrent!("owner-run", () => true));
+            var holdingGate = runtime.TrySaveWalletValidationAsync(wallet, wallet, CancellationToken.None);
+            try
+            {
+                await store.SaveEntered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+                using var cancel = new CancellationTokenSource();
+                var unlink = runtime.TryUnlinkWalletAsync(matches ? wallet : other, cancel.Token);
+                Assert.False(unlink.IsCompleted);
+                cancel.Cancel();
+                await Assert.ThrowsAnyAsync<OperationCanceledException>(() => unlink.WaitAsync(TimeSpan.FromSeconds(5)));
+                Assert.Equal(!matches, runtime.HasSessionUnlock);
+                Assert.Equal(!matches, (await runtime.GetUnlockStateAsync()).IsOn);
+                if (active)
+                {
+                    var session = Assert.Single(context.UsageStore.Load().SessionRecords);
+                    Assert.Equal("owner-run", session.SessionRunId);
+                    Assert.Equal(matches, session.EndedUtc.HasValue);
+                    if (matches) Assert.Equal("wallet_unlink_failed", session.StopReason);
+                }
+                Assert.True(wallet.IsSameLinkAs(await store.LoadAsync()));
+            }
+            finally { store.ReleaseSave.TrySetResult(); await holdingGate; }
+        }
+        finally { DeleteTempRoot(root); }
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task TunaRuntimeWallet_PendingUnlinkProjectsOnlyMatchingValidationOff(bool matches)
+    {
+        var root = CreateTempRoot();
+        var verifier = new BlockingTunaWalletVerifier(TunaWalletValidationResult.Ok("wallet", VerifiedFixturePayer, "1"));
+        try
+        {
+            var context = await CreateVerifiedRuntimeContextAsync(root, verifier);
+            var store = new BlockingWalletSave(context.WalletStore) { BlockClear = true };
+            var runtime = new TunaRuntimePilotService(context.PreferenceStore, context.UsageStore, store, verifier);
+            store.ReleaseSave.TrySetResult();
+            var wallet = await store.LoadAsync();
+            var other = TunaWalletLinkState.Linked(wallet.WalletPath!, wallet.LinkedUtc!.Value);
+            var checking = runtime.UnlockForSessionAsync("fixture".ToCharArray(), TunaRuntimeUnlockSource.Header, wallet);
+            await verifier.Entered.WaitAsync(TimeSpan.FromSeconds(5));
+            var transport = new RecordingTransportAccelerationControl { HangStop = true };
+            SetPrivateField(runtime, "currentTransportControl", transport);
+            Assert.True((await runtime.GetUnlockStateAsync()).IsOn);
+            var notifications = 0;
+            runtime.StateChanged += (_, _) => Interlocked.Increment(ref notifications);
+            var unlink = runtime.TryUnlinkWalletAsync(matches ? wallet : other, CancellationToken.None);
+            try
+            {
+                Assert.False(unlink.IsCompleted);
+                var header = await runtime.GetUnlockStateAsync();
+                Assert.Equal(!matches, header.IsOn);
+                if (matches)
+                {
+                    Assert.True(Volatile.Read(ref notifications) > 0);
+                    Assert.False(header.CanToggle);
+                    Assert.Equal("locked", header.RuntimeStatus);
+                }
+            }
+            finally
+            {
+                store.ReleaseClear.TrySetResult();
+                try { await unlink.WaitAsync(TimeSpan.FromSeconds(5)); }
+                finally { verifier.Release(); await checking.WaitAsync(TimeSpan.FromSeconds(5)); }
+            }
+            Assert.Equal(matches, await unlink);
+            Assert.Equal(!matches, (await checking).Success);
+            Assert.Equal(!matches, runtime.HasSessionUnlock);
+            if (matches) Assert.Equal("locked", runtime.RuntimeStatus);
+            Assert.Equal(0, transport.StopCalls);
+        }
+        finally { verifier.Release(); DeleteTempRoot(root); }
+    }
+
+    [Fact]
+    public async Task TunaRuntimeWallet_HeaderPromptCannotUnlockSamePathReplacement()
+    {
+        var root = CreateTempRoot();
+        try
+        {
+            var verifier = new FakeTunaWalletVerifier(TunaWalletValidationResult.Ok("wallet", "address", "1"));
+            var context = await CreateVerifiedRuntimeContextAsync(root, verifier);
+            var runtime = context.RuntimeService;
+            var state = await runtime.GetUnlockStateAsync();
+            Assert.True(state.CanToggle);
+            var original = state.PromptWallet;
+            var replacement = TunaWalletLinkState.Linked(original.WalletPath!, original.LinkedUtc!.Value)
+                .WithValidationResult(TunaWalletValidationResult.Ok("wallet", "address", "1"), DateTimeOffset.UtcNow);
+            await context.WalletStore.SaveAsync(replacement);
+            var password = "shared-fixture-password".ToCharArray();
+            Assert.False((await runtime.UnlockForSessionAsync(password, TunaRuntimeUnlockSource.Header, expectedWallet: original)).Success);
+            Assert.Empty(verifier.PasswordsSeen);
+            Assert.All(password, c => Assert.Equal('\0', c));
+            Assert.False(runtime.HasSessionUnlock);
+            Assert.Equal(replacement.LastVerifiedUtc, (await context.WalletStore.LoadAsync()).LastVerifiedUtc);
+        }
+        finally { DeleteTempRoot(root); }
+    }
+
+    [Theory]
+    [InlineData(true, false)]
+    [InlineData(false, false)]
+    [InlineData(true, true)]
+    [InlineData(false, true)]
+    public async Task TunaRuntimeWallet_FailedUnlinkDuringFirstReadTargetsOnlyPromptWallet(bool matching, bool oldUnlock)
+    {
+        var root = CreateTempRoot();
+        var verifier = new FakeTunaWalletVerifier(TunaWalletValidationResult.Ok("wallet", "address", "1"));
+        try
+        {
+            var context = await CreateVerifiedRuntimeContextAsync(root, verifier);
+            var store = new BlockingWalletLoad(context.WalletStore, snapshotBeforeWait: true);
+            var runtime = new TunaRuntimePilotService(context.PreferenceStore, context.UsageStore, store, verifier);
+            var old = await store.LoadAsync();
+            if (oldUnlock) runtime.UnlockForNextSession(old, "old-password".ToCharArray());
+            var wallet = TunaWalletLinkState.Linked(old.WalletPath!, old.LinkedUtc!.Value)
+                .WithValidationResult(TunaWalletValidationResult.Ok("wallet", "address", "1"), DateTimeOffset.UtcNow);
+            await context.WalletStore.SaveAsync(wallet);
+            store.BlockNextLoad = 1;
+            var password = "new-password".ToCharArray();
+            var pending = runtime.UnlockForSessionAsync(password, TunaRuntimeUnlockSource.Header, expectedWallet: wallet);
+            try
+            {
+                await store.Entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+                using var peerLock = File.Open(Path.Combine(root, "tuna-wallet-link.json.lock"), FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None);
+                using var cancel = new CancellationTokenSource();
+                var unlink = runtime.TryUnlinkWalletAsync(matching ? wallet : old, cancel.Token);
+                Assert.False(unlink.IsCompleted);
+                cancel.Cancel();
+                await Assert.ThrowsAnyAsync<OperationCanceledException>(() => unlink.WaitAsync(TimeSpan.FromSeconds(5)));
+            }
+            finally { store.Release.TrySetResult(); }
+            Assert.Equal(!matching, (await pending.WaitAsync(TimeSpan.FromSeconds(5))).Success);
+            Assert.Equal(matching ? 0 : 1, verifier.PasswordsSeen.Count);
+            Assert.All(password, c => Assert.Equal('\0', c));
+            Assert.Equal(!matching, runtime.HasSessionUnlock);
+            Assert.Equal(wallet.LinkId, (await context.WalletStore.LoadAsync()).LinkId);
+        }
+        finally { DeleteTempRoot(root); }
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task DiagnosticsTunaWallet_BalancePromptCannotVerifySamePathReplacement(bool local)
+    {
+        var root = CreateTempRoot();
+        try
+        {
+            var verifier = new FakeTunaWalletVerifier(TunaWalletValidationResult.Ok("wallet", "address", "1"));
+            var context = await CreateVerifiedRuntimeContextAsync(root, verifier);
+            using var page = CreateViewModel(context.WalletStore, verifier, context.RuntimeService);
+            TunaWalletLinkState? prompted = null;
+            page.ValidateTunaWalletPasswordRequested += (_, wallet) => prompted = wallet;
+            page.ValidateTunaWalletCommand.Execute(null);
+            var original = Assert.IsType<TunaWalletLinkState>(prompted);
+            if (local) await page.LinkTunaWalletAsync(original.WalletPath);
+            else await context.WalletStore.SaveAsync(TunaWalletLinkState.Linked(original.WalletPath!, original.LinkedUtc!.Value));
+            var replacement = await context.WalletStore.LoadAsync();
+            var password = "shared-fixture-password".ToCharArray();
+            await page.ValidateTunaWalletAsync(original, password);
+            Assert.Empty(verifier.PasswordsSeen);
+            Assert.All(password, c => Assert.Equal('\0', c));
+            var stored = await context.WalletStore.LoadAsync();
+            Assert.Equal(replacement.LinkId, stored.LinkId);
+            Assert.Null(stored.LastVerifiedUtc);
+            Assert.True(page.NeedsTunaWalletBalanceCheck);
+        }
+        finally { DeleteTempRoot(root); }
+    }
+
+    [Fact]
+    public async Task DiagnosticsTunaWallet_BalanceLookupCannotVerifyAfterLocalReselection()
+    {
+        var root = CreateTempRoot();
+        try
+        {
+            var verifier = new FakeTunaWalletVerifier(TunaWalletValidationResult.Ok("wallet", "address", "1"));
+            var context = await CreateVerifiedRuntimeContextAsync(root, verifier);
+            var store = new BlockingWalletLoad(context.WalletStore, snapshotBeforeWait: true);
+            using var page = CreateViewModel(store, verifier, context.RuntimeService);
+            var original = await store.LoadAsync();
+            store.BlockNextLoad = 1;
+            var password = "shared-fixture-password".ToCharArray();
+            var check = page.ValidateTunaWalletAsync(original, password);
+            try
+            {
+                await store.Entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+                await page.LinkTunaWalletAsync(original.WalletPath);
+            }
+            finally { store.Release.TrySetResult(); }
+            await check.WaitAsync(TimeSpan.FromSeconds(5));
+            Assert.Empty(verifier.PasswordsSeen);
+            Assert.All(password, c => Assert.Equal('\0', c));
+            Assert.True(page.NeedsTunaWalletBalanceCheck);
+            Assert.Equal("Wallet linked", page.CopyFeedbackText);
+            Assert.NotEqual(original.LinkId, (await store.LoadAsync()).LinkId);
+        }
+        finally { DeleteTempRoot(root); }
+    }
+
+    [Fact]
+    public async Task TunaRuntimeWallet_UnlinkCurrentDiskLinkPreservesOtherPaidRun()
+    {
+        var root = CreateTempRoot();
+        try
+        {
+            var context = await CreateListenerSupervisorRuntimeContextAsync(root);
+            var runtime = context.RuntimeService;
+            var wallet = await context.WalletStore.LoadAsync();
+            runtime.UnlockForNextSession(wallet, "owner-password".ToCharArray());
+            var control = new BoundCapControl();
+            SetPrivateField(runtime, "currentTransportControl", control);
+            var listener = RuntimeListenerOptions(runtime);
+            Assert.True(listener.BeginUsageAttemptIfCurrent!("owner-run", () => true));
+            listener.UsageSink!.RecordPayment(new NknTunaPaymentTelemetry(0.25m, 0.25m, 100, null));
+            var open = Assert.Single(context.UsageStore.Load().SessionRecords);
+            Assert.Null(open.EndedUtc);
+            Assert.Equal(0.25m, open.PaidNkn);
+            var replacement = TunaWalletLinkState.Linked(wallet.WalletPath!, wallet.LinkedUtc!.Value);
+            await context.WalletStore.SaveAsync(replacement); // Written by a peer while the local run is active.
+
+            Assert.True(await runtime.TryUnlinkWalletAsync(replacement, CancellationToken.None));
+            Assert.False((await context.WalletStore.LoadAsync()).IsLinked);
+            Assert.Equal(open, Assert.Single(context.UsageStore.Load().SessionRecords));
+            listener.UsageSink.RecordPayment(new NknTunaPaymentTelemetry(0.5m, 0.75m, 200, null));
+            listener.UsageSink.RecordSummary(new NknTunaSessionUsageTelemetry(256, "completed", true, 0.75m, PaymentEventCount: 2));
+            var summary = Assert.Single(context.UsageStore.Load().SessionRecords);
+            Assert.Equal("owner-run", summary.SessionRunId);
+            Assert.True(summary.CompletedFromSummary);
+            Assert.Equal(2, summary.PaymentEventCount);
+            Assert.Equal(0.75m, summary.PaidNkn);
+            Assert.Equal(0, control.UnboundStops);
+        }
+        finally { DeleteTempRoot(root); }
+    }
+
+    [Theory]
+    [InlineData(false, false)]
+    [InlineData(false, true)]
+    [InlineData(true, false)]
+    [InlineData(true, true)]
+    public async Task TunaRuntimeWallet_FailedUnlinkRevokesOnlyMatchingPendingVerification(bool matching, bool previouslyUnlocked)
+    {
+        var root = CreateTempRoot();
+        var verifier = new BlockingTunaWalletVerifier(TunaWalletValidationResult.Ok("B", "new-address", "1"));
+        try
+        {
+            var context = await CreateVerifiedRuntimeContextAsync(root, verifier);
+            var runtime = context.RuntimeService;
+            var original = await context.WalletStore.LoadAsync();
+            if (previouslyUnlocked) runtime.UnlockForNextSession(original, "old-fixture-password".ToCharArray());
+            var replacement = TunaWalletLinkState.Linked(original.WalletPath!, original.LinkedUtc!.Value)
+                .WithValidationResult(TunaWalletValidationResult.Ok("B", "new-address", "1"), DateTimeOffset.UtcNow);
+            await context.WalletStore.SaveAsync(replacement);
+            var unlock = runtime.UnlockForSessionAsync("fixture".ToCharArray(), TunaRuntimeUnlockSource.Header, replacement);
+            try
+            {
+                await verifier.Entered.WaitAsync(TimeSpan.FromSeconds(5));
+                using var peerLock = File.Open(Path.Combine(root, "tuna-wallet-link.json.lock"), FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None);
+                using var cancel = new CancellationTokenSource();
+                var unlink = runtime.TryUnlinkWalletAsync(matching ? replacement : original, cancel.Token);
+                Assert.False(unlink.IsCompleted);
+                cancel.Cancel();
+                await Assert.ThrowsAnyAsync<OperationCanceledException>(() => unlink.WaitAsync(TimeSpan.FromSeconds(5)));
+                var header = await runtime.GetUnlockStateAsync();
+                Assert.Equal(matching ? "locked" : "unlock_validating", header.RuntimeStatus);
+                Assert.Equal(!matching, header.IsOn);
+                if (matching) Assert.False(header.CanToggle); // The canceled verifier still owns the slot.
+            }
+            finally { verifier.Release(); }
+            Assert.Equal(!matching, (await unlock.WaitAsync(TimeSpan.FromSeconds(5))).Success);
+            Assert.Equal(!matching, runtime.HasSessionUnlock);
+            Assert.Equal(replacement.LinkId, (await context.WalletStore.LoadAsync()).LinkId);
+            Assert.Empty(context.UsageStore.Load().SessionRecords);
+        }
+        finally { verifier.Release(); DeleteTempRoot(root); }
+    }
+
+    [Fact]
+    public async Task DiagnosticsTunaWallet_DelayedUnlockRefreshCannotReplaceNewLocalSelection()
+    {
+        var root = CreateTempRoot();
+        try
+        {
+            var verifier = new FakeTunaWalletVerifier(TunaWalletValidationResult.Ok("A", VerifiedFixturePayer, "1"));
+            var context = await CreateVerifiedRuntimeContextAsync(root, verifier);
+            // Only the Options reload is blocked; the runtime has already finished unlocking A.
+            var blocked = new BlockingWalletLoad(context.WalletStore, snapshotBeforeWait: true);
+            using var page = CreateViewModel(blocked, verifier, context.RuntimeService);
+            blocked.BlockNextLoad = 1;
+            var unlock = page.UnlockTunaRuntimeAsync(OpenUnlockPrompt(page), "test-only".ToCharArray());
+            try
+            {
+                await blocked.Entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+                Assert.True(context.RuntimeService.HasSessionUnlock);
+                await page.LinkTunaWalletAsync(Path.Combine(root, "B.json"));
+                Assert.False(context.RuntimeService.HasSessionUnlock);
+            }
+            finally { blocked.Release.TrySetResult(); }
+            await unlock.WaitAsync(TimeSpan.FromSeconds(5));
+            Assert.Equal("B.json", page.TunaWalletFileName);
+            Assert.True(page.NeedsTunaWalletBalanceCheck);
+            Assert.Equal("Wallet linked", page.CopyFeedbackText);
+            Assert.Equal("B.json", (await context.WalletStore.LoadAsync()).WalletFileName);
+        }
+        finally { DeleteTempRoot(root); }
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task DiagnosticsTunaWallet_StaleUnlinkLeavesReplacementAndItsRunAlone(bool useRuntime)
+    {
+        var root = CreateTempRoot();
+        try
+        {
+            var verifier = new FakeTunaWalletVerifier(TunaWalletValidationResult.Ok("wallet", "new-address", "1"));
+            var context = await CreateVerifiedRuntimeContextAsync(root, verifier);
+            var runtime = context.RuntimeService;
+            using var stalePage = CreateViewModel(context.WalletStore, verifier, useRuntime ? runtime : null);
+            var peer = new JsonTunaWalletLinkStore(() => Path.Combine(root, "tuna-wallet-link.json"));
+            var original = await peer.LoadAsync();
+            var replacement = TunaWalletLinkState.Linked(original.WalletPath!, original.LinkedUtc!.Value)
+                .WithValidationResult(TunaWalletValidationResult.Ok("wallet", "new-address", "1"), DateTimeOffset.UtcNow);
+            await peer.SaveAsync(replacement);
+            runtime.UnlockForNextSession(replacement, "new-password".ToCharArray());
+            var listener = RuntimeListenerOptions(runtime);
+            Assert.True(listener.BeginUsageAttemptIfCurrent!("new-run", () => true));
+
+            await stalePage.UnlinkTunaWalletAsync();
+            Assert.Equal(replacement.LinkId, (await peer.LoadAsync()).LinkId);
+            Assert.Equal("new-address", stalePage.TunaWalletAddress);
+            Assert.Contains("not unlinked", stalePage.CopyFeedbackText, StringComparison.OrdinalIgnoreCase);
+            Assert.True(runtime.HasSessionUnlock);
+            listener.UsageSink!.RecordPayment(new NknTunaPaymentTelemetry(0.25m, 0.25m, 100, null));
+            listener.UsageSink.RecordSummary(new NknTunaSessionUsageTelemetry(256, "completed", true, 0.25m, PaymentEventCount: 1));
+            var summary = Assert.Single(context.UsageStore.Load().SessionRecords);
+            Assert.Equal("new-run", summary.SessionRunId);
+            Assert.True(summary.CompletedFromSummary);
+            Assert.Equal(0.25m, summary.PaidNkn);
+        }
+        finally { DeleteTempRoot(root); }
+    }
+
+    [Fact]
+    public async Task DiagnosticsTunaWallet_StaleRefreshCannotReplaceNewLocalSelection()
+    {
+        var root = CreateTempRoot();
+        var verifier = new BlockingTunaWalletVerifier(TunaWalletValidationResult.Ok("A", "old-address", "1"));
+        var path = Path.Combine(root, "state.json");
+        var store = new JsonTunaWalletLinkStore(() => path);
+        var blocked = new BlockingWalletLoad(store, snapshotBeforeWait: true);
+        try
+        {
+            using var page = CreateViewModel(blocked, verifier);
+            await page.LinkTunaWalletAsync(Path.Combine(root, "A.json"));
+            var pending = page.ValidateTunaWalletAsync("test-only".ToCharArray());
+            try
+            {
+                await verifier.Entered.WaitAsync(TimeSpan.FromSeconds(2));
+                var other = new JsonTunaWalletLinkStore(() => path);
+                await other.SaveAsync(TunaWalletLinkState.Linked(Path.Combine(root, "B.json"), DateTimeOffset.UtcNow));
+                blocked.BlockNextLoad = 1;
+                verifier.Release();
+                await blocked.Entered.Task.WaitAsync(TimeSpan.FromSeconds(2));
+                await page.LinkTunaWalletAsync(Path.Combine(root, "C.json"));
+            }
+            finally { verifier.Release(); blocked.Release.TrySetResult(); }
+            await pending.WaitAsync(TimeSpan.FromSeconds(2));
+            Assert.Equal("C.json", page.TunaWalletFileName);
+            Assert.True(page.NeedsTunaWalletBalanceCheck);
+            Assert.Equal("C.json", (await store.LoadAsync()).WalletFileName);
+        }
+        finally { verifier.Release(); blocked.Release.TrySetResult(); DeleteTempRoot(root); }
+    }
+
+    [Theory]
+    [InlineData("link")]
+    [InlineData("unlink")]
+    [InlineData("validate")]
+    public async Task TunaWalletStore_ContendingWriterCanCancelWithoutChangingState(string operation)
+    {
+        var root = CreateTempRoot();
+        try
+        {
+            var path = Path.Combine(root, "state.json");
+            var first = new JsonTunaWalletLinkStore(() => path);
+            var other = new JsonTunaWalletLinkStore(() => path);
+            var wallet = TunaWalletLinkState.Linked(Path.Combine(root, "A.json"), DateTimeOffset.UtcNow);
+            await first.SaveAsync(wallet);
+            var before = await File.ReadAllTextAsync(path);
+            using (File.Open(path + ".lock", FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None))
+            using (var cancel = new CancellationTokenSource())
+            {
+                var pending = operation switch
+                {
+                    "unlink" => other.TryClearAsync(wallet, cancel.Token),
+                    "link" => other.SaveAsync(TunaWalletLinkState.Linked(Path.Combine(root, "B.json"), DateTimeOffset.UtcNow), cancel.Token),
+                    _ => other.SaveAsync(wallet.WithValidationResult(TunaWalletValidationResult.Ok("A", "addr", "1"), DateTimeOffset.UtcNow),
+                        cancel.Token, expectedValidation: wallet),
+                };
+                cancel.Cancel();
+                await Assert.ThrowsAnyAsync<OperationCanceledException>(() => pending.WaitAsync(TimeSpan.FromSeconds(2)));
+            }
+            Assert.Equal(before, await File.ReadAllTextAsync(path));
+        }
+        finally { DeleteTempRoot(root); }
+    }
+
+    [Fact]
+    public async Task TunaWalletStore_UnlinkRechecksIdentityAfterWaitingForPeerWriter()
+    {
+        var root = CreateTempRoot();
+        try
+        {
+            var path = Path.Combine(root, "state.json");
+            var store = new JsonTunaWalletLinkStore(() => path);
+            var original = TunaWalletLinkState.Linked(Path.Combine(root, "wallet.json"), DateTimeOffset.UnixEpoch);
+            var replacement = TunaWalletLinkState.Linked(original.WalletPath!, original.LinkedUtc!.Value);
+            await store.SaveAsync(original);
+            Task<bool> unlink;
+            using (File.Open(path + ".lock", FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None))
+            {
+                unlink = store.TryClearAsync(original);
+                Assert.False(unlink.IsCompleted);
+                await File.WriteAllTextAsync(path, JsonSerializer.Serialize(replacement, new JsonSerializerOptions(JsonSerializerDefaults.Web)));
+            }
+            Assert.False(await unlink.WaitAsync(TimeSpan.FromSeconds(5)));
+            Assert.Equal(replacement.LinkId, (await store.LoadAsync()).LinkId);
+            Assert.True(await store.TryClearAsync(replacement));
+            Assert.False(File.Exists(path));
+        }
+        finally { DeleteTempRoot(root); }
+    }
+
+    [Fact]
+    public async Task TunaWalletStore_CanceledUnlinkRevokesUnlockButDoesNotReportWalletRemoved()
+    {
+        var root = CreateTempRoot();
+        try
+        {
+            var context = await CreateVerifiedRuntimeContextAsync(root,
+                new FakeTunaWalletVerifier(TunaWalletValidationResult.Ok("A", "address", "1")));
+            var wallet = await context.WalletStore.LoadAsync();
+            var runtime = context.RuntimeService;
+            runtime.UnlockForNextSession(wallet, "test-only".ToCharArray());
+            Assert.True(RuntimeListenerOptions(runtime).BeginUsageAttemptIfCurrent!("paid-run", () => true));
+            using var peerLock = File.Open(Path.Combine(root, "tuna-wallet-link.json.lock"), FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None);
+            using var cancel = new CancellationTokenSource();
+            var unlink = runtime.TryUnlinkWalletAsync(wallet, cancel.Token);
+            cancel.Cancel();
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(() => unlink.WaitAsync(TimeSpan.FromSeconds(2)));
+            Assert.False(runtime.HasSessionUnlock);
+            Assert.Equal(wallet.LinkId, (await context.WalletStore.LoadAsync()).LinkId);
+            Assert.Equal("wallet_unlink_failed", Assert.Single(context.UsageStore.Load().SessionRecords).StopReason);
+        }
+        finally { DeleteTempRoot(root); }
+    }
+
+    [Fact]
+    public async Task TunaWalletStore_WindowsPeerRelinkWinsAgainstWaitingValidation()
+    {
+        if (!OperatingSystem.IsWindows()) return;
+        var root = CreateTempRoot();
+        try
+        {
+            var path = Path.Combine(root, "state.json");
+            var store = new JsonTunaWalletLinkStore(() => path);
+            var original = TunaWalletLinkState.Linked(Path.Combine(root, "wallet.json"), DateTimeOffset.UnixEpoch);
+            var replacement = TunaWalletLinkState.Linked(original.WalletPath!, original.LinkedUtc!.Value);
+            await store.SaveAsync(original);
+            await new JsonTunaWalletLinkStore(() => Path.Combine(root, "next.json")).SaveAsync(replacement);
+            // Stand-in for a second instance: only touches synthetic state in this test directory.
+            var start = new ProcessStartInfo(Path.Combine(Environment.SystemDirectory, @"WindowsPowerShell\v1.0\powershell.exe"))
+            {
+                WorkingDirectory = root, UseShellExecute = false, CreateNoWindow = true,
+                RedirectStandardInput = true, RedirectStandardOutput = true,
+                ArgumentList = { "-NoProfile", "-NonInteractive", "-Command", """
+                    $ErrorActionPreference = 'Stop'
+                    $h = [IO.File]::Open('state.json.lock','OpenOrCreate','ReadWrite','None')
+                    try {
+                        [Console]::WriteLine('locked')
+                        if ([Console]::ReadLine() -eq 'replace') { [IO.File]::Copy('next.json','state.json',$true) }
+                    } finally { $h.Dispose() }
+                    """ }
+            };
+            using var peer = Process.Start(start)!;
+            var timeout = TimeSpan.FromSeconds(10);
+            try
+            {
+                Assert.Equal("locked", await peer.StandardOutput.ReadLineAsync().WaitAsync(timeout));
+                var pending = store.SaveAsync(original.WithValidationResult(
+                    TunaWalletValidationResult.Ok("wallet.json", "old-address", "1"), DateTimeOffset.UtcNow), expectedValidation: original);
+                Assert.False(pending.IsCompleted);
+                await peer.StandardInput.WriteLineAsync("replace");
+                Assert.False(await pending.WaitAsync(timeout));
+            }
+            finally
+            {
+                peer.StandardInput.Close();
+                await peer.WaitForExitAsync().WaitAsync(timeout);
+            }
+            Assert.Equal(0, peer.ExitCode);
+            var stored = await store.LoadAsync();
+            Assert.Equal(replacement.LinkId, stored.LinkId);
+            Assert.Equal(TunaWalletLinkStatus.LinkedUnverified, stored.Status);
+        }
+        finally { DeleteTempRoot(root); }
+    }
+
+    [Fact]
+    public async Task TunaWalletStore_HeaderUnlockCannotRestoreReplacementDuringSave()
+    {
+        var root = CreateTempRoot();
+        try
+        {
+            var verifier = new FakeTunaWalletVerifier(TunaWalletValidationResult.Ok("A", VerifiedFixturePayer, "1"));
+            var context = await CreateVerifiedRuntimeContextAsync(root, verifier);
+            var blocked = new BlockingWalletSave(context.WalletStore);
+            var runtime = new TunaRuntimePilotService(context.PreferenceStore, context.UsageStore, blocked, verifier);
+            var peer = new JsonTunaWalletLinkStore(() => Path.Combine(root, "tuna-wallet-link.json"));
+            var replacement = TunaWalletLinkState.Linked(Path.Combine(root, "B.json"), DateTimeOffset.UtcNow);
+            var unlock = runtime.UnlockForSessionAsync("test-only".ToCharArray(), TunaRuntimeUnlockSource.Header, await peer.LoadAsync());
+            try
+            {
+                await blocked.SaveEntered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+                await peer.SaveAsync(replacement);
+            }
+            finally { blocked.ReleaseSave.TrySetResult(); }
+            Assert.False((await unlock.WaitAsync(TimeSpan.FromSeconds(5))).Success);
+            Assert.False(runtime.HasSessionUnlock);
+            Assert.Equal(replacement.LinkId, (await peer.LoadAsync()).LinkId);
+        }
+        finally { DeleteTempRoot(root); }
+    }
+
+    [Fact]
+    public async Task DiagnosticsTunaWallet_ExistingLinkWithoutIdCanStillValidate()
+    {
+        var root = CreateTempRoot();
+        try
+        {
+            var statePath = Path.Combine(root, "state.json");
+            var walletPath = Path.Combine(root, "wallet.json");
+            await File.WriteAllTextAsync(statePath, JsonSerializer.Serialize(new
+            {
+                walletPath, linkedUtc = DateTimeOffset.UnixEpoch, status = TunaWalletLinkStatus.LinkedUnverified
+            }));
+            var store = new JsonTunaWalletLinkStore(() => statePath);
+            using var vm = CreateViewModel(store, new FakeTunaWalletVerifier(TunaWalletValidationResult.Ok("wallet.json", "address", "1")));
+            await vm.ValidateTunaWalletAsync("test-only".ToCharArray());
+            var stored = await store.LoadAsync();
+            Assert.Equal(walletPath, stored.WalletPath);
+            Assert.Equal(TunaWalletLinkStatus.VerifiedFunded, stored.Status);
+            Assert.NotNull(stored.ValidationRevision);
+            Assert.Equal("address", stored.WalletAddress);
+        }
+        finally { DeleteTempRoot(root); }
+    }
+
     [Theory]
     [InlineData("lock", false)]
     [InlineData("lock", true)]
@@ -651,7 +2063,7 @@ public sealed class TunaWalletDiagnosticsTests
         var sinkType = typeof(TunaRuntimePilotService).GetNestedType("RuntimeUsageSink", BindingFlags.NonPublic)!;
         var sink = Activator.CreateInstance(sinkType, runtime);
         return Assert.IsType<NknTunaListenerSidecarOptions>(typeof(TunaRuntimePilotService)
-            .GetMethod("CreateListenerSidecarOptions", BindingFlags.Instance | BindingFlags.NonPublic)!.Invoke(runtime, [sink]));
+            .GetMethod("CreateListenerSidecarOptions", BindingFlags.Instance | BindingFlags.NonPublic)!.Invoke(runtime, [sink, null]));
     }
 
     private sealed class BoundCapControl : ITransportAccelerationControl, INknListenerCapHandoffControl
@@ -1273,7 +2685,7 @@ public sealed class TunaWalletDiagnosticsTests
             Assert.Equal("30", vm.TunaMaxDurationMinutes);
 
             var runtimePassword = "runtime-pass".ToCharArray();
-            await vm.UnlockTunaRuntimeAsync(runtimePassword);
+            await vm.UnlockTunaRuntimeAsync(OpenUnlockPrompt(vm), runtimePassword);
 
             Assert.All(runtimePassword, c => Assert.Equal('\0', c));
             Assert.True(runtimeService.HasSessionUnlock);
@@ -1326,7 +2738,7 @@ public sealed class TunaWalletDiagnosticsTests
             vm.IsTunaRuntimeEnabled = true;
 
             var wrongPassword = "wrong-pass".ToCharArray();
-            await vm.UnlockTunaRuntimeAsync(wrongPassword);
+            await vm.UnlockTunaRuntimeAsync(OpenUnlockPrompt(vm), wrongPassword);
 
             Assert.All(validationPassword, c => Assert.Equal('\0', c));
             Assert.All(wrongPassword, c => Assert.Equal('\0', c));
@@ -1343,7 +2755,7 @@ public sealed class TunaWalletDiagnosticsTests
             Assert.Equal("wrong-pass", new string(verifier.PasswordsSeen[1]));
 
             var secondWrongPassword = "wrong-pass-2".ToCharArray();
-            await vm.UnlockTunaRuntimeAsync(secondWrongPassword);
+            await vm.UnlockTunaRuntimeAsync(OpenUnlockPrompt(vm), secondWrongPassword);
 
             Assert.All(secondWrongPassword, c => Assert.Equal('\0', c));
             Assert.False(runtimeService.HasSessionUnlock);
@@ -1354,7 +2766,7 @@ public sealed class TunaWalletDiagnosticsTests
             Assert.Equal(3, verifier.PasswordsSeen.Count);
 
             var blockedPassword = "blocked-pass".ToCharArray();
-            await vm.UnlockTunaRuntimeAsync(blockedPassword);
+            await vm.UnlockTunaRuntimeAsync(OpenUnlockPrompt(vm), blockedPassword);
 
             Assert.All(blockedPassword, c => Assert.Equal('\0', c));
             Assert.Equal(3, verifier.PasswordsSeen.Count);
@@ -1400,13 +2812,13 @@ public sealed class TunaWalletDiagnosticsTests
 
             var first = await runtimeService.UnlockForSessionAsync(
                 "wrong-pass-1".ToCharArray(),
-                TunaRuntimeUnlockSource.Header);
+                TunaRuntimeUnlockSource.Header, await walletStore.LoadAsync());
             var second = await runtimeService.UnlockForSessionAsync(
                 "wrong-pass-2".ToCharArray(),
-                TunaRuntimeUnlockSource.Options);
+                TunaRuntimeUnlockSource.Options, expectedWallet: await walletStore.LoadAsync());
             var blocked = await runtimeService.UnlockForSessionAsync(
                 "correct-but-blocked".ToCharArray(),
-                TunaRuntimeUnlockSource.Header);
+                TunaRuntimeUnlockSource.Header, await walletStore.LoadAsync());
 
             Assert.False(first.Success);
             Assert.False(first.IsCooldownActive);
@@ -1426,6 +2838,84 @@ public sealed class TunaWalletDiagnosticsTests
         }
     }
 
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task TunaRuntimeWallet_StartupDoesNotRestoreUnlockValidating(bool enabled)
+    {
+        var root = CreateTempRoot();
+        try
+        {
+            var verifier = new FakeTunaWalletVerifier(TunaWalletValidationResult.Fail("unused"));
+            var context = await CreateVerifiedRuntimeContextAsync(root, verifier, enabled);
+            context.PreferenceStore.Save(context.PreferenceStore.Load().WithStatus("unlock_validating"));
+            var runtime = new TunaRuntimePilotService(context.PreferenceStore, context.UsageStore, context.WalletStore, verifier);
+            var state = await runtime.GetUnlockStateAsync();
+            Assert.Equal(enabled ? "locked" : "off", state.RuntimeStatus);
+            Assert.Equal(state.RuntimeStatus, runtime.Preferences.LastRuntimeStatus);
+            Assert.False(state.IsOn);
+            Assert.False(runtime.HasSessionUnlock);
+            Assert.Empty(verifier.PasswordsSeen);
+        }
+        finally { DeleteTempRoot(root); }
+    }
+
+    [Fact]
+    public async Task TunaRuntimeWallet_RevokedWrongPasswordDoesNotCountAgainstNextUnlock()
+    {
+        var root = CreateTempRoot();
+        try
+        {
+            var verifier = new BlockingTunaWalletVerifier(TunaWalletValidationResult.Fail("wrong_password"));
+            var context = await CreateVerifiedRuntimeContextAsync(root, verifier);
+            var runtime = context.RuntimeService;
+            var wallet = await context.WalletStore.LoadAsync();
+            var pending = runtime.UnlockForSessionAsync("stale".ToCharArray(), TunaRuntimeUnlockSource.Options, wallet);
+            try
+            {
+                await verifier.Entered.WaitAsync(TimeSpan.FromSeconds(5));
+                await runtime.LockOrStopForSessionAsync("user_locked", TunaRuntimeUnlockSource.Header);
+            }
+            finally { verifier.Release(); }
+            Assert.False((await pending.WaitAsync(TimeSpan.FromSeconds(5))).Success);
+            var current = await runtime.UnlockForSessionAsync("wrong".ToCharArray(), TunaRuntimeUnlockSource.Header, wallet);
+            Assert.False(current.Success);
+            Assert.False(current.IsCooldownActive);
+            Assert.Equal(2, verifier.PasswordsSeen.Count);
+        }
+        finally { DeleteTempRoot(root); }
+    }
+
+    [Fact]
+    public async Task TunaRuntimeWallet_WrongPasswordCountsWhenFailureStatusCannotBeSaved()
+    {
+        var root = CreateTempRoot();
+        try
+        {
+            var verifier = new FakeTunaWalletVerifier(TunaWalletValidationResult.Fail("wrong_password"));
+            var context = await CreateVerifiedRuntimeContextAsync(root, verifier);
+            var prefs = new FailingStopPreferenceStore(context.PreferenceStore) { FailStatus = "unlock_failed_wrong_password" };
+            var runtime = new TunaRuntimePilotService(prefs, context.UsageStore, context.WalletStore, verifier);
+            var wallet = await context.WalletStore.LoadAsync();
+            using var page = CreateViewModel(context.WalletStore, verifier, runtime);
+            await page.UnlockTunaRuntimeAsync(wallet, "wrong-1".ToCharArray());
+            Assert.Equal(1, prefs.FailedWrites);
+            Assert.Equal("Couldn't confirm the wallet unlock. Check access to nLink's wallet settings.", page.CopyFeedbackText);
+            Assert.False((await runtime.GetUnlockStateAsync()).IsCooldownActive);
+
+            prefs.FailStatus = null;
+            var second = await runtime.UnlockForSessionAsync("wrong-2".ToCharArray(), TunaRuntimeUnlockSource.Header, wallet);
+            Assert.False(second.Success);
+            Assert.True(second.IsCooldownActive);
+            var blocked = await runtime.UnlockForSessionAsync("blocked".ToCharArray(), TunaRuntimeUnlockSource.Options, wallet);
+            Assert.False(blocked.Success);
+            Assert.True(blocked.IsCooldownActive);
+            Assert.Equal(2, verifier.PasswordsSeen.Count);
+            Assert.False(runtime.HasSessionUnlock);
+        }
+        finally { DeleteTempRoot(root); }
+    }
+
     [Fact]
     [Trait("Category", "Smoke")]
     public async Task TunaRuntimeUnlockCoordinator_DebouncesConcurrentUnlockAttempts()
@@ -1441,14 +2931,14 @@ public sealed class TunaWalletDiagnosticsTests
             var firstUnlock = context.RuntimeService.UnlockForSessionAsync(
                 firstPassword,
                 TunaRuntimeUnlockSource.Header,
-                CancellationToken.None);
+                await context.WalletStore.LoadAsync());
             await WaitUntilAsync(() => verifier.PasswordsSeen.Count == 1, TimeSpan.FromSeconds(2));
 
             var secondPassword = "second-pass".ToCharArray();
             var secondResult = await context.RuntimeService.UnlockForSessionAsync(
                 secondPassword,
                 TunaRuntimeUnlockSource.Options,
-                CancellationToken.None);
+                await context.WalletStore.LoadAsync());
 
             Assert.False(secondResult.Success);
             Assert.Contains("already in progress", secondResult.Message, StringComparison.OrdinalIgnoreCase);
@@ -1541,7 +3031,7 @@ public sealed class TunaWalletDiagnosticsTests
             var context = await CreateVerifiedRuntimeContextAsync(root, verifier);
             using var vm = CreateViewModel(context.WalletStore, verifier, context.RuntimeService);
             var password = "runtime-pass".ToCharArray();
-            var pending = context.RuntimeService.UnlockForSessionAsync(password, TunaRuntimeUnlockSource.Header);
+            var pending = context.RuntimeService.UnlockForSessionAsync(password, TunaRuntimeUnlockSource.Header, await context.WalletStore.LoadAsync());
 
             try
             {
@@ -1597,12 +3087,12 @@ public sealed class TunaWalletDiagnosticsTests
             var verifier = new FakeTunaWalletVerifier(
                 TunaWalletValidationResult.Ok("wallet-test-nkn.json", "NKN0123456789PUBLICADDRESS", "2.5000"));
             var context = await CreateVerifiedRuntimeContextAsync(root, verifier);
-            var store = new BlockingWalletSave(context.WalletStore);
+            var store = new BlockingWalletSave(context.WalletStore) { BlockClear = !relink };
             var runtime = new TunaRuntimePilotService(context.PreferenceStore, context.UsageStore, store, verifier);
             using var vm = CreateViewModel(store, verifier, runtime);
             var replacementPath = Path.Combine(root, "replacement-wallet.json");
             var password = "runtime-pass".ToCharArray();
-            var pending = runtime.UnlockForSessionAsync(password, TunaRuntimeUnlockSource.Header);
+            var pending = runtime.UnlockForSessionAsync(password, TunaRuntimeUnlockSource.Header, await store.LoadAsync());
             Task change;
             try
             {
@@ -1615,9 +3105,13 @@ public sealed class TunaWalletDiagnosticsTests
                 store.ReleaseSave.TrySetResult();
             }
 
-            Assert.False((await pending.WaitAsync(TimeSpan.FromSeconds(2))).Success);
+            // Ensure deletion cannot finish until after the rejected attempt releases its identity.
+            try { Assert.False((await pending.WaitAsync(TimeSpan.FromSeconds(5))).Success); }
+            finally { store.ReleaseClear.TrySetResult(); }
             await change.WaitAsync(TimeSpan.FromSeconds(2));
             Assert.False(runtime.HasSessionUnlock);
+            Assert.Equal("locked", runtime.RuntimeStatus);
+            Assert.False((await runtime.GetUnlockStateAsync()).IsOn);
             Assert.All(password, c => Assert.Equal('\0', c));
             var wallet = await store.LoadAsync();
             Assert.Equal(relink ? TunaWalletLinkStatus.LinkedUnverified : TunaWalletLinkStatus.Unlinked, wallet.Status);
@@ -1641,7 +3135,7 @@ public sealed class TunaWalletDiagnosticsTests
             var context = await CreateVerifiedRuntimeContextAsync(root, verifier);
             using var vm = CreateViewModel(context.WalletStore, verifier, context.RuntimeService);
             var result = await context.RuntimeService.UnlockForSessionAsync(
-                "runtime-pass".ToCharArray(), TunaRuntimeUnlockSource.Header);
+                "runtime-pass".ToCharArray(), TunaRuntimeUnlockSource.Header, await context.WalletStore.LoadAsync());
             Assert.True(result.Success);
             Assert.True(context.RuntimeService.HasSessionUnlock);
 
@@ -1692,7 +3186,7 @@ public sealed class TunaWalletDiagnosticsTests
 
             var unlock = await runtimeService.UnlockForSessionAsync(
                 "runtime-pass".ToCharArray(),
-                TunaRuntimeUnlockSource.Options);
+                TunaRuntimeUnlockSource.Options, expectedWallet: await walletStore.LoadAsync());
             var locked = await runtimeService.LockOrStopForSessionAsync(
                 "test_lock",
                 TunaRuntimeUnlockSource.Header);
@@ -1726,7 +3220,7 @@ public sealed class TunaWalletDiagnosticsTests
 
             var unlock = await context.RuntimeService.UnlockForSessionAsync(
                 "runtime-pass".ToCharArray(),
-                TunaRuntimeUnlockSource.Header);
+                TunaRuntimeUnlockSource.Header, await context.WalletStore.LoadAsync());
 
             Assert.True(unlock.Success);
             Assert.True(supervisor.CanOfferListener);
@@ -1954,7 +3448,7 @@ public sealed class TunaWalletDiagnosticsTests
 
             var result = await context.RuntimeService.UnlockForSessionAsync(
                 [],
-                TunaRuntimeUnlockSource.Header);
+                TunaRuntimeUnlockSource.Header, await context.WalletStore.LoadAsync());
             var state = await context.RuntimeService.GetUnlockStateAsync();
 
             Assert.False(result.Success);
@@ -2171,7 +3665,11 @@ public sealed class TunaWalletDiagnosticsTests
             var context = await CreateVerifiedRuntimeContextAsync(root, verifier);
             var control = new RecordingTransportAccelerationControl();
             SetPrivateField(context.RuntimeService, "currentTransportControl", control);
-            SetPrivateField(context.RuntimeService, "runtimeStatus", "active");
+            var wallet = await context.WalletStore.LoadAsync();
+            context.RuntimeService.UnlockForNextSession(wallet, "test-only".ToCharArray());
+            var listener = RuntimeListenerOptions(context.RuntimeService);
+            Assert.True(listener.BeginUsageAttemptIfCurrent!("unlink-owner", () => true));
+            listener.StatusChanged!("active");
             var vm = CreateViewModel(context.WalletStore, verifier, context.RuntimeService);
 
             await vm.UnlinkTunaWalletAsync();
@@ -2188,6 +3686,9 @@ public sealed class TunaWalletDiagnosticsTests
             Assert.Equal("locked", context.RuntimeService.RuntimeStatus);
             Assert.Equal(1, control.StopCalls);
             Assert.Equal("wallet_unlinked", control.StopReasons.Single());
+            var closed = Assert.Single(context.UsageStore.Load().SessionRecords);
+            Assert.Equal("unlink-owner", closed.SessionRunId);
+            Assert.Equal("wallet_unlinked", closed.StopReason);
             Assert.False(File.Exists(Path.Combine(root, "tuna-wallet-link.json")));
         }
         finally
@@ -2665,7 +4166,8 @@ public sealed class TunaWalletDiagnosticsTests
     private static DiagnosticsPageViewModel CreateViewModel(
         ITunaWalletLinkStore store,
         ITunaWalletVerifier verifier,
-        ITunaRuntimePilotService? runtimePilotService = null)
+        ITunaRuntimePilotService? runtimePilotService = null,
+        Func<DateTimeOffset>? nowProvider = null)
     {
         var previousTransport = Environment.GetEnvironmentVariable("NLINK_TRANSPORT");
         Environment.SetEnvironmentVariable("NLINK_TRANSPORT", null);
@@ -2675,6 +4177,7 @@ public sealed class TunaWalletDiagnosticsTests
                 ScreenShareEvidenceLocator.CreateDefault(),
                 static () => { },
                 TransportRuntimeConfig.Select(),
+                nowProvider: nowProvider,
                 tunaWalletLinkStore: store,
                 tunaWalletVerifier: verifier,
                 tunaRuntimePilotService: runtimePilotService);
@@ -2698,7 +4201,7 @@ public sealed class TunaWalletDiagnosticsTests
         var walletStore = new JsonTunaWalletLinkStore(() => Path.Combine(root, "tuna-wallet-link.json"));
         await walletStore.SaveAsync(TunaWalletLinkState.Linked(walletPath, DateTimeOffset.Parse("2026-05-05T10:00:00Z"))
             .WithValidationResult(
-                TunaWalletValidationResult.Ok("wallet-test-nkn.json", "NKN0123456789PUBLICADDRESS", "1.2500"),
+                TunaWalletValidationResult.Ok("wallet-test-nkn.json", VerifiedFixturePayer, "1.2500"),
                 DateTimeOffset.Parse("2026-05-05T10:01:00Z")));
         var preferenceStore = new JsonTunaRuntimePreferenceStore(() => Path.Combine(root, "tuna-runtime-preferences.json"));
         preferenceStore.Save(new TunaRuntimePreferenceState
@@ -3059,7 +4562,7 @@ public sealed class TunaWalletDiagnosticsTests
         }
     }
 
-    private sealed class BlockingWalletLoad(ITunaWalletLinkStore inner) : ITunaWalletLinkStore
+    private sealed class BlockingWalletLoad(ITunaWalletLinkStore inner, bool snapshotBeforeWait = false) : ITunaWalletLinkStore
     {
         public int BlockNextLoad;
         public TaskCompletionSource Entered { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -3068,29 +4571,41 @@ public sealed class TunaWalletDiagnosticsTests
         {
             if (Interlocked.Exchange(ref BlockNextLoad, 0) != 0)
             {
+                var snapshot = snapshotBeforeWait ? await inner.LoadAsync(ct) : null;
                 Entered.TrySetResult();
                 await Release.Task.WaitAsync(ct);
+                if (snapshot is not null) return snapshot;
             }
             return await inner.LoadAsync(ct);
         }
-        public Task SaveAsync(TunaWalletLinkState state, CancellationToken ct = default) => inner.SaveAsync(state, ct);
-        public Task ClearAsync(CancellationToken ct = default) => inner.ClearAsync(ct);
+        public Task<bool> SaveAsync(TunaWalletLinkState state, CancellationToken ct = default, TunaWalletLinkState? expectedValidation = null,
+            string? expectedFundedPayer = null) => inner.SaveAsync(state, ct, expectedValidation, expectedFundedPayer);
+        public Task<bool> TryClearAsync(TunaWalletLinkState expected, CancellationToken ct = default) => inner.TryClearAsync(expected, ct);
     }
 
     private sealed class BlockingWalletSave(ITunaWalletLinkStore inner) : ITunaWalletLinkStore
     {
+        public bool BlockClear;
+        public Func<IDisposable>? DuringSave;
+        public TaskCompletionSource ReleaseClear { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public TaskCompletionSource SaveEntered { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public TaskCompletionSource ReleaseSave { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
         public Task<TunaWalletLinkState> LoadAsync(CancellationToken ct = default) => inner.LoadAsync(ct);
 
-        public Task ClearAsync(CancellationToken ct = default) => inner.ClearAsync(ct);
+        public async Task<bool> TryClearAsync(TunaWalletLinkState expected, CancellationToken ct = default)
+        {
+            if (BlockClear) await ReleaseClear.Task.WaitAsync(ct);
+            return await inner.TryClearAsync(expected, ct);
+        }
 
-        public async Task SaveAsync(TunaWalletLinkState state, CancellationToken ct = default)
+        public async Task<bool> SaveAsync(TunaWalletLinkState state, CancellationToken ct = default, TunaWalletLinkState? expectedValidation = null,
+            string? expectedFundedPayer = null)
         {
             SaveEntered.TrySetResult();
             await ReleaseSave.Task.WaitAsync(ct);
-            await inner.SaveAsync(state, ct);
+            using var scope = DuringSave?.Invoke();
+            return await inner.SaveAsync(state, ct, expectedValidation, expectedFundedPayer);
         }
     }
 

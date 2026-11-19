@@ -89,6 +89,7 @@ type config struct {
 	localIPC          string
 
 	walletPath               string
+	expectedPayerHash        []byte
 	passwordPrompt           bool
 	passwordStdin            bool
 	allowRemote              string
@@ -368,6 +369,14 @@ func parseArgs(args []string) (*config, error) {
 		fs.BoolVar(&cfg.passwordStdin, "password-stdin", false, "read wallet password from stdin")
 	case modeListen:
 		fs.StringVar(&cfg.walletPath, "wallet", "", "linked NKN wallet.json path")
+		fs.Func("expected-payer-sha256", "require the opened wallet to match the approved payer", func(value string) error {
+			hash, err := hex.DecodeString(value)
+			if err != nil || len(hash) != sha256.Size {
+				return errors.New("expected a SHA-256 digest")
+			}
+			cfg.expectedPayerHash = hash
+			return nil
+		})
 		fs.BoolVar(&cfg.passwordPrompt, "password-prompt", false, "prompt for wallet password without echo")
 		fs.BoolVar(&cfg.passwordStdin, "password-stdin", false, "test automation only: read wallet password from stdin")
 		fs.StringVar(&cfg.allowRemote, "allow-remote", "", "allowed remote NKN address; exact by default")
@@ -2472,17 +2481,9 @@ func openLinkedWallet(cfg *config, emit *emitter) (*walletInfo, error) {
 		return nil, err
 	}
 	defer zeroBytes(passwordBytes)
-	password := string(passwordBytes)
-	raw, err := os.ReadFile(cfg.walletPath)
+	wallet, err := loadLinkedWallet(cfg, string(passwordBytes))
 	if err != nil {
-		return nil, fmt.Errorf("read wallet file %q failed: %s", filepath.Base(cfg.walletPath), scrubError(err, cfg.walletPath))
-	}
-	wallet, err := nkn.WalletFromJSON(string(raw), &nkn.WalletConfig{Password: password})
-	if err != nil {
-		return nil, fmt.Errorf("unlock wallet %q failed: %s", filepath.Base(cfg.walletPath), scrubError(err, cfg.walletPath))
-	}
-	if err := wallet.VerifyPassword(password); err != nil {
-		return nil, fmt.Errorf("wallet password verification failed")
+		return nil, err
 	}
 	balance, err := wallet.Balance()
 	if err != nil {
@@ -2500,6 +2501,28 @@ func openLinkedWallet(cfg *config, emit *emitter) (*walletInfo, error) {
 		"sidecarVersion":       sidecarVersion,
 	})
 	return info, nil
+}
+
+// Check the decrypted account before balance lookup or starting a paid client.
+func loadLinkedWallet(cfg *config, password string) (*nkn.Wallet, error) {
+	raw, err := os.ReadFile(cfg.walletPath)
+	if err != nil {
+		return nil, fmt.Errorf("read wallet file %q failed: %s", filepath.Base(cfg.walletPath), scrubError(err, cfg.walletPath))
+	}
+	wallet, err := nkn.WalletFromJSON(string(raw), &nkn.WalletConfig{Password: password})
+	if err != nil {
+		return nil, fmt.Errorf("unlock wallet %q failed: %s", filepath.Base(cfg.walletPath), scrubError(err, cfg.walletPath))
+	}
+	if err := wallet.VerifyPassword(password); err != nil {
+		return nil, fmt.Errorf("wallet password verification failed")
+	}
+	if cfg.expectedPayerHash != nil {
+		actual := sha256.Sum256([]byte(wallet.Address()))
+		if !bytes.Equal(actual[:], cfg.expectedPayerHash) {
+			return nil, errors.New("listener wallet does not match the approved payer")
+		}
+	}
+	return wallet, nil
 }
 
 func readWalletPassword(cfg *config) ([]byte, error) {
