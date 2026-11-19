@@ -75,6 +75,9 @@ public partial class SessionHeaderView : UserControl
     public static readonly StyledProperty<bool> TunaActiveProperty =
         AvaloniaProperty.Register<SessionHeaderView, bool>(nameof(TunaActive), false);
 
+    public static readonly StyledProperty<bool> FileUsesRegularNknProperty =
+        AvaloniaProperty.Register<SessionHeaderView, bool>(nameof(FileUsesRegularNkn));
+
     public static readonly StyledProperty<string?> TunaStatusReasonProperty =
         AvaloniaProperty.Register<SessionHeaderView, string?>(nameof(TunaStatusReason), "inactive");
 
@@ -224,6 +227,8 @@ public partial class SessionHeaderView : UserControl
             view.UpdateTunaVisualState());
         TunaStatusReasonProperty.Changed.AddClassHandler<SessionHeaderView>((view, _) =>
             view.UpdateTunaVisualState());
+        FileUsesRegularNknProperty.Changed.AddClassHandler<SessionHeaderView>((view, _) =>
+            view.UpdateTunaVisualState());
     }
 
     public SessionHeaderView()
@@ -289,6 +294,12 @@ public partial class SessionHeaderView : UserControl
     {
         get => GetValue(TunaActiveProperty);
         set => SetValue(TunaActiveProperty, value);
+    }
+
+    public bool FileUsesRegularNkn
+    {
+        get => GetValue(FileUsesRegularNknProperty);
+        set => SetValue(FileUsesRegularNknProperty, value);
     }
 
     public string? TunaStatusReason
@@ -475,7 +486,8 @@ public partial class SessionHeaderView : UserControl
             active,
             reason,
             tunaRuntimeStatus,
-            tunaUnlockToggleOn);
+            tunaUnlockToggleOn,
+            FileUsesRegularNkn);
         var pulsing = !active &&
                       tunaUnlockToggleOn &&
                       presentation.IsConnecting &&
@@ -693,7 +705,8 @@ public partial class SessionHeaderView : UserControl
                 TunaActive,
                 TunaStatusReason,
                 state.RuntimeStatus,
-                state.IsOn);
+                state.IsOn,
+                FileUsesRegularNkn);
             var tip = GetPendingTunaUnlockMessage() ?? presentation.Text;
             ApplyTunaUnlockToggleState(
                 state.IsVisible,

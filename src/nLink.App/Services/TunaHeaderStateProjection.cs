@@ -4,36 +4,53 @@ using NLink.Core.FileTransfer;
 
 namespace NLink.App.Services;
 
-internal sealed record TunaHeaderStateProjection(bool IsActive, string StatusReason);
+internal sealed record TunaHeaderStateProjection(bool IsActive, string StatusReason, bool FileUsesRegularNkn);
 
 internal static class TunaHeaderStateProjector
 {
     private const string FileTunaV4RouteToken = "file_tuna_v4";
     private const string ActiveFileTunaReason = "file_transfer_route_file_tuna_v4";
+    internal const string NoConnectionReason = "header_no_connection";
+    internal const string LocalConnectionReason = "header_local_connection";
 
     public static TunaHeaderStateProjection FromSnapshot(
         SessionFileTransferSnapshot snapshot,
+        string transportKind,
         bool transportActive,
         string? transportReason,
         TransportAccelerationPendingFileTransfer? pendingFileTransfer = null)
     {
+        if (transportKind == "(none)")
+        {
+            return new TunaHeaderStateProjection(false, NoConnectionReason, false);
+        }
+
+        if (transportKind == "DevLocal" && !transportActive && transportReason == "transport_without_acceleration")
+        {
+            return new TunaHeaderStateProjection(false, LocalConnectionReason, false);
+        }
+
         var hasActiveTransfer = false;
         var activeTransferUsesTuna = false;
+        var hasRegularFile = false;
+        var hasOtherFile = false;
 
         Inspect(snapshot.Outbound);
         Inspect(snapshot.Inbound);
 
+        var fileUsesRegularNkn = transportKind == "NKN" && hasRegularFile && !hasOtherFile;
+
         if (!transportActive && !activeTransferUsesTuna && transportReason == "runtime_unlock_pending_route_commit" &&
             HasFinishedPendingTransfer(snapshot, pendingFileTransfer))
         {
-            return new TunaHeaderStateProjection(false, "file_transfer_tuna_idle");
+            return new TunaHeaderStateProjection(false, "file_transfer_tuna_idle", fileUsesRegularNkn);
         }
 
         if (!hasActiveTransfer)
         {
             return new TunaHeaderStateProjection(
                 transportActive,
-                string.IsNullOrWhiteSpace(transportReason) ? "inactive" : transportReason);
+                string.IsNullOrWhiteSpace(transportReason) ? "inactive" : transportReason, false);
         }
 
         var reason = !string.IsNullOrWhiteSpace(transportReason)
@@ -43,7 +60,7 @@ internal static class TunaHeaderStateProjector
                 : "inactive";
         // A regular-NKN file route does not deactivate the session's Tuna connection.
         // This is header presentation only; the transfer's route remains unchanged.
-        return new TunaHeaderStateProjection(transportActive || activeTransferUsesTuna, reason);
+        return new TunaHeaderStateProjection(transportActive || activeTransferUsesTuna, reason, fileUsesRegularNkn);
 
         void Inspect(FileTransferTransferSnapshot? transfer)
         {
@@ -53,6 +70,14 @@ internal static class TunaHeaderStateProjector
             }
 
             hasActiveTransfer = true;
+            // Offers already have a route tuple; only describe a file once its data phase starts.
+            if (transfer.State is FileTransferTransferState.Sending or FileTransferTransferState.Receiving)
+            {
+                if ((transfer.RouteToken, transfer.ProtocolVersion) is ("regular_nkn_v4_fast", 4) or ("post_tuna_fallback_v6", 6))
+                    hasRegularFile = true;
+                else
+                    hasOtherFile = true;
+            }
             activeTransferUsesTuna |=
                 transfer.ProtocolVersion == 4 &&
                 string.Equals(transfer.RouteToken, FileTunaV4RouteToken, StringComparison.Ordinal);

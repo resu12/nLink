@@ -83,6 +83,7 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
     private string connectionState = "Waiting";
     private HelpeeConnectionViewState connectionViewState = HelpeeConnectionViewState.Waiting;
     private bool isTunaActive;
+    private bool fileUsesRegularNkn;
     private string tunaStatusReason = "inactive";
     private string chatDraft = string.Empty;
     private string failureTitle = string.Empty;
@@ -744,6 +745,12 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
     {
         get => isTunaActive;
         private set => SetProperty(ref isTunaActive, value);
+    }
+
+    public bool FileUsesRegularNkn
+    {
+        get => fileUsesRegularNkn;
+        private set => SetProperty(ref fileUsesRegularNkn, value);
     }
 
     public string TunaStatusReason
@@ -3662,11 +3669,13 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
         var status = sessionRuntime.TransportAccelerationPresentation;
         var projection = TunaHeaderStateProjector.FromSnapshot(
             sessionRuntime.FileTransferSnapshot,
+            sessionRuntime.GetCurrentTransportKind(),
             status.IsActive,
             status.Reason,
             status.PendingFileTransfer);
         IsTunaActive = projection.IsActive;
         TunaStatusReason = projection.StatusReason;
+        FileUsesRegularNkn = projection.FileUsesRegularNkn;
     }
 
     private void OnTransientStatusChanged(object? sender, SessionRuntimeTransientStatusChangedEventArgs e)

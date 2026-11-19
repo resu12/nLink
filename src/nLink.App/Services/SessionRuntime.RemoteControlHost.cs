@@ -9309,7 +9309,7 @@ public sealed partial class SessionRuntime
         transportLifecycle.CompleteDurationMetric(metricName, eventName, timing, reason, ex, failed);
     }
 
-    private string GetCurrentTransportKind()
+    internal string GetCurrentTransportKind()
     {
         return transportLifecycle.GetCurrentTransportKind();
     }

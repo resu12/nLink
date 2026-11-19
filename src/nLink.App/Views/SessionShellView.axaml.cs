@@ -28,6 +28,9 @@ public partial class SessionShellView : UserControl
     public static readonly StyledProperty<bool> TunaActiveProperty =
         AvaloniaProperty.Register<SessionShellView, bool>(nameof(TunaActive), false);
 
+    public static readonly StyledProperty<bool> FileUsesRegularNknProperty =
+        AvaloniaProperty.Register<SessionShellView, bool>(nameof(FileUsesRegularNkn));
+
     public static readonly StyledProperty<string?> TunaStatusReasonProperty =
         AvaloniaProperty.Register<SessionShellView, string?>(nameof(TunaStatusReason), "inactive");
 
@@ -211,6 +214,12 @@ public partial class SessionShellView : UserControl
     {
         get => GetValue(TunaActiveProperty);
         set => SetValue(TunaActiveProperty, value);
+    }
+
+    public bool FileUsesRegularNkn
+    {
+        get => GetValue(FileUsesRegularNknProperty);
+        set => SetValue(FileUsesRegularNknProperty, value);
     }
 
     public string? TunaStatusReason

@@ -505,7 +505,7 @@ public void TunaStatusPresentationMapper_ActiveTransportWins()
         runtimeStatus: "locked",
         sessionUnlockOn: false);
 
-    Assert.Equal("Tuna acceleration is active.", presentation.Text);
+    Assert.Equal("Tuna is ready.", presentation.Text);
     Assert.False(presentation.IsConnecting);
 }
 
@@ -523,9 +523,9 @@ public void TunaStatusPresentationMapper_ActiveTransportPreservesLocalPayerSigna
         runtimeStatus: "peer_connected",
         sessionUnlockOn: true);
 
-    Assert.Equal("Tuna is active. This computer is paying as the Tuna listener.", payer.Text);
+    Assert.Equal("Tuna is ready. This computer is paying as the Tuna listener.", payer.Text);
     Assert.True(payer.IsLocalPayer);
-    Assert.Equal("Tuna is active and the other computer is paying.", dialer.Text);
+    Assert.Equal("Tuna is ready. The other computer is paying.", dialer.Text);
     Assert.False(dialer.IsLocalPayer);
 }
 
@@ -536,17 +536,17 @@ public void TunaStatusPresentationMapper_ActiveFileFallbackShowsRegularNknPath()
         transportActive: true,
         transportReason: "paid_listener_active_file_regular_nkn_fallback",
         runtimeStatus: "listener_ready",
-        sessionUnlockOn: true);
+        sessionUnlockOn: true, fileUsesRegularNkn: true);
     var dialer = TunaStatusPresentationMapper.FromState(
         transportActive: true,
         transportReason: "free_dialer_active_file_regular_nkn_fallback",
         runtimeStatus: "peer_connected",
-        sessionUnlockOn: true);
+        sessionUnlockOn: true, fileUsesRegularNkn: true);
 
-    Assert.Equal("Tuna is active for the session, but file transfer is using regular NKN. This computer is paying as the Tuna listener.", payer.Text);
+    Assert.Equal("Tuna is ready. This file uses regular NKN. This computer is paying as the Tuna listener.", payer.Text);
     Assert.True(payer.IsLocalPayer);
     Assert.False(payer.IsConnecting);
-    Assert.Equal("Tuna is active for the session, but file transfer is using regular NKN.", dialer.Text);
+    Assert.Equal("Tuna is ready. This file uses regular NKN. The other computer is paying.", dialer.Text);
     Assert.False(dialer.IsLocalPayer);
     Assert.False(dialer.IsConnecting);
 }
@@ -710,7 +710,7 @@ public void TunaStatusPresentationMapper_ActiveStateStillWinsOverProvisionalPref
     foreach (var reason in new[] { "preflight_listener_unavailable", "session_security_state_not_eligible" })
     {
         var presentation = TunaStatusPresentationMapper.FromState(true, reason, "listener_ready", true);
-        Assert.Equal("Tuna acceleration is active.", presentation.Text);
+        Assert.Equal("Tuna is ready.", presentation.Text);
         Assert.False(presentation.IsConnecting);
     }
 }
@@ -723,6 +723,8 @@ public void TunaStatusPresentationMapper_ActiveStateStillWinsOverProvisionalPref
 [InlineData("file_tuna_v6", 6, false, false)]
 [InlineData("regular_nkn_v4_fast", 4, true, true)]
 [InlineData("post_tuna_fallback_v6", 6, true, true)]
+[InlineData("regular_nkn_v4_fast", 6, true, true)]
+[InlineData("post_tuna_fallback_v6", 4, true, true)]
 [InlineData("file_tuna_v4", 4, true, true)]
 public void TunaHeaderStateProjector_PreservesSessionActivityAndValidatedFileRoute(
     string route,
@@ -740,11 +742,16 @@ public void TunaHeaderStateProjector_PreservesSessionActivityAndValidatedFileRou
     var reason = transportActive ? "paid_listener_active" : "listener_starting";
     var projection = TunaHeaderStateProjector.FromSnapshot(
         new SessionFileTransferSnapshot(transfer, Inbound: null),
+        "NKN",
         transportActive,
         transportReason: reason);
 
     Assert.Equal(expectedActive, projection.IsActive);
+    var regular = (route, protocolVersion) is ("regular_nkn_v4_fast", 4) or ("post_tuna_fallback_v6", 6);
     Assert.Equal(reason, projection.StatusReason);
+    Assert.Equal(regular, projection.FileUsesRegularNkn);
+    var text = TunaStatusPresentationMapper.FromState(projection.IsActive, projection.StatusReason, "listener_ready", true, projection.FileUsesRegularNkn).Text;
+    Assert.Equal(regular, text.Contains("This file uses regular NKN.", StringComparison.Ordinal));
     Assert.Equal(route, transfer.RouteToken);
     Assert.Equal(protocolVersion, transfer.ProtocolVersion);
 }
@@ -761,10 +768,12 @@ public void TunaHeaderStateProjector_TerminalOrMissingTransferUsesTransportState
 
     var terminalProjection = TunaHeaderStateProjector.FromSnapshot(
         new SessionFileTransferSnapshot(Outbound: null, Inbound: terminal),
+        "NKN",
         transportActive: false,
         transportReason: "dialer_starting");
     var emptyProjection = TunaHeaderStateProjector.FromSnapshot(
         new SessionFileTransferSnapshot(Outbound: null, Inbound: null),
+        "NKN",
         transportActive: true,
         transportReason: "paid_listener_active");
 
