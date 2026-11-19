@@ -4,6 +4,7 @@
 
 Changes since the published 0.7.0 hotfix revision 2:
 
+- **File transfer:** Helper and Helpee can drop one local file from Windows Explorer into chat instead of using the file picker. The same session permission and receiver approval are required.
 - **Session UI:** The Tuna tooltip distinguishes a ready session from a file using regular NKN. It no longer labels local transfers as NKN or claims a route or payer after disconnect. File routing is unchanged.
 - **Tests and tooling:** Added Windows regressions for receiving files into deep folders, including when a file already exists; the receiver itself is unchanged. The evidence writer now handles long temporary paths, and the analyzer scans startup-isolation evidence only when needed.
 - **Beta Readiness:** [Case 10323 remains unpassed](docs/ReleaseRunbook.md#071-beta-readiness-decision-2026-11-19). Its unresolved risk is accepted for 0.7.1 only.

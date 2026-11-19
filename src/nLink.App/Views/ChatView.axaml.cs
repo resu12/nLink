@@ -38,6 +38,10 @@ public partial class ChatView : UserControl
     public ChatView()
     {
         InitializeComponent();
+        AddHandler(DragDrop.DragEnterEvent, ChatFileDrag, handledEventsToo: true);
+        AddHandler(DragDrop.DragOverEvent, ChatFileDrag, handledEventsToo: true);
+        AddHandler(DragDrop.DropEvent, ChatFileDrag, handledEventsToo: true);
+        AddHandler(DragDrop.DragLeaveEvent, (_, _) => SetFileDropHint(null), handledEventsToo: true);
         if (ChatInputTextBox is not null)
         {
             // Handle Enter before TextBox AcceptsReturn consumes it, while still letting
@@ -62,6 +66,7 @@ public partial class ChatView : UserControl
         };
         DetachedFromVisualTree += (_, _) =>
         {
+            SetFileDropHint(null);
             UnhookBindings();
             UnhookMessagesCollection();
             UnhookScrollViewer();
@@ -76,6 +81,7 @@ public partial class ChatView : UserControl
     {
         if (e.Property == DataContextProperty)
         {
+            SetFileDropHint(null);
             HookBindings();
             HookMessagesCollection();
             UpdateSendChatButtonState();

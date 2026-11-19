@@ -7,6 +7,8 @@
              mc:Ignorable="d"
              x:Class="NLink.App.Views.ChatView"
              x:Name="Root"
+             DragDrop.AllowDrop="True"
+             Background="Transparent"
              x:DataType="vm:IChatPanelBindings">
 
     <UserControl.Styles>
@@ -205,6 +207,8 @@
                   Margin="16,14">
                 <StackPanel Grid.Row="0"
                             Spacing="0">
+                    <TextBlock x:Name="FileDropHint" Classes="appMuted" IsVisible="False"
+                               TextWrapping="Wrap" Margin="0,0,0,8"/>
                     <TextBlock Classes="appMuted"
                                Text="{Binding ChatNoticeText}"
                                FontSize="14"

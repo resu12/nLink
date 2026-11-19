@@ -29,7 +29,7 @@ using NLink.Infra.Nkn;
 
 namespace NLink.App.ViewModels;
 
-public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanelBindings, IWindowCloseAware
+public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatFileSender, IWindowCloseAware
 {
     private static readonly TimeSpan DefaultConnectFailureCooldown = TimeSpan.FromSeconds(2);
     private static readonly TimeSpan DefaultApprovalTimeout = SessionApprovalTimeouts.DefaultHumanDecisionTimeout;
@@ -2143,10 +2143,21 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
     private void RequestSendFileWindow()
     {
         LogSendFileActionUi("file_transfer_send_ui_requested", "(entry)");
+        if (TryAuthorizeFileSelection())
+        {
+            SendFileRequested?.Invoke(this, EventArgs.Empty);
+        }
+    }
+
+    SessionId? IChatFileSender.FileSendSessionId => sessionRuntime.CurrentSessionGrant?.SessionId;
+    bool IChatFileSender.TryAuthorizeFileSelection() => TryAuthorizeFileSelection();
+
+    private bool TryAuthorizeFileSelection()
+    {
         if (!CanExecuteSendFileAction())
         {
             LogSendFileActionUi("file_transfer_send_ui_ignored", "can_execute_false");
-            return;
+            return false;
         }
 
         if (!sessionRuntime.TryAuthorizeFileTransferSend())
@@ -2155,10 +2166,10 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
             CanSendFiles = false;
             OnPropertyChanged(nameof(CanSendFileAction));
             SendFileCommand.NotifyCanExecuteChanged();
-            return;
+            return false;
         }
 
-        SendFileRequested?.Invoke(this, EventArgs.Empty);
+        return true;
     }
 
     private bool CanExecuteSendFileAction()
