@@ -362,6 +362,67 @@ public sealed class FileTransferSecurityGuardTests
         }
     }
 
+    [WindowsTheory]
+    [InlineData(false, 244, 288)]
+    [InlineData(true, 248, 292)]
+    public async Task OpenReceiveWriteStream_DeepDirectory_OnlyPartialPathExceeds260(
+        bool destinationExists, int expectedFinalLength, int expectedPartLength)
+    {
+        const string fileName = "report.txt";
+        var payload = "received bytes"u8.ToArray();
+        var sentinel = "original bytes"u8.ToArray();
+        var now = DateTimeOffset.FromUnixTimeMilliseconds(1_760_200_000_000);
+        var guard = new SessionFileTransferGuard(() => now);
+        var state = CreateApprovedSecurityState(now, CapabilityGrant.FileTransfer);
+        var grant = CreateGrant(state, now, CapabilityGrant.FileTransfer);
+        var tempRoot = CreateTempRoot();
+        try
+        {
+            // Size the directory, not the filename, so the requested path is exactly 244 characters.
+            var padding = 244 - Path.Combine(tempRoot, "x", fileName).Length + 1;
+            Assert.True(padding is > 0 and <= 255, "Setup: TEMP cannot accommodate the deep receive directory.");
+            var directory = Directory.CreateDirectory(Path.Combine(tempRoot, new string('d', padding))).FullName;
+            var requested = Path.Combine(directory, fileName);
+            Assert.Equal(244, requested.Length);
+            if (destinationExists)
+                await File.WriteAllBytesAsync(requested, sentinel);
+
+            var result = guard.OpenReceiveWriteStream(true, state, grant,
+                new FileTransferDescriptor(state.SessionId!.Value, state.HelperAddress!.Value, fileName, payload.Length),
+                new FileTransferStoragePolicy(directory, AllowOverwrite: false));
+            Assert.True(result.IsAllowed, result.Access.Message);
+            var destination = Path.Combine(directory, destinationExists ? "report (1).txt" : fileName);
+            await using (var handle = Assert.IsType<FileTransferWriteHandle>(result.Handle))
+            {
+                var plan = handle.Plan;
+                Assert.Equal(destination, plan.FinalPath);
+                Assert.Equal(expectedFinalLength, plan.FinalPath.Length);
+                Assert.Equal(expectedPartLength, plan.TempPath.Length);
+                Assert.Equal(plan.TempPath, Assert.Single(Directory.GetFiles(directory, "*.part")));
+                await handle.Stream.WriteAsync(payload);
+                await handle.FinalizeAsync(CancellationToken.None);
+            }
+
+            Assert.Equal(payload, await File.ReadAllBytesAsync(destination));
+            if (destinationExists)
+                Assert.Equal(sentinel, await File.ReadAllBytesAsync(requested));
+            Assert.Empty(Directory.GetFiles(directory, "*.part"));
+        }
+        finally
+        {
+            CleanupTempRoot(tempRoot);
+        }
+    }
+
+    private sealed class WindowsTheoryAttribute : TheoryAttribute
+    {
+        public WindowsTheoryAttribute()
+        {
+            if (!OperatingSystem.IsWindows())
+                Skip = "Exercises the native Windows receive-file path.";
+        }
+    }
+
     [Fact]
     public async Task FinalizeAsync_PreservesTempArtifact_WhenFinalPathAppearsBeforeMove()
     {
