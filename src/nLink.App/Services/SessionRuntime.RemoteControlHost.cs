@@ -2216,43 +2216,40 @@ public sealed partial class SessionRuntime
     }
 
     private void OnTransportAccelerationStateChanged(object? sender, TransportAccelerationStateChangedEventArgs e)
-    {
-        if (!IsFromCurrentTransport(sender))
-        {
-            return;
-        }
-
-        var wasActive = transportAccelerationActive;
-        SetTransportAccelerationActive(e.IsActive, e.Reason, e.PendingFileTransfer);
-        if (wasActive && !e.IsActive && ShouldStartScreenShareTransportRebindForAccelerationReason(e.Reason))
-        {
-            BeginScreenShareTransportRebindRecovery(e.Reason);
-        }
-    }
+        => ApplyTransportAccelerationStatus(sender, e, recoverScreenOnStop: true);
 
     private void SetTransportAccelerationActive(
         bool isActive,
         string reason,
         TransportAccelerationPendingFileTransfer? pendingFileTransfer = null)
+        => ApplyTransportAccelerationStatus(null, new(isActive, reason, pendingFileTransfer), recoverScreenOnStop: false);
+
+    private void ApplyTransportAccelerationStatus(object? sender, TransportAccelerationStateChangedEventArgs status, bool recoverScreenOnStop)
     {
-        var normalizedReason = string.IsNullOrWhiteSpace(reason) ? "unknown" : reason.Trim();
+        bool stopped;
         lock (transportAccelerationPresentationGate)
         {
+            if (!IsFromCurrentTransport(sender)) return;
+            // A stop may already have published a newer snapshot on this same transport.
+            status = (sender as ITransportAccelerationStatus)?.PublishedAccelerationStatus ?? status;
             // Compare raw status so a repeated notification for the same exact
             // attempt cannot revive its already-settled display reason.
-            if (transportAccelerationActive == isActive &&
-                string.Equals(transportAccelerationStatusReason, normalizedReason, StringComparison.Ordinal) &&
-                transportAccelerationPresentation.PendingFileTransfer == pendingFileTransfer)
+            if (transportAccelerationActive == status.IsActive &&
+                string.Equals(transportAccelerationStatusReason, status.Reason, StringComparison.Ordinal) &&
+                transportAccelerationPresentation.PendingFileTransfer == status.PendingFileTransfer)
             {
                 return;
             }
 
-            transportAccelerationActive = isActive;
-            transportAccelerationStatusReason = normalizedReason;
-            transportAccelerationPresentation = new(isActive, normalizedReason, pendingFileTransfer);
+            stopped = transportAccelerationActive && !status.IsActive;
+            transportAccelerationActive = status.IsActive;
+            transportAccelerationStatusReason = status.Reason;
+            transportAccelerationPresentation = status;
             SettleFinishedFileAccelerationPresentation(latestFileTransferSnapshot);
         }
         TransportAccelerationStateChanged?.Invoke(this, EventArgs.Empty);
+        if (recoverScreenOnStop && stopped && ShouldStartScreenShareTransportRebindForAccelerationReason(status.Reason))
+            BeginScreenShareTransportRebindRecovery(status.Reason);
     }
 
     // Called under the presentation gate. Retain only the display settlement;

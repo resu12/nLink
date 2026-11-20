@@ -587,18 +587,8 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
         }
     }
 
-    private TransportAccelerationPendingFileTransfer? pendingAccelerationFileTransfer;
-
-    public TransportAccelerationPendingFileTransfer? PendingAccelerationFileTransfer
-    {
-        get
-        {
-            lock (accelerationGate)
-            {
-                return pendingAccelerationFileTransfer;
-            }
-        }
-    }
+    public TransportAccelerationStateChangedEventArgs PublishedAccelerationStatus => publishedAccelerationStatus;
+    public TransportAccelerationPendingFileTransfer? PendingAccelerationFileTransfer => publishedAccelerationStatus.PendingFileTransfer;
 
     private void RaiseSessionLivenessProof(
         string? sessionId,

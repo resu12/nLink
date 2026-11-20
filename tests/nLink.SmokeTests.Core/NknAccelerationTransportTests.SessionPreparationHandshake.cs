@@ -272,15 +272,17 @@ public sealed partial class NknAccelerationTransportTests
         private readonly List<PreparationHandshakeBarrier> barriers = [];
         public CancellationToken Token => lifetime.Token;
         public readonly SessionFileTransferService PayerService = new(), DialerService = new();
-        public readonly PreparationHandshakeLane PayerLane = new(), DialerLane = new();
+        public readonly PreparationHandshakeLane PayerLane, DialerLane;
         public readonly FakeNknClient PayerClient, DialerClient;
         public readonly NknSignalingTransport Payer, Dialer;
         public readonly ConcurrentQueue<MsgType> Sent = new();
         public readonly ConcurrentQueue<string> Liveness = new();
         public FileTransferSessionPreparationPermit Permit = null!;
 
-        public PreparationHandshakePair(bool helperPays, NknTunaAccelerationOptions? payerOptions = null, bool useWriterGatePeer = false)
+        public PreparationHandshakePair(bool helperPays, NknTunaAccelerationOptions? payerOptions = null, bool useWriterGatePeer = false, bool allowRuntimeRestart = false)
         {
+            PayerLane = new(allowRuntimeRestart);
+            DialerLane = new(allowRuntimeRestart, canListen: !allowRuntimeRestart);
             var id = Guid.NewGuid().ToString("N");
             PayerClient = new($"payer.preparation-handshake.{id}.address");
             var dialerAddress = $"dialer.preparation-handshake.{id}.address";

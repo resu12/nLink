@@ -1,5 +1,7 @@
 using System.Collections;
 using System.Reflection;
+using NLink.App.Services;
+using NLink.Core;
 using NLink.Core.FileTransfer;
 using NLink.Infra.Nkn;
 
@@ -88,9 +90,19 @@ public sealed partial class NknAccelerationTransportTests
         => RunPreparedInitialTunaFallbackAsync(false, true, stopMode: 2, writeSource: source,
             sidecarFailureReason: "listener_terminal_tuna_write_failed");
 
+    [Fact]
+    public Task DuplexUnlock_ReconnectsSessionWithoutMovingFallbackOrReverseFile()
+        => RunPreparedInitialTunaFallbackAsync(helperPays: true, payerSends: true, stopMode: 0, duplexUnlock: true);
+
+    [Fact]
+    public Task DuplexUnlock_HeaderIgnoresReadyDeliveredAfterStop()
+        => RunPreparedInitialTunaFallbackAsync(helperPays: true, payerSends: true, stopMode: 0,
+            duplexUnlock: true, stopBeforeHeaderDelivery: true);
+
     private Task RunPreparedInitialTunaFallbackAsync(bool helperPays, bool payerSends, int stopMode = -1,
         string? writeSource = null, bool pendingCallbacks = false, bool resetBeforeStop = false,
-        string? sidecarFailureReason = null, bool dialerFailsFirst = false, bool? peerDownBeforeLocalFailure = null)
+        string? sidecarFailureReason = null, bool dialerFailsFirst = false, bool? peerDownBeforeLocalFailure = null,
+        bool duplexUnlock = false, bool stopBeforeHeaderDelivery = false)
         => WithPublicPreparationPairAsync(helperPays, async pair =>
         {
             pair.PayerLane.FilePeer = pair.DialerLane;
@@ -249,6 +261,92 @@ public sealed partial class NknAccelerationTransportTests
                     AssertJoinedBootstrapFallbackPublished(sender, outbound, receiver, inbound);
                     AssertInitialFallbackSourcePreserved(sender, outbound);
                     AssertInitialFallbackSourcePreserved(receiver, inbound);
+                    if (duplexUnlock)
+                    {
+                        // The bootstrap gate belongs only to the first file.
+                        SessionFileTransferService.BootstrapFeedbackBeforeSubmissionForTests = prior;
+                        Assert.True((await sender.PauseTransferAsync("prepared-admission", "user_requested", pair.Token))?.IsPaused);
+                        await OfferPausedFileAsync(receiver, sender, "reverse-file", pair.Token);
+                        await WaitUntilAsync(() => receiver.Snapshot.Inbound?.IsPeerPaused == true &&
+                            sender.Snapshot.Inbound?.IsPeerPaused == true, TimeSpan.FromSeconds(3));
+                        FileTransferTransferSnapshot[] Files() => [sender.Snapshot.Outbound!, receiver.Snapshot.Inbound!,
+                            receiver.Snapshot.Outbound!, sender.Snapshot.Inbound!];
+                        var before = Files();
+                        Assert.All(before.Take(2), file => Assert.Equal((FileTransferRouteResolver.PostTunaFallbackV6Token, 6),
+                            (file.RouteToken, file.ProtocolVersion)));
+                        Assert.All(before.Skip(2), file => Assert.Equal("reverse-file", file.TransferId));
+                        var session = before[0].SessionId;
+                        Assert.Equal("AwaitingRetryAuthority", ContextProperty(InvokePrivateMethod(pair.Payer,
+                            "CaptureRuntimeUnlockPostFallbackSchedulingBoundary", session)!, "Kind")!.ToString());
+                        Assert.False(pair.Payer.IsTransportAccelerationActive);
+                        Assert.False(pair.Dialer.IsTransportAccelerationActive);
+                        var handoffs = 0;
+                        pair.Payer.OrdinaryFileHandoffBeforeDispatchForTests = pair.Dialer.OrdinaryFileHandoffBeforeDispatchForTests =
+                            () => Interlocked.Increment(ref handoffs);
+                        var atAck = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+                        var releaseAck = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+                        var delayedReady = new TaskCompletionSource<TransportAccelerationStateChangedEventArgs>(TaskCreationOptions.RunContinuationsAsynchronously);
+                        void HoldReady(object? _, TransportAccelerationStateChangedEventArgs e)
+                        {
+                            if (e.IsActive) delayedReady.TrySetResult(e);
+                        }
+                        if (stopBeforeHeaderDelivery) pair.Payer.TransportAccelerationStateChanged += HoldReady;
+                        pair.Payer.IdleSessionBeforeAnswerAckForTests = () => { atAck.TrySetResult(); return releaseAck.Task; };
+                        try
+                        {
+                            await pair.Payer.RequestAccelerationNegotiationAsync("runtime_unlock", pair.Token);
+                            await atAck.Task.WaitAsync(TimeSpan.FromSeconds(5));
+                            Assert.False(pair.Payer.IsTransportAccelerationActive);
+                            Assert.False(pair.Dialer.IsTransportAccelerationActive);
+                        }
+                        finally { releaseAck.TrySetResult(); }
+                        await WaitUntilAsync(() => pair.Payer.IsTransportAccelerationActive && pair.Dialer.IsTransportAccelerationActive &&
+                            pair.Payer.TransportAccelerationStatusReason == "paid_listener_active_file_regular_nkn_fallback" &&
+                            pair.Dialer.TransportAccelerationStatusReason == "free_dialer_active_file_regular_nkn_fallback", TimeSpan.FromSeconds(5));
+                        if (stopBeforeHeaderDelivery)
+                        {
+                            var ready = await delayedReady.Task.WaitAsync(TimeSpan.FromSeconds(3));
+                            pair.Payer.TransportAccelerationStateChanged -= HoldReady;
+                            Assert.Equal("paid_listener_active_file_regular_nkn_fallback", ready.Reason);
+                            using var header = new SessionRuntime(() => pair.Payer);
+                            SetPrivateField(header, "transport", pair.Payer);
+                            var deliver = typeof(SessionRuntime).GetMethod("OnTransportAccelerationStateChanged",
+                                BindingFlags.NonPublic | BindingFlags.Instance)!
+                                .CreateDelegate<EventHandler<TransportAccelerationStateChangedEventArgs>>(header);
+                            var unavailable = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+                            void DeliverStop(object? source, TransportAccelerationStateChangedEventArgs e)
+                            {
+                                deliver(source, e);
+                                if (!e.IsActive) unavailable.TrySetResult();
+                            }
+                            pair.Payer.TransportAccelerationStateChanged += DeliverStop;
+                            try
+                            {
+                                await pair.Payer.StopAccelerationAsync("header_switch_off", pair.Token);
+                                await unavailable.Task.WaitAsync(TimeSpan.FromSeconds(3));
+                                var stopped = header.TransportAccelerationPresentation;
+                                Assert.False(stopped.IsActive);
+                                Assert.False(pair.Payer.IsTransportAccelerationActive);
+                                deliver(pair.Payer, ready);
+                                Assert.Same(stopped, header.TransportAccelerationPresentation);
+                                Assert.False(TunaHeaderStateProjector.FromSnapshot(sender.Snapshot, "NKN",
+                                    header.IsTransportAccelerationActive, header.TransportAccelerationStatusReason).IsActive);
+                            }
+                            finally
+                            {
+                                pair.Payer.TransportAccelerationStateChanged -= DeliverStop;
+                                SetPrivateField(header, "transport", null);
+                            }
+                        }
+                        Assert.Equal(0, Volatile.Read(ref handoffs));
+                        foreach (var (old, current) in before.Zip(Files()))
+                        {
+                            Assert.False(current.IsTerminal);
+                            Assert.Equal((old.TransferId, old.RouteToken, old.ProtocolVersion, old.IsPaused, old.IsPeerPaused),
+                                (current.TransferId, current.RouteToken, current.ProtocolVersion, current.IsPaused, current.IsPeerPaused));
+                        }
+                        return;
+                    }
                     callbacks?.AssertRetiredByExactDispositionAndStaleDrainIsInert();
                     AssertRejectedInitialStop(sender, payerSends ? pair.Payer : pair.Dialer, outbound, senderStop);
                     AssertRejectedInitialStop(receiver, payerSends ? pair.Dialer : pair.Payer, inbound, receiverStop);
@@ -299,7 +397,7 @@ public sealed partial class NknAccelerationTransportTests
                 SessionFileTransferService.BootstrapFeedbackBeforeSubmissionForTests = prior;
                 await sender.CancelTransferAsync("prepared-admission", "test_complete", pair.Token);
             }
-        });
+        }, allowRuntimeRestart: duplexUnlock);
 
     private static void AssertInitialStopCapture(SessionFileTransferService service,
         NknSignalingTransport transport, string contextName)

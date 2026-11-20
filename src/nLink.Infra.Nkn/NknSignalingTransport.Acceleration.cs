@@ -274,6 +274,7 @@ public sealed partial class NknSignalingTransport : INknListenerCapHandoffContro
     private long runtimeUnlockAckHoldGeneration = -1;
     // This belongs to the negotiated connection, not to its independently retired ACK generation.
     private volatile bool negotiatedFileLaneIsSessionOnly;
+    private bool acknowledgedDuplexReconnect;
     private long ordinaryNegotiationPauseGeneration = -1;
     private (long Generation, string SessionId, long TransactionGeneration, long OfferGeneration)? confirmedRuntimeUnlockAck;
     private bool IsOrdinaryFileHandoffCurrent(long generation, string? sessionId) =>
@@ -465,7 +466,7 @@ public sealed partial class NknSignalingTransport : INknListenerCapHandoffContro
     private long runtimeUnlockQueueAcceptedObservedEscapePayerDecisionId;
     private long runtimeUnlockQueueAcceptedObservedEscapeTick;
     private string? runtimeUnlockQueueAcceptedObservedEscapeReason;
-    private int transportAccelerationActivePublished;
+    private volatile TransportAccelerationStateChangedEventArgs publishedAccelerationStatus = new(false, "inactive");
     private string transportAccelerationStatusReason = "inactive";
     private string? accelerationUserStoppedSessionId;
     private long accelerationUserStoppedUtcMs;
@@ -3424,6 +3425,7 @@ public sealed partial class NknSignalingTransport : INknListenerCapHandoffContro
                 : sessionId.Trim();
             accelerationNegotiatedLanes = lanes;
             negotiatedFileLaneIsSessionOnly = false;
+            acknowledgedDuplexReconnect = false;
             accelerationPreparationAdmission = null;
             acceptedSessionId = accelerationSessionId;
             ordinaryGeneration = Interlocked.Increment(ref fileActivationHandoffResetGeneration);
@@ -39000,6 +39002,7 @@ public sealed partial class NknSignalingTransport : INknListenerCapHandoffContro
             ordinaryAnswerGeneration = Interlocked.Increment(ref fileActivationHandoffResetGeneration);
             negotiatedFileLaneIsSessionOnly = !isRuntimeUnlockOffer &&
                 (expectedIdleOffer?.Request.Trigger == DuplexSessionUnlockTrigger || HasDuplexFileOffers(accelerationSessionId));
+            acknowledgedDuplexReconnect = false;
             confirmedRuntimeUnlockAck = null;
             if (isRuntimeUnlockOffer) Interlocked.Exchange(ref runtimeUnlockAckHoldGeneration, ordinaryAnswerGeneration);
             ordinaryFileFinalAck = handoffAck is null ? null : new(ordinaryAnswerGeneration, handoffAck.Task);
@@ -39067,6 +39070,7 @@ public sealed partial class NknSignalingTransport : INknListenerCapHandoffContro
                         if (runtimeUnlock) return;
                         // The reverse file can be admitted while the final ACK waits at the writer.
                         negotiatedFileLaneIsSessionOnly |= HasDuplexFileOffers(answer.SessionId);
+                        acknowledgedDuplexReconnect = expectedIdleOffer?.Request.Trigger == DuplexSessionUnlockTrigger;
                     }
                     if (ackSelection.ListenerLease is { } lease)
                         return (accelerationLane as INknTunaAccelerationSession)?.TryPublishForListenerLease(lease, Publish) == true;
@@ -39205,6 +39209,8 @@ public sealed partial class NknSignalingTransport : INknListenerCapHandoffContro
         {
             var submitted = await SubmitFinalAckAsync(runtimeUnlock: false).ConfigureAwait(false);
             if (submitted && deferUntilAck) CompleteOrdinaryNegotiation();
+            else if (submitted && expectedIdleOffer?.Request.Trigger == DuplexSessionUnlockTrigger && IsTransportAccelerationPublishedActive())
+                NotifyTransportAccelerationStateChanged(GetActiveAccelerationStatusReason());
             return submitted;
         }, CancellationToken.None);
         if (expectedIdleOffer is not null || IdleSessionBeforeAnswerAckForTests is not null)
@@ -39970,6 +39976,7 @@ public sealed partial class NknSignalingTransport : INknListenerCapHandoffContro
                             accelerationSessionId = ack.SessionId.Trim();
                             negotiatedFileLaneIsSessionOnly = pendingAuthorityMode is null &&
                                 (pendingTrigger == DuplexSessionUnlockTrigger || HasDuplexFileOffers(accelerationSessionId));
+                            acknowledgedDuplexReconnect = pendingAuthorityMode is null && pendingTrigger == DuplexSessionUnlockTrigger;
                             accelerationNegotiatedLanes = acceptedLanes;
                             ordinaryAckGeneration = pendingResponderHandoffGeneration;
                             if (pendingAuthorityMode.HasValue && (acceptedLanes & NknAccelerationLaneKind.File) != 0)
@@ -42166,7 +42173,9 @@ public sealed partial class NknSignalingTransport : INknListenerCapHandoffContro
 
             if (IsFileTransferUsingRegularNknFallbackForCurrentSession(currentSessionId))
             {
-                return false;
+                // A completed session-only handshake is ready even while the file
+                // stays on V6. Do not publish the File lane as a payload route.
+                return acknowledgedDuplexReconnect && negotiatedFileLaneIsSessionOnly && IsAccelerationNegotiatedAndHealthyUnsafe(currentSessionId);
             }
 
             return IsAccelerationNegotiatedAndHealthyUnsafe(currentSessionId) &&
@@ -42515,6 +42524,15 @@ public sealed partial class NknSignalingTransport : INknListenerCapHandoffContro
                     RuntimeUnlockPostFallbackSchedulingBoundaryKind
                         .AwaitingRetryAuthority)
                 {
+                    // This boundary forbids reactivating the fallback file. A duplex
+                    // selection reconnects only the session, never either file.
+                    if (routeTransitionAuthority is null && !ct.IsCancellationRequested &&
+                        !IsAccelerationNegotiatedAndHealthy() && IsSessionAccelerationEligible(out _) &&
+                        SelectSessionPreparationRequest() is { Purpose: FileTransferAccelerationRequestPurpose.DuplexSessionReestablishment } duplex)
+                    {
+                        RequestIdleSessionReestablishment(duplex, ct, idleUnlockStopGeneration, idleUnlockRequestedAtUnixMs);
+                        return Task.CompletedTask;
+                    }
                     RequestFallbackListenerPreparation(ct);
                     RecheckPendingRuntimeUnlockRetryNegotiationIntentAfterUnlock(
                         postFallbackSchedulingBoundary,
@@ -43061,6 +43079,7 @@ public sealed partial class NknSignalingTransport : INknListenerCapHandoffContro
             accelerationSessionId = null;
             accelerationNegotiatedLanes = NknAccelerationLaneKind.None;
             accelerationPreparationAdmission = null;
+            acknowledgedDuplexReconnect = false;
             resetDial = ClearPendingAccelerationAnswerAckLocked();
             acceptedIdleSessionAnswer = null;
             finalAckPreferenceOffer?.FileReadinessPublication?.TrySetResult(null);
@@ -43244,23 +43263,22 @@ public sealed partial class NknSignalingTransport : INknListenerCapHandoffContro
 
     private void NotifyTransportAccelerationStateChanged(string reason)
     {
-        var active = IsTransportAccelerationPublishedActive();
-        var activeValue = active ? 1 : 0;
-        var previousActiveValue = Interlocked.Exchange(ref transportAccelerationActivePublished, activeValue);
-        var suppressed = TryGetUncommittedRuntimeUnlockFileAccelerationStatusSuppression(out var pendingTransaction);
-        var pending = !active && suppressed;
-        var normalizedReason = active
-            ? GetActiveAccelerationStatusReason()
-            : pending
-                ? "runtime_unlock_pending_route_commit"
-                : IsFileTransferUsingRegularNknFallbackForCurrentSession(currentSessionSecurityState.SessionId?.Value)
-                    ? "post_tuna_fallback_route_active"
-                    : string.IsNullOrWhiteSpace(reason) ? "unknown" : SanitizeLogToken(reason);
-        var reasonChanged = false;
-        TransportAccelerationPendingFileTransfer? pendingFileTransfer = null;
-
+        TransportAccelerationStateChangedEventArgs status;
+        string? sessionId;
+        NknAccelerationLaneKind lanes;
+        long payerDecisionId;
         lock (accelerationGate)
         {
+            var active = IsTransportAccelerationPublishedActive();
+            var pending = TryGetUncommittedRuntimeUnlockFileAccelerationStatusSuppression(out var pendingTransaction) && !active;
+            var normalizedReason = active
+                ? GetActiveAccelerationStatusReason()
+                : pending
+                    ? "runtime_unlock_pending_route_commit"
+                    : IsFileTransferUsingRegularNknFallbackForCurrentSession(currentSessionSecurityState.SessionId?.Value)
+                        ? "post_tuna_fallback_route_active"
+                        : string.IsNullOrWhiteSpace(reason) ? "unknown" : SanitizeLogToken(reason);
+            TransportAccelerationPendingFileTransfer? pendingFileTransfer = null;
             // Correlate presentation to the existing exact attempt binding. Do not
             // derive session/Screen activity from readiness or a file route cache.
             var transaction = runtimeUnlockTransactionState;
@@ -43278,25 +43296,10 @@ public sealed partial class NknSignalingTransport : INknListenerCapHandoffContro
                     transaction.TransactionGeneration, transaction.OfferGeneration);
             }
 
-            if (!string.Equals(transportAccelerationStatusReason, normalizedReason, StringComparison.Ordinal) ||
-                pendingAccelerationFileTransfer != pendingFileTransfer)
-            {
-                transportAccelerationStatusReason = normalizedReason;
-                pendingAccelerationFileTransfer = pendingFileTransfer;
-                reasonChanged = true;
-            }
-        }
-
-        if (previousActiveValue == activeValue && !reasonChanged)
-        {
-            return;
-        }
-
-        string? sessionId;
-        NknAccelerationLaneKind lanes;
-        long payerDecisionId;
-        lock (accelerationGate)
-        {
+            if (publishedAccelerationStatus.IsActive == active && transportAccelerationStatusReason == normalizedReason &&
+                publishedAccelerationStatus.PendingFileTransfer == pendingFileTransfer) return;
+            transportAccelerationStatusReason = normalizedReason;
+            publishedAccelerationStatus = status = new(active, normalizedReason, pendingFileTransfer);
             sessionId = accelerationSessionId ?? currentSessionSecurityState.SessionId?.Value;
             lanes = accelerationNegotiatedLanes;
             payerDecisionId = accelerationPayerDecisionId;
@@ -43304,10 +43307,8 @@ public sealed partial class NknSignalingTransport : INknListenerCapHandoffContro
 
         LocalOperationalLog.Info(
             "NKN.Tuna",
-            $"event=tuna_acceleration_timeline; status={normalizedReason}; active={activeValue}; session_id={sessionId ?? "(none)"}; lanes={FormatAccelerationLanesForLog(lanes)}; payer_decision_id={payerDecisionId}");
-        TransportAccelerationStateChanged?.Invoke(
-            this,
-            new TransportAccelerationStateChangedEventArgs(active, normalizedReason, pendingFileTransfer));
+            $"event=tuna_acceleration_timeline; status={status.Reason}; active={(status.IsActive ? 1 : 0)}; session_id={sessionId ?? "(none)"}; lanes={FormatAccelerationLanesForLog(lanes)}; payer_decision_id={payerDecisionId}");
+        TransportAccelerationStateChanged?.Invoke(this, status);
     }
 
     private bool TryGetUncommittedRuntimeUnlockFileAccelerationStatusSuppression(

@@ -464,14 +464,14 @@ public sealed partial class NknAccelerationTransportTests
     }
 
     private static async Task WithPublicPreparationPairAsync(bool helperPays, Func<PreparationHandshakePair, Task> test,
-        InviteCapabilities capabilities = InviteCapabilities.Chat | InviteCapabilities.FileTransfer)
+        InviteCapabilities capabilities = InviteCapabilities.Chat | InviteCapabilities.FileTransfer, bool allowRuntimeRestart = false)
     {
         FakeNknClient.ResetNetwork();
         var prior = NknSignalingTransport.HelperPaidOfferHelpeePriorityDelayOverrideForTests;
         NknSignalingTransport.HelperPaidOfferHelpeePriorityDelayOverrideForTests = TimeSpan.Zero;
         try
         {
-            using var pair = new PreparationHandshakePair(helperPays);
+            using var pair = new PreparationHandshakePair(helperPays, allowRuntimeRestart: allowRuntimeRestart);
             await pair.Approve(begin: false, capabilities);
             await test(pair);
         }
