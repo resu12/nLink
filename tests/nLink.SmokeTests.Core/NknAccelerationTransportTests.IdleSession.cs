@@ -16,6 +16,8 @@ public sealed partial class NknAccelerationTransportTests
         public BridgeStdioWriter? Writer;
         public Action? AfterFrameWritten;
         public Func<MsgType, NknBridgeChannel, Task>? BeforeOwnedWrite;
+        public Func<Envelope, Task>? AfterOwnedWrite;
+        public Action<Envelope>? OwnedWriteRejected;
         public readonly TaskCompletionSource Arrived = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public readonly TaskCompletionSource<bool> WriteCompleted = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public async Task<bool> SendOwnedHandshakeAsync(string destination, byte[] bytes, NknBridgeChannel channel, bool priority,
@@ -32,8 +34,13 @@ public sealed partial class NknAccelerationTransportTests
                 return written;
             }
             if (admit(() => new ValueTask(channel == NknBridgeChannel.Bulk ? SendBulkAsync(destination, bytes, ct)
-                : SendAsync(destination, bytes, ct))) is not { } write) return false;
+                : SendAsync(destination, bytes, ct))) is not { } write)
+            {
+                if (OwnedWriteRejected is { } rejected && EnvelopeCodec.TryDeserialize(bytes, out var denied)) rejected(denied);
+                return false;
+            }
             await write;
+            if (AfterOwnedWrite is { } after && EnvelopeCodec.TryDeserialize(bytes, out var sent)) await after(sent);
             return true;
         }
     }

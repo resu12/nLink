@@ -827,6 +827,7 @@ public sealed partial class NknSignalingTransport : INknListenerCapHandoffContro
         public IdleSessionOfferBinding? IdleOffer { get; init; }
         public object? AnswerDialOwner { get; init; }
         public long? FinalAckAnswerGeneration { get; init; }
+        public RuntimeUnlockOfferAuthorityBoundary? FinalAckAuthorityBoundary { get; init; }
     }
 
     private enum InboundRuntimeUnlockDialOfferDisposition
@@ -18653,7 +18654,7 @@ public sealed partial class NknSignalingTransport : INknListenerCapHandoffContro
             {
                 if (pendingAccelerationAnswerAckReplyShadow is not { } ack || !ReferenceEquals(ack.Envelope, envelope) ||
                     ack.FinalAckAnswerGeneration != fileActivationHandoffResetGeneration ||
-                    FinalAckUtcMs() >= ack.DeadlineUtcMs ||
+                    FinalAckUtcMs() >= ack.DeadlineUtcMs || !IsFinalAckRetryReceiptCurrentLocked(ack) ||
                     (ack.IdleOffer is not null && !IsIdleSessionAcceptedAnswerCurrentLocked(ack.IdleOffer))) return false;
                 if (!tunaAccelerationOptions.UsesRuntimeLanePreferences && !leaseBoundFinalAcks.TryGetValue(envelope, out _))
                     return finalAckPreferenceOffer is null;
@@ -33882,7 +33883,7 @@ public sealed partial class NknSignalingTransport : INknListenerCapHandoffContro
         long pendingGeneration,
         long answerGeneration,
         long deadlineUtcMs,
-        bool runtimeUnlock,
+        RuntimeUnlockOfferAuthorityBoundary? authorityBoundary,
         out bool workerCreated,
         IdleSessionOfferBinding? idleOffer = null, PreferenceBoundOffer? selection = null)
     {
@@ -33901,6 +33902,7 @@ public sealed partial class NknSignalingTransport : INknListenerCapHandoffContro
                 current.PayerDecisionId == payerDecisionId &&
                 current.PendingGeneration == pendingGeneration)
             {
+                if (current.FinalAckAuthorityBoundary != authorityBoundary) return null;
                 current = current with { ReplyTarget = replyTarget };
                 pendingAccelerationAnswerAckReplyShadow = current;
                 return current;
@@ -33913,19 +33915,26 @@ public sealed partial class NknSignalingTransport : INknListenerCapHandoffContro
                 nonce.Trim(),
                 payerDecisionId,
                 pendingGeneration,
-                runtimeUnlock
-                    ? RuntimeUnlockOfferAuthorityMode.InitialActivation
-                    : null,
+                authorityBoundary?.Mode,
                 deadlineUtcMs,
                 ++pendingAccelerationReplyWorkerGeneration,
                 "answer_ack",
                 new TaskCompletionSource<bool>(
-                    TaskCreationOptions.RunContinuationsAsynchronously)) { IdleOffer = idleOffer, FinalAckAnswerGeneration = answerGeneration };
+                    TaskCreationOptions.RunContinuationsAsynchronously)) { IdleOffer = idleOffer, FinalAckAnswerGeneration = answerGeneration, FinalAckAuthorityBoundary = authorityBoundary };
             if (selection is not null) leaseBoundFinalAcks.Add(envelope, selection);
             pendingAccelerationAnswerAckReplyShadow = shadow;
             workerCreated = true;
             return shadow;
         }
+    }
+
+    private bool IsFinalAckRetryReceiptCurrentLocked(PendingAccelerationReplyShadow ack)
+    {
+        if (ack.AuthorityMode != RuntimeUnlockOfferAuthorityMode.InstalledRetry) return true;
+        return ack.FinalAckAuthorityBoundary is { InstallReceipt: { } receipt } boundary &&
+               receipt.Authority.SessionId == ack.SessionId && receipt.Authority.TransferId == boundary.TransferId &&
+               receipt.Authority.Direction == boundary.Direction && runtimeUnlockRecoveryRetryState is { } state &&
+               TryValidateRuntimeUnlockRetryDispatchInstallReceiptCurrentUnsafe(state, receipt, out _, allowDispatchObservedSettlement: true);
     }
 
     private bool TryGetCurrentPendingAccelerationAnswerAckReplyShadow(
@@ -33935,7 +33944,7 @@ public sealed partial class NknSignalingTransport : INknListenerCapHandoffContro
         lock (accelerationGate)
         {
             current = pendingAccelerationAnswerAckReplyShadow!;
-            return current is not null &&
+            return current is not null && IsFinalAckRetryReceiptCurrentLocked(current) &&
                    (expected.IdleOffer is null || IsIdleSessionAcceptedAnswerCurrentLocked(expected.IdleOffer)) &&
                    current.WorkerGeneration == expected.WorkerGeneration &&
                    current.PendingGeneration == expected.PendingGeneration &&
@@ -35976,9 +35985,10 @@ public sealed partial class NknSignalingTransport : INknListenerCapHandoffContro
         NknAccelerationLaneKind lanes,
         CancellationToken ct,
         long answerGeneration,
-        bool runtimeUnlock = false,
+        RuntimeUnlockOfferAuthorityBoundary? authorityBoundary = null,
         IdleSessionOfferBinding? idleOffer = null, PreferenceBoundOffer? selection = null, TaskCompletionSource<bool>? handoffAck = null)
     {
+        var runtimeUnlock = authorityBoundary is not null;
         if (IdleSessionBeforeAnswerAckForTests is { } beforeAck) await beforeAck().ConfigureAwait(false);
         bool Reject() { handoffAck?.TrySetResult(false); return false; }
         if (idleOffer is not null && !IsIdleSessionAcceptedAnswerCurrent(idleOffer)) return Reject();
@@ -36020,7 +36030,7 @@ public sealed partial class NknSignalingTransport : INknListenerCapHandoffContro
             replyTarget.LineageGeneration,
             answerGeneration,
             ack.ExpiresAtUnixMs,
-            runtimeUnlock,
+            authorityBoundary,
             out var replayWorkerCreated,
             idleOffer, selection);
         if (replyShadow is null) return Reject();
@@ -36039,7 +36049,8 @@ public sealed partial class NknSignalingTransport : INknListenerCapHandoffContro
         {
             if (answerGeneration != fileActivationHandoffResetGeneration ||
                 (selection is not null && !ReferenceEquals(finalAckPreferenceOffer, selection)) ||
-                !ReferenceEquals(pendingAccelerationAnswerAckReplyShadow?.Envelope, envelope)) return Reject();
+                !ReferenceEquals(pendingAccelerationAnswerAckReplyShadow?.Envelope, envelope) ||
+                !IsFinalAckRetryReceiptCurrentLocked(replyShadow)) return Reject();
             if (FinalAckUtcMs() >= replyShadow.DeadlineUtcMs || (!runtimeUnlock && !queued.Succeeded))
             {
                 // Invalidate this answer's queued Core work before publishing the rejection.
@@ -37791,15 +37802,14 @@ public sealed partial class NknSignalingTransport : INknListenerCapHandoffContro
             return false;
         }
 
-        var fallbackYieldAdmissionTransferId =
-            ResolveSingleActiveFileTransferDataSessionTransferId(normalizedSessionId, transferId: null);
         var hasFallbackYieldAdmission =
-            !string.IsNullOrWhiteSpace(fallbackYieldAdmissionTransferId) &&
+            HasActiveFileTransferDataSessionForTransfer(normalizedSessionId, authorityBoundary.TransferId) &&
             TryGetEffectiveFallbackPairedTailYieldInstallReceipt(
                 normalizedSessionId,
-                fallbackYieldAdmissionTransferId,
-                direction: null,
-                out _);
+                authorityBoundary.TransferId,
+                authorityBoundary.Direction,
+                out var receipt) &&
+            receipt == authorityBoundary.InstallReceipt;
         var currentOfferMatches = HasCurrentRuntimeUnlockOfferProofState(
             normalizedSessionId,
             offerGeneration);
@@ -39163,7 +39173,7 @@ public sealed partial class NknSignalingTransport : INknListenerCapHandoffContro
             try
             {
                 if (!fixedListenerCurrent || !await SendAccelerationAnswerAckAsync(answer, answerReplyTarget, validation.AcceptedLanes, CancellationToken.None,
-                        ordinaryAnswerGeneration, runtimeUnlock: runtimeUnlock, idleOffer: expectedIdleOffer, selection: ackSelection, handoffAck: handoffAck).ConfigureAwait(false))
+                        ordinaryAnswerGeneration, authorityBoundary: expectedOfferAuthorityBoundary, idleOffer: expectedIdleOffer, selection: ackSelection, handoffAck: handoffAck).ConfigureAwait(false))
                     return false;
                 lock (accelerationGate)
                 {
