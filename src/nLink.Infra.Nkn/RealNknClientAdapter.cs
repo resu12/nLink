@@ -30,7 +30,7 @@ internal readonly record struct BridgeBootstrapHealthSnapshot(
     string FailureReason,
     string LastError);
 
-internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, IAuthoritativeConnectedAddressSource, IBridgeScreenShareQueueCapability, IRuntimeUnlockRetryPriorityNknClient
+internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, IAuthoritativeConnectedAddressSource, IBridgeScreenShareQueueCapability, IRuntimeUnlockRetryPriorityNknClient, IOwnedHandshakeClient
 {
     private const int MaxPayloadBytes = BridgeBinaryProtocol.MaxPayloadBytes;
     private const int BridgeProtocolVersion = BridgeBinaryProtocol.ProtocolVersion;
@@ -3835,12 +3835,19 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
                 NknBridgeChannel.Control));
     }
 
-    private async Task SendCoreAsync(
+    public async Task<bool> SendOwnedHandshakeAsync(string destination, byte[] bytes, NknBridgeChannel channel, bool priority,
+        OwnedHandshakeWrite admit, CancellationToken ct)
+    {
+        if (channel == NknBridgeChannel.Bulk && !priority) await WaitWhileBulkQueueSeverelyCongestedAsync(ct).ConfigureAwait(false);
+        return await SendCoreAsync(destination, bytes, channel, ct, priority, admit).ConfigureAwait(false);
+    }
+
+    private async Task<bool> SendCoreAsync(
         string destination,
         byte[] payload,
         NknBridgeChannel channel,
         CancellationToken ct,
-        bool prioritizeRuntimeUnlockRetry = false)
+        bool prioritizeRuntimeUnlockRetry = false, OwnedHandshakeWrite? admit = null)
     {
         ThrowIfDisposed();
         ArgumentException.ThrowIfNullOrWhiteSpace(destination);
@@ -3848,7 +3855,6 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
         EnsurePayloadWithinLimit(payload, "send");
         EnsureChannelSupported(channel);
 
-        MaybeLogBridgeSendSummary(payload.Length, destination.Length);
         var isScreenSharePayload = channel == NknBridgeChannel.Media;
         var serializedBytes = BridgeBinaryProtocol.MeasureSendFrameBytes(destination, payload);
         var admission = CaptureBridgeSubmissionAdmissionOrThrow(
@@ -3881,9 +3887,8 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
                 "pre_submit",
                 channel);
             BridgeSubmissionAfterGateAcquiredForTests?.Invoke(channel);
-            await submissionSnapshot.Writer
-                .WriteSendFrameAsync(destination, payload, channel, ct)
-                .ConfigureAwait(false);
+            if (!await submissionSnapshot.Writer.WriteSendFrameAsync(destination, payload, channel, ct, admit).ConfigureAwait(false)) return false;
+            MaybeLogBridgeSendSummary(payload.Length, destination.Length);
             ValidatePhysicalBridgeSubmissionOrThrow(
                 admission,
                 "post_submit",
@@ -3915,6 +3920,7 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
                     "event=runtime_unlock_retry_priority_submission_decided; " +
                     $"decision_status=Completed; channel={channel.ToString().ToLowerInvariant()}; elapsed_ms={(long)Stopwatch.GetElapsedTime(priorityWaitStarted).TotalMilliseconds}; authority_effect=none");
             }
+            return true;
         }
         finally
         {

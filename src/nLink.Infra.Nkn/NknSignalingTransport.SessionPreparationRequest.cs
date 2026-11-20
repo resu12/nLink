@@ -75,7 +75,7 @@ public sealed partial class NknSignalingTransport
             : new(FileTransferAccelerationRequestPurpose.Unavailable, "preparation_binding_unavailable");
     }
 
-    private async Task RequestSessionPreparationAsync(CancellationToken ct)
+    private async Task RequestSessionPreparationAsync(CancellationToken ct, RetryPauseScope? retryScope = null)
     {
         long slot = 0;
         FileTransferSessionPreparationPermit? ownedPermit = null;
@@ -97,7 +97,7 @@ public sealed partial class NknSignalingTransport
             var selected = attachment.Authority.SelectRequest(attachment, epoch);
             if (selected.Purpose != FileTransferAccelerationRequestPurpose.SessionPreparation ||
                 selected.Permit is { LocalIsPayer: false }) return;
-            if (!TryAcquireSessionPreparationNegotiationSlot(out slot)) return;
+            if (!TryAcquireSessionPreparationNegotiationSlot(out slot, retryScope)) return;
             if (ct.IsCancellationRequested || IsAccelerationUserStoppedForCurrentSession() ||
                 CaptureRuntimeUnlockPostFallbackSchedulingBoundary(epoch.SessionId).Kind != RuntimeUnlockPostFallbackSchedulingBoundaryKind.NoFallback)
                 return;
@@ -203,7 +203,7 @@ public sealed partial class NknSignalingTransport
             ContinueSessionPreparationAfterAdmission(publication);
     }
 
-    private bool TryAcquireSessionPreparationNegotiationSlot(out long slot)
+    private bool TryAcquireSessionPreparationNegotiationSlot(out long slot, RetryPauseScope? retryScope = null)
     {
         lock (accelerationGate)
         {
@@ -211,7 +211,7 @@ public sealed partial class NknSignalingTransport
             if (!string.IsNullOrWhiteSpace(outboundAccelerationOfferNonce) ||
                 !string.IsNullOrWhiteSpace(pendingAccelerationAnswerAckNonce) ||
                 GetFileTransferRouteTransitionPauseAuthorityUnsafe() is not null ||
-                !TryAcquireGenericAccelerationNegotiationSlot(out slot)) return false;
+                !TryAcquireGenericAccelerationNegotiationSlot(out slot, retryScope)) return false;
             accelerationNegotiationSlotOwner = AccelerationNegotiationSlotOwner.SessionPreparation;
             return true;
         }

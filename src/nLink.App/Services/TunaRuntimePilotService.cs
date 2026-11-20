@@ -737,6 +737,7 @@ internal sealed class TunaRuntimePilotService : ITunaRuntimePilotService
     private static readonly TimeSpan DefaultStopCompletionTimeout = TimeSpan.FromSeconds(10);
     internal static TimeSpan ListenerRestartUnlockRetentionForTests => ListenerRestartUnlockRetention;
     private readonly object gate = new();
+    private readonly object lanePreferenceWriteGate = new();
     private readonly SemaphoreSlim walletWriteGate = new(1, 1);
     private readonly ITunaRuntimePreferenceStore preferenceStore;
     private readonly ITunaUsageAccountingStore usageStore;
@@ -1309,23 +1310,36 @@ internal sealed class TunaRuntimePilotService : ITunaRuntimePilotService
         TunaUsageSessionRecord? recordedSession = null;
         var shouldStop = false;
         ExceptionDispatchInfo? disableSaveFailure = null;
-        lock (gate)
+        // A rapid re-selection must not overtake retirement of the old offer.
+        lock (lanePreferenceWriteGate)
         {
-            if (!normalized.Enabled)
+            NknSignalingTransport? laneTransport;
+            ExceptionDispatchInfo? enableSaveFailure = null;
+            lock (gate)
             {
-                shouldStop = HasTransportToStop_NoLock();
-                ClearSessionUnlock_NoLock();
-                recordedSession = CompleteIncompleteSession_NoLock("runtime_disabled");
-                control = currentTransportControl;
+                if (!normalized.Enabled)
+                {
+                    shouldStop = HasTransportToStop_NoLock();
+                    ClearSessionUnlock_NoLock();
+                    recordedSession = CompleteIncompleteSession_NoLock("runtime_disabled");
+                    control = currentTransportControl;
+                }
+
+                runtimeStatus = normalized.Enabled ? normalized.LastRuntimeStatus : "off";
+                Volatile.Write(ref preferences, normalized.WithStatus(runtimeStatus));
+                UpdateStartupTiming_NoLock(runtimeStatus, nowProvider());
+                laneTransport = currentTransportControl as NknSignalingTransport;
+                if (normalized.Enabled)
+                {
+                    try { preferenceStore.Save(preferences); }
+                    catch (Exception ex) { enableSaveFailure = ExceptionDispatchInfo.Capture(ex); }
+                }
+                else disableSaveFailure = SaveStopPreferences_NoLock();
             }
-
-            runtimeStatus = normalized.Enabled ? normalized.LastRuntimeStatus : "off";
-            preferences = normalized.WithStatus(runtimeStatus);
-            UpdateStartupTiming_NoLock(runtimeStatus, nowProvider());
-            if (normalized.Enabled) preferenceStore.Save(preferences);
-            else disableSaveFailure = SaveStopPreferences_NoLock();
+            // Never acquire the transport lock while holding the wallet lock.
+            laneTransport?.RetireDeselectedAccelerationOffers();
+            enableSaveFailure?.Throw();
         }
-
         LogUsageSessionRecorded(recordedSession);
         NotifyStateChanged();
         if (shouldStop && control is not null)
@@ -1436,39 +1450,39 @@ internal sealed class TunaRuntimePilotService : ITunaRuntimePilotService
     }
 
     public ISignalingTransport CreateNknTransport()
+        => CreateNknTransport(NknSignalingTransport.CreateWithTunaAcceleration);
+
+    internal ISignalingTransport CreateNknTransport(
+        Func<NknTunaAccelerationOptions, INknTunaListenerSidecarSupervisor?, NknSignalingTransport> createTransport)
     {
         var envOptions = NknTunaAccelerationOptions.Load();
         if (envOptions.Enabled)
         {
-            return TrackTransport(NknSignalingTransport.CreateWithTunaAcceleration(envOptions, listenerSupervisor: null));
+            return TrackTransport(createTransport(envOptions, null));
         }
 
         var currentPreferences = Preferences;
         var availability = walletVerifier.GetAvailability();
-        if (!currentPreferences.Enabled)
-        {
-            SetRuntimeStatus("off");
-            return TrackTransport(availability.IsAvailable && !string.IsNullOrWhiteSpace(availability.SidecarPath)
-                ? NknSignalingTransport.CreateWithTunaAcceleration(
-                    NknTunaAccelerationOptions.CreatePassiveDialer(
-                        availability.SidecarPath,
-                        TunaRuntimePreferenceState.Default.Lanes),
-                    listenerSupervisor: null)
-                : new NknSignalingTransport());
-        }
-
         if (!availability.IsAvailable || string.IsNullOrWhiteSpace(availability.SidecarPath))
         {
-            SetRuntimeStatus("sidecar_unavailable");
+            SetRuntimeStatus(currentPreferences.Enabled ? "sidecar_unavailable" : "off");
             return TrackTransport(new NknSignalingTransport());
         }
 
-        var wallet = LoadWalletState();
-        SetRuntimeStatusForTransportCreation(wallet);
+        if (currentPreferences.Enabled) SetRuntimeStatusForTransportCreation(LoadWalletState());
+        else SetRuntimeStatus("off");
 
-        var runtimeOptions = NknTunaAccelerationOptions.CreateRuntimePilot(availability.SidecarPath, currentPreferences.Lanes);
-        INknTunaListenerSidecarSupervisor? supervisor = new RuntimeListenerSupervisor(this);
-        return TrackTransport(NknSignalingTransport.CreateWithTunaAcceleration(runtimeOptions, supervisor));
+        var runtimeOptions = NknTunaAccelerationOptions.CreateRuntimePilot(
+            availability.SidecarPath, TunaRuntimePreferenceState.Default.Lanes, runtimeLaneLimit: GetSessionTunaLanes);
+        return TrackTransport(createTransport(runtimeOptions, new RuntimeListenerSupervisor(this)));
+    }
+
+    private NknAccelerationLaneKind GetSessionTunaLanes()
+    {
+        // Lane capabilities are queried under transport locks; read the immutable
+        // preference snapshot without taking the wallet lock. Off still permits free dialing.
+        var current = Volatile.Read(ref preferences);
+        return current.Enabled ? current.Lanes : TunaRuntimePreferenceState.Default.Lanes;
     }
 
     internal INknTunaListenerSidecarSupervisor CreateRuntimeListenerSupervisorForTests()
@@ -2654,7 +2668,36 @@ internal sealed class TunaRuntimePilotService : ITunaRuntimePilotService
             }
         }
 
-        private INknTunaListenerSidecarSupervisor? GetOrCreateSupervisor(bool requireIdle, CancellationToken ct, out long generation)
+        public bool IsCurrentVacancy(NknListenerVacancy vacant)
+        {
+            lock (gate) return !disposed && supervisor?.IsCurrentVacancy(vacant) == true;
+        }
+
+        public bool TryDetachForRearm(NknTunaListenerAdoptionSnapshot snapshot, out Action<string>? stop, out NknListenerVacancy? vacant, bool replacing = false)
+        {
+            lock (gate)
+            {
+                stop = null; vacant = null;
+                return !disposed && supervisor?.TryDetachForRearm(snapshot, out stop, out vacant, replacing) == true;
+            }
+        }
+
+        public Task<NknTunaListenerAdoptionSnapshot?> StartInVacancyAsync(NknListenerVacancy vacant,
+            NknTunaListenerStartRequest request, CancellationToken ct, Action<NknListenerVacancy> failed)
+        {
+            var current = GetOrCreateSupervisor(true, ct, out var generation, rearmOnly: true);
+            lock (gate)
+                return !disposed && generation == stopGeneration && ReferenceEquals(current, supervisor) && !ct.IsCancellationRequested
+                    ? current?.StartInVacancyAsync(vacant, request, ct, failed) ?? Task.FromResult<NknTunaListenerAdoptionSnapshot?>(null)
+                    : Task.FromResult<NknTunaListenerAdoptionSnapshot?>(null);
+        }
+
+        public bool TryUseExactListener(NknTunaListenerAdoptionSnapshot expected, Action use)
+        {
+            lock (gate) return !disposed && supervisor?.TryUseExactListener(expected, use) == true;
+        }
+
+        private INknTunaListenerSidecarSupervisor? GetOrCreateSupervisor(bool requireIdle, CancellationToken ct, out long generation, bool rearmOnly = false)
         {
             lock (gate)
             {
@@ -2678,6 +2721,7 @@ internal sealed class TunaRuntimePilotService : ITunaRuntimePilotService
                 var walletChanged = supervisorWallet?.IsSamePayerLinkAs(selected) == false;
                 if (supervisor is null || walletChanged || !string.Equals(supervisorKey, nextKey, StringComparison.Ordinal))
                 {
+                    if (rearmOnly) return null;
                     if (supervisor is not null)
                     {
                         // Changing the selected wallet must never dispose a starting or accounted listener.

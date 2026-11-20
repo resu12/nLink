@@ -1709,6 +1709,7 @@ public sealed partial class NknFileTransferTransportTests : CoreSmokeTestsBase
                     null,
                     null,
                     0L, // Existing receiverBarrierPauseGeneration default; reflection does not supply it.
+                    null, // Not a generation-bound release.
                 ]);
 
             await submission.PhysicalCompletionTask.WaitAsync(TimeSpan.FromSeconds(2));

@@ -25,6 +25,15 @@ internal interface INknClient : IDisposable
     event EventHandler? Disconnected;
 }
 
+// Return null to skip a retired handshake; an admitted frame is written in full.
+internal delegate ValueTask? OwnedHandshakeWrite(Func<ValueTask> beginWrite);
+
+internal interface IOwnedHandshakeClient
+{
+    Task<bool> SendOwnedHandshakeAsync(string destination, byte[] bytes, NknBridgeChannel channel, bool priority,
+        OwnedHandshakeWrite admit, CancellationToken ct);
+}
+
 internal interface IRuntimeUnlockRetryPriorityNknClient
 {
     Task SendRuntimeUnlockRetryControlAsync(

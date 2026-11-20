@@ -422,6 +422,47 @@ public sealed partial class NknAccelerationTransportTests
         => WaitUntilAsync(() => (long)GetPrivateField(pair.Payer, "accelerationNegotiationSlotGeneration")! == 0 &&
             (long)GetPrivateField(pair.Dialer, "accelerationNegotiationSlotGeneration")! == 0, TimeSpan.FromSeconds(3));
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task PreparationRequest_FileLaneDeselected_RetiresOnlyPendingOffer(bool alreadyReady)
+    {
+        FakeNknClient.ResetNetwork();
+        try
+        {
+            var allowed = NknAccelerationLaneKind.File;
+            using var pair = new PreparationHandshakePair(false, NknTunaAccelerationOptions.CreateRuntimePilot(
+                "fake-sidecar.exe", NknAccelerationLaneKind.File | NknAccelerationLaneKind.Screen, runtimeLaneLimit: () => allowed));
+            await pair.Approve();
+            var held = pair.Hold(MsgType.SessionPreparationAnswer);
+            var started = pair.Start(pair.Token);
+            await held.Entered.Task.WaitAsync(pair.Token);
+            if (alreadyReady)
+            {
+                held.Release.TrySetResult();
+                await pair.WaitReady();
+            }
+            var before = pair.State(pair.PayerService).Readiness;
+            allowed = NknAccelerationLaneKind.Screen;
+            pair.Payer.RetireDeselectedAccelerationOffers();
+            allowed = NknAccelerationLaneKind.File;
+            held.Release.TrySetResult();
+            Assert.Equal(alreadyReady, await started.WaitAsync(pair.Token));
+            if (alreadyReady)
+            {
+                Assert.NotNull(before);
+                Assert.Same(before, pair.State(pair.PayerService).Readiness);
+            }
+            else
+            {
+                Assert.Null(pair.State(pair.PayerService).Readiness);
+                Assert.DoesNotContain(MsgType.SessionPreparationAnswerAck, pair.Sent);
+            }
+            pair.AssertNoFileEffects();
+        }
+        finally { FakeNknClient.ResetNetwork(); }
+    }
+
     private static async Task WithPublicPreparationPairAsync(bool helperPays, Func<PreparationHandshakePair, Task> test,
         InviteCapabilities capabilities = InviteCapabilities.Chat | InviteCapabilities.FileTransfer)
     {

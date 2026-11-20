@@ -112,6 +112,7 @@ public sealed partial class NknSignalingTransport
            (retired ? retiredAccelerationOfferPayerDecisionId : outboundAccelerationOfferPayerDecisionId) == binding.PayerDecisionId &&
            (retired ? DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() < retiredAccelerationOfferExpiresUtcMs
                : outboundAccelerationOfferGeneration == binding.Generation) &&
+           binding.Request.Selection.IdleWrite?.IsCurrent == true &&
            IsIdleSessionUnlockLifetimeCurrent(binding.Request) &&
            !IsAccelerationUserStoppedForCurrentSession() &&
            !IsAccelerationPeerUserStoppedForFallbackSession(binding.Request.Epoch.SessionId);

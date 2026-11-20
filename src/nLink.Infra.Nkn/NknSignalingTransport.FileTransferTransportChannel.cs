@@ -1178,7 +1178,7 @@ public sealed partial class NknSignalingTransport : IFileTransferControlPlanePhy
                             ct,
                             allowAcceleration: !forceRegularNknBulk && !suppressUncommittedRuntimeUnlockAcceleration,
                             allowAccelerationDuringRegularNknFallback: allowAccelerationDuringRegularNknFallback)
-                        .ConfigureAwait(false);
+                        .ConfigureAwait(false) == BulkSendResult.Accelerated;
                 }
             }
 
@@ -1681,7 +1681,8 @@ public sealed partial class NknSignalingTransport : IFileTransferControlPlanePhy
         FileTransferTransportHandoffKind handoffKind = FileTransferTransportHandoffKind.None,
         FileTransferTransportKind targetTransport = FileTransferTransportKind.Unknown,
         PostTunaFallbackHandoffEvidence? postTunaFallbackHandoffEvidence = null,
-        PostTunaFallbackAvailabilityProofEvidence? postTunaFallbackProofBoundary = null)
+        PostTunaFallbackAvailabilityProofEvidence? postTunaFallbackProofBoundary = null,
+        (string SessionId, long Generation)? pausePublication = null)
     {
         var effectiveHandoffKind = ResolveFileTransferDataSessionAvailabilityHandoffKind(
             reason,
@@ -1791,6 +1792,7 @@ public sealed partial class NknSignalingTransport : IFileTransferControlPlanePhy
 
         foreach (var session in sessions)
         {
+            if (pausePublication is { } publication && publication.SessionId != session.SessionId) continue;
             var proofScopedFallbackBoundary =
                 (postTunaFallbackHandoffEvidence is { IsComplete: true } evidence &&
                  string.Equals(evidence.SessionId, session.SessionId, StringComparison.Ordinal) &&
@@ -1854,7 +1856,8 @@ public sealed partial class NknSignalingTransport : IFileTransferControlPlanePhy
                 targetTransport,
                 proofScopedFallbackBoundary ? postTunaFallbackHandoffEvidence : null,
                 proofScopedFallbackBoundary ? postTunaFallbackProofBoundary : null,
-                receiverBarrierPauseGeneration);
+                receiverBarrierPauseGeneration,
+                pausePublication?.Generation);
         }
     }
 
@@ -9883,7 +9886,8 @@ public sealed partial class NknSignalingTransport : IFileTransferControlPlanePhy
             FileTransferTransportKind targetTransport = FileTransferTransportKind.Unknown,
             PostTunaFallbackHandoffEvidence? postTunaFallbackHandoffEvidence = null,
             PostTunaFallbackAvailabilityProofEvidence? postTunaFallbackProofBoundary = null,
-            long receiverBarrierPauseGeneration = 0)
+            long receiverBarrierPauseGeneration = 0,
+            long? expectedPauseGeneration = null)
         {
             if (disposed != 0)
             {
@@ -9950,16 +9954,31 @@ public sealed partial class NknSignalingTransport : IFileTransferControlPlanePhy
             int previous;
             lock (availabilityGate)
             {
-                previous = Interlocked.Exchange(ref available, next);
+                if (expectedPauseGeneration is long expected)
+                {
+                    lock (owner.activationPausePublicationGate)
+                    {
+                        if (owner.fileTransferTunaActivationPauseGeneration != expected) return;
+                        if (isAvailable) owner.ActivationPausePublishingForTests?.Invoke(false);
+                        previous = WriteAvailabilityLocked();
+                    }
+                }
+                else previous = WriteAvailabilityLocked();
+                // Synchronous token callbacks may enter the transport. Never run them under the publication gate.
+                if (activationBarrier) CancelTunaActivationPauseSends();
+            }
+
+            int WriteAvailabilityLocked()
+            {
+                var prior = Interlocked.Exchange(ref available, next);
                 Volatile.Write(ref availabilityReason, normalizedReason);
                 if (activationBarrier)
                 {
                     initialReceiverBarrierPauseGeneration = receiverBarrierPauseGeneration;
                     Volatile.Write(ref lastTunaActivationPauseReason, normalizedReason);
-                    CancelTunaActivationPauseSends();
                 }
 
-                if (isAvailable && previous == 0)
+                if (isAvailable && prior == 0)
                 {
                     if (IsTunaActivationNegotiationAvailabilityReason(previousReason))
                     {
@@ -9971,6 +9990,7 @@ public sealed partial class NknSignalingTransport : IFileTransferControlPlanePhy
                 }
 
                 availabilityGeneration = Math.Max(1, availabilityGeneration + 1);
+                return prior;
             }
 
             var explicitHandoff = requiresResumeRequest &&

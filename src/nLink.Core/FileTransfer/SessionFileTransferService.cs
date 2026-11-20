@@ -1410,6 +1410,7 @@ public sealed partial class SessionFileTransferService :
                     preparedPublication = publication;
                 }
                 if (nativeSender is not null && !nativeSender.BindContextLocked(this, context)) return null;
+                RetireIdleOfferWriteLocked();
                 outboundTransfer = context;
                 uninstalled = null;
             }
@@ -3146,6 +3147,7 @@ public sealed partial class SessionFileTransferService :
                             !AdoptPreparationAdmissionLocked(preparation, CreateCoordinatorStateLocked(incoming), incoming.LifetimeCts.Token)) return;
                         preparedPublication = publication;
                     }
+                    RetireIdleOfferWriteLocked();
                     inboundTransfer = incoming;
                     installed = true;
                     snapshotToRaise = CreateSnapshotLocked();

@@ -3827,6 +3827,53 @@ public sealed class TunaWalletDiagnosticsTests
         }
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    [Trait("Category", "Smoke")]
+    public async Task TunaRuntimePilot_EnableAndUnlockAfterTransportCreation_OffersListenerWithoutReconnect(bool fileOnly)
+    {
+        var root = CreateTempRoot();
+        var previousTunaEnabled = Environment.GetEnvironmentVariable("NLINK_NKN_TUNA_ENABLED");
+        try
+        {
+            Environment.SetEnvironmentVariable("NLINK_NKN_TUNA_ENABLED", null);
+            using var localAppData = NknTransportOptions.OverrideLocalAppDataPathForTests(root);
+            using var perProcessIdentity = NknTransportOptions.OverrideShouldUsePerProcessLocalIdentityForTests(false);
+            var verifier = new FakeTunaWalletVerifier(TunaWalletValidationResult.Ok("wallet", VerifiedFixturePayer, "1"),
+                sidecarPath: Path.Combine(root, "nlink-tuna-sidecar.exe"));
+            var context = await CreateVerifiedRuntimeContextAsync(root, verifier, enabled: false);
+            var runtime = context.RuntimeService;
+            using var transport = Assert.IsType<NknSignalingTransport>(runtime.CreateNknTransport());
+            var lane = Assert.IsAssignableFrom<INknTunaAccelerationSession>(
+                CoreSmokeTestsBase.GetPrivateField(transport, "accelerationLane"));
+            Assert.Equal(NknAccelerationLaneKind.File | NknAccelerationLaneKind.Screen, lane.ConfiguredLanes);
+            Assert.False(transport.AccelerationCanOfferListenerForTests);
+
+            runtime.SavePreferences(new TunaRuntimePreferenceState
+                { Enabled = true, FileLaneEnabled = fileOnly, ScreenLaneEnabled = !fileOnly });
+            Assert.False(transport.AccelerationCanOfferListenerForTests);
+            var unlock = await runtime.UnlockForSessionAsync("fixture".ToCharArray(), TunaRuntimeUnlockSource.Header,
+                await context.WalletStore.LoadAsync());
+            Assert.True(unlock.Success);
+            Assert.True(transport.AccelerationCanOfferListenerForTests);
+            var selectedLane = fileOnly ? NknAccelerationLaneKind.File : NknAccelerationLaneKind.Screen;
+            Assert.Equal(selectedLane, lane.ConfiguredLanes);
+            Assert.Equal(selectedLane, lane.SupportedLanes);
+            Assert.False(transport.IsAccelerationAvailableForTests);
+
+            runtime.SavePreferences(new TunaRuntimePreferenceState
+                { Enabled = false, FileLaneEnabled = fileOnly, ScreenLaneEnabled = !fileOnly });
+            Assert.False(transport.AccelerationCanOfferListenerForTests);
+            Assert.Equal(NknAccelerationLaneKind.File | NknAccelerationLaneKind.Screen, lane.ConfiguredLanes);
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("NLINK_NKN_TUNA_ENABLED", previousTunaEnabled);
+            DeleteTempRoot(root);
+        }
+    }
+
     [Fact]
     [Trait("Category", "Smoke")]
     public void TunaListenerSidecarSupervisor_ParsesSummaryPaymentAndCapConfidence()
@@ -4235,6 +4282,12 @@ public sealed class TunaWalletDiagnosticsTests
                     "NKN0123456789PUBLICADDRESS",
                     "1.2500"),
                 sidecarPath));
+
+    internal static async Task<(TunaRuntimePilotService Runtime, TunaWalletLinkState Wallet)> CreateFundedFakePeerRuntimeAsync(string root)
+    {
+        var context = await CreateListenerSupervisorRuntimeContextAsync(root, Path.Combine(root, "fake-sidecar.exe"));
+        return (context.RuntimeService, await context.WalletStore.LoadAsync());
+    }
 
     private static NknTunaListenerAdoptionSnapshot CreateListenerAdoptionSnapshot(
         NknAccelerationLaneKind lanes = NknAccelerationLaneKind.File)

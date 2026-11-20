@@ -7,7 +7,21 @@ internal enum FileTransferSessionPreparationStatus { Accepted, Idempotent, Rejec
 internal enum FileTransferAccelerationRequestPurpose { Unavailable, SessionPreparation, TransferActivation, IdleSessionReestablishment }
 internal sealed record FileTransferAccelerationRequestSelection(FileTransferAccelerationRequestPurpose Purpose,
     string Reason, FileTransferSessionPreparationPermit? Permit = null,
-    string? TerminalTransferId = null, FileTransferDirection? TerminalDirection = null, long TerminalGeneration = 0);
+    string? TerminalTransferId = null, FileTransferDirection? TerminalDirection = null, long TerminalGeneration = 0)
+{
+    internal IdleOfferWriteWindow? IdleWrite { get; init; }
+}
+
+// Serializes the start of an idle offer write with replacement of the terminal transfer.
+// This does not grant a lane, a route, or permission to write any other message.
+internal sealed class IdleOfferWriteWindow
+{
+    private readonly object gate = new();
+    private volatile bool retired;
+    internal bool IsCurrent => !retired;
+    internal void Retire() { lock (gate) retired = true; }
+    internal ValueTask? TryWrite(Func<ValueTask> write) { lock (gate) return retired ? null : write(); }
+}
 
 internal sealed record FileTransferSessionPreparationScope(
     Guid ServiceInstanceId, long AttachmentGeneration, long SecurityGeneration,

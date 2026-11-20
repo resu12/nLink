@@ -279,14 +279,14 @@ public sealed partial class NknAccelerationTransportTests
         public readonly ConcurrentQueue<string> Liveness = new();
         public FileTransferSessionPreparationPermit Permit = null!;
 
-        public PreparationHandshakePair(bool helperPays)
+        public PreparationHandshakePair(bool helperPays, NknTunaAccelerationOptions? payerOptions = null)
         {
             var id = Guid.NewGuid().ToString("N");
             PayerClient = new($"payer.preparation-handshake.{id}.address");
             DialerClient = new($"dialer.preparation-handshake.{id}.address");
             var options = NknTransportOptions.Load();
             Payer = new(PayerClient, options, new NknIdentity("preparation-payer", PayerClient.Address),
-                NknTunaAccelerationOptions.Disabled, PayerLane);
+                payerOptions ?? NknTunaAccelerationOptions.Disabled, PayerLane);
             Dialer = new(DialerClient, options, new NknIdentity("preparation-dialer", DialerClient.Address),
                 NknTunaAccelerationOptions.Disabled, DialerLane);
             host = helperPays ? Dialer : Payer;
@@ -502,6 +502,18 @@ public sealed partial class NknAccelerationTransportTests
             Interlocked.Increment(ref OrdinaryStarts);
             return runtime.StartDialerSidecarAsync(tuna, peer, ct);
         }
+        public Task<bool> StartOfferDialerAsync(string tuna, string peer, object owner, CancellationToken ct)
+        {
+            if (runtime is null) throw new InvalidOperationException("ordinary_dialer_forbidden");
+            Assert.Null(Current);
+            Interlocked.Increment(ref OrdinaryStarts);
+            return runtime.StartOfferDialerAsync(tuna, peer, owner, ct);
+        }
+        public bool IsCurrentOfferDial(object owner) => Current is null && runtime?.IsCurrentOfferDial(owner) == true;
+        public bool TryCommitOfferDialer(object owner, bool retainUntilProbe, Func<bool, bool> publish)
+            => Current is null && runtime?.TryCommitOfferDialer(owner, retainUntilProbe, publish) == true;
+        public bool TryStopOfferDialer(object owner, string reason)
+            => Current is null && runtime?.TryStopOfferDialer(owner, reason) == true;
         public Task StopAsync(string reason, CancellationToken ct)
         {
             GlobalStops++; Current = null; failureOrigin = null;

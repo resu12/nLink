@@ -2629,10 +2629,10 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
 
         try
         {
-            await SendEnvelopeWithAckRetryAsync(
+            var sent = await SendEnvelopeWithAckRetryAsync(
                 options.ControlDestination, envelope, ct,
                 registeredAck: registeredAck).ConfigureAwait(false);
-            return new LifecycleCopySendResult("control_ack", true, null);
+            return new LifecycleCopySendResult("control_ack", sent, null);
         }
         catch (Exception ex)
         {
@@ -2700,17 +2700,10 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
                     return delayedFailure;
             }
 
-            if (useBulkLane)
-            {
-                await SendBulkEnvelopeAsync(destination, envelope, copyCts.Token).ConfigureAwait(false);
-            }
-            else
-            {
-                await SendEnvelopeAsync(destination, envelope, copyCts.Token).ConfigureAwait(false);
-            }
-
-            succeeded = true;
-            return new LifecycleCopySendResult(lane, true, null);
+            succeeded = useBulkLane
+                ? await SendBulkEnvelopeAsync(destination, envelope, copyCts.Token).ConfigureAwait(false) != BulkSendResult.Skipped
+                : await SendEnvelopeAsync(destination, envelope, copyCts.Token).ConfigureAwait(false);
+            return new LifecycleCopySendResult(lane, succeeded, null);
         }
         catch (Exception ex)
         {

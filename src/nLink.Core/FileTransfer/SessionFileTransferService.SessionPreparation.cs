@@ -9,6 +9,13 @@ public sealed partial class SessionFileTransferService : IFileTransferSessionPre
     private IFileTransferSignalingTransport? preparationTransport;
     private FileTransferSessionPreparationSecurityEpoch? preparationEpoch;
     private long preparationBlockedThroughGeneration;
+    private IdleOfferWriteWindow? idleOfferWrite;
+
+    private void RetireIdleOfferWriteLocked()
+    {
+        idleOfferWrite?.Retire();
+        idleOfferWrite = null;
+    }
     private PreparationAdmissionCapture? preparationAdmission;
     private FileTransferSessionPreparationExecution? preparationExecution;
     private FileTransferSessionPreparationAdmissionLease? preparationAdmissionLease;
@@ -23,6 +30,7 @@ public sealed partial class SessionFileTransferService : IFileTransferSessionPre
         lock (gate)
         {
             transport = source;
+            RetireIdleOfferWriteLocked();
             preparationTransport = source;
             preparationAttachment = attachment;
             preparationEpoch = null;
@@ -37,6 +45,7 @@ public sealed partial class SessionFileTransferService : IFileTransferSessionPre
 
     private FileTransferSessionPreparationAttachment? DetachPreparationTransportLocked()
     {
+        RetireIdleOfferWriteLocked();
         var old = preparationAttachment;
         preparationAttachment = null;
         preparationTransport = null;
@@ -51,6 +60,7 @@ public sealed partial class SessionFileTransferService : IFileTransferSessionPre
 
     private void RevokePreparationScopeLocked()
     {
+        RetireIdleOfferWriteLocked();
         preparationBlockedThroughGeneration = Math.Max(preparationBlockedThroughGeneration,
             preparationAttachment?.Lifecycle.Generation ?? 0);
         preparationAdmission = null;
@@ -87,6 +97,7 @@ public sealed partial class SessionFileTransferService : IFileTransferSessionPre
             epoch.Id, epoch.Security!, DateTimeOffset.UtcNow);
         if (decision.Status != FileTransferSessionPreparationStatus.Accepted) return false;
         sessionPreparation = decision.State;
+        RetireIdleOfferWriteLocked();
         preparationEpoch = epoch;
         preparationAdmission = null;
         return true;
@@ -169,6 +180,8 @@ public sealed partial class SessionFileTransferService : IFileTransferSessionPre
                 }
                 result = FileTransferCoordinator.SelectSessionPreparationRequest(sessionPreparation, epoch.SessionId,
                     selectedTransfer, DateTimeOffset.UtcNow);
+                if (result.Purpose == FileTransferAccelerationRequestPurpose.IdleSessionReestablishment)
+                    result = result with { IdleWrite = idleOfferWrite ??= new() };
             });
             return result;
         }

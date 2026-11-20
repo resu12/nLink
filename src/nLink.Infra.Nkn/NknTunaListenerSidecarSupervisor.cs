@@ -222,8 +222,31 @@ internal sealed class NknTunaListenerSidecarSupervisor : INknTunaListenerSidecar
     public Task<NknTunaListenerAdoptionSnapshot?> EnsureStartedIfIdleAsync(NknTunaListenerStartRequest request, CancellationToken ct)
         => EnsureStartedCoreAsync(request, ct, requireIdle: true);
 
+    public bool IsCurrentVacancy(NknListenerVacancy vacant)
+    {
+        lock (gate) return IsIdle && MatchesVacancyLocked(vacant);
+    }
+
+    private bool MatchesVacancyLocked(NknListenerVacancy vacant) => ReferenceEquals(vacant.Supervisor, this) &&
+        vacant.Stop == stopGeneration && vacant.Ownership == ownershipGeneration;
+
+    public Task<NknTunaListenerAdoptionSnapshot?> StartInVacancyAsync(NknListenerVacancy vacant,
+        NknTunaListenerStartRequest request, CancellationToken ct, Action<NknListenerVacancy> failed)
+        => EnsureStartedCoreAsync(request, ct, requireIdle: true, vacant, failed);
+
+    public bool TryUseExactListener(NknTunaListenerAdoptionSnapshot expected, Action use)
+    {
+        lock (gate)
+        {
+            if (CaptureCurrentListenerAdoptionSnapshot() != expected) return false;
+            use();
+            return true;
+        }
+    }
+
     private async Task<NknTunaListenerAdoptionSnapshot?> EnsureStartedCoreAsync(
-        NknTunaListenerStartRequest request, CancellationToken ct, bool requireIdle)
+        NknTunaListenerStartRequest request, CancellationToken ct, bool requireIdle, NknListenerVacancy? vacant = null,
+        Action<NknListenerVacancy>? failed = null)
     {
         if (string.IsNullOrWhiteSpace(request.ExpectedRemotePeer))
         {
@@ -236,6 +259,7 @@ internal sealed class NknTunaListenerSidecarSupervisor : INknTunaListenerSidecar
         {
             ThrowIfDisposed();
             expectedStopGeneration = stopGeneration;
+            if (vacant is not null && !MatchesVacancyLocked(vacant)) return null;
             if (requireIdle && (processOwner is not null || currentRequest is not null)) return null;
             if (endpoint is not null &&
                 processOwner?.IsRunning == true &&
@@ -250,12 +274,15 @@ internal sealed class NknTunaListenerSidecarSupervisor : INknTunaListenerSidecar
             if (!await startGate.WaitAsync(0, ct).ConfigureAwait(false)) return null;
         }
         else await startGate.WaitAsync(ct).ConfigureAwait(false);
+        var admitted = false;
         try
         {
             lock (gate)
             {
                 if (disposed || stopGeneration != expectedStopGeneration || ct.IsCancellationRequested) return null;
+                if (vacant is not null && !MatchesVacancyLocked(vacant)) return null;
                 if (requireIdle && (processOwner is not null || currentRequest is not null)) return null;
+                admitted = true;
                 if (endpoint is not null &&
                     processOwner?.IsRunning == true &&
                     currentRequest == request)
@@ -337,7 +364,13 @@ internal sealed class NknTunaListenerSidecarSupervisor : INknTunaListenerSidecar
         }
         finally
         {
-            startGate.Release();
+            lock (gate)
+            {
+                if (admitted && failed is not null && !disposed && !ct.IsCancellationRequested &&
+                    stopGeneration == expectedStopGeneration && processOwner is null && currentRequest is null)
+                    failed(new(this, stopGeneration, ownershipGeneration));
+                startGate.Release();
+            }
         }
     }
 
@@ -990,11 +1023,15 @@ internal sealed class NknTunaListenerSidecarSupervisor : INknTunaListenerSidecar
     }
 
     public bool TryDetachCurrentListener(NknTunaListenerAdoptionSnapshot snapshot, out Action<string>? stop)
+        => TryDetachForRearm(snapshot, out stop, out _);
+
+    public bool TryDetachForRearm(NknTunaListenerAdoptionSnapshot snapshot, out Action<string>? stop, out NknListenerVacancy? vacant, bool replacing = false)
     {
         stop = null;
+        vacant = null;
         lock (gate)
         {
-            if (disposed || processOwner is not { } owner || currentRequest != snapshot.CurrentRequest ||
+            if (disposed || (replacing && startGate.CurrentCount == 0) || processOwner is not { } owner || currentRequest != snapshot.CurrentRequest ||
                 endpoint != snapshot.Endpoint || ownershipGeneration != snapshot.OwnershipGeneration ||
                 owner.Pid != snapshot.ProcessId || owner.RunId != snapshot.ProcessRunId ||
                 owner.StartedUtc != snapshot.ProcessStartedUtc) return false;
@@ -1007,6 +1044,8 @@ internal sealed class NknTunaListenerSidecarSupervisor : INknTunaListenerSidecar
             pendingReady?.TrySetCanceled();
             pendingReady = null;
             stop = owner.Stop;
+            vacant = new(this, stopGeneration, ownershipGeneration);
+            CompleteIncompleteSession_NoLock("listener_detached");
             return true;
         }
     }
