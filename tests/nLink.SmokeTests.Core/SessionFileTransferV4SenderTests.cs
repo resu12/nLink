@@ -5322,6 +5322,46 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
         Assert.Contains("event=filetransfer_regular_v4_receive_recovery_suppressed_by_current_route_owner;", log, StringComparison.Ordinal);
     }
 
+    private sealed class CanceledPredecessorTransport(string sessionId) : LoopbackFileTransferTransport(sessionId), IFileTransferRouteStatus
+    {
+        bool IFileTransferRouteStatus.IsPostTunaFileFallbackActiveForNewOffer => false;
+    }
+
+    [Theory]
+    [InlineData(FileTransferDirection.Outbound)]
+    [InlineData(FileTransferDirection.Inbound)]
+    public void RegularNknV4ReceiveRecovery_CanceledPredecessorCannotSuppressCurrentPublication(FileTransferDirection direction)
+    {
+        var id = $"reverse-recovery-{direction}";
+        var session = $"session_{id}";
+        using var service = new SessionFileTransferService();
+        using var transport = new CanceledPredecessorTransport(session) { IsPostTunaFileFallbackActiveForRouteSelection = true };
+        service.AttachTransport(transport);
+        using var inboundData = new RecordingDataSession(session, id);
+        var outbound = direction == FileTransferDirection.Outbound;
+        var context = outbound ? CreateRegularNknV4OutboundContext(id, 100, 256, 256, DateTimeOffset.UtcNow) : CreateRegularNknV4InboundContext(id);
+        if (!outbound)
+        {
+            SeedCurrentRuntimeOwnerForTest(context, direction, "unit_test_regular");
+            SetPrivateProperty(context, "DataSession", inboundData);
+            SetPrivateProperty(context, "DataSessionGeneration", 1L);
+        }
+        typeof(SessionFileTransferService).GetField(outbound ? "outboundTransfer" : "inboundTransfer",
+            BindingFlags.Instance | BindingFlags.NonPublic)!.SetValue(service, context);
+        var observation = Assert.IsType<FileTransferReceiveRecoveryObservationSnapshot>(
+            (outbound ? service.Snapshot.Outbound : service.Snapshot.Inbound)?.ReceiveRecoveryObservation);
+        Assert.True(observation.RoutePublicationGeneration > 0);
+        var request = new FileTransferReceiveRecoveryRequest(session, id, direction, "session_liveness_timeout_pending") { Observation = observation };
+        Assert.False(service.RequestFileTransferReceiveRecovery(request with
+            { Observation = observation with { RoutePublicationGeneration = observation.RoutePublicationGeneration + 1 } }));
+        Assert.Empty(transport.ReceiveRecoveryRequests);
+        Assert.True(service.RequestFileTransferReceiveRecovery(request));
+        var dispatched = Assert.Single(transport.ReceiveRecoveryRequests);
+        Assert.Equal(id, dispatched.TransferId);
+        Assert.Equal(direction, dispatched.Direction);
+        Assert.Equal(FileTransferRouteResolver.RegularNknV4FastToken, dispatched.RouteToken);
+    }
+
     [Fact]
     public void RuntimeUnlockPreCommitProbe_DoesNotStartWithoutRuntimeOwner()
     {

@@ -572,6 +572,8 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
     public bool IsFileTunaActiveForRouteSelection =>
         HasActiveFileTunaV4FileTransferRouteHint(currentSessionSecurityState.SessionId?.Value);
     public bool IsPostTunaFileFallbackActiveForRouteSelection => IsFileTransferUsingRegularNknFallbackForCurrentSession();
+    bool IFileTransferRouteStatus.IsPostTunaFileFallbackActiveForNewOffer =>
+        HasRegularNknFileFallback(currentSessionSecurityState.SessionId?.Value, forNewOffer: true);
     public bool IsDiagnosticRegularNknV6RouteEnabled => IsDiagnosticRegularNknV6RouteEnabledCore();
     public string TransportAccelerationStatusReason
     {

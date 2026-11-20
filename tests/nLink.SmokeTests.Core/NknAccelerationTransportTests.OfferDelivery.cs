@@ -1,11 +1,426 @@
 using NLink.Core;
 using NLink.Core.FileTransfer;
 using NLink.Infra.Nkn;
+using System.Threading.Channels;
 
 namespace NLink.SmokeTests;
 
 public sealed partial class NknAccelerationTransportTests
 {
+    [Theory]
+    [InlineData("current", 4)]
+    [InlineData("current", 6)]
+    [InlineData("disposed", 4)]
+    [InlineData("replacement", 6)]
+    [InlineData("queue-full", 4)]
+    [InlineData("writer-closed", 6)]
+    [InlineData("control-first", 6)]
+    [InlineData("dispose-during-write", 6)]
+    public Task OfferDelivery_PreparedBinaryCompletionStaysWithItsOriginalChannel(string dispatchAt, int version)
+        => WithPreparationHandshakePairAsync(false, async pair =>
+        {
+            // No service pump: hold the prepared work and observe exactly which channel receives it.
+            pair.PayerService.DetachTransport();
+            pair.DialerService.DetachTransport();
+            var offer = ReplacementTestOffer(pair.Permit.Scope.SessionId);
+            async Task<Guid> Start(string name)
+            {
+                var offered = new TaskCompletionSource<FileTransferOfferV2>(TaskCreationOptions.RunContinuationsAsynchronously);
+                var accepted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+                var opened = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+                void OnOffer(object? _, FileTransferOfferReceivedEventArgs e) => offered.TrySetResult(e.Message);
+                void OnAccept(object? _, FileTransferAcceptReceivedEventArgs e) => accepted.TrySetResult();
+                void OnOpen(object? _, FileTransferSessionOpenReceivedEventArgs e) => opened.TrySetResult();
+                pair.Dialer.FileTransferOfferReceived += OnOffer;
+                pair.Payer.FileTransferAcceptReceived += OnAccept;
+                pair.Dialer.FileTransferSessionOpenReceived += OnOpen;
+                try
+                {
+                    await pair.Payer.SendFileTransferOfferAsync(offer with { FileName = name }, pair.Token);
+                    var wireId = Assert.IsType<Guid>((await offered.Task.WaitAsync(pair.Token)).OfferInstanceId);
+                    await pair.Dialer.SendFileTransferAcceptAsync(new() { SessionId = offer.SessionId, TransferId = offer.TransferId,
+                        OfferInstanceId = wireId, AcceptedDataProtocolVersion = 4, FileTransferRoute = offer.FileTransferRoute }, pair.Token);
+                    await accepted.Task.WaitAsync(pair.Token);
+                    await pair.Payer.SendFileTransferSessionOpenAsync(new() { SessionId = offer.SessionId, TransferId = offer.TransferId,
+                        SessionRole = FileTransferProtocol.SessionRoleSender, ProtocolVersion = 4, FileTransferRoute = offer.FileTransferRoute,
+                        ChunkSizeBytes = 1024, InitialPipelineDepth = 8 }, pair.Token);
+                    await opened.Task.WaitAsync(pair.Token);
+                    return wireId;
+                }
+                finally
+                {
+                    pair.Dialer.FileTransferOfferReceived -= OnOffer;
+                    pair.Payer.FileTransferAcceptReceived -= OnAccept;
+                    pair.Dialer.FileTransferSessionOpenReceived -= OnOpen;
+                }
+            }
+            var first = await Start("first.bin");
+            using var original = await pair.Payer.OpenFileTransferDataSessionAsync(offer.SessionId, offer.TransferId, pair.Token);
+            FileTransferCompleteFrameV4 frame = version == 6 ? new FileTransferCompleteFrameV6() : new FileTransferCompleteFrameV4();
+            frame = frame with { SessionId = offer.SessionId, TransferId = offer.TransferId, FileSizeBytes = offer.FileSizeBytes,
+                Sha256Base64 = Convert.ToBase64String(System.Security.Cryptography.SHA256.HashData(new byte[4])) };
+            var payload = Assert.IsType<byte[]>(InvokePrivateMethod(pair.Dialer, "CreateSecureFileTransferPayload", MsgType.FileTransferDataFrame,
+                offer.TransferId, version == 4 ? FileTransferDataFrameCodec.SerializeLegacyV4(frame) : FileTransferDataFrameCodec.Serialize(frame), true));
+            var envelope = new Envelope(1, (string)GetPrivateField(pair.Dialer, "currentEnvelopeCode")!, Guid.NewGuid().ToString("N"),
+                MsgType.FileTransferDataFrame, payload, DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(), null);
+            object?[] args = [pair.DialerClient.BulkAddress, NknBridgeChannel.Bulk, envelope, null];
+            var prepare = typeof(NknSignalingTransport).GetMethod("TryPrepareFileTransferDataFrameDispatch",
+                System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!;
+            async Task<FileTransferCompleteV1> SendTaggedReceipt(Guid owner)
+            {
+                var received = new TaskCompletionSource<FileTransferCompleteV1>(TaskCreationOptions.RunContinuationsAsynchronously);
+                void OnComplete(object? _, FileTransferCompleteReceivedEventArgs e) => received.TrySetResult(e.Message);
+                pair.Payer.FileTransferCompleteReceived += OnComplete;
+                try
+                {
+                    await pair.Dialer.SendFileTransferCompleteAsync(new() { SessionId = frame.SessionId, TransferId = frame.TransferId,
+                        OfferInstanceId = owner, FileSizeBytes = frame.FileSizeBytes, Sha256Base64 = frame.Sha256Base64 }, pair.Token);
+                    return await received.Task.WaitAsync(pair.Token);
+                }
+                finally { pair.Payer.FileTransferCompleteReceived -= OnComplete; }
+            }
+            if (dispatchAt == "control-first")
+            {
+                Assert.Equal(frame.Sha256Base64, (await SendTaggedReceipt(first)).Sha256Base64);
+                original.Dispose();
+                var previous = NknRuntimeDiagnostics.Snapshot();
+                try
+                {
+                    NknRuntimeDiagnostics.SetLastError("previous_diagnostic");
+                    NknRuntimeDiagnostics.SetLastEnvelopeDropReason("previous_drop");
+                    Assert.False(Assert.IsType<bool>(prepare.Invoke(pair.Payer, args)));
+                    var after = NknRuntimeDiagnostics.Snapshot();
+                    Assert.Equal("previous_diagnostic", after.LastError);
+                    Assert.Equal("previous_drop", after.LastEnvelopeDropReason);
+                }
+                finally
+                {
+                    NknRuntimeDiagnostics.SetLastError(previous.LastError);
+                    NknRuntimeDiagnostics.SetLastEnvelopeDropReason(previous.LastEnvelopeDropReason);
+                }
+                return;
+            }
+            Assert.True(Assert.IsType<bool>(prepare.Invoke(pair.Payer, args)));
+            var dispatch = Assert.IsType<Action>(args[3]!.GetType().GetProperty("Dispatch")!.GetValue(args[3]));
+            if (dispatchAt == "dispose-during-write")
+            {
+                // Interpose at the real priority writer, after the completion reserved its queue slot.
+                using var entered = new ManualResetEventSlim();
+                var retirement = new Thread(() => { entered.Set(); original.Dispose(); }) { IsBackground = true };
+                bool retiredBeforeWrite = false;
+                Action beforeWrite = () =>
+                {
+                    retirement.Start();
+                    entered.Wait(pair.Token);
+                    Assert.True(SpinWait.SpinUntil(() => !retirement.IsAlive ||
+                        (retirement.ThreadState & System.Threading.ThreadState.WaitSleepJoin) != 0, TimeSpan.FromSeconds(3)));
+                    retiredBeforeWrite = (bool)original.GetType().GetProperty("IsDisposed")!.GetValue(original)!;
+                };
+                var queue = original.GetType().GetField("priorityFrames", System.Reflection.BindingFlags.Instance |
+                    System.Reflection.BindingFlags.NonPublic)!;
+                var wrapper = typeof(ReceiptWriteGate<>).MakeGenericType(queue.FieldType.GetGenericArguments());
+                queue.SetValue(original, Activator.CreateInstance(wrapper, queue.GetValue(original), beforeWrite));
+                dispatch();
+                Assert.True(retirement.Join(TimeSpan.FromSeconds(3)));
+                Assert.False(retiredBeforeWrite);
+                Assert.Equal(frame, await original.ReceiveAsync(pair.Token));
+                return;
+            }
+            if (dispatchAt == "current")
+            {
+                dispatch();
+                Assert.Equal(frame, await original.ReceiveAsync(pair.Token));
+                return;
+            }
+            if (dispatchAt is "queue-full" or "writer-closed")
+            {
+                if (dispatchAt == "queue-full")
+                {
+                    var deliver = original.GetType().GetMethod("Deliver")!;
+                    var feedback = new FileTransferStateFrameV4 { SessionId = offer.SessionId, TransferId = offer.TransferId };
+                    for (var i = 0; i < NknSignalingTransport.FileTransferDataSessionMaxQueuedFrames; i++)
+                        deliver.Invoke(original, [feedback, NknBridgeChannel.Bulk, FileTransferTransportKind.RegularNkn, null, null]);
+                }
+                else
+                {
+                    var queue = original.GetType().GetField("priorityFrames", System.Reflection.BindingFlags.Instance |
+                        System.Reflection.BindingFlags.NonPublic)!.GetValue(original)!;
+                    var writer = queue.GetType().GetProperty("Writer")!.GetValue(queue)!;
+                    Assert.True(Assert.IsType<bool>(writer.GetType().GetMethod("TryComplete")!.Invoke(writer, [null])));
+                }
+                dispatch();
+                Assert.True(Assert.IsType<bool>(original.GetType().GetProperty("IsDisposed")!.GetValue(original)));
+                Assert.True(Assert.IsType<bool>(InvokePrivateMethod(pair.Payer, "TryValidateAndTrackFileTransferMessage",
+                    MsgType.FileTransferComplete, offer.TransferId, true, false, null, null)));
+                Assert.Equal(frame.Sha256Base64, (await SendTaggedReceipt(first)).Sha256Base64);
+                return;
+            }
+
+            await pair.Dialer.SendFileTransferCancelAsync(new() { SessionId = offer.SessionId, TransferId = offer.TransferId,
+                OfferInstanceId = first }, pair.Token);
+            original.Dispose();
+            if (dispatchAt == "disposed")
+            {
+                dispatch();
+                var channels = (System.Collections.IDictionary)GetPrivateField(pair.Payer, "fileTransferDataSessions")!;
+                Assert.False(channels.Contains(offer.TransferId));
+                return;
+            }
+
+            var second = await Start("second.bin");
+            Assert.NotEqual(first, second);
+            using var replacement = await pair.Payer.OpenFileTransferDataSessionAsync(offer.SessionId, offer.TransferId, pair.Token);
+            dispatch();
+            foreach (var count in new[] { "queuedFrameCount", "queuedPriorityControlFrameCount" })
+                Assert.Equal(0, Assert.IsType<int>(replacement.GetType().GetField(count,
+                    System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!.GetValue(replacement)));
+            Assert.Equal(frame.Sha256Base64, (await SendTaggedReceipt(second)).Sha256Base64);
+        });
+
+    private sealed class ReceiptWriteGate<T> : Channel<T>
+    {
+        public ReceiptWriteGate(Channel<T> queue, Action beforeWrite)
+        {
+            Reader = queue.Reader;
+            Writer = new WriterGate(queue.Writer, beforeWrite);
+        }
+        private sealed class WriterGate(ChannelWriter<T> inner, Action beforeWrite) : ChannelWriter<T>
+        {
+            public override bool TryWrite(T item) { beforeWrite(); return inner.TryWrite(item); }
+            public override bool TryComplete(Exception? error = null) => inner.TryComplete(error);
+            public override ValueTask<bool> WaitToWriteAsync(CancellationToken ct = default) => inner.WaitToWriteAsync(ct);
+        }
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public Task OfferDelivery_DelayedCompletionCannotRetireReusedId(bool identicalContents)
+        => WithPreparationHandshakePairAsync(false, async pair =>
+        {
+            const string id = "reused-completion";
+            var oldBulk = new TaskCompletionSource<Envelope>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var originalReceipt = new TaskCompletionSource<FileTransferCompleteV1>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var replacementReceipt = new TaskCompletionSource<FileTransferCompleteV1>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var sendingReplacement = new PreparationHandshakeBarrier();
+            var generation = 1;
+            pair.Payer.FileTransferCompleteReceived += (_, e) =>
+                (Volatile.Read(ref generation) == 1 ? originalReceipt : replacementReceipt).TrySetResult(e.Message);
+            pair.PayerClient.ShouldDeliverSendAsync = async (_, bytes, _) =>
+            {
+                if (Volatile.Read(ref generation) == 2 && EnvelopeCodec.TryDeserialize(bytes, out var e) && e.Type == MsgType.FileTransferDataFrame)
+                {
+                    sendingReplacement.Entered.TrySetResult();
+                    await sendingReplacement.Release.Task.WaitAsync(pair.Token);
+                }
+                return true;
+            };
+            pair.DialerClient.ShouldDeliverSendAsync = (destination, bytes, _) =>
+            {
+                if (!EnvelopeCodec.TryDeserialize(bytes, out var e) || e.Type != MsgType.FileTransferComplete)
+                    return Task.FromResult(true);
+                if (Volatile.Read(ref generation) == 1)
+                {
+                    if (destination != pair.PayerClient.BulkAddress) return Task.FromResult(true);
+                    oldBulk.TrySetResult(e);
+                    return Task.FromResult(false);
+                }
+                return Task.FromResult(true);
+            };
+
+            async Task Receive(string name, byte[] contents)
+            {
+                await pair.PayerService.TryStartSendAsync(new(name, contents.Length, id),
+                    _ => Task.FromResult<Stream>(new MemoryStream(contents)), pair.Token);
+                await WaitUntilAsync(() => pair.DialerService.Snapshot.Inbound is { State: FileTransferTransferState.PendingDecision } offer &&
+                    offer.FileName == name, TimeSpan.FromSeconds(3));
+                using var output = new MemoryStream();
+                await pair.DialerService.AcceptIncomingTransferAsync(id,
+                    (FileTransferWriteStreamFactory)((_, _) => Task.FromResult<Stream>(output)), pair.Token);
+                await WaitUntilAsync(() => pair.DialerService.Snapshot.Inbound?.State == FileTransferTransferState.Completed, TimeSpan.FromSeconds(3));
+                Assert.Equal(contents, output.ToArray());
+            }
+
+            byte[] first = [1, 2, 3, 4];
+            await Receive("first.bin", first);
+            var stale = await oldBulk.Task.WaitAsync(pair.Token);
+            var queued = await originalReceipt.Task.WaitAsync(pair.Token);
+            Assert.NotNull(queued.OfferInstanceId);
+            await WaitUntilAsync(() => pair.PayerService.Snapshot.Outbound?.State == FileTransferTransferState.Completed, TimeSpan.FromSeconds(3));
+            Volatile.Write(ref generation, 2);
+            var receiving = Receive("second.bin", identicalContents ? first : [5, 6, 7, 8]);
+            try
+            {
+                await sendingReplacement.Entered.Task.WaitAsync(pair.Token);
+                await WaitUntilAsync(() => Assert.IsType<bool>(InvokePrivateMethod(pair.Payer, "TryValidateAndTrackFileTransferMessage",
+                    MsgType.FileTransferComplete, id, true, false, null, null)), TimeSpan.FromSeconds(3));
+                Assert.False(Assert.IsType<bool>(InvokePrivateMethod(pair.Payer, "TryPrepareFileTransferCompleteDispatch",
+                    pair.DialerClient.BulkAddress, NknBridgeChannel.Bulk, stale, null)));
+                foreach (var frame in new FileTransferCompleteFrameV4[] { new(), new FileTransferCompleteFrameV6() })
+                {
+                    var staleFrame = frame with { SessionId = queued.SessionId, TransferId = id,
+                        FileSizeBytes = queued.FileSizeBytes, Sha256Base64 = queued.Sha256Base64 };
+                    Assert.False(Assert.IsType<bool>(InvokePrivateMethod(pair.Payer, "TryValidateAndTrackFileTransferDataFrame",
+                        staleFrame, true, true, null, null)));
+                }
+                await (Task)InvokePrivateMethod(pair.PayerService, "HandleIncomingCompleteAsync", queued)!;
+                Assert.NotEqual(FileTransferTransferState.Completed, pair.PayerService.Snapshot.Outbound?.State);
+            }
+            finally { sendingReplacement.Release.TrySetResult(); }
+            await receiving;
+            var receipt = await replacementReceipt.Task.WaitAsync(pair.Token);
+            Assert.NotNull(receipt.OfferInstanceId);
+            Assert.NotEqual(queued.OfferInstanceId, receipt.OfferInstanceId);
+            await WaitUntilAsync(() => pair.PayerService.Snapshot.Outbound?.State == FileTransferTransferState.Completed, TimeSpan.FromSeconds(3));
+        });
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public Task OfferDelivery_ReverseRegularOfferAfterCancelHonorsEstablishedFallbackEpoch(bool hasEpoch)
+        => WithPreparationHandshakePairAsync(true, async pair =>
+        {
+            var session = pair.Permit.Scope.SessionId;
+            var first = ReplacementTestOffer(session) with { TransferId = "first-transfer" };
+            var accepted = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            pair.Dialer.FileTransferAcceptReceived += (_, e) =>
+            {
+                if (e.Message.TransferId == first.TransferId) accepted.TrySetResult(true);
+            };
+            await pair.Dialer.SendFileTransferOfferAsync(first, pair.Token);
+            await WaitUntilAsync(() => pair.PayerService.Snapshot.Inbound?.State == FileTransferTransferState.PendingDecision, TimeSpan.FromSeconds(3));
+            await pair.PayerService.AcceptIncomingTransferAsync(first.TransferId,
+                (FileTransferWriteStreamFactory)((_, _) => Task.FromResult<Stream>(new MemoryStream())), pair.Token);
+            await accepted.Task.WaitAsync(pair.Token);
+            var oldData = await pair.Dialer.OpenFileTransferDataSessionAsync(session, first.TransferId, pair.Token);
+            using (oldData)
+            {
+                Assert.True(Assert.IsType<bool>(InvokePrivateMethod(pair.Dialer, "StartTunaFallbackProofIfNeeded",
+                    "sidecar_remote_closed", session, NknAccelerationLaneKind.File | NknAccelerationLaneKind.Screen)));
+                InvokePrivateMethod(pair.Dialer, "RecordFileTransferTunaFallbackEvidence",
+                    "sidecar_remote_closed", session, NknAccelerationLaneKind.File | NknAccelerationLaneKind.Screen, false);
+                Assert.True(pair.Dialer.IsPostTunaFileFallbackActiveForRouteSelection);
+                Assert.True(((IFileTransferRouteStatus)pair.Dialer).IsPostTunaFileFallbackActiveForNewOffer);
+                if (hasEpoch)
+                    pair.Dialer.ObserveFileTransferV6TransportEpoch(new(session, first.TransferId, FileTransferDirection.Outbound,
+                        1, FileTransferTransportHandoffKind.TunaToNormalFallback, FileTransferTransportKind.Tuna,
+                        FileTransferTransportKind.RegularNkn, V6TransportEpochState.TargetProofPending, "sidecar_remote_closed", IsUnresolved: true));
+                await pair.Dialer.SendFileTransferCancelAsync(new() { SessionId = session, TransferId = first.TransferId }, pair.Token);
+            }
+            await WaitUntilAsync(() => pair.PayerService.Snapshot.Inbound?.State == FileTransferTransferState.Canceled, TimeSpan.FromSeconds(3));
+            Assert.True(pair.Dialer.IsPostTunaFileFallbackActiveForRouteSelection);
+            Assert.Equal(hasEpoch, ((IFileTransferRouteStatus)pair.Dialer).IsPostTunaFileFallbackActiveForNewOffer);
+            byte[] payload = [0x17, 0xa2, 0x39, 0xfe];
+            await pair.PayerService.TryStartSendAsync(new("reverse.bin", payload.Length, "reverse-transfer"),
+                _ => Task.FromResult<Stream>(new MemoryStream(payload)), pair.Token);
+            await WaitUntilAsync(() => pair.DialerService.Snapshot.Inbound?.State == FileTransferTransferState.PendingDecision ||
+                pair.PayerService.Snapshot.Outbound?.State == FileTransferTransferState.Declined, TimeSpan.FromSeconds(3));
+            if (hasEpoch)
+            {
+                Assert.Equal(FileTransferTransferState.Declined, pair.PayerService.Snapshot.Outbound?.State);
+                Assert.Null(pair.DialerService.Snapshot.Inbound);
+            }
+            else
+            {
+                Assert.Equal(FileTransferTransferState.AwaitingAcceptance, pair.PayerService.Snapshot.Outbound?.State);
+                Assert.Equal(FileTransferTransferState.PendingDecision, pair.DialerService.Snapshot.Inbound?.State);
+                Assert.Equal(FileTransferRouteResolver.RegularNknV4FastToken, pair.DialerService.Snapshot.Inbound?.RouteToken);
+                using var destination = new MemoryStream();
+                await pair.DialerService.AcceptIncomingTransferAsync("reverse-transfer",
+                    (FileTransferWriteStreamFactory)((_, _) => Task.FromResult<Stream>(destination)), pair.Token);
+                await WaitUntilAsync(() => pair.PayerService.Snapshot.Outbound?.State == FileTransferTransferState.Completed &&
+                    pair.DialerService.Snapshot.Inbound?.State == FileTransferTransferState.Completed, TimeSpan.FromSeconds(5));
+                Assert.Equal(payload, destination.ToArray());
+            }
+        });
+
+    [Theory]
+    [InlineData("unanswered")]
+    [InlineData("canceled-before-capture")]
+    [InlineData("reused-before-capture")]
+    [InlineData("cancel-and-failure")]
+    [InlineData("both-failed")]
+    public Task OfferDelivery_FallbackCaptureKeepsOnlyParticipatingIncarnations(string ordering)
+        => WithPreparationHandshakePairAsync(true, async pair =>
+        {
+            var session = pair.Permit.Scope.SessionId;
+            var first = ReplacementTestOffer(session);
+            var accepted = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            pair.Dialer.FileTransferAcceptReceived += (_, e) => accepted.TrySetResult(e.Message.TransferId == first.TransferId);
+            await pair.Dialer.SendFileTransferOfferAsync(first, pair.Token);
+            await WaitUntilAsync(() => pair.PayerService.Snapshot.Inbound?.State == FileTransferTransferState.PendingDecision, TimeSpan.FromSeconds(3));
+            await pair.PayerService.AcceptIncomingTransferAsync(first.TransferId,
+                (FileTransferWriteStreamFactory)((_, _) => Task.FromResult<Stream>(new MemoryStream())), pair.Token);
+            Assert.True(await accepted.Task.WaitAsync(pair.Token));
+            using var oldChannel = await pair.Dialer.OpenFileTransferDataSessionAsync(session, first.TransferId, pair.Token);
+            async Task CancelFirst()
+            {
+                await pair.Dialer.SendFileTransferCancelAsync(new() { SessionId = session, TransferId = first.TransferId }, pair.Token);
+                await WaitUntilAsync(() => pair.PayerService.Snapshot.Inbound?.State == FileTransferTransferState.Canceled, TimeSpan.FromSeconds(3));
+            }
+            var twoAdmitted = ordering is "cancel-and-failure" or "both-failed";
+            if (ordering == "unanswered" || twoAdmitted)
+            {
+                var other = twoAdmitted ? "other-active" : "unanswered";
+                await pair.Payer.SendFileTransferOfferAsync(first with { TransferId = other }, pair.Token);
+                await WaitUntilAsync(() => pair.DialerService.Snapshot.Inbound?.TransferId == other, TimeSpan.FromSeconds(3));
+                if (twoAdmitted)
+                    await pair.DialerService.AcceptIncomingTransferAsync(other,
+                        (FileTransferWriteStreamFactory)((_, _) => Task.FromResult<Stream>(new MemoryStream())), pair.Token);
+            }
+            else
+            {
+                await CancelFirst();
+                if (ordering == "reused-before-capture")
+                {
+                    await pair.Dialer.SendFileTransferOfferAsync(first with { FileName = "replacement.bin" }, pair.Token);
+                    await WaitUntilAsync(() => pair.PayerService.Snapshot.Inbound?.FileName == "replacement.bin", TimeSpan.FromSeconds(3));
+                }
+            }
+            Assert.True(Assert.IsType<bool>(InvokePrivateMethod(pair.Dialer, "StartTunaFallbackProofIfNeeded",
+                "sidecar_remote_closed", session, NknAccelerationLaneKind.File)));
+            InvokePrivateMethod(pair.Dialer, "RecordFileTransferTunaFallbackEvidence",
+                "sidecar_remote_closed", session, NknAccelerationLaneKind.File, false);
+            var status = (IFileTransferRouteStatus)pair.Dialer;
+            if (twoAdmitted)
+            {
+                if (ordering == "both-failed")
+                {
+                    await pair.Dialer.SendFileTransferErrorAsync(new() { SessionId = session, TransferId = first.TransferId, ErrorCode = "send_failed" }, pair.Token);
+                    await WaitUntilAsync(() => pair.PayerService.Snapshot.Inbound?.State == FileTransferTransferState.Failed, TimeSpan.FromSeconds(3));
+                }
+                else await CancelFirst();
+                Assert.True(status.IsPostTunaFileFallbackActiveForNewOffer);
+                await pair.Payer.SendFileTransferErrorAsync(new() { SessionId = session, TransferId = "other-active", ErrorCode = "send_failed" }, pair.Token);
+                await WaitUntilAsync(() => pair.DialerService.Snapshot.Inbound?.State == FileTransferTransferState.Failed, TimeSpan.FromSeconds(3));
+                if (ordering == "both-failed")
+                {
+                    Assert.True(status.IsPostTunaFileFallbackActiveForNewOffer);
+                    return;
+                }
+            }
+            if (ordering == "unanswered")
+            {
+                Assert.True(status.IsPostTunaFileFallbackActiveForNewOffer);
+                await CancelFirst();
+                Assert.Equal(FileTransferTransferState.PendingDecision, pair.DialerService.Snapshot.Inbound?.State);
+                var declined = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+                pair.Payer.FileTransferDeclineReceived += (_, e) => declined.TrySetResult(e.Message.TransferId == "unanswered");
+                await pair.DialerService.DeclineIncomingTransferAsync("unanswered", "not_now", pair.Token);
+                Assert.True(await declined.Task.WaitAsync(pair.Token));
+            }
+            Assert.True(status.IsPostTunaFileFallbackActiveForRouteSelection);
+            Assert.False(status.IsPostTunaFileFallbackActiveForNewOffer);
+            await pair.PayerService.TryStartSendAsync(new("reverse.bin", 4, "reverse-check"),
+                _ => Task.FromResult<Stream>(new MemoryStream(new byte[4])), pair.Token);
+            await WaitUntilAsync(() => pair.DialerService.Snapshot.Inbound?.TransferId == "reverse-check" ||
+                pair.PayerService.Snapshot.Outbound?.State == FileTransferTransferState.Declined, TimeSpan.FromSeconds(3));
+            Assert.Equal(FileTransferTransferState.PendingDecision, pair.DialerService.Snapshot.Inbound?.State);
+            Assert.Equal("reverse-check", pair.DialerService.Snapshot.Inbound?.TransferId);
+            if (ordering == "reused-before-capture")
+                Assert.Equal(FileTransferTransferState.PendingDecision, pair.PayerService.Snapshot.Inbound?.State);
+        });
+
     [Fact]
     public Task OfferDelivery_TimeoutBeforeWriterAndFailedFirstWriteLeaveNextRetryUsable()
         => WithPreparationHandshakePairAsync(false, async pair =>
@@ -323,18 +738,37 @@ public sealed partial class NknAccelerationTransportTests
             var offer = ReplacementTestOffer(pair.Permit.Scope.SessionId) with { OfferInstanceId = Guid.NewGuid() };
             var error = new TaskCompletionSource<Guid?>(TaskCreationOptions.RunContinuationsAsynchronously);
             pair.Payer.FileTransferErrorReceived += (_, e) => error.TrySetResult(e.Message.OfferInstanceId);
-            pair.DialerClient.ShouldDeliverSendAsync = (_, bytes, _) =>
+            var writer = new PreparationHandshakeBarrier();
+            pair.DialerClient.ShouldDeliverSendAsync = async (_, bytes, _) =>
             {
                 if (EnvelopeCodec.TryDeserialize(bytes, out var e) && e.Type == MsgType.FileTransferAccept)
+                {
+                    await Task.Yield();
+                    writer.Entered.TrySetResult();
+                    await writer.Release.Task.WaitAsync(pair.Token);
                     throw new IOException("accept write failed before delivery");
-                return Task.FromResult(true);
+                }
+                return true;
             };
             await pair.Payer.SendFileTransferOfferAsync(offer, pair.Token);
             await WaitUntilAsync(() => pair.DialerService.Snapshot.Inbound?.State == FileTransferTransferState.PendingDecision, TimeSpan.FromSeconds(3));
-            var result = await pair.DialerService.AcceptIncomingTransferAsync(offer.TransferId,
+            var accepting = pair.DialerService.AcceptIncomingTransferAsync(offer.TransferId,
                 (FileTransferWriteStreamFactory)((_, _) => Task.FromResult<Stream>(new MemoryStream())), pair.Token);
+            try
+            {
+                await writer.Entered.Task.WaitAsync(pair.Token);
+                Assert.True(Assert.IsType<bool>(InvokePrivateMethod(pair.Dialer, "StartTunaFallbackProofIfNeeded",
+                    "sidecar_remote_closed", offer.SessionId, NknAccelerationLaneKind.File)));
+                InvokePrivateMethod(pair.Dialer, "RecordFileTransferTunaFallbackEvidence",
+                    "sidecar_remote_closed", offer.SessionId, NknAccelerationLaneKind.File, false);
+                Assert.True(((IFileTransferRouteStatus)pair.Dialer).IsPostTunaFileFallbackActiveForNewOffer);
+            }
+            finally { writer.Release.TrySetResult(); }
+            var result = await accepting.WaitAsync(pair.Token);
             Assert.Equal(FileTransferTransferState.Failed, result!.State);
             Assert.Equal(offer.OfferInstanceId, await error.Task.WaitAsync(pair.Token));
+            Assert.True(pair.Dialer.IsPostTunaFileFallbackActiveForRouteSelection);
+            Assert.False(((IFileTransferRouteStatus)pair.Dialer).IsPostTunaFileFallbackActiveForNewOffer);
         });
 
     [Theory]
@@ -364,6 +798,10 @@ public sealed partial class NknAccelerationTransportTests
             try
             {
                 await writer.Entered.Task.WaitAsync(pair.Token);
+                Assert.True(Assert.IsType<bool>(InvokePrivateMethod(pair.Dialer, "StartTunaFallbackProofIfNeeded",
+                    "sidecar_remote_closed", offer.SessionId, NknAccelerationLaneKind.File)));
+                InvokePrivateMethod(pair.Dialer, "RecordFileTransferTunaFallbackEvidence",
+                    "sidecar_remote_closed", offer.SessionId, NknAccelerationLaneKind.File, false);
                 await pair.Payer.SendFileTransferSessionOpenAsync(new() { SessionId = offer.SessionId, TransferId = offer.TransferId,
                     ProtocolVersion = 4, SessionRole = FileTransferProtocol.SessionRoleSender,
                     FileTransferRoute = offer.FileTransferRoute, ChunkSizeBytes = 1024, InitialPipelineDepth = 8 }, pair.Token);
@@ -372,6 +810,7 @@ public sealed partial class NknAccelerationTransportTests
             }
             finally { writer.Release.TrySetResult(); }
             Assert.NotEqual(FileTransferTransferState.Failed, (await accept.WaitAsync(pair.Token))!.State);
+            Assert.True(((IFileTransferRouteStatus)pair.Dialer).IsPostTunaFileFallbackActiveForNewOffer);
         });
 
     [Fact]

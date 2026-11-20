@@ -5192,6 +5192,7 @@ public sealed partial class SessionFileTransferService :
             context = outboundTransfer;
             completionEligible = context is not null &&
                 !context.IsTerminal &&
+                (message.OfferInstanceId is null || message.OfferInstanceId == context.OfferInstanceId) &&
                 string.Equals(context.TransferId, message.TransferId, StringComparison.Ordinal) &&
                 string.Equals(context.SessionId, message.SessionId, StringComparison.Ordinal) &&
                 (
@@ -5638,7 +5639,7 @@ public sealed partial class SessionFileTransferService :
             var currentTransport = GetTransportOrThrow();
             var completion = new FileTransferCompleteV1
             {
-                SessionId = sessionId, TransferId = transferId,
+                SessionId = sessionId, TransferId = transferId, OfferInstanceId = context.OfferInstanceId,
                 FileSizeBytes = fileSizeBytes, Sha256Base64 = computedHash,
             };
             Task sendingCompletion;
@@ -6093,7 +6094,7 @@ public sealed partial class SessionFileTransferService :
     private static FileTransferRouteResolverInput CreateInitialRouteResolverInputForNewTransfer(
         IFileTransferSignalingTransport? currentTransport)
     {
-        var input = FileTransferRouteResolverInput.FromTransport(currentTransport);
+        var input = FileTransferRouteResolverInput.FromTransport(currentTransport, forNewOffer: true);
         return input with { IsFileTunaActive = false };
     }
 

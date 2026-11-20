@@ -9,6 +9,40 @@ namespace NLink.SmokeTests;
 
 public sealed partial class FileTransferCoordinatorTests
 {
+    [Fact]
+    [Trait("FileTransferInfraSuite", "RegularV4PressureBackend")]
+    public Task NknPressureBackend_ReplacementOpenedDuringOverflowKeepsRegistration()
+        => WithPressureBackendAsync(true, async (host, _, adapter, sessionId, ct) =>
+        {
+            const string id = "pressure-backend";
+            using var original = await host.OpenFileTransferDataSessionAsync(sessionId, id, ct);
+            IFileTransferDataSession? replacement = null;
+            original.AvailabilityChanged += (_, e) =>
+            {
+                if (e.Reason == FileTransferResultCodes.ReceiverBufferExhausted)
+                    replacement = host.OpenFileTransferDataSessionAsync(sessionId, id, ct).GetAwaiter().GetResult();
+            };
+            try
+            {
+                var deliver = original.GetType().GetMethod("Deliver")!;
+                var feedback = new FileTransferStateFrameV4 { SessionId = sessionId, TransferId = id };
+                for (int i = 0; i <= NknSignalingTransport.FileTransferDataSessionMaxQueuedFrames; i++)
+                    deliver.Invoke(original, [feedback, NknBridgeChannel.Bulk, FileTransferTransportKind.RegularNkn, null, null]);
+                Assert.NotNull(replacement);
+                Assert.NotSame(original, replacement);
+                AssertPressureBackendActivity(adapter, dataSessions: 1, runtimes: 0);
+                var suppressed = (HashSet<string>)typeof(NknSignalingTransport).GetField("fileTransferDataSessionRemoteOpenSuppressed",
+                    BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(host)!;
+                Assert.DoesNotContain(id, suppressed);
+                var staged = StageNknPressure(sessionId);
+                var receipt = ((IFileTransferRegularV4FrontierRepairPressureInstallBridge)host)
+                    .InstallRegularV4FrontierRepairPressure(staged.InstallCommand!);
+                Assert.Equal(FileTransferRegularV4FrontierRepairPressureInstallStatus.Installed, receipt.Status);
+            }
+            finally { replacement?.Dispose(); }
+            AssertPressureBackendActivity(adapter, dataSessions: 0, runtimes: 0);
+        });
+
     [Theory]
     [InlineData(false)]
     [InlineData(true)]

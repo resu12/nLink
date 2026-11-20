@@ -905,6 +905,8 @@ public sealed partial class NknSignalingTransport : INknListenerCapHandoffContro
 
         public RoutePublicationToken? FileProjectionPublication { get; set; }
 
+        public FileFallbackParticipant[]? PendingFileOffers { get; init; }
+
         public FileTransferRouteTransitionDispositionCommand? FileProjectionRetirement { get; set; }
 
         public FileTransferTerminalFallbackProjectionRetirementCommand? FileTerminalProjectionRetirement { get; set; }
@@ -3407,8 +3409,9 @@ public sealed partial class NknSignalingTransport : INknListenerCapHandoffContro
         }
 
         var normalizedReason = SanitizeLogToken(reason);
-        if ((lanes & NknAccelerationLaneKind.File) == NknAccelerationLaneKind.File &&
-            !HasActiveFileTransferDataSessionsForRecovery())
+        FileFallbackParticipant[]? pendingFileOffers = null;
+        if ((lanes & NknAccelerationLaneKind.File) != 0 &&
+            !TryCaptureFileFallbackParticipants(normalizedSessionId, out pendingFileOffers))
         {
             lanes &= ~NknAccelerationLaneKind.File;
             LocalOperationalLog.Info(
@@ -3456,6 +3459,7 @@ public sealed partial class NknSignalingTransport : INknListenerCapHandoffContro
                 Reason = normalizedReason,
                 StartedUtc = DateTimeOffset.UtcNow,
                 Lanes = lanes,
+                PendingFileOffers = pendingFileOffers,
             };
             stateToLog = tunaFallbackProofState;
         }
@@ -43139,6 +43143,11 @@ public sealed partial class NknSignalingTransport : INknListenerCapHandoffContro
         var fallbackSessionId = string.IsNullOrWhiteSpace(expectedSessionId)
             ? currentSessionId
             : expectedSessionId.Trim();
+        return HasRegularNknFileFallback(fallbackSessionId, forNewOffer: false);
+    }
+
+    private bool HasRegularNknFileFallback(string? fallbackSessionId, bool forNewOffer)
+    {
         if (string.IsNullOrWhiteSpace(fallbackSessionId))
         {
             return false;
@@ -43150,8 +43159,30 @@ public sealed partial class NknSignalingTransport : INknListenerCapHandoffContro
                    string.Equals(state.SessionId, fallbackSessionId, StringComparison.Ordinal) &&
                    (state.Lanes & NknAccelerationLaneKind.File) == NknAccelerationLaneKind.File &&
                    !state.IsFileProjectionRetired &&
-                   state.FileState != TunaFallbackLaneState.None;
+                   state.FileState != TunaFallbackLaneState.None &&
+                   // Keep recovery evidence for the original transfers and screen lane. An
+                   // unpublished, zero-epoch hint need not bind a new offer after abandonment.
+                   !(forNewOffer && state.FileState == TunaFallbackLaneState.Pending &&
+                     state.FileProjectionPublication is null && state.FileV6TransportEpoch == 0 &&
+                     state.PendingFileOffers is { Length: > 0 } owners && IsFileFallbackAbandoned(owners));
         }
+    }
+
+    private static bool IsFileFallbackAbandoned(FileFallbackParticipant[] participants)
+    {
+        var hasOwner = false;
+        var hasCancellation = false;
+        foreach (var participant in participants)
+        {
+            // A rolled-back reservation never admitted this transfer. A separately observed
+            // open data channel has no reservation and still counts as an owner.
+            if (participant.Reservation?.RolledBack == true) continue;
+            hasOwner = true;
+            var end = participant.Owner.End;
+            if (end == FileOfferEnd.Live) return false;
+            hasCancellation |= end == FileOfferEnd.Canceled;
+        }
+        return !hasOwner || hasCancellation;
     }
 
     private bool ShouldUseFileTransferV6ForAccelerationCore()
