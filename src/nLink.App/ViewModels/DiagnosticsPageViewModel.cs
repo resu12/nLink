@@ -313,7 +313,7 @@ public sealed class DiagnosticsPageViewModel : ViewModelBase, IDisposable
                 ? "Advanced opt-in"
                 : "Off";
     public string TunaFallbackState => NknTunaAccelerationOptions.Load().Enabled
-        ? "Experimental acceleration can negotiate only after an approved secure session."
+        ? "Tuna acceleration can negotiate only after an approved secure session."
         : CurrentTunaRuntimePreferences().Enabled
             ? "Tuna can start only after approved session unlock; current NKN remains fallback."
             : "Current NKN will be used.";

@@ -10,7 +10,7 @@ This document describes the current nLink file-transfer implementation. It is an
 - Safety cap: file transfers are capped at `25 GiB` by the app release policy.
 - Destination: received files are saved to the Windows Downloads folder by default, with a numbered suffix when the target name already exists.
 - Protocols: production uses protocol `4` for regular NKN and active file Tuna, and protocol `6` only for controlled post-Tuna fallback. Protocol `5` is obsolete and rejected.
-- Transport boundary: normal NKN remains the default. Experimental Tuna can carry only `MsgType.FileTransferDataFrame` on the bulk lane after session-bound Tuna negotiation succeeds.
+- Transport boundary: normal NKN remains the default. Tuna can carry only `MsgType.FileTransferDataFrame` on the bulk lane after session-bound Tuna negotiation succeeds.
 
 File-transfer control stays on current NKN. Offer, accept, decline, session-open, cancel, error, and complete control messages are not accelerated by Tuna.
 
@@ -294,7 +294,7 @@ publication still require their original deadlines and Coordinator authority.
 - No resume after app restart.
 - Default file-size cap is `25 GiB`.
 - Live throughput depends on NKN, Tuna provider health, and network delivery.
-- Tuna remains experimental and optional. Current NKN remains the default path when Tuna is inactive.
+- Tuna is optional. Current NKN remains the default path when Tuna is inactive.
 
 ## Validation
 

@@ -116,7 +116,7 @@
                                     Margin="0,16,0,0">
                             <Border Classes="appCard" Padding="16">
                                 <StackPanel Spacing="8">
-                                    <TextBlock Classes="appSectionTitle" Text="Tuna (experimental)"/>
+                                    <TextBlock Classes="appSectionTitle" Text="Tuna"/>
                                     <TextBlock Classes="appBody"
                                                Text="Tuna can speed up screen sharing and file transfers by opening an encrypted high-performance NKN relay path after a session is approved. This computer pays only when its wallet is unlocked and selected as the listener; if Tuna is unavailable, nLink keeps using regular NKN automatically."
                                                TextWrapping="Wrap"/>
@@ -177,7 +177,7 @@
                                     </Grid>
 
                                     <StackPanel Spacing="8">
-                                        <CheckBox Content="Enable Tuna acceleration (experimental)"
+                                        <CheckBox Content="Enable Tuna acceleration"
                                                   IsChecked="{Binding IsTunaRuntimeEnabled}"/>
                                         <WrapPanel>
                                             <CheckBox Content="File lane"

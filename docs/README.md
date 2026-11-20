@@ -10,7 +10,7 @@ Start here for current repo guidance. [0.7.0 hotfix revision 1](https://github.c
 - [`docs/screenshare-operability.md`](screenshare-operability.md): screenshare-specific operator model and `ScreenShare-Ops.ps1` entry point.
 - [`docs/file-transfer-implementation.md`](file-transfer-implementation.md): current route-aware single-file transfer protocol, V4 regular/Tuna routes, controlled V6 fallback, lifecycle safety, and diagnostics design.
 - [`docs/file-transfer-operability.md`](file-transfer-operability.md): start here for file transfer/Tuna usage, support capture, operator triage, and the distinction between correctness and performance.
-- [`docs/nkn-tuna-implementation.md`](nkn-tuna-implementation.md): experimental NKN Tuna wallet, sidecar, session binding, runtime unlock, caps, and fallback design.
+- [`docs/nkn-tuna-implementation.md`](nkn-tuna-implementation.md): NKN Tuna wallet, sidecar, session binding, runtime unlock, caps, and fallback design.
 - [`docs/file-transfer-soak.md`](file-transfer-soak.md): targeted local/live commands and the strict seven-scenario Phase 5 release gate.
 - [`docs/file-transfer-stabilization-protocol.md`](file-transfer-stabilization-protocol.md): coordinator-authority invariants and bounded remediation rules.
 - [`docs/screenshare-soak.md`](screenshare-soak.md): technical reference for local screenshare soak output and retained Track B evidence.

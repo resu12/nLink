@@ -868,7 +868,8 @@ public void DiagnosticsPageView_UsesOptionsTabs()
     Assert.Contains("Save Hang Report", xaml, StringComparison.Ordinal);
     Assert.Contains("Open logs folder", xaml, StringComparison.Ordinal);
     Assert.Contains("Screen share health", xaml, StringComparison.Ordinal);
-    Assert.Contains("Tuna (experimental)", xaml, StringComparison.Ordinal);
+    Assert.Contains("Text=\"Tuna\"", xaml, StringComparison.Ordinal);
+    Assert.Contains("Content=\"Enable Tuna acceleration\"", xaml, StringComparison.Ordinal);
     Assert.Contains("Wallet and runtime", xaml, StringComparison.Ordinal);
     Assert.Contains("Tuna can speed up screen sharing and file transfers", xaml, StringComparison.Ordinal);
     Assert.Contains("if Tuna is unavailable, nLink keeps using regular NKN automatically", xaml, StringComparison.Ordinal);

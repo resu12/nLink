@@ -1,6 +1,6 @@
 # File-Transfer Operability
 
-This is the operator entry point for file transfer and experimental Tuna. For runtime architecture, use [file-transfer-implementation.md](file-transfer-implementation.md); for wallet, payer, and spending details, use [nkn-tuna-implementation.md](nkn-tuna-implementation.md).
+This is the operator entry point for file transfer and Tuna. For runtime architecture, use [file-transfer-implementation.md](file-transfer-implementation.md); for wallet, payer, and spending details, use [nkn-tuna-implementation.md](nkn-tuna-implementation.md).
 
 ## Using File Transfer And Tuna
 

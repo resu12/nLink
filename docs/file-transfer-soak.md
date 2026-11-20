@@ -13,7 +13,7 @@ V5 and legacy active `file_tuna_v6` evidence are obsolete protocol inputs and sh
 
 - Production bridge defaults remain unchanged.
 - Regular NKN carries control; `FileTransferCoordinator` and its issued DTOs/tokens alone authorize lifecycle, liveness, route publication, V6 fallback, and recovery effects. Readiness, ACKs, send acceptance, and transport observations are evidence only.
-- Tuna remains experimental and default-off unless explicitly enabled for a test or session.
+- Tuna is off by default and must be explicitly enabled for a test or session.
 - Do not redesign screen sharing, wallet UX, payer policy, caps, sidecar startup, installer behavior, or Diagnostics/Options UI while tuning file-transfer soak.
 - All generated artifacts must stay under repo `artifacts/`. Manual scripts and runbooks must never delete or clean Downloads or other user data folders.
 - Run .NET tests serially on Windows to avoid DLL file locks; see `docs/build-test-lock-avoidance.md`.

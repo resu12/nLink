@@ -88,7 +88,7 @@ Notes:
 - Progress is based on accepted/receiver-confirmed bytes, not merely queued sends. The bars smooth reported progress without predicting future delivery; network acknowledgements can still make the two displays differ briefly. Completion requires final SHA-256 verification.
 - Received files are saved into the Windows Downloads folder by default, with a numbered suffix added automatically when the target name already exists.
 - Safe-by-default file size cap for `0.7.0`: `25 GiB`
-- Options -> Wallet exposes an experimental Tuna wallet-linking and runtime opt-in section; linking a wallet does not start Tuna, spend NKN, or change the default transport.
+- In Options -> Wallet, you can link a wallet and choose whether to enable Tuna. Linking a wallet does not start Tuna, spend NKN, or change the default transport.
 - Tuna startup status and a pulsing fish indicate an unlocked connection attempt, not proof of payload delivery. Gray is inactive, light blue is the non-paying side, and yellow identifies the selected paying listener. Linking or validating a wallet does not spend NKN; starting a paid listener can. See the [Tuna guide](docs/nkn-tuna-implementation.md).
 - The strict Phase 5 release gate requires actual payload delivery, SHA integrity, coordinator-published routes, authenticated Tuna delivery, fallback, and terminal GUI completion. Performance is reported separately under the existing policy, without changing numeric baselines or promising Tuna/fallback throughput.
 - Large file transfers over NKN can still be noticeably slower than local or direct network copy. Live screenshare latency can also vary with NKN/network delivery.

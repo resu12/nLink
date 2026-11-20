@@ -19,7 +19,7 @@ State whether this is a draft/candidate or a published release. Replace placehol
 
 - State single-file scope, explicit accept/decline, active-session pause/resume/cancel, file-size cap, and lack of resume after restart.
 - Preserve regular NKN V4 / Tuna V4 / controlled same-transfer fallback V6 route invariants and coordinator authority. Do not describe active Tuna V6 as supported.
-- Describe Tuna as default-off/experimental, distinguish wallet validation from paid runtime use, and explain payer/cap/accounting limitations.
+- State that Tuna is off by default, distinguish wallet validation from paid runtime use, and explain payer/cap/accounting limitations.
 - Distinguish application session-envelope protection from transport encryption. Do not imply listener readiness, a colored fish, or queued bytes prove authenticated delivery.
 
 ## Qualification and remaining limits
