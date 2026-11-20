@@ -3083,6 +3083,10 @@ public interface IFileTransferRuntimeUnlockPreCommitProbeAckAuthorizer
 
 public interface IFileTransferRuntimeUnlockTunaProbeSender
 {
+    // Both sides of paired confirmation complete only after a guarded physical write.
+    Task<bool> TryWritePairedCommitConfirmationAsync(FileTransferRuntimeUnlockPreCommitProbeAckFrame reply,
+        Func<Func<Task>, Task?> startIfCurrent, CancellationToken ct) => Task.FromResult(false);
+
     Task SendRuntimeUnlockTunaPreCommitProbeAsync(
         FileTransferRuntimeUnlockPreCommitProbeFrame probe,
         CancellationToken ct);

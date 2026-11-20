@@ -1217,7 +1217,7 @@ public sealed partial class NknSignalingTransport : IFileTransferControlPlanePhy
         long OfferGeneration,
         long TunaPathLeaseGeneration,
         string ProbeId,
-        long ExpiresUtcTicks)
+        long ExpiresUtcTicks, Func<Func<Task>, Task?>? StartCommitReplyWrite = null)
     {
         public bool Matches(FileTransferRuntimeUnlockPreCommitProbeAckFrame ack)
             => string.Equals(SessionId, ack.SessionId, StringComparison.Ordinal) &&
@@ -1684,7 +1684,9 @@ public sealed partial class NknSignalingTransport : IFileTransferControlPlanePhy
 
         try
         {
-            var sent = await laneClient.TrySendAsync(channel, envelopeBytes, ct).ConfigureAwait(false);
+            var sent = authority.StartCommitReplyWrite is { } start
+                ? await laneClient.TryWritePairedCommitConfirmationAsync(envelopeBytes, authority.ExpiresUtcTicks, start, ct).ConfigureAwait(false)
+                : await laneClient.TrySendAsync(channel, envelopeBytes, ct).ConfigureAwait(false);
             if (sent)
             {
                 LocalOperationalLog.Info(
@@ -8861,6 +8863,21 @@ public sealed partial class NknSignalingTransport : IFileTransferControlPlanePhy
                 $"event=runtime_unlock_tuna_probe_ack_sent; transport=tuna; session_id={SanitizeLogToken(ack.SessionId)}; transfer_id={SanitizeLogToken(ack.TransferId)}; transaction_generation={ack.TransactionGeneration}; offer_generation={ack.OfferGeneration}; tuna_path_lease_generation={ack.TunaPathLeaseGeneration}; probe_id={SanitizeLogToken(ack.ProbeId ?? string.Empty)}; reason={SanitizeLogToken(ack.Reason ?? string.Empty)}; accepted={(ack.Accepted ? 1 : 0)}");
         }
 
+        public async Task<bool> TryWritePairedCommitConfirmationAsync(FileTransferRuntimeUnlockPreCommitProbeAckFrame reply,
+            Func<Func<Task>, Task?> startIfCurrent, CancellationToken ct)
+        {
+            ObjectDisposedException.ThrowIf(disposed != 0, this);
+            if (reply.SessionId != SessionId || reply.TransferId != TransferId || !reply.Accepted ||
+                reply.Reason is not ("precommit_probe_commit_confirmed" or "precommit_probe_commit_confirmed_reply") ||
+                !ShouldRequireTunaBulk(reply)) return false;
+            var expires = DateTimeOffset.UtcNow.Add(RuntimeUnlockPreCommitAckAuthorityTtl).UtcDateTime.Ticks;
+            var authority = new RuntimeUnlockPreCommitAckSendAuthority(SessionId, TransferId, reply.TransactionGeneration,
+                reply.OfferGeneration, reply.TunaPathLeaseGeneration, reply.ProbeId!, expires,
+                write => DateTime.UtcNow.Ticks < expires && !IsDisposed ? startIfCurrent(write) : null);
+            await SendAsyncCore(reply, ct, null, commitReply: authority).ConfigureAwait(false);
+            return true;
+        }
+
         public event EventHandler<FileTransferDataSessionAvailabilityChangedEventArgs>? AvailabilityChanged
         {
             add
@@ -9090,7 +9107,8 @@ public sealed partial class NknSignalingTransport : IFileTransferControlPlanePhy
             FileTransferDataFrame frame,
             CancellationToken ct,
             FileTransferDataPathSendAuthority? dataPathSendAuthority,
-            PhysicalSendCompletionTracker? physicalSendCompletion = null)
+            PhysicalSendCompletionTracker? physicalSendCompletion = null,
+            RuntimeUnlockPreCommitAckSendAuthority? commitReply = null)
         {
             var sendCt = ct;
             CancellationTokenSource? activationPauseLinkedCts = null;
@@ -9159,7 +9177,7 @@ public sealed partial class NknSignalingTransport : IFileTransferControlPlanePhy
                      IsFileTunaV4TargetTuna(authority) &&
                      IsFileTransferV4DataPathFrame(frame.Type, ResolveFileTransferDataPathBatchProfile(frame)));
                 var preCommitProbeAuthority = TryCreateRuntimeUnlockPreCommitProbeAuthority(frame);
-                var preCommitAckAuthority = TryConsumeRuntimeUnlockPreCommitAckAuthority(frame);
+                var preCommitAckAuthority = commitReply ?? TryConsumeRuntimeUnlockPreCommitAckAuthority(frame);
 
                 var singleSend = owner.SendFileTransferEnvelopeRawAsync(
                         MsgType.FileTransferDataFrame,

@@ -24680,7 +24680,13 @@ public sealed partial class SessionFileTransferService :
         RuntimeUnlockPeerPreCommitAnswerAcceptanceStatus?
             AnswerAcceptanceStatus = null,
         FileTransferRuntimeUnlockPreCommitProbeAckFrame?
-            CompletedCommitConfirmation = null);
+            CompletedCommitConfirmation = null,
+        bool CommitReplyStarted = false)
+    {
+        // Accessed only under the service gate, on the exact claimed record.
+        public bool CommitReplyWritten { get; set; }
+        public bool DuplicateWaiting { get; set; }
+    }
 
     private sealed class RuntimeUnlockPostFallbackPairedAdmissionRecheck
     {
@@ -24929,6 +24935,8 @@ public sealed partial class SessionFileTransferService :
         public DateTimeOffset? RuntimeUnlockActivationWindowGrantedUtc { get; set; }
 
         public RuntimeUnlockPeerPreCommitProbeState? RuntimeUnlockPendingPeerPreCommitProbe { get; set; }
+
+        public InitiatorCommitConfirmation? SentPairedConfirmation { get; set; }
 
         public RuntimeUnlockPeerPreCommitProbeRegistration? RuntimeUnlockPeerPreCommitProbeRegistration { get; set; }
 

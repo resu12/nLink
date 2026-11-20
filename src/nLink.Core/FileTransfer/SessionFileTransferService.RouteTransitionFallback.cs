@@ -4141,6 +4141,7 @@ public sealed partial class SessionFileTransferService
             EmitOutboundFileTransferRouteTransitionRecoveredProjectionLocked(
                 context,
                 command.Value);
+            PublishConfirmedInitiatorLocked(context);
             context.PullTransportPaused = false;
             context.PullTransportPausedSinceUtc = null;
             context.PullTransportGraceDeadlineUtc = null;
@@ -4250,6 +4251,9 @@ public sealed partial class SessionFileTransferService
                 EmitInboundFileTransferRouteTransitionRecoveredProjectionLocked(
                     context,
                     command.Value);
+                if (context.RuntimeUnlockPendingPeerPreCommitProbe?.CompletedCommitConfirmation is { } confirmation &&
+                    context.DataSession is { } session)
+                    _ = TryStartCommittedResponderReplyLocked(confirmation, session);
             }
             context.PullTransportPaused = false;
             context.PullTransportPausedSinceUtc = null;

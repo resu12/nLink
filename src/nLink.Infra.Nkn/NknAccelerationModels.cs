@@ -59,6 +59,8 @@ internal interface INknAccelerationLane : IDisposable
     bool TryApplyFailureOrigin(NknAccelerationFailureOrigin origin, Func<bool> apply) => false;
 
     Task<bool> TrySendAsync(NknBridgeChannel lane, byte[] envelopeBytes, CancellationToken ct);
+    Task<bool> TryWritePairedCommitConfirmationAsync(byte[] envelopeBytes, long expiresUtcTicks, Func<Func<Task>, Task?> startIfCurrent,
+        CancellationToken ct) => Task.FromResult(false);
 
     event EventHandler<NknIncomingMessage>? MessageReceived;
 

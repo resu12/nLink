@@ -464,6 +464,17 @@ public sealed partial class NknAccelerationTransportTests
                 bridgeIngressObservedUtcMs: DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()));
             return true;
         }
+        public async Task<bool> TryWritePairedCommitConfirmationAsync(byte[] bytes, long expiresUtcTicks, Func<Func<Task>, Task?> start, CancellationToken ct)
+        {
+            bool sent = false;
+            async Task Write()
+            {
+                if (!ct.IsCancellationRequested && DateTime.UtcNow.Ticks < expiresUtcTicks)
+                    sent = await TrySendAsync(NknBridgeChannel.Bulk, bytes, ct);
+            }
+            if (start(Write) is { } writing) await writing;
+            return sent;
+        }
         public Task<bool> EnsureListenerSidecarConnectedAsync(string peer, CancellationToken ct)
         {
             Interlocked.Increment(ref OrdinaryStarts);

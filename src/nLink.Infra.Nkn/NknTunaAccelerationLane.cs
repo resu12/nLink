@@ -715,6 +715,20 @@ internal sealed partial class NknTunaAccelerationLane : INknTunaAccelerationSess
         return current.TrySendAsync(lane, envelopeBytes, ct);
     }
 
+    public Task<bool> TryWritePairedCommitConfirmationAsync(byte[] bytes, long expiresUtcTicks, Func<Func<Task>, Task?> startIfCurrent, CancellationToken ct)
+    {
+        NknTunaSidecarClient? selected;
+        lock (gate) selected = client;
+        return selected?.TryWritePairedCommitConfirmationAsync(bytes, expiresUtcTicks, write => startIfCurrent(() =>
+        {
+            lock (gate)
+            {
+                if (client != selected) throw new OperationCanceledException("Tuna client replaced");
+                return write();
+            }
+        }), ct) ?? Task.FromResult(false);
+    }
+
     public Task StopAsync(string reason, CancellationToken ct)
     {
         ct.ThrowIfCancellationRequested();

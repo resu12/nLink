@@ -3300,6 +3300,7 @@ public sealed partial class SessionFileTransferService
                 IsInboundLifecycleMessageMatchLocked(sessionId, transferId) &&
                 inboundTransfer is { IsTerminal: false } inbound &&
                 inbound.RuntimeUnlockPendingPeerPreCommitProbe is { } inboundPending &&
+                inboundPending.CompletedCommitConfirmation is null &&
                 inboundPending.TransactionGeneration == confirmation.TransactionGeneration &&
                 inboundPending.OfferGeneration == confirmation.OfferGeneration &&
                 inboundPending.TunaPathLeaseGeneration == confirmation.TunaPathLeaseGeneration &&
@@ -3335,6 +3336,39 @@ public sealed partial class SessionFileTransferService
                 direction, ack, receivedTransportKind, dataSession) is { } registrationTask)
         {
             await registrationTask.ConfigureAwait(false);
+        }
+
+        if (direction == FileTransferDirection.Outbound && ack.Reason == RuntimeUnlockPreCommitProbeCommitConfirmedReplyReason)
+        {
+            lock (gate)
+            {
+                if (outboundTransfer is { SentPairedConfirmation: { } expected } outbound &&
+                    outbound.SessionId == sessionId && outbound.TransferId == transferId)
+                {
+                    if ((outboundSparseReceiveAuthority is not { } sparse || IsOutboundSparseRuntimeUnlockPreCommitProbeReceiveAuthorityCurrentLocked(sparse, out _)) &&
+                        receivedTransportKind == FileTransferTransportKind.Tuna && ReferenceEquals(expected.Session, dataSession) &&
+                        ack.Accepted && (ack with { Reason = expected.Probe.Reason, SentUnixTimeMilliseconds = expected.Probe.SentUnixTimeMilliseconds }) == expected.Probe &&
+                        InitiatorBindingCurrent(outbound, expected))
+                    {
+                        expected.ReplyReceived = true;
+                        PublishConfirmedInitiatorLocked(outbound);
+                    }
+                    return;
+                }
+            }
+        }
+
+        if (direction == FileTransferDirection.Inbound && receivedTransportKind == FileTransferTransportKind.Tuna &&
+            dataSession is not null && ack.SessionId == sessionId && ack.TransferId == transferId)
+        {
+            Task? reply;
+            lock (gate)
+                reply = TryStartCommittedResponderReplyLocked(ack, dataSession, receivedDuplicate: true);
+            if (reply is not null)
+            {
+                await reply.ConfigureAwait(false);
+                return;
+            }
         }
 
         if (TryClassifyRuntimeUnlockCompletedPeerPreCommitProbeConfirmationLocked(
@@ -3533,6 +3567,7 @@ public sealed partial class SessionFileTransferService
         bool authorized;
         string ackAuthorizationRejectionReason;
         long currentRouteTransitionLaunchGeneration = 0;
+        InitiatorCommitConfirmation? initiatorBinding = null;
         RuntimeUnlockPeerPreCommitAnswerAcceptanceScope currentReceiveScope =
             default;
         lock (gate)
@@ -3610,6 +3645,15 @@ public sealed partial class SessionFileTransferService
             {
                 currentRouteTransitionLaunchGeneration =
                     activation.LaunchGeneration;
+                if (authorized && !isPeerCommitConfirmation && ack.Accepted &&
+                    direction == FileTransferDirection.Outbound && dataSession is not null &&
+                    transition.Authority.Kind == FileTransferRouteTransitionKind.PostTunaFallbackV6ToTunaV4 &&
+                    activation.RuntimeUnlockAdmission == currentAdmissionToken &&
+                    activation.EffectiveRetryInstallReceipt is not null && outboundTransfer is { } sender &&
+                    ReferenceEquals(sender.DataSession, dataSession) &&
+                    sender.DataSessionGeneration == transition.Authority.DataSessionGeneration)
+                    initiatorBinding = new(ack, activation.RuntimeUnlockAdmission, dataSession, sender.DataSessionGeneration,
+                        proofProvider, expectedTunaPathLeaseListenerRunId, transition.Authority);
             }
 
             if (authorized &&
@@ -3840,7 +3884,7 @@ public sealed partial class SessionFileTransferService
                 return;
             }
 
-            if (dataSession is IFileTransferRuntimeUnlockPreCommitProbeAckAuthorizer confirmationAuthorizer)
+            if (initiatorBinding is null && dataSession is IFileTransferRuntimeUnlockPreCommitProbeAckAuthorizer confirmationAuthorizer)
             {
                 confirmationAuthorizer.AuthorizeRuntimeUnlockPreCommitProbeAck(ack, receivedTransportKind);
             }
@@ -3862,14 +3906,60 @@ public sealed partial class SessionFileTransferService
                 return;
             }
 
-            var confirmationSent = await SendRuntimeUnlockPreCommitProbeCommitConfirmationAsync(
+            InitiatorCommitConfirmation? issued = null;
+            if (direction == FileTransferDirection.Outbound && currentAdmissionToken is { Route: FileTransferRoute.PostTunaFallbackV6 })
+            {
+                lock (gate)
+                {
+                    if (initiatorBinding is null || outboundTransfer is not { } outbound ||
+                        !InitiatorBindingCurrent(outbound, initiatorBinding)) return;
+                    if (outbound.SentPairedConfirmation is { } prior && prior.Transition == initiatorBinding.Transition &&
+                        prior.Probe.ProbeId == ack.ProbeId && ReferenceEquals(prior.Session, dataSession)) return;
+                    issued = outbound.SentPairedConfirmation = initiatorBinding;
+                }
+            }
+            Task? StartInitiatorWrite(Func<Task> write)
+            {
+                lock (gate)
+                    return issued is not null && outboundTransfer is { } sender &&
+                        ReferenceEquals(sender.SentPairedConfirmation, issued) && InitiatorBindingCurrent(sender, issued) &&
+                        (outboundSparseReceiveAuthority is not { } sparse || IsOutboundSparseRuntimeUnlockPreCommitProbeReceiveAuthorityCurrentLocked(sparse, out _))
+                        ? write() : null;
+            }
+            bool confirmationSent;
+            try
+            {
+                confirmationSent = await SendRuntimeUnlockPreCommitProbeCommitConfirmationAsync(
                     direction,
                     sessionId,
                     transferId,
                     ack,
                     dataSession,
-                    RuntimeUnlockPreCommitProbeCommitConfirmedReason)
+                    RuntimeUnlockPreCommitProbeCommitConfirmedReason, issued is null ? null : StartInitiatorWrite)
                 .ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) when (issued is not null)
+            {
+                lock (gate)
+                    if (outboundTransfer is { } current && ReferenceEquals(current.SentPairedConfirmation, issued))
+                        current.SentPairedConfirmation = null;
+                throw;
+            }
+            if (issued is not null)
+            {
+                lock (gate)
+                {
+                    if (outboundTransfer is null || !ReferenceEquals(outboundTransfer.SentPairedConfirmation, issued)) return;
+                    if (!InitiatorBindingCurrent(outboundTransfer, issued))
+                    {
+                        outboundTransfer.SentPairedConfirmation = null;
+                        return;
+                    }
+                    issued.Sent = confirmationSent;
+                    if (confirmationSent) PublishConfirmedInitiatorLocked(outboundTransfer);
+                    else outboundTransfer.SentPairedConfirmation = null;
+                }
+            }
             if (outboundSparseReceiveAuthority is { } requiredReceiveAuthority)
             {
                 bool receiveAuthorityCurrent;
@@ -4024,7 +4114,12 @@ public sealed partial class SessionFileTransferService
                 return;
             }
 
-            if (initiatorCommitted)
+            if (initiatorCommitted && issued is not null)
+            {
+                lock (gate)
+                    if (outboundTransfer is not null && ReferenceEquals(outboundTransfer.SentPairedConfirmation, issued)) PublishConfirmedInitiatorLocked(outboundTransfer);
+            }
+            else if (initiatorCommitted)
             {
                 NotifyRuntimeUnlockPairedRouteCommitConfirmed(
                     direction,
@@ -4051,6 +4146,21 @@ public sealed partial class SessionFileTransferService
                     ack.ProbeId!,
                     RuntimeUnlockPreCommitProbeCommitConfirmedReplyReason);
             }
+            return;
+        }
+
+        if (direction == FileTransferDirection.Inbound &&
+            currentReceiveScope.ResponderTransitionMode == RuntimeUnlockResponderPeerProbeTransitionMode.PostFallbackV6Paired &&
+            commitReason == RuntimeUnlockPreCommitProbeCommitConfirmedReason && dataSession is not null)
+        {
+            // The wire generations name the peer's offer, not this receiver's transition.
+            // If the drain is still outstanding, disposition application completes this join.
+            TryCommitRuntimeUnlockRouteAfterPreCommitProbeAck(direction, sessionId, transferId,
+                callbackSnapshot.TransactionGeneration, callbackSnapshot.OfferGeneration, commitReason, out _);
+            Task? reply;
+            lock (gate)
+                reply = TryStartCommittedResponderReplyLocked(ack, dataSession);
+            if (reply is not null) await reply.ConfigureAwait(false);
             return;
         }
 
@@ -4149,6 +4259,142 @@ public sealed partial class SessionFileTransferService
         }
     }
 
+    private sealed record InitiatorCommitConfirmation(FileTransferRuntimeUnlockPreCommitProbeAckFrame Probe,
+        RuntimeUnlockAdmissionToken Admission, IFileTransferDataSession Session, long SessionGeneration,
+        IRuntimeUnlockRouteCommitProofProvider Provider, string? ListenerRun, FileTransferRouteTransitionAuthority Transition)
+    {
+        public bool Sent;
+        public bool ReplyReceived;
+        public bool Published;
+    }
+
+    private bool InitiatorBindingCurrent(OutboundTransferContext c, InitiatorCommitConfirmation expected)
+    {
+        var probe = expected.Probe;
+        if (c.IsTerminal || !ReferenceEquals(c.DataSession, expected.Session) || c.DataSessionGeneration != expected.SessionGeneration ||
+            !ReferenceEquals(transport, expected.Provider) || c.TransferId != probe.TransferId || c.SessionId != probe.SessionId ||
+            !expected.Provider.TryGetRuntimeUnlockRouteCommitProof(c.SessionId, c.TransferId, out var proof) ||
+            proof.SessionId != c.SessionId || proof.TransferId != c.TransferId ||
+            proof.TransactionGeneration != probe.TransactionGeneration || proof.OfferGeneration != probe.OfferGeneration ||
+            proof.TunaPathLeaseGeneration != probe.TunaPathLeaseGeneration || !proof.TunaPathLeaseCurrent ||
+            proof.TunaPathLeaseListenerRunId != expected.ListenerRun || proof.PathProbeId != probe.ProbeId ||
+            !string.Equals(proof.PathProbeState, "Acked", StringComparison.OrdinalIgnoreCase)) return false;
+        var state = CreateCoordinatorStateLocked(c);
+        var transition = state.PersistentState.FileTransferRouteTransition;
+        if (transition.CurrentOperation is { } pending)
+            return pending.Authority == expected.Transition &&
+                expected.Transition.ProofBoundary is FileTransferTunaActivationTransitionProofBoundary activation &&
+                FileTransferCoordinator.IsRuntimeUnlockAdmissionTokenCurrent(state, expected.Admission, out _) &&
+                FileTransferCoordinator.IsRuntimeUnlockPendingPreCommitProbeRequestCurrent(state, activation.PendingPreCommitProbe, out _) &&
+                FileTransferCoordinator.TryGetCurrentRuntimeUnlockRetryDispatchInstallReceipt(state, out var receipt) &&
+                receipt == activation.EffectiveRetryInstallReceipt;
+        return transition.LastTerminalOperation?.Authority == expected.Transition &&
+             TryGetCommittedFileTransferRouteTransitionTokenLocked(c, probe.TransactionGeneration, probe.OfferGeneration, out var token) &&
+             token.RuntimeUnlockAdmission == expected.Admission && token.SamePathTunaProbeAckId == probe.ProbeId &&
+             token.TunaPathLeaseGeneration == probe.TunaPathLeaseGeneration && token.TunaPathLeaseListenerRunId == expected.ListenerRun &&
+             FileTransferCoordinator.IsRouteCommitTokenCurrent(state, token, out _);
+    }
+
+    private void PublishConfirmedInitiatorLocked(OutboundTransferContext context)
+    {
+        if (context.SentPairedConfirmation is not { Sent: true, ReplyReceived: true, Published: false } expected ||
+            context.CoordinatorPersistentState.FileTransferRouteTransition is not
+                { CurrentOperation: null, LastTerminalOperation.DispositionReceipt.Status:
+                    FileTransferRouteTransitionDispositionApplyStatus.Applied or FileTransferRouteTransitionDispositionApplyStatus.Idempotent } ||
+            !TryGetCommittedFileTransferRouteTransitionTokenLocked(context, expected.Probe.TransactionGeneration,
+                expected.Probe.OfferGeneration, out var token) || token.RuntimeUnlockAdmission != expected.Admission ||
+            !InitiatorBindingCurrent(context, expected)) return;
+        expected.Published = true;
+        expected.Provider.NotifyRuntimeUnlockRouteCommitResult(context.SessionId, context.TransferId, FileTransferDirection.Outbound,
+            token.TransactionGeneration, token.OfferGeneration, true, RuntimeUnlockPreCommitProbeCommitConfirmedReplyReason);
+        LocalOperationalLog.Info("FileTransferService",
+            $"event=runtime_unlock_paired_commit_confirmed; direction=outbound; transfer_id={FormatProtocolLogValue(context.TransferId)}; session_id={FormatProtocolLogValue(context.SessionId)}; transaction_generation={token.TransactionGeneration}; offer_generation={token.OfferGeneration}; tuna_path_lease_generation={token.TunaPathLeaseGeneration}; probe_id={FormatProtocolLogValue(expected.Probe.ProbeId)}; reason={RuntimeUnlockPreCommitProbeCommitConfirmedReplyReason}");
+    }
+
+    // Join the wire tuple to the local committed operation via the receipt for the
+    // original probe. The peer and local offer/lease counters are independent.
+    private Task? TryStartCommittedResponderReplyLocked(FileTransferRuntimeUnlockPreCommitProbeAckFrame ack,
+        IFileTransferDataSession dataSession, bool receivedDuplicate = false)
+    {
+        if (ack is not { Accepted: true, Reason: RuntimeUnlockPreCommitProbeCommitConfirmedReason,
+                TargetRoute: FileTransferRouteResolver.FileTunaV4Token, TargetProtocolVersion: FileTransferProtocol.ProtocolVersionV4,
+                TargetTransport: "tuna", HandoffKind: "normal_to_tuna_activation" } ||
+            inboundTransfer is not { IsTerminal: false, RuntimeUnlockPendingPeerPreCommitProbe: { AnswerAcceptanceReceipt: { } receipt } pending } context ||
+            !ReferenceEquals(context.DataSession, dataSession) || context.SessionId != ack.SessionId || context.TransferId != ack.TransferId ||
+            receipt.SessionId != ack.SessionId || receipt.TransferId != ack.TransferId || receipt.Direction != FileTransferDirection.Inbound ||
+            receipt.PeerTransactionGeneration != ack.TransactionGeneration || receipt.PeerOfferGeneration != ack.OfferGeneration ||
+            receipt.PeerTunaPathLeaseGeneration != ack.TunaPathLeaseGeneration || receipt.ProbeId != ack.ProbeId ||
+            (pending.CompletedCommitConfirmation is { } completed && completed != (ack with { SentUnixTimeMilliseconds = completed.SentUnixTimeMilliseconds })) ||
+            context.CoordinatorPersistentState.FileTransferRouteTransition.LastTerminalOperation is not
+                { DispositionReceipt.Status: FileTransferRouteTransitionDispositionApplyStatus.Applied or FileTransferRouteTransitionDispositionApplyStatus.Idempotent,
+                  Authority.ProofBoundary: FileTransferTunaActivationTransitionProofBoundary { ResponderPeerProbeHandoffAuthority: { } bound } } ||
+            bound.Observation.ResponderTransitionMode != RuntimeUnlockResponderPeerProbeTransitionMode.PostFallbackV6Paired ||
+            bound.Observation.PeerReceiveScope != receipt.ReceiveScope || bound.RuntimeUnlockAdmission != receipt.AdmissionToken ||
+            bound.Observation.PeerProbeFrameFingerprint != receipt.ProbeFrameFingerprint || bound.Observation.ProbeId != receipt.ProbeId ||
+            bound.DataSessionGeneration != context.DataSessionGeneration ||
+            bound.DataSessionIdentity != CreateReceiveRecoveryDataSessionIdentity(context.TransferId, dataSession, context.DataSessionGeneration) ||
+            !TryGetCommittedFileTransferRouteTransitionTokenLocked(context, bound.Observation.TransactionGeneration,
+                bound.Observation.OfferGeneration, out var token) ||
+            transport is not IRuntimeUnlockRouteCommitProofProvider provider)
+            return null;
+
+        if (pending.CommitReplyStarted)
+        {
+            if (receivedDuplicate && !pending.CommitReplyWritten) pending.DuplicateWaiting = true;
+            return Task.CompletedTask;
+        }
+        var claimed = pending with { CompletedCommitConfirmation = ack, CommitReplyStarted = true };
+        context.RuntimeUnlockPendingPeerPreCommitProbe = claimed;
+        return ReplyAsync();
+
+        bool Current() => ReferenceEquals(inboundTransfer, context) && !context.IsTerminal &&
+            ReferenceEquals(transport, provider) && ReferenceEquals(context.DataSession, dataSession) &&
+            context.DataSessionGeneration == receipt.DataSessionGeneration &&
+            ReferenceEquals(context.RuntimeUnlockPendingPeerPreCommitProbe, claimed) &&
+            context.CoordinatorPersistentState.FileTransferRouteTransition.CurrentOperation is null &&
+            TryGetCommittedFileTransferRouteTransitionTokenLocked(context, token.TransactionGeneration, token.OfferGeneration,
+                out var current) && current == token &&
+            FileTransferCoordinator.IsRouteCommitTokenCurrent(CreateCoordinatorStateLocked(context), token, out _) &&
+            provider.TryGetRuntimeUnlockRouteCommitProof(context.SessionId, context.TransferId, out var proof) &&
+            proof.SessionId == context.SessionId && proof.TransferId == context.TransferId &&
+            proof.TransactionGeneration == token.TransactionGeneration && proof.OfferGeneration == token.OfferGeneration &&
+            proof.TunaPathLeaseCurrent && proof.TunaPathLeaseGeneration == token.TunaPathLeaseGeneration &&
+            proof.TunaPathLeaseListenerRunId == token.TunaPathLeaseListenerRunId && proof.PathProbeId == receipt.ProbeId;
+
+        async Task ReplyAsync()
+        {
+            await Task.Yield(); // Do not wait for IPC under the coordinator lock.
+            Task? StartWrite(Func<Task> write) { lock (gate) return Current() ? write() : null; }
+            while (true)
+            {
+                bool sent;
+                try
+                {
+                    sent = await SendRuntimeUnlockPreCommitProbeCommitConfirmationAsync(FileTransferDirection.Inbound,
+                        context.SessionId, context.TransferId, ack, dataSession, RuntimeUnlockPreCommitProbeCommitConfirmedReplyReason, StartWrite)
+                        .ConfigureAwait(false);
+                }
+                catch (OperationCanceledException) { sent = false; }
+                lock (gate)
+                {
+                    if (!ReferenceEquals(context.RuntimeUnlockPendingPeerPreCommitProbe, claimed)) return;
+                    var retry = !sent && claimed.DuplicateWaiting && Current();
+                    claimed.DuplicateWaiting = false;
+                    if (retry) continue;
+                    if (sent)
+                    {
+                        claimed.CommitReplyWritten = true;
+                        if (Current())
+                            provider.NotifyRuntimeUnlockRouteCommitResult(context.SessionId, context.TransferId, FileTransferDirection.Inbound,
+                                token.TransactionGeneration, token.OfferGeneration, true, RuntimeUnlockPreCommitProbeCommitConfirmedReplySentReason);
+                    }
+                    else context.RuntimeUnlockPendingPeerPreCommitProbe = claimed with { CommitReplyStarted = false };
+                    return;
+                }
+            }
+        }
+    }
+
     private void LogOutboundSparseRuntimeUnlockPreCommitProbeReceiveRejected(
         OutboundSparseRuntimeUnlockPreCommitProbeReceiveAuthority receiveAuthority,
         FileTransferDirection direction,
@@ -4225,7 +4471,8 @@ public sealed partial class SessionFileTransferService
         string transferId,
         FileTransferRuntimeUnlockPreCommitProbeAckFrame ack,
         IFileTransferDataSession dataSession,
-        string reason)
+        string reason,
+        Func<Func<Task>, Task?>? startCommitReplyWrite = null)
     {
         if (dataSession is not IFileTransferRuntimeUnlockTunaProbeSender tunaProbeSender)
         {
@@ -4252,26 +4499,27 @@ public sealed partial class SessionFileTransferService
             Reason = reason,
         };
 
+        var sufficientCopySent = false;
         try
         {
             using var timeoutCts = new CancellationTokenSource(ResolveV6TransportProbeAckSendTimeout());
-            if (dataSession is IFileTransferRuntimeUnlockPreCommitProbeAckAuthorizer authorizer)
+            async Task<bool> Submit()
             {
-                authorizer.AuthorizeRuntimeUnlockPreCommitProbeAck(confirmation, FileTransferTransportKind.Tuna);
+                if (startCommitReplyWrite is not null)
+                    return await tunaProbeSender.TryWritePairedCommitConfirmationAsync(confirmation, startCommitReplyWrite, timeoutCts.Token).ConfigureAwait(false);
+                if (dataSession is IFileTransferRuntimeUnlockPreCommitProbeAckAuthorizer authorizer)
+                    authorizer.AuthorizeRuntimeUnlockPreCommitProbeAck(confirmation, FileTransferTransportKind.Tuna);
+                await tunaProbeSender.SendRuntimeUnlockTunaPreCommitProbeAckAsync(confirmation, timeoutCts.Token).ConfigureAwait(false);
+                return true;
             }
-
-            await tunaProbeSender.SendRuntimeUnlockTunaPreCommitProbeAckAsync(confirmation, timeoutCts.Token).ConfigureAwait(false);
+            if (!await Submit().ConfigureAwait(false)) return false;
+            sufficientCopySent = startCommitReplyWrite is not null;
             LocalOperationalLog.Info(
                 "FileTransferService",
                 $"event=runtime_unlock_precommit_probe_commit_confirmation_sent; direction={direction.ToString().ToLowerInvariant()}; transfer_id={FormatProtocolLogValue(transferId)}; session_id={FormatProtocolLogValue(sessionId)}; transaction_generation={confirmation.TransactionGeneration}; offer_generation={confirmation.OfferGeneration}; tuna_path_lease_generation={confirmation.TunaPathLeaseGeneration}; probe_id={FormatProtocolLogValue(confirmation.ProbeId ?? "(none)")}; reason={FormatProtocolLogValue(reason)}");
             if (IsRuntimeUnlockPreCommitProbeCommitConfirmationReason(reason))
             {
-                if (dataSession is IFileTransferRuntimeUnlockPreCommitProbeAckAuthorizer duplicateAuthorizer)
-                {
-                    duplicateAuthorizer.AuthorizeRuntimeUnlockPreCommitProbeAck(confirmation, FileTransferTransportKind.Tuna);
-                }
-
-                await tunaProbeSender.SendRuntimeUnlockTunaPreCommitProbeAckAsync(confirmation, timeoutCts.Token).ConfigureAwait(false);
+                if (!await Submit().ConfigureAwait(false)) return sufficientCopySent;
                 LocalOperationalLog.Info(
                     "FileTransferService",
                     $"event=runtime_unlock_precommit_probe_commit_confirmation_sent; direction={direction.ToString().ToLowerInvariant()}; transfer_id={FormatProtocolLogValue(transferId)}; session_id={FormatProtocolLogValue(sessionId)}; transaction_generation={confirmation.TransactionGeneration}; offer_generation={confirmation.OfferGeneration}; tuna_path_lease_generation={confirmation.TunaPathLeaseGeneration}; probe_id={FormatProtocolLogValue(confirmation.ProbeId ?? "(none)")}; reason={FormatProtocolLogValue(reason)}; duplicate=1");
@@ -4279,12 +4527,12 @@ public sealed partial class SessionFileTransferService
 
             return true;
         }
-        catch (Exception ex) when (ex is not OperationCanceledException)
+        catch (Exception ex) when (ex is not OperationCanceledException || sufficientCopySent)
         {
             LocalOperationalLog.Warn(
                 "FileTransferService",
                 $"event=runtime_unlock_precommit_probe_commit_confirmation_failed; direction={direction.ToString().ToLowerInvariant()}; transfer_id={FormatProtocolLogValue(transferId)}; session_id={FormatProtocolLogValue(sessionId)}; transaction_generation={confirmation.TransactionGeneration}; offer_generation={confirmation.OfferGeneration}; tuna_path_lease_generation={confirmation.TunaPathLeaseGeneration}; probe_id={FormatProtocolLogValue(confirmation.ProbeId ?? "(none)")}; reason={FormatProtocolLogValue(reason)}; error={FormatProtocolLogValue(ex.GetType().Name)}");
-            return false;
+            return sufficientCopySent;
         }
     }
 
