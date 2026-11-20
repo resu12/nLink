@@ -39090,6 +39090,7 @@ public sealed partial class NknAccelerationTransportTests : CoreSmokeTestsBase, 
                 : supportedLanes;
 
         public string? LocalTunaAddress { get; private set; }
+        public bool ClearLocalAddressOnStop { get; init; }
 
         public bool IsLocalPaidListenerActive { get; private set; }
 
@@ -39323,6 +39324,7 @@ public sealed partial class NknAccelerationTransportTests : CoreSmokeTestsBase, 
             Volatile.Write(ref lastStopReason, reason);
             Volatile.Write(ref available, 0);
             IsLocalPaidListenerActive = false;
+            if (ClearLocalAddressOnStop) LocalTunaAddress = null;
             StateChanged?.Invoke(this, new AccelerationStateChangedEventArgs(false, reason));
         }
 

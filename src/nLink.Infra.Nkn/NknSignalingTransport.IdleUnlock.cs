@@ -4,12 +4,19 @@ namespace NLink.Infra.Nkn;
 
 public sealed partial class NknSignalingTransport
 {
+    private const string DuplexSessionUnlockTrigger = "duplex_session_after_user_unlock";
+
     // Retained user intent, never file-route or runtime-owner authority.
     private sealed record IdleSessionUnlockRequest(
         FileTransferSessionPreparationAttachment Attachment,
         FileTransferSessionPreparationSecurityEpoch Epoch,
         FileTransferAccelerationRequestSelection Selection,
-        long RequestedAtUnixMs, CancellationToken Cancellation, long StopGeneration);
+        long RequestedAtUnixMs, CancellationToken Cancellation, long StopGeneration)
+    {
+        public string Trigger => Selection.Purpose == FileTransferAccelerationRequestPurpose.DuplexSessionReestablishment
+            ? DuplexSessionUnlockTrigger : "session_ready_after_user_unlock";
+        public bool FromPeer { get; init; }
+    }
 
     private sealed record IdleSessionOfferBinding(
         IdleSessionUnlockRequest Request, string Nonce, long PayerDecisionId, long Generation);
@@ -47,24 +54,43 @@ public sealed partial class NknSignalingTransport
            !IsAccelerationUserStoppedForCurrentSession() &&
            !IsAccelerationPeerUserStoppedForFallbackSession(request.Epoch.SessionId);
 
-    private void RequestIdleSessionReestablishment(CancellationToken ct, long stopGeneration, long requestedAtUnixMs)
+    private void SchedulePreferredHelpeeNegotiation(string reason, string? peerTrigger, string sessionId, long sentAtUnixMs)
+    {
+        if (peerTrigger != DuplexSessionUnlockTrigger)
+        {
+            ScheduleAccelerationNegotiationIfEligible(reason);
+            return;
+        }
+        var stopGeneration = Volatile.Read(ref accelerationExplicitStopGeneration);
+        var selection = SelectSessionPreparationRequest();
+        if (selection.Purpose == FileTransferAccelerationRequestPurpose.DuplexSessionReestablishment)
+            RequestIdleSessionReestablishment(selection, CancellationToken.None, stopGeneration, sentAtUnixMs, sessionId);
+    }
+
+    private void RequestIdleSessionReestablishment(FileTransferAccelerationRequestSelection expected, CancellationToken ct, long stopGeneration, long requestedAtUnixMs, string? peerSession = null)
     {
         var attachment = sessionPreparationLifecycle.Attachment;
         var epoch = sessionPreparationLifecycle.Current;
-        if (attachment is null || epoch is null || !IsSessionPreparationRequestBindingCurrent(attachment, epoch)) return;
+        if (attachment is null || epoch is null || (peerSession is not null && peerSession != epoch.SessionId) ||
+            !IsSessionPreparationRequestBindingCurrent(attachment, epoch)) return;
         var selection = attachment.Authority.SelectRequest(attachment, epoch);
-        if (selection.Purpose != FileTransferAccelerationRequestPurpose.IdleSessionReestablishment) return;
+        if (selection != expected) return;
         var request = new IdleSessionUnlockRequest(attachment, epoch, selection,
-            requestedAtUnixMs, ct, stopGeneration);
+            requestedAtUnixMs, ct, stopGeneration) { FromPeer = peerSession is not null };
         IdleSessionUnlockBeforePublicationForTests?.Invoke();
         lock (accelerationGate)
         {
             if (accelerationExplicitStopGeneration != stopGeneration || ct.IsCancellationRequested) return;
+            if (peerSession is not null &&
+                (IsAccelerationUserStoppedForCurrentSession() || IsAccelerationPeerUserStoppedForFallbackSession(peerSession) ||
+                 (idleSessionUnlock is { } prior && prior.Selection == selection && IsIdleSessionUnlockLifetimeCurrent(prior) &&
+                  (prior.RequestedAtUnixMs >= requestedAtUnixMs || outboundAccelerationOfferIdleUnlock?.Request == prior ||
+                   acceptedIdleSessionAnswer?.Request == prior)))) return;
             idleSessionUnlock = request;
             idleSessionUnlockWaiting = true;
         }
         NotifyTransportAccelerationStateChanged("renegotiating_after_user_unlock");
-        Interlocked.Exchange(ref accelerationNegotiationRetryAttempts, 0);
+        if (peerSession is null) Interlocked.Exchange(ref accelerationNegotiationRetryAttempts, 0);
         RecheckPendingIdleSessionUnlock();
     }
 
@@ -78,11 +104,14 @@ public sealed partial class NknSignalingTransport
                 accelerationLaneStopDrains != 0 || accelerationNegotiationScheduled != 0) return;
             // Reapply this later user intent after the preceding stop finishes.
             // Any newer explicit stop atomically invalidates it when that stop begins.
-            ClearAccelerationUserStoppedForCurrentSession();
-            ClearAccelerationPeerUserStoppedForCurrentSession();
+            if (!request.FromPeer)
+            {
+                ClearAccelerationUserStoppedForCurrentSession();
+                ClearAccelerationPeerUserStoppedForCurrentSession();
+            }
             idleSessionUnlockWaiting = false;
         }
-        ScheduleAccelerationNegotiationIfEligible("session_ready_after_user_unlock", idleUnlock: request);
+        ScheduleAccelerationNegotiationIfEligible(request.Trigger, idleUnlock: request);
     }
 
     private IDisposable BeginAccelerationLaneStopDrain(bool invalidateIdleUnlock = false)

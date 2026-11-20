@@ -169,7 +169,14 @@ public sealed partial class SessionFileTransferService : IFileTransferSessionPre
                     !epoch.IsCurrent || epoch.Security?.ApprovalExpiresAt is not { } expires || expires <= DateTimeOffset.UtcNow) return;
                 var outbound = outboundTransfer is { IsTerminal: false };
                 var inbound = inboundTransfer is { IsTerminal: false };
-                if (outbound && inbound) return; // No ambiguous transfer owner selection.
+                if (outbound && inbound)
+                {
+                    // Reconnect the session, never select one file as authority for the other.
+                    if (outboundTransfer!.SessionId == epoch.SessionId && inboundTransfer!.SessionId == epoch.SessionId)
+                        result = new(FileTransferAccelerationRequestPurpose.DuplexSessionReestablishment,
+                            "unfinished_files_in_both_directions") { IdleWrite = idleOfferWrite ??= new() };
+                    return;
+                }
                 FileTransferCoordinatorState? selectedTransfer = outbound ? CreateCoordinatorStateLocked(outboundTransfer!)
                     : inbound ? CreateCoordinatorStateLocked(inboundTransfer!) : null;
                 if (selectedTransfer is null)

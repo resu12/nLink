@@ -2935,6 +2935,538 @@ public sealed partial class NknAccelerationTransportTests
     public Task IdleOfferAtWriter_RechecksOriginalUnlock(string change) =>
         RunIdleSessionReestablishmentAsync(false, false, switchPayer: true, stopBeforeAnswer: false, change);
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public Task ExplicitUnlock_WithUnfinishedFilesInBothDirections_ReconnectsWithoutChangingEitherFile(bool fileOnly)
+        => CheckDuplexUnlockAsync(fileOnly, deselectScreen: false);
+
+    [Fact]
+    public Task DuplexUnlock_ScreenDeselectionDoesNotGiveLateFileSubscribersAHandoff()
+        => CheckDuplexUnlockAsync(fileOnly: false, deselectScreen: true);
+
+    private static async Task OfferPausedFileAsync(SessionFileTransferService from, SessionFileTransferService to, string id, CancellationToken ct)
+    {
+        Assert.NotNull(await from.TryStartSendAsync(new(id + ".bin", 1024, id),
+            _ => Task.FromResult<Stream>(new MemoryStream(new byte[1024], writable: false)), ct));
+        await WaitUntilAsync(() => to.Snapshot.Inbound?.TransferId == id, TimeSpan.FromSeconds(3));
+        Assert.True((await from.PauseTransferAsync(id, "user_requested", ct))?.IsPaused);
+        Assert.NotNull(await to.AcceptIncomingTransferAsync(id, (_, _) => Task.FromResult<Stream>(new MemoryStream()), ct));
+    }
+
+    [Fact]
+    public async Task DuplexUnlock_OrdinaryOfferDeliveredAfterBothAdmissionsCannotPauseEitherFile()
+    {
+        FakeNknClient.ResetNetwork();
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(12));
+        var ct = timeout.Token;
+        var a = new FakeNknClient("host.delayed-duplex.address");
+        var b = new FakeNknClient("helper.delayed-duplex.address");
+        var options = NknTransportOptions.Load();
+        using var lane = new RetryableTunaAccelerationSession(false, 0);
+        using var host = new NknSignalingTransport(a, options, new NknIdentity("host", a.Address), NknTunaAccelerationOptions.Disabled, lane);
+        using var helper = new NknSignalingTransport(b, options, new NknIdentity("helper", b.Address));
+        using var hostFiles = new SessionFileTransferService();
+        using var helperFiles = new SessionFileTransferService();
+        hostFiles.AttachTransport(host);
+        helperFiles.AttachTransport(helper);
+        var session = await ApproveNknSessionAsync(host, helper, ct, InviteCapabilities.Chat | InviteCapabilities.FileTransfer,
+            suppressAutomaticAccelerationNegotiation: true);
+        // The authenticated ordinary offer already exists before either file is admitted.
+        var offer = CreateOfferPayload(session, "delayed-ordinary-offer", ["file"], payerDecisionId: 7);
+        offer.Trigger = "session_ready";
+        var delayed = BuildSecureAccelerationEnvelope(helper, MsgType.TransportAccelerationOffer, offer,
+            "transport_acceleration_offer", offer.Nonce, sequence: 730);
+        await OfferPausedFileAsync(hostFiles, helperFiles, "outgoing", ct);
+        await OfferPausedFileAsync(helperFiles, hostFiles, "incoming", ct);
+        var pauses = new ConcurrentQueue<string>();
+        foreach (var id in new[] { "outgoing", "incoming" })
+        {
+            var channel = await host.OpenFileTransferDataSessionAsync(session, id, ct);
+            channel.AvailabilityChanged += (_, e) => { if (!e.IsAvailable && e.Reason == "tuna_activation_negotiating") pauses.Enqueue(id); };
+        }
+        var answer = new TaskCompletionSource<TransportAccelerationAnswerPayload>(TaskCreationOptions.RunContinuationsAsynchronously);
+        a.ShouldDeliverSendAsync = (_, bytes, _) =>
+        {
+            if (!EnvelopeCodec.TryDeserialize(bytes, out var env) || env.Type != MsgType.TransportAccelerationAnswer)
+                return Task.FromResult(true);
+            var plain = SessionSecureEnvelopeCodec.Decrypt((byte[])InvokePrivateMethod(host, "GetControlSessionSharedKeyOrThrow")!, env.Payload);
+            answer.TrySetResult(JsonSerializer.Deserialize<TransportAccelerationAnswerPayload>(plain.Plaintext)!);
+            return Task.FromResult(false);
+        };
+        InvokePrivateMethod(host, "HandleTransportAccelerationOffer", b.Address, delayed);
+        var response = await answer.Task.WaitAsync(ct);
+        Assert.Equal(offer.Nonce, response.Nonce);
+        Assert.Empty(pauses);
+        Assert.False(response.Accepted);
+        Assert.Equal("duplex_session_unlock_required", response.RejectReason);
+        Assert.Equal(0, lane.StartDialerCalls);
+        Assert.Null(GetPrivateField(host, "fileTransferTunaActivationPauseSessionId"));
+        Assert.All(new[] { hostFiles.Snapshot.Outbound!, hostFiles.Snapshot.Inbound! },
+            file => Assert.Equal(FileTransferRouteResolver.RegularNknV4FastToken, file.RouteToken));
+    }
+
+    [Theory]
+    [InlineData(false, false)]
+    [InlineData(true, false)]
+    [InlineData(false, true)]
+    public Task DuplexUnlock_ReverseFileJoinsWhileOrdinaryFinalAckWaits(bool checkPause, bool fixedLanes)
+        => CheckReverseAdmissionAsync(checkPause, fixedLanes);
+
+    [Fact]
+    public Task DuplexUnlock_ReverseAdmissionAtDispatchVetoesBothPeersHandoffs()
+        => CheckReverseAdmissionAsync(false, false, holdDispatch: true);
+
+    [Theory]
+    [InlineData(false, false)] // Recovery overlaps the handshake and finishes last.
+    [InlineData(false, true)]  // Recovery finishes first; the handshake still owns its pause.
+    [InlineData(true, false)]  // The channel was already held before the handshake.
+    [InlineData(true, true)]   // The pre-existing recovery ends while the final ACK is still gated.
+    public Task DuplexUnlock_FinalAckReleasesOnlyItsOwnChannels(bool recoveryPrecedesHandshake, bool recoveryCompletesBeforeAck)
+        => CheckReverseAdmissionAsync(false, false, independentHold: true,
+            recoveryPrecedesHandshake: recoveryPrecedesHandshake, recoveryCompletesBeforeAck: recoveryCompletesBeforeAck);
+
+    [Fact]
+    public Task DuplexUnlock_NewChannelHeldByRecoveryWaitsForFinalAck()
+        => CheckReverseAdmissionAsync(false, false, independentHold: true,
+            recoveryCompletesBeforeAck: true, recoveryDuringOpen: true);
+
+    [Fact]
+    public Task DuplexUnlock_RecoveryFinishingInsideChannelOpenWaitsForFinalAck()
+        => CheckReverseAdmissionAsync(false, false, independentHold: true,
+            recoveryCompletesBeforeAck: true, recoveryDuringOpen: true, finishInsideOpen: true);
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public Task DuplexUnlock_ReverseOfferDuringReopenRetainsOnlyFirstFilesPause(bool finishInsideOpen)
+        => CheckReverseAdmissionAsync(false, false, independentHold: true, recoveryCompletesBeforeAck: true,
+            recoveryDuringOpen: true, finishInsideOpen: finishInsideOpen, admitReverseDuringOpen: true);
+
+    [Fact]
+    public Task DuplexUnlock_ConcurrentReopenNeverExposesFirstFileBeforeAck()
+        => CheckReverseAdmissionAsync(false, false, independentHold: true, recoveryCompletesBeforeAck: true,
+            recoveryDuringOpen: true, admitReverseDuringOpen: true, concurrentOrder: ConcurrentOpenOrder.OpenBeforeAck);
+
+    [Fact]
+    public Task DuplexUnlock_FinalAckBeforeConcurrentReopenFinishesDoesNotReinstallPause()
+        => CheckReverseAdmissionAsync(false, false, independentHold: true, recoveryCompletesBeforeAck: true,
+            recoveryDuringOpen: true, admitReverseDuringOpen: true, concurrentOrder: ConcurrentOpenOrder.AckBeforeOpen);
+
+    private enum ConcurrentOpenOrder { None, OpenBeforeAck, AckBeforeOpen }
+
+    private async Task CheckReverseAdmissionAsync(bool checkPause, bool fixedLanes, bool holdDispatch = false,
+        bool independentHold = false, bool recoveryPrecedesHandshake = false, bool recoveryCompletesBeforeAck = false,
+        bool recoveryDuringOpen = false, bool finishInsideOpen = false, bool admitReverseDuringOpen = false,
+        ConcurrentOpenOrder concurrentOrder = ConcurrentOpenOrder.None)
+    {
+        var concurrentReopen = concurrentOrder != ConcurrentOpenOrder.None;
+        var ackBeforeOpen = concurrentOrder == ConcurrentOpenOrder.AckBeforeOpen;
+        FakeNknClient.ResetNetwork();
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+        var ct = timeout.Token;
+        var payerClient = new WriterGatePeer("host.duplex-ack.address");
+        var dialerClient = new FakeNknClient("helper.duplex-ack.address");
+        var both = NknAccelerationLaneKind.File | NknAccelerationLaneKind.Screen;
+        var laneOptions = NknTunaAccelerationOptions.CreateRuntimePilot("fake-sidecar.exe", both, runtimeLaneLimit: fixedLanes ? null : () => both);
+        using var listener = new RetryableTunaAccelerationSession(true, 0) { StrictPayerHandoffForTests = true };
+        using var dial = new RetryableTunaAccelerationSession(false, 0) { StrictPayerHandoffForTests = true };
+        using var payer = new NknSignalingTransport(payerClient, NknTransportOptions.Load(), new NknIdentity("host", payerClient.Address), laneOptions, listener);
+        using var responder = new NknSignalingTransport(dialerClient, NknTransportOptions.Load(), new NknIdentity("helper", dialerClient.Address), laneOptions, dial);
+        using var payerFiles = new SessionFileTransferService();
+        using var responderFiles = new SessionFileTransferService();
+        payerFiles.AttachTransport(payer);
+        responderFiles.AttachTransport(responder);
+        var session = await ApproveNknSessionAsync(payer, responder, ct,
+            InviteCapabilities.Chat | InviteCapabilities.ScreenShare | InviteCapabilities.FileTransfer, suppressAutomaticAccelerationNegotiation: true);
+        var offer = new TaskCompletionSource<Envelope>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var atAck = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var ack = new TaskCompletionSource<Envelope>(TaskCreationOptions.RunContinuationsAsynchronously);
+        payerClient.ShouldDeliverSendAsync = (_, bytes, _) =>
+        {
+            if (!EnvelopeCodec.TryDeserialize(bytes, out var env)) return Task.FromResult(true);
+            if ((holdDispatch || independentHold) && env.Type == MsgType.TransportAccelerationAnswerAck)
+            {
+                ack.TrySetResult(env);
+                return Task.FromResult(false);
+            }
+            if (env.Type != MsgType.TransportAccelerationOffer)
+                return Task.FromResult(true);
+            offer.TrySetResult(env);
+            return Task.FromResult(false);
+        };
+        payer.IdleSessionBeforeAnswerAckForTests = async () =>
+        {
+            atAck.TrySetResult();
+            await release.Task.WaitAsync(ct);
+        };
+        await payer.RequestAccelerationNegotiationAsync("session_ready", ct);
+        var sent = await offer.Task.WaitAsync(ct);
+        await OfferPausedFileAsync(responderFiles, payerFiles, "first", ct);
+        var original = await responder.OpenFileTransferDataSessionAsync(session, "first", ct);
+        Assert.True(original.IsAvailable);
+        void HoldForRecovery() => InvokePrivateMethod(responder, "SetFileTransferDataSessionsAvailability",
+            false, "receive_stall_recovery", false, FileTransferTransportHandoffKind.None, FileTransferTransportKind.RegularNkn);
+        void FinishRecovery() => InvokePrivateMethod(responder, "SetFileTransferDataSessionsAvailability",
+            true, "transport_recovered", false, FileTransferTransportHandoffKind.None, FileTransferTransportKind.RegularNkn);
+        int originalReopened = 0;
+        string? lastHoldReason = null;
+        void ObserveAvailability(object? sender, FileTransferDataSessionAvailabilityChangedEventArgs e)
+        {
+            if (e.IsAvailable) Interlocked.Increment(ref originalReopened);
+            else Volatile.Write(ref lastHoldReason, e.Reason);
+        }
+        if (independentHold && !recoveryDuringOpen)
+            original.AvailabilityChanged += ObserveAvailability;
+        if (recoveryPrecedesHandshake)
+        {
+            HoldForRecovery();
+            Assert.False(original.IsAvailable);
+        }
+        InvokePrivateMethod(responder, "HandleTransportAccelerationOffer", payerClient.Address, sent);
+        await atAck.Task.WaitAsync(ct);
+        using var unblockDispatch = new ManualResetEventSlim();
+        var observed = new ConcurrentQueue<string>();
+        Task? responderAck = null;
+        IFileTransferDataSession? heldReverse = null;
+        int reversePauses = 0;
+        async Task AdmitReverseAsync()
+        {
+            // Deliver the ordinary reverse offer without waiting on the optional initial Tuna readiness.
+            await payer.SendFileTransferOfferAsync(new FileTransferOfferV2
+            {
+                SessionId = session, TransferId = "reverse", FileName = "reverse.bin", FileSizeBytes = 1024,
+                PreferredDataProtocolVersion = FileTransferProtocol.ProtocolVersionV4,
+            }, ct);
+            await WaitUntilAsync(() => responderFiles.Snapshot.Inbound?.TransferId == "reverse", TimeSpan.FromSeconds(3));
+            Assert.All(new[] { payer, responder }, peer => Assert.True((bool)InvokePrivateMethod(peer, "HasDuplexFileOffers", session)!));
+        }
+        try
+        {
+            Assert.False(original.IsAvailable);
+            if (recoveryDuringOpen)
+            {
+                // Reopen file A's channel while its ordinary handshake is waiting for the ACK.
+                original.Dispose();
+                IFileTransferDataSession? registered = null;
+                IFileTransferDataSession? registeredReverse = null;
+                var atOpenGate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+                using var continueOpen = new ManualResetEventSlim();
+                if (ackBeforeOpen)
+                {
+                    // Let A capture its retained pause, but hold the actual write until its ACK has retired that generation.
+                    responder.NewChannelPauseCapturedForTests = () =>
+                    {
+                        if (atOpenGate.TrySetResult()) continueOpen.Wait(ct);
+                    };
+                }
+                responder.NewChannelRegisteredForTests = channel =>
+                {
+                    if (admitReverseDuringOpen && channel.TransferId == "reverse")
+                    {
+                        registeredReverse = channel;
+                        channel.AvailabilityChanged += (_, e) => { if (!e.IsAvailable) Interlocked.Increment(ref reversePauses); };
+                        return;
+                    }
+                    Assert.Equal("first", channel.TransferId);
+                    Assert.Null(registered);
+                    registered = channel;
+                    channel.AvailabilityChanged += ObserveAvailability;
+                    if (!concurrentReopen) // A separate recovery hold would mask exposure of the uninitialized channel.
+                    {
+                        HoldForRecovery();
+                        Assert.False(channel.IsAvailable);
+                        Assert.Equal("receive_stall_recovery", Volatile.Read(ref lastHoldReason));
+                    }
+                    if (admitReverseDuringOpen && !ackBeforeOpen)
+                    {
+                        atOpenGate.TrySetResult();
+                        continueOpen.Wait(ct);
+                    }
+                    if (finishInsideOpen)
+                    {
+                        FinishRecovery();
+                        Assert.Equal(0, Volatile.Read(ref originalReopened));
+                        Assert.False(channel.IsAvailable);
+                    }
+                };
+                if (admitReverseDuringOpen)
+                {
+                    Task<IFileTransferDataSession>? secondOpen = null;
+                    var reopening = Task.Run(() => responder.OpenFileTransferDataSessionAsync(session, "first", ct), ct);
+                    try
+                    {
+                        await atOpenGate.Task.WaitAsync(ct);
+                        await AdmitReverseAsync();
+                        heldReverse = await responder.OpenFileTransferDataSessionAsync(session, "reverse", ct);
+                        Assert.Same(registeredReverse, heldReverse);
+                        Assert.True(heldReverse.IsAvailable);
+                        if (concurrentReopen)
+                        {
+                            secondOpen = responder.OpenFileTransferDataSessionAsync(session, "first", ct);
+                            Assert.False(secondOpen.IsCompleted);
+                            if (ackBeforeOpen)
+                            {
+                                Assert.False(responder.IsAccelerationAvailableForTests);
+                                Assert.False(ack.Task.IsCompleted);
+                                Assert.True(release.TrySetResult());
+                                var writtenAck = await ack.Task.WaitAsync(ct);
+                                Assert.True(await Assert.IsAssignableFrom<Task<bool>>(payer.IdleSessionAnswerAckForTests).WaitAsync(ct));
+                                InvokePrivateMethod(responder, "HandleTransportAccelerationAnswerAck", payerClient.Address, writtenAck);
+                                Assert.True(responder.IsAccelerationAvailableForTests);
+                                Assert.False(reopening.IsCompleted);
+                                Assert.True(heldReverse.IsAvailable);
+                            }
+                            else
+                            {
+                                using var cancelWait = CancellationTokenSource.CreateLinkedTokenSource(ct);
+                                var canceledOpen = responder.OpenFileTransferDataSessionAsync(session, "first", cancelWait.Token);
+                                cancelWait.Cancel();
+                                await Assert.ThrowsAnyAsync<OperationCanceledException>(() => canceledOpen);
+                            }
+                            Assert.False(secondOpen.IsCompleted);
+                        }
+                    }
+                    finally
+                    {
+                        continueOpen.Set();
+                        try { original = await reopening; }
+                        finally { if (ackBeforeOpen) responder.NewChannelPauseCapturedForTests = null; }
+                    }
+                    if (secondOpen is not null)
+                    {
+                        var second = await secondOpen.WaitAsync(ct);
+                        Assert.Same(original, second);
+                        Assert.Equal(ackBeforeOpen, second.IsAvailable);
+                    }
+                }
+                else original = await responder.OpenFileTransferDataSessionAsync(session, "first", ct);
+                responder.NewChannelRegisteredForTests = null;
+                Assert.Same(registered, original);
+            }
+            if (holdDispatch)
+            {
+                var atPayer = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+                var atResponder = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+                foreach (var (peer, at) in new[] { (payer, atPayer), (responder, atResponder) })
+                {
+                    var channel = await peer.OpenFileTransferDataSessionAsync(session, "first", ct);
+                    channel.AvailabilityChanged += (_, e) =>
+                    {
+                        if (e.HandoffKind == FileTransferTransportHandoffKind.NormalToTunaActivation) observed.Enqueue("first");
+                    };
+                    peer.OrdinaryFileHandoffBeforeDispatchForTests = () =>
+                    {
+                        if (at.TrySetResult()) unblockDispatch.Wait(ct);
+                    };
+                }
+                release.TrySetResult();
+                var writtenAck = await ack.Task.WaitAsync(ct);
+                responderAck = Task.Run(() => InvokePrivateMethod(responder, "HandleTransportAccelerationAnswerAck", payerClient.Address, writtenAck));
+                await Task.WhenAll(atPayer.Task, atResponder.Task).WaitAsync(ct);
+            }
+            if (!admitReverseDuringOpen) await AdmitReverseAsync();
+            if (independentHold && !recoveryPrecedesHandshake && !recoveryDuringOpen)
+            {
+                heldReverse = await responder.OpenFileTransferDataSessionAsync(session, "reverse", ct);
+                Assert.True(heldReverse.IsAvailable);
+                HoldForRecovery();
+                Assert.False(heldReverse.IsAvailable);
+            }
+            if (recoveryCompletesBeforeAck)
+            {
+                if (!finishInsideOpen && !concurrentReopen) FinishRecovery();
+                if (heldReverse is not null) Assert.True(heldReverse.IsAvailable);
+                Assert.Equal(0, Volatile.Read(ref originalReopened));
+                Assert.Equal(ackBeforeOpen, original.IsAvailable);
+                if (admitReverseDuringOpen)
+                {
+                    Assert.True(responderFiles.Snapshot.Outbound!.IsPaused);
+                    Assert.Equal(FileTransferRouteResolver.RegularNknV4FastToken, responderFiles.Snapshot.Outbound.RouteToken);
+                }
+            }
+            if (fixedLanes)
+            {
+                var early = new ConcurrentQueue<string>();
+                var reverse = await payer.OpenFileTransferDataSessionAsync(session, "reverse", ct);
+                reverse.AvailabilityChanged += (_, e) =>
+                {
+                    if (e.HandoffKind == FileTransferTransportHandoffKind.NormalToTunaActivation) early.Enqueue("reverse");
+                };
+                Assert.Empty(early);
+            }
+        }
+        finally { unblockDispatch.Set(); release.TrySetResult(); }
+        if (independentHold && !ackBeforeOpen)
+            InvokePrivateMethod(responder, "HandleTransportAccelerationAnswerAck", payerClient.Address, await ack.Task.WaitAsync(ct));
+        if (responderAck is not null) await responderAck.WaitAsync(ct);
+        if (holdDispatch || independentHold)
+        {
+            await payer.IdleSessionAnswerAckForTests!.WaitAsync(ct);
+            Assert.Empty(observed);
+            if (independentHold && !recoveryCompletesBeforeAck)
+            {
+                Assert.False(original.IsAvailable);
+                Assert.Equal(0, Volatile.Read(ref originalReopened));
+                if (heldReverse is not null) Assert.False(heldReverse.IsAvailable);
+                Assert.Equal("receive_stall_recovery", Volatile.Read(ref lastHoldReason));
+                FinishRecovery();
+            }
+            Assert.True(original.IsAvailable);
+            if (independentHold)
+            {
+                Assert.Equal(ackBeforeOpen ? 0 : 1, Volatile.Read(ref originalReopened));
+                if (ackBeforeOpen) Assert.Null(Volatile.Read(ref lastHoldReason));
+                Assert.True(responderFiles.Snapshot.Outbound!.IsPaused);
+            }
+            if (heldReverse is not null) Assert.True(heldReverse.IsAvailable);
+            if (admitReverseDuringOpen) Assert.Equal(0, Volatile.Read(ref reversePauses));
+            Assert.Equal(FileTransferRouteResolver.RegularNknV4FastToken, responderFiles.Snapshot.Outbound!.RouteToken);
+        }
+        await WaitUntilAsync(() => payer.IsAccelerationAvailableForTests && responder.IsAccelerationAvailableForTests, TimeSpan.FromSeconds(4));
+        if (checkPause)
+        {
+            await WaitUntilAsync(() => original.IsAvailable, TimeSpan.FromSeconds(2));
+            Assert.True(responderFiles.Snapshot.Outbound!.IsPaused); // Only the transport pause was released.
+            Assert.Equal(FileTransferRouteResolver.RegularNknV4FastToken, responderFiles.Snapshot.Outbound.RouteToken);
+            var regularData = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            dialerClient.BeforeSendAsync = (_, bytes, _) =>
+            {
+                if (EnvelopeCodec.TryDeserialize(bytes, out var env) && env.Type == MsgType.FileTransferDataFrame)
+                    regularData.TrySetResult();
+                return Task.CompletedTask;
+            };
+            Assert.NotNull(await responderFiles.ResumeTransferAsync("first", "user_requested", ct));
+            await regularData.Task.WaitAsync(ct);
+            await WaitUntilAsync(() => payerFiles.Snapshot.Inbound?.State == FileTransferTransferState.Completed &&
+                responderFiles.Snapshot.Outbound?.State == FileTransferTransferState.Completed, TimeSpan.FromSeconds(5));
+        }
+        else
+        {
+            var received = new ConcurrentQueue<string>();
+            foreach (var peer in new[] { payer, responder })
+                foreach (var id in new[] { "first", "reverse" })
+                {
+                    var channel = await peer.OpenFileTransferDataSessionAsync(session, id, ct);
+                    channel.AvailabilityChanged += (_, e) =>
+                    {
+                        if (e.HandoffKind == FileTransferTransportHandoffKind.NormalToTunaActivation) received.Enqueue(id);
+                    };
+                }
+            Assert.Empty(received);
+        }
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public Task DuplexUnlock_EligibleHelpeePaysWhenOnlyHelperReenables(bool dropHelperIntent)
+        => CheckDuplexUnlockAsync(false, false, helpeeEligible: true, dropHelperIntent: dropHelperIntent);
+
+    [Fact]
+    public Task DuplexUnlock_EligibleHelpeeWithoutAnAddressPaysWhenOnlyHelperReenables()
+        => CheckDuplexUnlockAsync(false, false, helpeeEligible: true, dropHelperIntent: true, coldHelpee: true);
+
+    private async Task CheckDuplexUnlockAsync(bool fileOnly, bool deselectScreen, bool helpeeEligible = false, bool dropHelperIntent = false, bool coldHelpee = false)
+    {
+        FakeNknClient.ResetNetwork();
+        var scope = Guid.NewGuid().ToString("N");
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(20));
+        var ct = timeout.Token;
+        var hostClient = new FakeNknClient($"host.duplex-{scope}.address");
+        var helperClient = new FakeNknClient($"helper.duplex-{scope}.address");
+        using var hostLane = new RetryableTunaAccelerationSession(false, 0) { StrictPayerHandoffForTests = true, ClearLocalAddressOnStop = coldHelpee };
+        using var helperLane = new RetryableTunaAccelerationSession(true, 0) { StrictPayerHandoffForTests = true };
+        var options = NknTransportOptions.Load();
+        var selectedLanes = NknAccelerationLaneKind.File | NknAccelerationLaneKind.Screen;
+        var laneOptions = NknTunaAccelerationOptions.CreateRuntimePilot("fake-sidecar.exe", selectedLanes,
+            runtimeLaneLimit: () => selectedLanes);
+        using var host = new NknSignalingTransport(hostClient, options, new NknIdentity("duplex-host", hostClient.Address),
+            laneOptions, hostLane);
+        using var helper = new NknSignalingTransport(helperClient, options, new NknIdentity("duplex-helper", helperClient.Address),
+            laneOptions, helperLane);
+        using var hostFiles = new SessionFileTransferService();
+        using var helperFiles = new SessionFileTransferService();
+        hostFiles.AttachTransport(host);
+        helperFiles.AttachTransport(helper);
+        var session = await ApproveNknSessionAsync(host, helper, ct, InviteCapabilities.Chat | InviteCapabilities.ScreenShare | InviteCapabilities.FileTransfer,
+            suppressAutomaticAccelerationNegotiation: true);
+        bool Ready() => host.IsAccelerationAvailableForTests && helper.IsAccelerationAvailableForTests;
+        await helper.RequestAccelerationNegotiationAsync("runtime_unlock", ct);
+        await WaitUntilAsync(Ready, TimeSpan.FromSeconds(5));
+        var stopped = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        hostLane.StateChanged += (_, e) => { if (e.Reason == "remote_header_switch_off") stopped.TrySetResult(); };
+        await helper.StopAccelerationAsync("header_switch_off", ct);
+        await stopped.Task.WaitAsync(ct);
+        Assert.False(host.IsAccelerationAvailableForTests);
+        Assert.False(helper.IsAccelerationAvailableForTests);
+
+        await OfferPausedFileAsync(helperFiles, hostFiles, "helper-file", ct);
+        await OfferPausedFileAsync(hostFiles, helperFiles, "helpee-file", ct);
+        await WaitUntilAsync(() => helperFiles.Snapshot.Inbound?.IsPeerPaused == true &&
+            hostFiles.Snapshot.Inbound?.IsPeerPaused == true, TimeSpan.FromSeconds(3));
+        FileTransferTransferSnapshot[] Files() => [helperFiles.Snapshot.Outbound!, hostFiles.Snapshot.Inbound!,
+            hostFiles.Snapshot.Outbound!, helperFiles.Snapshot.Inbound!];
+        var before = Files();
+        Assert.All(before, file => { Assert.False(file.IsTerminal); Assert.Equal(FileTransferRouteResolver.RegularNknV4FastToken, file.RouteToken); });
+
+        int handoffs = 0;
+        host.OrdinaryFileHandoffBeforeDispatchForTests = helper.OrdinaryFileHandoffBeforeDispatchForTests =
+            () => Interlocked.Increment(ref handoffs);
+        if (fileOnly) selectedLanes = NknAccelerationLaneKind.File;
+        if (helpeeEligible)
+        {
+            hostLane.SetCanListen(true);
+            if (coldHelpee)
+            {
+                Assert.Null(hostLane.LocalTunaAddress);
+                Assert.True(hostLane.CanOfferListener);
+            }
+            if (dropHelperIntent)
+                helperClient.ShouldDeliverSendAsync = (_, bytes, _) => Task.FromResult(
+                    !EnvelopeCodec.TryDeserialize(bytes, out var env) || env.Type != MsgType.TransportAccelerationPayerIntent);
+        }
+        await helper.RequestAccelerationNegotiationAsync("runtime_unlock", ct);
+        await WaitUntilAsync(Ready, TimeSpan.FromSeconds(5));
+        if (helpeeEligible)
+        {
+            Assert.True(hostLane.IsLocalPaidListenerActive);
+            Assert.False(helperLane.IsLocalPaidListenerActive);
+        }
+        Assert.Equal(selectedLanes, helper.AccelerationNegotiatedLanesForTests);
+        Assert.Equal(helper.AccelerationNegotiatedLanesForTests, host.AccelerationNegotiatedLanesForTests);
+        if (deselectScreen)
+        {
+            selectedLanes = NknAccelerationLaneKind.File;
+            helper.RetireDeselectedAccelerationOffers();
+            host.RetireDeselectedAccelerationOffers();
+            var received = new ConcurrentQueue<string>();
+            foreach (var peer in new[] { helper, host })
+            {
+                Assert.True(peer.IsAccelerationAvailableForTests);
+                Assert.True(peer.AccelerationNegotiatedLanesForTests.HasFlag(NknAccelerationLaneKind.File));
+                foreach (var id in new[] { "helper-file", "helpee-file" })
+                {
+                    var channel = await peer.OpenFileTransferDataSessionAsync(session, id, ct);
+                    channel.AvailabilityChanged += (_, e) =>
+                    {
+                        if (e.HandoffKind == FileTransferTransportHandoffKind.NormalToTunaActivation) received.Enqueue(id);
+                    };
+                }
+            }
+            Assert.Empty(received);
+        }
+        Assert.Equal(0, Volatile.Read(ref handoffs));
+        foreach (var (old, current) in before.Zip(Files()))
+        {
+            Assert.False(current.IsTerminal);
+            Assert.Equal((old.TransferId, old.RouteToken, old.ProtocolVersion), (current.TransferId, current.RouteToken, current.ProtocolVersion));
+            Assert.False(current.IsPauseBlockedByTransport);
+            Assert.True(current.Direction == FileTransferDirection.Outbound ? current.IsPaused : current.IsPeerPaused);
+        }
+    }
+
     private async Task RunIdleSessionReestablishmentAsync(
         bool completed, bool helperPays, bool switchPayer, bool stopBeforeAnswer, string? change = null)
     {

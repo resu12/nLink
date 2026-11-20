@@ -588,32 +588,41 @@ public sealed partial class NknSignalingTransport : IFileTransferControlPlanePhy
 
         if (createdSession)
         {
-            ApplyActiveTunaActivationPauseToNewFileTransferDataSession(session!, "local_open");
+            session!.InitializeActivationPause("local_open");
         }
 
-        RecheckPendingStartupTransferActivation();
-
-        return Task.FromResult<IFileTransferDataSession>(session!);
+        return FinishOpenAsync(session!, ct);
     }
+
+    private async Task<IFileTransferDataSession> FinishOpenAsync(TransportFileTransferDataSession session, CancellationToken ct)
+    {
+        // A concurrent caller may find a locally or remotely registered channel before its owner applies the pause.
+        await session.OpenFinished.WaitAsync(ct).ConfigureAwait(false);
+        ObjectDisposedException.ThrowIf(session.IsDisposed, session);
+        RecheckPendingStartupTransferActivation();
+        return session;
+    }
+
+    internal Action<IFileTransferDataSession>? NewChannelRegisteredForTests { get; set; }
 
     private void ApplyActiveTunaActivationPauseToNewFileTransferDataSession(
         TransportFileTransferDataSession session,
-        string trigger)
+        string trigger, bool ordinaryOnly = false)
     {
         long expectedGeneration;
         long receiverPauseGeneration;
         long? expectedAdmissionGeneration;
         lock (accelerationGate)
         {
-            if (!session.IsAvailable ||
-                !TryGetActiveFileTransferTunaActivationPauseForCurrentSession(out var pausedSessionId) ||
+            if (!TryGetActiveFileTransferTunaActivationPauseForCurrentSession(out var pausedSessionId) ||
                 pausedSessionId != session.SessionId)
                 return;
             expectedGeneration = fileTransferTunaActivationPauseGeneration;
+            if (ordinaryOnly && expectedGeneration != ordinaryNegotiationPauseGeneration) return;
             receiverPauseGeneration = fileTransferTunaActivationPauseSessionId == session.SessionId
                 ? expectedGeneration : 0;
             lock (activationPausePublicationGate)
-                if (!CanPublishFileActivationPause(session, expectedGeneration)) return;
+                if (!CanPublishFileActivationPause(session, expectedGeneration, initializingChannel: true)) return;
             expectedAdmissionGeneration = GetFileTransferRouteTransitionPauseAuthorityUnsafe()?.SessionId == session.SessionId ||
                 IsInitialReceiverBarrierPauseBoundUnsafe(session.SessionId) ? null : fileActivationPauseNegotiationGeneration;
         }
@@ -629,20 +638,31 @@ public sealed partial class NknSignalingTransport : IFileTransferControlPlanePhy
             handoffKind: FileTransferTransportHandoffKind.None,
             targetTransport: FileTransferTransportKind.RegularNkn,
             receiverBarrierPauseGeneration: receiverPauseGeneration,
-            expectedPauseGeneration: expectedGeneration, expectedAdmissionGeneration: expectedAdmissionGeneration);
+            expectedPauseGeneration: expectedGeneration, expectedAdmissionGeneration: expectedAdmissionGeneration,
+            initializingChannel: true);
     }
 
-    // Read the ownership projection under the leaf publication gate, including at the channel write.
-    private bool CanPublishFileActivationPause(TransportFileTransferDataSession session, long generation)
+    // Read under activationPausePublicationGate, including when retaining a retiring channel's pause.
+    private bool IsSessionNegotiationPauseCurrent(string sessionId)
     {
+        var shadow = fileTransferRouteTransitionExecutionShadow;
+        return shadow.Current?.Command.Authority.SessionId != sessionId &&
+               shadow.RetainedPredecessor?.Command.Authority.SessionId != sessionId &&
+               shadow.PendingAvailabilityDisposition?.Authority.SessionId != sessionId &&
+               fileTransferTunaActivationPauseSessionId == sessionId && fileActivationPauseNegotiationGeneration == fileActivationResetGeneration;
+    }
+
+    private bool CanPublishFileActivationPause(TransportFileTransferDataSession session, long generation, bool initializingChannel)
+    {
+        if (session.IsDisposed) return false;
         var shadow = fileTransferRouteTransitionExecutionShadow;
         var current = shadow.Current?.Command.Authority;
         var predecessor = shadow.RetainedPredecessor?.Command.Authority;
         var receiverOwned = IsInitialReceiverBarrierPauseBoundUnsafe(session.SessionId);
-        if (current?.SessionId != session.SessionId && predecessor?.SessionId != session.SessionId &&
-            shadow.PendingAvailabilityDisposition?.Authority.SessionId != session.SessionId &&
-            fileTransferTunaActivationPauseSessionId == session.SessionId &&
-            fileActivationPauseNegotiationGeneration == fileActivationResetGeneration)
+        if (IsSessionNegotiationPauseCurrent(session.SessionId) &&
+            (generation != ordinaryNegotiationPauseGeneration || !HasDuplexFileOffers(session.SessionId) ||
+             (initializingChannel && session.OfferOwner is { End: FileOfferEnd.Live } offer &&
+              offer.RetainedOrdinaryPauseGeneration == generation && fileFallbackOffers.Any(o => ReferenceEquals(o.Owner, offer)))))
             return true; // Still negotiating for the session, not merely retaining an owned pause after reset.
 
         // A pending disposition can release its own channel. It is not a new pause grant.
@@ -1905,7 +1925,8 @@ public sealed partial class NknSignalingTransport : IFileTransferControlPlanePhy
         FileTransferTransportKind targetTransport = FileTransferTransportKind.Unknown,
         PostTunaFallbackHandoffEvidence? postTunaFallbackHandoffEvidence = null,
         PostTunaFallbackAvailabilityProofEvidence? postTunaFallbackProofBoundary = null,
-        (string SessionId, long Generation)? pausePublication = null)
+        (string SessionId, long Generation)? pausePublication = null,
+        long? releaseOfPauseGeneration = null)
     {
         var effectiveHandoffKind = ResolveFileTransferDataSessionAvailabilityHandoffKind(
             reason,
@@ -2080,7 +2101,8 @@ public sealed partial class NknSignalingTransport : IFileTransferControlPlanePhy
                 proofScopedFallbackBoundary ? postTunaFallbackHandoffEvidence : null,
                 proofScopedFallbackBoundary ? postTunaFallbackProofBoundary : null,
                 receiverBarrierPauseGeneration,
-                pausePublication?.Generation);
+                pausePublication?.Generation,
+                releaseOfPauseGeneration: releaseOfPauseGeneration);
         }
     }
 
@@ -2187,7 +2209,7 @@ public sealed partial class NknSignalingTransport : IFileTransferControlPlanePhy
         lock (gate)
         {
             if (ordinaryGeneration is long source && (runtimeUnlockPreCommitProbeSnapshot is null
-                    ? !IsOrdinaryFileHandoffCurrent(source)
+                    ? !IsOrdinaryFileHandoffCurrent(source, normalizedSessionId)
                     : source != Interlocked.Read(ref fileActivationHandoffResetGeneration)))
                 return false;
             var staleTransferIds = fileTransferDataSessions
@@ -2302,7 +2324,7 @@ public sealed partial class NknSignalingTransport : IFileTransferControlPlanePhy
     {
         if (string.IsNullOrWhiteSpace(sessionId) ||
             !ShouldPersistPendingFileTransferV6Handoff(handoffKind, targetTransport) ||
-            (runtimeUnlockPreCommitProbeSnapshot is null && (ordinaryGeneration is not long source || !IsOrdinaryFileHandoffCurrent(source))) ||
+            (runtimeUnlockPreCommitProbeSnapshot is null && (ordinaryGeneration is not long source || !IsOrdinaryFileHandoffCurrent(source, sessionId))) ||
             (runtimeUnlockPreCommitProbeSnapshot is { } probe && (probe.SessionId != sessionId || string.IsNullOrEmpty(probe.TransferId))))
         {
             return false;
@@ -2368,7 +2390,7 @@ public sealed partial class NknSignalingTransport : IFileTransferControlPlanePhy
         {
             lock (accelerationGate)
             {
-                if (intent.OrdinaryGeneration is not long source || !IsOrdinaryFileHandoffCurrent(source) ||
+                if (intent.OrdinaryGeneration is not long source || !IsOrdinaryFileHandoffCurrent(source, session.SessionId) ||
                     accelerationSessionId != session.SessionId ||
                     (accelerationNegotiatedLanes & NknAccelerationLaneKind.File) == 0 ||
                     accelerationUserStoppedSessionId == session.SessionId)
@@ -2483,7 +2505,7 @@ public sealed partial class NknSignalingTransport : IFileTransferControlPlanePhy
                 return false;
             }
             ordinaryGeneration = fileActivationHandoffResetGeneration;
-            if (!IsOrdinaryFileHandoffCurrent(ordinaryGeneration) ||
+            if (!IsOrdinaryFileHandoffCurrent(ordinaryGeneration, session.SessionId) ||
                 (waitingGeneration.HasValue && waitingGeneration != ordinaryGeneration)) return false;
         }
 
@@ -7156,7 +7178,7 @@ public sealed partial class NknSignalingTransport : IFileTransferControlPlanePhy
             }
 
             nextState = new FileTransferTransportState(initiatedLocally, FileTransferTransportPhase.Offered)
-                { OfferLifetime = new(currentSessionSecurityState.SessionId?.Value, transferId) };
+                { OfferLifetime = new(currentSessionSecurityState.SessionId?.Value, transferId, initiatedLocally) };
             return true;
         }
 
@@ -8126,7 +8148,7 @@ public sealed partial class NknSignalingTransport : IFileTransferControlPlanePhy
 
         if (createdSession)
         {
-            ApplyActiveTunaActivationPauseToNewFileTransferDataSession(session!, "remote_open");
+            session!.InitializeActivationPause("remote_open");
         }
 
         if (createdSession) RecheckPendingStartupTransferActivation();
@@ -8397,9 +8419,26 @@ public sealed partial class NknSignalingTransport : IFileTransferControlPlanePhy
     // Written under controlSecureStateGate; read without nesting it inside gate.
     private volatile (FileOfferLifetime Owner, bool Admitted, FileAcceptReservation? Reservation)[] fileFallbackOffers = [];
 
-    private void PublishFileFallbackOffersLocked() =>
-        fileFallbackOffers = fileTransferStates.Values.Where(s => s.OfferLifetime is not null)
+    private void PublishFileFallbackOffersLocked()
+    {
+        var next = fileTransferStates.Values.Where(s => s.OfferLifetime is not null)
             .Select(s => (s.OfferLifetime!, s.Phase != FileTransferTransportPhase.Offered, s.AcceptReservation)).ToArray();
+        lock (activationPausePublicationGate) fileFallbackOffers = next;
+    }
+
+    // A veto on unowned handshake work, not evidence that either file can change route.
+    private bool HasDuplexFileOffers(string sessionId)
+    {
+        bool outbound = false, inbound = false;
+        foreach (var (owner, _, _) in fileFallbackOffers)
+        {
+            if (owner.SessionId != sessionId || owner.End != FileOfferEnd.Live) continue;
+            if (owner.InitiatedLocally) outbound = true;
+            else inbound = true;
+            if (outbound && inbound) return true;
+        }
+        return false;
+    }
 
     private void SetFileTransferStateLocked(string transferId, FileTransferTransportState next)
     {
@@ -8417,11 +8456,14 @@ public sealed partial class NknSignalingTransport : IFileTransferControlPlanePhy
 
     private readonly record struct FileFallbackParticipant(FileOfferLifetime Owner, FileAcceptReservation? Reservation);
 
-    private sealed class FileOfferLifetime(string? sessionId, string transferId)
+    private sealed class FileOfferLifetime(string? sessionId, string transferId, bool initiatedLocally)
     {
         public string? SessionId { get; } = sessionId;
         public string TransferId { get; } = transferId;
+        public bool InitiatedLocally { get; } = initiatedLocally;
         public volatile FileOfferEnd End;
+        // Under activationPausePublicationGate. A replacement offer, even with the same ID, does not inherit this.
+        public long RetainedOrdinaryPauseGeneration { get; set; }
     }
 
     private readonly record struct FileTransferTransportState(
@@ -8622,6 +8664,9 @@ public sealed partial class NknSignalingTransport : IFileTransferControlPlanePhy
         private RuntimeUnlockPreCommitAckSendAuthority? preCommitAckSendAuthority;
         private long availabilityGeneration = 1;
         private long initialReceiverBarrierPauseGeneration;
+        // Protected by availabilityGate while the ordinary handshake is the visible hold.
+        private string? overlappingRecoveryReason;
+        private readonly TaskCompletionSource openFinished = new(TaskCreationOptions.RunContinuationsAsynchronously);
         private InitialActivationReceiverBarrierExecutionFence? initialReceiverBarrierExecution;
         private EventHandler<FileTransferDataSessionAvailabilityChangedEventArgs>? availabilityChanged;
         // A release and the normal ACK broadcast may race. Claim once per waiting subscription.
@@ -8661,6 +8706,23 @@ public sealed partial class NknSignalingTransport : IFileTransferControlPlanePhy
         public bool IsDisposed => Volatile.Read(ref disposed) != 0;
 
         public string CurrentAvailabilityReason => Volatile.Read(ref availabilityReason);
+
+        public Task OpenFinished => openFinished.Task;
+
+        public void InitializeActivationPause(string trigger)
+        {
+            try
+            {
+                owner.NewChannelRegisteredForTests?.Invoke(this);
+                owner.ApplyActiveTunaActivationPauseToNewFileTransferDataSession(this, trigger);
+                openFinished.TrySetResult();
+            }
+            catch
+            {
+                Dispose(); // Retire the failed channel and wake any concurrent opener.
+                throw;
+            }
+        }
 
         public int AvailabilitySubscriberCount
             => availabilityChanged?.GetInvocationList().Length ?? 0;
@@ -10454,6 +10516,16 @@ public sealed partial class NknSignalingTransport : IFileTransferControlPlanePhy
                 {
                     if (disposed != 0) return false;
                     Volatile.Write(ref disposed, 1);
+                    openFinished.TrySetResult();
+                }
+                lock (owner.activationPausePublicationGate)
+                {
+                    var held = initialReceiverBarrierPauseGeneration;
+                    if (OfferOwner is { End: FileOfferEnd.Live } offer && held > 0 &&
+                        held == owner.fileTransferTunaActivationPauseGeneration && held == owner.ordinaryNegotiationPauseGeneration &&
+                        OwnedReceiverBarrierPauseGeneration != held && owner.IsSessionNegotiationPauseCurrent(SessionId) &&
+                        IsUnavailableForTunaActivationPause(out _))
+                        offer.RetainedOrdinaryPauseGeneration = held;
                 }
                 owner.DetachFileTransferDataSessionLocked(this, suppressRemoteOpen, reason);
                 return true;
@@ -10521,7 +10593,9 @@ public sealed partial class NknSignalingTransport : IFileTransferControlPlanePhy
             PostTunaFallbackAvailabilityProofEvidence? postTunaFallbackProofBoundary = null,
             long receiverBarrierPauseGeneration = 0,
             long? expectedPauseGeneration = null,
-            long? expectedAdmissionGeneration = null)
+            long? expectedAdmissionGeneration = null,
+            long? releaseOfPauseGeneration = null,
+            bool initializingChannel = false)
         {
             if (disposed != 0)
             {
@@ -10529,7 +10603,7 @@ public sealed partial class NknSignalingTransport : IFileTransferControlPlanePhy
             }
 
             var next = isAvailable ? 1 : 0;
-            var previousReason = Volatile.Read(ref availabilityReason);
+            string? previousReason;
             var normalizedReason = string.IsNullOrWhiteSpace(reason) ? "transport_state_changed" : reason.Trim();
             var activationBarrier = !isAvailable && IsTunaActivationNegotiationAvailabilityReason(normalizedReason);
             if (postTunaFallbackHandoffEvidence is { IsComplete: true } evidence &&
@@ -10575,28 +10649,57 @@ public sealed partial class NknSignalingTransport : IFileTransferControlPlanePhy
                 return;
             }
 
-            if (ShouldSuppressTransportLifecycleAvailabilityDuringTunaActivationPause(
-                    isAvailable,
-                    normalizedReason,
-                    requiresResumeRequest,
-                    handoffKind,
-                    targetTransport))
-            {
-                return;
-            }
+            // A plain recovery release can beat the open callback. Inherit the handshake
+            // before processing that release, using the same ownership checks as the opener.
+            if (!OpenFinished.IsCompleted && isAvailable && !requiresResumeRequest && handoffKind == FileTransferTransportHandoffKind.None &&
+                targetTransport == FileTransferTransportKind.RegularNkn && IsBridgeRecoveryHoldReason(CurrentAvailabilityReason) &&
+                string.Equals(normalizedReason, "transport_recovered", StringComparison.OrdinalIgnoreCase))
+                owner.ApplyActiveTunaActivationPauseToNewFileTransferDataSession(this, "recovered_during_open", ordinaryOnly: true);
 
             int previous;
             lock (availabilityGate)
             {
+                previousReason = availabilityReason;
+                if (ShouldSuppressTransportLifecycleAvailabilityDuringTunaActivationPause(
+                        isAvailable, normalizedReason, requiresResumeRequest, handoffKind, targetTransport))
+                {
+                    if (initialReceiverBarrierPauseGeneration == Interlocked.Read(ref owner.ordinaryNegotiationPauseGeneration))
+                        overlappingRecoveryReason = isAvailable ? null : normalizedReason;
+                    return;
+                }
+
                 if (expectedPauseGeneration is long expected)
                 {
                     lock (owner.activationPausePublicationGate)
                     {
                         if (owner.fileTransferTunaActivationPauseGeneration != expected ||
                             (expectedAdmissionGeneration is long admission && owner.fileActivationResetGeneration != admission) ||
-                            (activationBarrier && !owner.CanPublishFileActivationPause(this, expected))) return;
+                            (activationBarrier && !owner.CanPublishFileActivationPause(this, expected, initializingChannel))) return;
+                        // On open, only an ordinary handshake may share an existing bridge-recovery hold.
+                        if (initializingChannel && available == 0 &&
+                            (owner.ordinaryNegotiationPauseGeneration != expected || !IsBridgeRecoveryHoldReason(availabilityReason)))
+                            return;
+                        if (activationBarrier && owner.ordinaryNegotiationPauseGeneration == expected &&
+                            available == 0 && !IsTunaActivationNegotiationAvailabilityReason(availabilityReason))
+                        {
+                            // Recovery already owns a hold. Keep it while installing this handshake's pause.
+                            if (!IsBridgeRecoveryHoldReason(availabilityReason)) return;
+                            overlappingRecoveryReason = availabilityReason;
+                        }
+                        if (releaseOfPauseGeneration is long held &&
+                            (available != 0 || initialReceiverBarrierPauseGeneration != held ||
+                             !IsTunaActivationNegotiationAvailabilityReason(availabilityReason))) return;
                         if (isAvailable) owner.ActivationPausePublishingForTests?.Invoke(false);
+                        if (isAvailable && overlappingRecoveryReason is { } recoveryReason)
+                        {
+                            // End the handshake pause, not the recovery hold on this channel.
+                            isAvailable = false;
+                            next = 0;
+                            reason = normalizedReason = recoveryReason;
+                        }
                         previous = WriteAvailabilityLocked();
+                        if (initializingChannel && OfferOwner is { } offer && offer.RetainedOrdinaryPauseGeneration == expected)
+                            offer.RetainedOrdinaryPauseGeneration = 0;
                     }
                 }
                 else previous = WriteAvailabilityLocked();
@@ -10606,6 +10709,7 @@ public sealed partial class NknSignalingTransport : IFileTransferControlPlanePhy
 
             int WriteAvailabilityLocked()
             {
+                if (!activationBarrier) overlappingRecoveryReason = null;
                 var prior = Interlocked.Exchange(ref available, next);
                 Volatile.Write(ref availabilityReason, normalizedReason);
                 if (activationBarrier)
@@ -10698,8 +10802,11 @@ public sealed partial class NknSignalingTransport : IFileTransferControlPlanePhy
         }
 
         private static bool IsTransportLifecycleAvailabilityReason(string? reason)
+            => IsBridgeRecoveryHoldReason(reason) ||
+               string.Equals(reason, "transport_recovered", StringComparison.OrdinalIgnoreCase);
+
+        private static bool IsBridgeRecoveryHoldReason(string? reason)
             => string.Equals(reason, "receive_stall_recovery", StringComparison.OrdinalIgnoreCase) ||
-               string.Equals(reason, "transport_recovered", StringComparison.OrdinalIgnoreCase) ||
                string.Equals(reason, "transport_recovered_unproven", StringComparison.OrdinalIgnoreCase);
 
         public bool TryPublishHandoff(
@@ -10728,7 +10835,7 @@ public sealed partial class NknSignalingTransport : IFileTransferControlPlanePhy
                 if (ordinaryGeneration is not long generation) return false;
                 lock (owner.accelerationGate)
                     if (owner.ordinaryFileFinalAck is { } ack && ack.Generation == generation) finalAck = ack.Result;
-                isCurrent = () => owner.IsOrdinaryFileHandoffCurrent(generation) &&
+                isCurrent = () => owner.IsOrdinaryFileHandoffCurrent(generation, SessionId) &&
                     (finalAck?.IsCompletedSuccessfully != true || finalAck.Result);
                 owner.OrdinaryFileHandoffBeforeDispatchForTests?.Invoke();
                 if (!isCurrent()) return false;

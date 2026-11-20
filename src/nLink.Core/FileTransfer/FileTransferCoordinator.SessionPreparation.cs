@@ -4,7 +4,7 @@ namespace NLink.Core.FileTransfer;
 
 internal enum FileTransferSessionPreparationPhase { Unavailable, Eligible, Pending, Ready, AdmissionReserved, Revoked, Starting }
 internal enum FileTransferSessionPreparationStatus { Accepted, Idempotent, Rejected, Stale }
-internal enum FileTransferAccelerationRequestPurpose { Unavailable, SessionPreparation, TransferActivation, IdleSessionReestablishment }
+internal enum FileTransferAccelerationRequestPurpose { Unavailable, SessionPreparation, TransferActivation, IdleSessionReestablishment, DuplexSessionReestablishment }
 internal sealed record FileTransferAccelerationRequestSelection(FileTransferAccelerationRequestPurpose Purpose,
     string Reason, FileTransferSessionPreparationPermit? Permit = null,
     string? TerminalTransferId = null, FileTransferDirection? TerminalDirection = null, long TerminalGeneration = 0)

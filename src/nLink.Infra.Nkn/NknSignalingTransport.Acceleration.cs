@@ -268,13 +268,18 @@ public sealed partial class NknSignalingTransport : INknListenerCapHandoffContro
     private long fileTransferTunaActivationPauseGeneration;
     private long fileActivationHandoffResetGeneration;
     // Fixed-lane answers can enqueue an ordinary handoff before the final ACK is written.
-    private (long Generation, Task<bool> Result)? ordinaryFileFinalAck;
+    private sealed record OrdinaryFileFinalAck(long Generation, Task<bool> Result);
+    private volatile OrdinaryFileFinalAck? ordinaryFileFinalAck;
     // A runtime-unlock answer belongs to the coordinator, not to newly subscribed files.
     private long runtimeUnlockAckHoldGeneration = -1;
+    // This belongs to the negotiated connection, not to its independently retired ACK generation.
+    private volatile bool negotiatedFileLaneIsSessionOnly;
+    private long ordinaryNegotiationPauseGeneration = -1;
     private (long Generation, string SessionId, long TransactionGeneration, long OfferGeneration)? confirmedRuntimeUnlockAck;
-    private bool IsOrdinaryFileHandoffCurrent(long generation) =>
+    private bool IsOrdinaryFileHandoffCurrent(long generation, string? sessionId) =>
         generation == Interlocked.Read(ref fileActivationHandoffResetGeneration) &&
-        generation != Interlocked.Read(ref runtimeUnlockAckHoldGeneration);
+        generation != Interlocked.Read(ref runtimeUnlockAckHoldGeneration) &&
+        !negotiatedFileLaneIsSessionOnly && sessionId is not null && !HasDuplexFileOffers(sessionId);
     private long fileActivationResetGeneration;
     private long fileActivationPauseNegotiationGeneration;
     internal Action? NewChannelPauseCapturedForTests { get; set; }
@@ -3418,6 +3423,7 @@ public sealed partial class NknSignalingTransport : INknListenerCapHandoffContro
                 ? currentSessionSecurityState.SessionId?.Value
                 : sessionId.Trim();
             accelerationNegotiatedLanes = lanes;
+            negotiatedFileLaneIsSessionOnly = false;
             accelerationPreparationAdmission = null;
             acceptedSessionId = accelerationSessionId;
             ordinaryGeneration = Interlocked.Increment(ref fileActivationHandoffResetGeneration);
@@ -5166,23 +5172,27 @@ public sealed partial class NknSignalingTransport : INknListenerCapHandoffContro
         string trigger)
         => TryAcquireActivationPause(reason, sessionId, trigger, out _);
 
-    private long AdvanceActivationPauseLocked(string? sessionId)
+    private long AdvanceActivationPauseLocked(string? sessionId, bool ordinaryOffer = false)
     {
         lock (activationPausePublicationGate)
         {
             if (sessionId is not null)
             {
+                if (ordinaryOffer && HasDuplexFileOffers(sessionId)) return 0;
                 ActivationPausePublishingForTests?.Invoke(true);
                 fileActivationPauseNegotiationGeneration = fileActivationResetGeneration;
             }
             fileTransferTunaActivationPauseSessionId = sessionId;
-            return ++fileTransferTunaActivationPauseGeneration;
+            var generation = ++fileTransferTunaActivationPauseGeneration;
+            if (ordinaryOffer) ordinaryNegotiationPauseGeneration = generation;
+            return generation;
         }
     }
 
     private bool TryAcquireActivationPause(
         string reason, string? sessionId, string trigger, out (long Ack, long Pause)? ownedPause,
-        PreferenceBoundOffer? offer = null, bool retiredOffer = false, DialEndpointReservation? dial = null, RetryPauseScope? retryScope = null)
+        PreferenceBoundOffer? offer = null, bool retiredOffer = false, DialEndpointReservation? dial = null, RetryPauseScope? retryScope = null,
+        bool ordinaryOffer = false)
     {
         ownedPause = null;
         var normalizedSessionId = string.IsNullOrWhiteSpace(sessionId)
@@ -5273,7 +5283,8 @@ public sealed partial class NknSignalingTransport : INknListenerCapHandoffContro
                 (retiredOffer && outboundPreferenceOffer is not null)))
                 return false;
             if (retryScope is { } scope && !IsRetryPauseCurrentLocked(scope)) return false;
-            generation = AdvanceActivationPauseLocked(normalizedSessionId);
+            generation = AdvanceActivationPauseLocked(normalizedSessionId, ordinaryOffer);
+            if (generation == 0) return false;
             ownedPause = (pendingAccelerationAnswerAckGeneration, generation);
             if (dial is not null) dial.OwnedPause = ownedPause;
             if (offer is not null) offer.OwnedPause = ownedPause;
@@ -5514,7 +5525,8 @@ public sealed partial class NknSignalingTransport : INknListenerCapHandoffContro
             requiresResumeRequest: false,
             handoffKind: FileTransferTransportHandoffKind.None,
             targetTransport: FileTransferTransportKind.RegularNkn,
-            pausePublication: (normalizedSessionId, releaseGeneration));
+            pausePublication: (normalizedSessionId, releaseGeneration),
+            releaseOfPauseGeneration: expectedAckRecovery?.Pause);
         return true;
     }
 
@@ -6738,7 +6750,8 @@ public sealed partial class NknSignalingTransport : INknListenerCapHandoffContro
 
     private bool TryAcquireRegularV4ActivationPause(
         string sessionId, string reason, string trigger, out (long Ack, long Pause)? ownedPause,
-        PreferenceBoundOffer? offer = null, DialEndpointReservation? dial = null, RetryPauseScope? retryScope = null)
+        PreferenceBoundOffer? offer = null, DialEndpointReservation? dial = null, RetryPauseScope? retryScope = null,
+        bool ordinaryOffer = false)
     {
         ownedPause = null;
         if (string.IsNullOrWhiteSpace(sessionId))
@@ -6758,7 +6771,7 @@ public sealed partial class NknSignalingTransport : INknListenerCapHandoffContro
             reason,
             sessionId,
             trigger,
-            out ownedPause, offer, dial: dial, retryScope: retryScope);
+            out ownedPause, offer, dial: dial, retryScope: retryScope, ordinaryOffer: ordinaryOffer);
         if (paused)
         {
             LocalOperationalLog.Info(
@@ -14949,7 +14962,7 @@ public sealed partial class NknSignalingTransport : INknListenerCapHandoffContro
         // A published regular-v4 transfer needs the coordinator-owned activation
         // transaction, not the session-only readiness handoff. The activation
         // path revalidates this source before issuing an offer or committing.
-        if (!runtimeUnlockActivation &&
+        if (!runtimeUnlockActivation && idleUnlock?.Trigger != DuplexSessionUnlockTrigger &&
             accelerationLane is INknTunaAccelerationSession automaticLane &&
             (automaticLane.ConfiguredLanes & NknAccelerationLaneKind.File) != 0 &&
             SelectSessionPreparationRequest().Purpose == FileTransferAccelerationRequestPurpose.TransferActivation &&
@@ -16231,7 +16244,7 @@ public sealed partial class NknSignalingTransport : INknListenerCapHandoffContro
         PreferenceBoundOffer? pauseOffer = null;
         void PauseActivationIfNeeded(string pauseTrigger)
         {
-            if (pausedForActivationNegotiation)
+            if (pausedForActivationNegotiation || reason == DuplexSessionUnlockTrigger)
             {
                 return;
             }
@@ -16244,7 +16257,7 @@ public sealed partial class NknSignalingTransport : INknListenerCapHandoffContro
             pausedForActivationNegotiation = TryAcquireActivationPause(
                 "activation_negotiation_pending",
                 sessionId,
-                pauseTrigger, out acquiredPause, pauseOffer);
+                pauseTrigger, out acquiredPause, pauseOffer, ordinaryOffer: !isRuntimeUnlockActivation);
         }
 
         void ResumeActivationPauseIfNeeded(string resumeReason, string resumeTrigger)
@@ -16856,6 +16869,8 @@ public sealed partial class NknSignalingTransport : INknListenerCapHandoffContro
         if (!isRuntimeUnlockActivation && startupAttachment is not null && startupEpoch is not null)
         {
             var selection = startupAttachment.Authority.SelectRequest(startupAttachment, startupEpoch);
+            if ((selection.Purpose == FileTransferAccelerationRequestPurpose.DuplexSessionReestablishment ||
+                 idleUnlock?.Trigger == DuplexSessionUnlockTrigger) && idleUnlock?.Selection != selection) return;
             if (selection.Purpose == FileTransferAccelerationRequestPurpose.TransferActivation)
             {
                 if (!TryCaptureCurrentRuntimeUnlockFileTransferOwnerAuthority(sessionId, out var publication, out _) ||
@@ -18102,7 +18117,7 @@ public sealed partial class NknSignalingTransport : INknListenerCapHandoffContro
             nonce,
             payerDecisionId,
             offerGeneration,
-            pauseOnQueueAccepted: !isRuntimeUnlockActivation,
+            pauseOnQueueAccepted: !isRuntimeUnlockActivation && reason != DuplexSessionUnlockTrigger,
             pauseAfterObservedSendOnly: false,
             expectedInstallReceipt: isRuntimeUnlockActivation ? expectedInstallReceipt : null);
         MarkRuntimeUnlockOfferAnswerTimeoutScheduledIfCurrent(nonce, payerDecisionId, offerGeneration);
@@ -18179,7 +18194,7 @@ public sealed partial class NknSignalingTransport : INknListenerCapHandoffContro
                     void PauseReplayAttempt(string trigger)
                     {
                         pausedForReplayAttempt = replayOffer is not null && TryAcquireActivationPause(
-                            "activation_negotiation_pending", sessionId, trigger, out _, replayOffer);
+                            "activation_negotiation_pending", sessionId, trigger, out _, replayOffer, ordinaryOffer: offerAuthorityBoundary is null);
                     }
 
                     Task<AccelerationControlSendResult> SendReplayEnvelopeAsync(
@@ -30919,7 +30934,7 @@ public sealed partial class NknSignalingTransport : INknListenerCapHandoffContro
             accelerationLane is INknTunaAccelerationSession { CanOfferListener: true } &&
             !IsAccelerationNegotiatedAndHealthy())
         {
-            ScheduleAccelerationNegotiationIfEligible("remote_payer_intent");
+            SchedulePreferredHelpeeNegotiation("remote_payer_intent", intent.Trigger, intent.SessionId, intent.SentAtUnixMs);
         }
 
         LocalOperationalLog.Info(
@@ -31085,13 +31100,21 @@ public sealed partial class NknSignalingTransport : INknListenerCapHandoffContro
             return;
         }
 
+        if (validation.IsValid && (validation.AcceptedLanes & NknAccelerationLaneKind.File) != 0 &&
+            offer.Trigger != DuplexSessionUnlockTrigger && !IsRuntimeUnlockActivationReason(offer.Trigger) &&
+            pairedRetryScope is null && HasDuplexFileOffers(offer.SessionId))
+        {
+            await SendAccelerationAnswerAsync(offer, replyTarget, false, NknAccelerationLaneKind.None,
+                "duplex_session_unlock_required", 0, ct).ConfigureAwait(false);
+            return;
+        }
         ObserveRemoteOfferForPayerPriority(offer, validation);
         if (validation.IsValid && ShouldRejectRemoteHelperOfferForHelpeePriority(offer))
         {
             LocalOperationalLog.Info(
                 "NKN.Tuna",
                 "event=tuna_acceleration_offer_rejected; reason=helpee_payer_preferred; sender_role=helper");
-            ScheduleAccelerationNegotiationIfEligible("helpee_payer_preferred");
+            SchedulePreferredHelpeeNegotiation("helpee_payer_preferred", offer.Trigger, offer.SessionId, offer.SentAtUnixMs);
             await SendAccelerationAnswerAsync(
                 offer,
                 replyTarget,
@@ -31185,11 +31208,10 @@ public sealed partial class NknSignalingTransport : INknListenerCapHandoffContro
         var rejectReason = validation.Reason;
         if (validation.IsValid)
         {
-            TryAcquireRegularV4ActivationPause(
-                offer.SessionId,
-                "peer_offer_answer_ack_pending",
-                offer.Trigger,
-                out _, dial: endpointReservation);
+            if (offer.Trigger != DuplexSessionUnlockTrigger)
+                TryAcquireRegularV4ActivationPause(
+                    offer.SessionId, "peer_offer_answer_ack_pending", offer.Trigger, out _, dial: endpointReservation,
+                    ordinaryOffer: !isRuntimeUnlockOffer);
 
             NotifyTransportAccelerationStateChanged("dialer_starting");
         }
@@ -38976,9 +38998,11 @@ public sealed partial class NknSignalingTransport : INknListenerCapHandoffContro
             accelerationSessionId = answer.SessionId.Trim();
             accelerationNegotiatedLanes = deferUntilAck ? NknAccelerationLaneKind.None : validation.AcceptedLanes;
             ordinaryAnswerGeneration = Interlocked.Increment(ref fileActivationHandoffResetGeneration);
+            negotiatedFileLaneIsSessionOnly = !isRuntimeUnlockOffer &&
+                (expectedIdleOffer?.Request.Trigger == DuplexSessionUnlockTrigger || HasDuplexFileOffers(accelerationSessionId));
             confirmedRuntimeUnlockAck = null;
             if (isRuntimeUnlockOffer) Interlocked.Exchange(ref runtimeUnlockAckHoldGeneration, ordinaryAnswerGeneration);
-            ordinaryFileFinalAck = handoffAck is null ? null : (ordinaryAnswerGeneration, handoffAck.Task);
+            ordinaryFileFinalAck = handoffAck is null ? null : new(ordinaryAnswerGeneration, handoffAck.Task);
             if (!isRuntimeUnlockOffer && ackSelection is not null)
                 ackSelection.OrdinaryFileHandoffGeneration = ordinaryAnswerGeneration;
             counterOwner = CaptureRetryPauseScopeLocked(accelerationSessionId, false);
@@ -39015,7 +39039,11 @@ public sealed partial class NknSignalingTransport : INknListenerCapHandoffContro
                 {
                     if (ordinaryAnswerGeneration != fileActivationHandoffResetGeneration) return false;
                     if (ackSelection is null)
-                        return published = expectedIdleOffer is null || IsIdleSessionAcceptedAnswerCurrentLocked(expectedIdleOffer);
+                    {
+                        if (expectedIdleOffer is not null && !IsIdleSessionAcceptedAnswerCurrentLocked(expectedIdleOffer)) return false;
+                        PublishSessionOnlyDecision();
+                        return published = true;
+                    }
                     if (!ReferenceEquals(finalAckPreferenceOffer, ackSelection) || ackSelection.Revoked ||
                         pendingAccelerationAnswerAckReplyShadow is not { } ack ||
                         (ack.IdleOffer is not null && !IsIdleSessionAcceptedAnswerCurrentLocked(ack.IdleOffer)) ||
@@ -39024,6 +39052,7 @@ public sealed partial class NknSignalingTransport : INknListenerCapHandoffContro
                         accelerationSessionId != answer.SessionId.Trim()) return false;
                     void Publish()
                     {
+                        PublishSessionOnlyDecision();
                         if (deferUntilAck)
                         {
                             accelerationNegotiatedLanes = validation.AcceptedLanes;
@@ -39032,6 +39061,12 @@ public sealed partial class NknSignalingTransport : INknListenerCapHandoffContro
                         }
                         if (deferUntilAck && !runtimeUnlock && IsRetryPauseCurrentLocked(counterOwner)) Interlocked.Exchange(ref accelerationNegotiationRetryAttempts, 0);
                         published = true;
+                    }
+                    void PublishSessionOnlyDecision()
+                    {
+                        if (runtimeUnlock) return;
+                        // The reverse file can be admitted while the final ACK waits at the writer.
+                        negotiatedFileLaneIsSessionOnly |= HasDuplexFileOffers(answer.SessionId);
                     }
                     if (ackSelection.ListenerLease is { } lease)
                         return (accelerationLane as INknTunaAccelerationSession)?.TryPublishForListenerLease(lease, Publish) == true;
@@ -39047,6 +39082,9 @@ public sealed partial class NknSignalingTransport : INknListenerCapHandoffContro
             {
                 if (!published && handoffAck is not null) BeforeOrdinaryFinalAckCleanupForTests?.Invoke();
                 handoffAck?.TrySetResult(published);
+                if (published && !runtimeUnlock && !deferUntilAck && expectedPreferenceOffer?.OwnedPause is { } held &&
+                    CurrentOrdinaryFileLaneIsSessionOnly(answer.SessionId, ordinaryAnswerGeneration) == true)
+                    TryResumeMatchingActivationPause("duplex_session_ready", answer.SessionId, "final_ack", held, expectedOfferGeneration);
                 if (!published)
                 {
                     (long Ack, long Pause)? abandoned = null;
@@ -39177,9 +39215,10 @@ public sealed partial class NknSignalingTransport : INknListenerCapHandoffContro
         {
             LocalOperationalLog.Info("NKN.Tuna",
                 $"event=tuna_acceleration_negotiated; session_id={answer.SessionId}; lanes={FormatAccelerationLanesForLog(validation.AcceptedLanes)}; payer_decision_id={answer.PayerDecisionId}");
-            CompleteRuntimeUnlockRecoveryContractIfActive(answer.SessionId, "transport_acceleration_answer", completionInstallReceipt: null);
-            RequestFileTransferTunaActivationHandoff(answer.SessionId, validation.AcceptedLanes, "tuna_activation_negotiated",
-                ordinaryGeneration: ordinaryAnswerGeneration);
+            CompleteOrdinaryFileNegotiation(answer.SessionId, validation.AcceptedLanes, ordinaryAnswerGeneration,
+                "transport_acceleration_answer", "tuna_activation_negotiated",
+                deferUntilAck || handoffAck is not null ? expectedPreferenceOffer?.OwnedPause : null,
+                expectedOfferGeneration, handoffAck?.Task);
             NotifyTransportAccelerationStateChanged(GetActiveAccelerationStatusReason());
         }
     }
@@ -39929,6 +39968,8 @@ public sealed partial class NknSignalingTransport : INknListenerCapHandoffContro
                                 runtimeUnlockResponderAnswerProbeConvergence = responderConvergence =
                                     responderConvergence with { DialCleanupOwner = owner };
                             accelerationSessionId = ack.SessionId.Trim();
+                            negotiatedFileLaneIsSessionOnly = pendingAuthorityMode is null &&
+                                (pendingTrigger == DuplexSessionUnlockTrigger || HasDuplexFileOffers(accelerationSessionId));
                             accelerationNegotiatedLanes = acceptedLanes;
                             ordinaryAckGeneration = pendingResponderHandoffGeneration;
                             if (pendingAuthorityMode.HasValue && (acceptedLanes & NknAccelerationLaneKind.File) != 0)
@@ -39972,10 +40013,10 @@ public sealed partial class NknSignalingTransport : INknListenerCapHandoffContro
                             responderConvergenceReason =
                                 completionReason;
                         }
-                        ClearPendingAccelerationAnswerAckLocked();
+                        ClearPendingAccelerationAnswerAckLocked(handOffOwnedPause: committed && pendingAuthorityMode is null);
                         if (!committed) rejectedDial = owner;
                     }
-                    if (activationFailureReason is not null && ownedPause is long owned)
+                    if ((activationFailureReason is not null || pendingAuthorityMode is null) && ownedPause is long owned)
                         expectedRecovery = (pendingAccelerationAnswerAckGeneration, owned);
                 }
             }
@@ -40037,13 +40078,34 @@ public sealed partial class NknSignalingTransport : INknListenerCapHandoffContro
         LocalOperationalLog.Info(
             "NKN.Tuna",
             $"event=tuna_acceleration_negotiated; session_id={ack.SessionId}; lanes={string.Join(",", ack.SupportedLanes)}; payer_decision_id={ack.PayerDecisionId}; handshake=answer_ack");
-        CompleteRuntimeUnlockRecoveryContractIfActive(
-            ack.SessionId,
-            "transport_acceleration_answer_ack",
-            completionInstallReceipt: null);
-        RequestFileTransferTunaActivationHandoff(ack.SessionId, validation.AcceptedLanes & pendingLanes, "tuna_activation_answer_ack",
-            ordinaryGeneration: ordinaryAckGeneration);
+        if (ordinaryAckGeneration is long generation)
+            CompleteOrdinaryFileNegotiation(ack.SessionId, validation.AcceptedLanes & pendingLanes, generation,
+                "transport_acceleration_answer_ack", "tuna_activation_answer_ack", expectedRecovery, expectedRecoveryOfferGeneration);
         NotifyTransportAccelerationStateChanged(GetActiveAccelerationStatusReason());
+    }
+
+    private bool? CurrentOrdinaryFileLaneIsSessionOnly(string session, long generation)
+    {
+        lock (accelerationGate)
+        {
+            if (fileActivationHandoffResetGeneration != generation || accelerationSessionId != session) return null;
+            return negotiatedFileLaneIsSessionOnly |= HasDuplexFileOffers(session);
+        }
+    }
+
+    private void CompleteOrdinaryFileNegotiation(string session, NknAccelerationLaneKind lanes, long generation,
+        string source, string reason, (long Ack, long Pause)? pause, long offerGeneration, Task<bool>? finalAck = null)
+    {
+        if (CurrentOrdinaryFileLaneIsSessionOnly(session, generation) == false)
+        {
+            CompleteRuntimeUnlockRecoveryContractIfActive(session, source, completionInstallReceipt: null);
+            RequestFileTransferTunaActivationHandoff(session, lanes, reason, ordinaryGeneration: generation);
+        }
+        // A reverse offer can arrive while subscribers are being dispatched. Only
+        // the exact, acknowledged handshake may release the pause it installed.
+        if (CurrentOrdinaryFileLaneIsSessionOnly(session, generation) == true && pause is { } held &&
+            (finalAck is null || (finalAck.IsCompletedSuccessfully && finalAck.Result)))
+            TryResumeMatchingActivationPause("duplex_session_ready", session, source, held, offerGeneration);
     }
 
     private void HandleTransportAccelerationDown(string source, Envelope env)
@@ -40565,7 +40627,7 @@ public sealed partial class NknSignalingTransport : INknListenerCapHandoffContro
                         ? IsRuntimeUnlockActivationReason(normalizedReason)
                             ? normalizedReason
                             : "runtime_unlock"
-                        : idleUnlock is not null ? "session_ready_after_user_unlock" : $"retry_{normalizedReason}";
+                        : idleUnlock?.Trigger ?? $"retry_{normalizedReason}";
                     ScheduleAccelerationNegotiationIfEligible(
                         negotiationReason,
                         expectedInstallReceipt,
@@ -42518,9 +42580,10 @@ public sealed partial class NknSignalingTransport : INknListenerCapHandoffContro
             var selection = SelectSessionPreparationRequest();
             if (selection.Purpose != FileTransferAccelerationRequestPurpose.TransferActivation)
             {
-                if (selection.Purpose == FileTransferAccelerationRequestPurpose.IdleSessionReestablishment)
+                if (selection.Purpose is FileTransferAccelerationRequestPurpose.IdleSessionReestablishment or
+                    FileTransferAccelerationRequestPurpose.DuplexSessionReestablishment)
                 {
-                    RequestIdleSessionReestablishment(ct, idleUnlockStopGeneration, idleUnlockRequestedAtUnixMs);
+                    RequestIdleSessionReestablishment(selection, ct, idleUnlockStopGeneration, idleUnlockRequestedAtUnixMs);
                 }
                 else if (selection.Purpose == FileTransferAccelerationRequestPurpose.SessionPreparation)
                 {
@@ -43403,11 +43466,12 @@ public sealed partial class NknSignalingTransport : INknListenerCapHandoffContro
         TransportAccelerationOfferPayload? pairedRetryOffer = null,
         InboundPostFallbackPairedRetryOfferScope? pairedRetryScope = null)
     {
-        // Both triggers represent an explicit unlock; automatic startup still
+        // These unlock triggers represent an explicit user action; automatic startup still
         // cannot clear a stop. Callers validate the peer before reaching here.
         if (sentAtUnixMs <= 0 ||
             (!IsRuntimeUnlockNegotiationReason(trigger) &&
              !string.Equals(trigger, "session_ready_after_user_unlock", StringComparison.Ordinal) &&
+             trigger != DuplexSessionUnlockTrigger &&
              !(pairedRetryOffer is not null &&
                pairedRetryScope is { IsDefault: false } paired &&
                string.Equals(SanitizeLogToken(trigger), "fallback_paired_tail_yield", StringComparison.Ordinal) &&
@@ -43921,7 +43985,7 @@ public sealed partial class NknSignalingTransport : INknListenerCapHandoffContro
             !IsHelperSessionRole(offer.SenderRole) ||
             accelerationLane is not INknTunaAccelerationSession tunaSession ||
             !tunaSession.CanOfferListener ||
-            string.IsNullOrWhiteSpace(tunaSession.LocalTunaAddress))
+            (offer.Trigger != DuplexSessionUnlockTrigger && string.IsNullOrWhiteSpace(tunaSession.LocalTunaAddress)))
         {
             return false;
         }
