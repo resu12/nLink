@@ -73,7 +73,7 @@ Notes:
 - Chat UX keeps `Enter` to send, `Shift+Enter` for a new line, stable pane sizing in chat-only and screen-sharing layouts, and message entry remains available during screen sharing.
 - Both versions transfer one file at a time. Hotfix 2 uses the file picker; 0.7.1 also accepts a single file dropped onto chat. Neither supports folders, multi-file drops, or resuming after restart.
 - Route defaults are explicit: regular NKN uses `regular_nkn_v4_fast` / protocol `4`, active file Tuna uses `file_tuna_v4` / protocol `4`, and controlled post-Tuna fallback uses `post_tuna_fallback_v6` / protocol `6` for the affected transfer. `diagnostic_regular_nkn_v6` is unsafe developer/test opt-in only; active `file_tuna_v6` is invalid.
-- Receiving a file requires explicit accept/decline, and file-transfer data is protected by nLink's session envelope plus source/session validation rather than by assuming NKN transport alone is sufficient.
+- The receiver decides separately for each file. In the 0.7.1 candidate, if NKN retries the same offer after a reply is lost, the receiver doesn’t need to answer twice. A new offer still needs its own approval. File-transfer messages are protected by nLink’s session envelope and source/session checks.
 - The bundled NKN bridge/runtime remains a trust boundary; transport encryption does not replace nLink's application checks.
 - Active file transfers can be paused, resumed, or canceled from either side when file transfer is allowed.
 - File-transfer lifecycle actions are hard-priority: cancel, pause, session end, peer down, window close, and app exit do not wait for file-data queues, repair queues, Tuna, or bulk backlog.

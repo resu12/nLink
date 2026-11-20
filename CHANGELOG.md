@@ -6,6 +6,7 @@ Changes since the published 0.7.0 hotfix revision 2:
 
 - **File transfer:** Helper and Helpee can drop one local file from Windows Explorer into chat instead of using the file picker. The same session permission and receiver approval are required.
 - Incoming offers now have **Save as…** to choose a destination without overwriting existing files. **Accept** still saves to Downloads, and canceling the picker leaves the offer pending.
+- **File-offer reliability:** A retry of the same NKN offer can recover a lost reply without prompting twice. A delayed reply cannot answer a replacement offer, and a failed **Decline** reply to an older peer no longer blocks the next file.
 - **Session UI:** The Tuna tooltip distinguishes a ready session from a file using regular NKN. It no longer labels local transfers as NKN or claims a route or payer after disconnect. File routing is unchanged.
 - **Tuna and wallet:** A funded payer can unlock Tuna in an approved session without reconnecting. Only the selected, permitted lanes are offered; stale answers and retries cannot reactivate a withdrawn offer. Wallet changes in another instance invalidate stale unlock results. Concurrent streams share the listener’s byte cap, and bridge shutdown has a time limit.
 - **Connection reliability:** A heartbeat received while the watchdog waits for the session lock prevents a false disconnect. A silent peer still times out.

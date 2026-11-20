@@ -16,6 +16,8 @@ This is the operator entry point for file transfer and Tuna. For runtime archite
 
 For an end-user problem, collect Diagnostics from both peers first; do not ask users to run paid matrices. See [supportability.md](supportability.md).
 
+**Receiver shows Declined; sender is still waiting (0.7.1):** these are two different observations. The receiver made a decision, but the sender may not have received it. With an updated sender, a retry of the exact offer can recover the reply automatically. An older sender may keep waiting because its offer has no identifier that makes replay safe. The sender can cancel the pending offer; there is no need to accept the file or switch Tuna routes to clear it.
+
 ## Retained Analysis And Focused Checks
 
 Start every retained file-transfer investigation with:
