@@ -3375,24 +3375,36 @@ public sealed partial class NknAccelerationTransportTests
     public Task DuplexUnlock_EligibleHelpeeWithoutAnAddressPaysWhenOnlyHelperReenables()
         => CheckDuplexUnlockAsync(false, false, helpeeEligible: true, dropHelperIntent: true, coldHelpee: true);
 
-    private async Task CheckDuplexUnlockAsync(bool fileOnly, bool deselectScreen, bool helpeeEligible = false, bool dropHelperIntent = false, bool coldHelpee = false)
+    [Theory]
+    [InlineData("zero_writes")]
+    [InlineData("yield")]
+    [InlineData("yield_replaced_listener")]
+    [InlineData("transport_recovered")]
+    public Task DuplexUnlock_ReverseCompletionSettlesOnlyInheritedChannelPauseAndOwnedListener(string outcome)
+        => CheckDuplexUnlockAsync(false, false, cleanup: outcome);
+
+    private async Task CheckDuplexUnlockAsync(bool fileOnly, bool deselectScreen, bool helpeeEligible = false, bool dropHelperIntent = false, bool coldHelpee = false, string? cleanup = null)
     {
         FakeNknClient.ResetNetwork();
         var scope = Guid.NewGuid().ToString("N");
         using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(20));
         var ct = timeout.Token;
         var hostClient = new FakeNknClient($"host.duplex-{scope}.address");
-        var helperClient = new FakeNknClient($"helper.duplex-{scope}.address");
+        var helperClient = cleanup is null ? new FakeNknClient($"helper.duplex-{scope}.address") : new WriterGatePeer($"helper.duplex-{scope}.address");
         using var hostLane = new RetryableTunaAccelerationSession(false, 0) { StrictPayerHandoffForTests = true, ClearLocalAddressOnStop = coldHelpee };
         using var helperLane = new RetryableTunaAccelerationSession(true, 0) { StrictPayerHandoffForTests = true };
         var options = NknTransportOptions.Load();
         var selectedLanes = NknAccelerationLaneKind.File | NknAccelerationLaneKind.Screen;
         var laneOptions = NknTunaAccelerationOptions.CreateRuntimePilot("fake-sidecar.exe", selectedLanes,
             runtimeLaneLimit: () => selectedLanes);
-        using var host = new NknSignalingTransport(hostClient, options, new NknIdentity("duplex-host", hostClient.Address),
-            laneOptions, hostLane);
-        using var helper = new NknSignalingTransport(helperClient, options, new NknIdentity("duplex-helper", helperClient.Address),
-            laneOptions, helperLane);
+        var hostIdentity = new NknIdentity("duplex-host", hostClient.Address);
+        var helperIdentity = new NknIdentity("duplex-helper", helperClient.Address);
+        // The reverse transfer needs pressure install and settlement receipts to finalize.
+        // These adapters are never connected; the fake clients still carry every message.
+        using var hostPressure = cleanup is null ? null : new RealNknClientAdapter(hostIdentity, options);
+        using var helperPressure = cleanup is null ? null : new RealNknClientAdapter(helperIdentity, options);
+        using var host = new NknSignalingTransport(hostClient, options, hostIdentity, laneOptions, hostLane, hostPressure);
+        using var helper = new NknSignalingTransport(helperClient, options, helperIdentity, laneOptions, helperLane, helperPressure);
         using var hostFiles = new SessionFileTransferService();
         using var helperFiles = new SessionFileTransferService();
         hostFiles.AttachTransport(host);
@@ -3409,18 +3421,128 @@ public sealed partial class NknAccelerationTransportTests
         Assert.False(host.IsAccelerationAvailableForTests);
         Assert.False(helper.IsAccelerationAvailableForTests);
 
-        await OfferPausedFileAsync(helperFiles, hostFiles, "helper-file", ct);
-        await OfferPausedFileAsync(hostFiles, helperFiles, "helpee-file", ct);
-        await WaitUntilAsync(() => helperFiles.Snapshot.Inbound?.IsPeerPaused == true &&
-            hostFiles.Snapshot.Inbound?.IsPeerPaused == true, TimeSpan.FromSeconds(3));
-        FileTransferTransferSnapshot[] Files() => [helperFiles.Snapshot.Outbound!, hostFiles.Snapshot.Inbound!,
-            hostFiles.Snapshot.Outbound!, helperFiles.Snapshot.Inbound!];
+        // For the cleanup cases the payer receives the held file and sends the
+        // reverse file; its own coordinator observes that send's completion.
+        var firstSender = cleanup is null ? helperFiles : hostFiles;
+        var reverseSender = cleanup is null ? hostFiles : helperFiles;
+        await OfferPausedFileAsync(firstSender, reverseSender, "helper-file", ct);
+        var first = cleanup is null ? null : await helper.OpenFileTransferDataSessionAsync(session, "helper-file", ct);
+        using var reverseWrite = cleanup is null ? null : new InitialFallbackWriteGate(true);
+        object? inherited = null;
+        if (first is not null)
+        {
+            // Seed just the predecessor final-ACK record; acquire its ordinary channel
+            // pause before the reverse file exists. The successor must inherit it itself.
+            var flags = System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic;
+            object?[] args = ["predecessor", session, "session_ready", null, null, false, null, null, true];
+            Assert.True((bool)typeof(NknSignalingTransport).GetMethod("TryAcquireActivationPause", flags)!.Invoke(helper, args)!);
+            inherited = Assert.IsType<(long, long)>(args[3]);
+            Assert.False(first.IsAvailable);
+            var field = typeof(NknSignalingTransport).GetField("finalAckPreferenceOffer", flags)!;
+            var predecessor = Activator.CreateInstance(field.FieldType,
+                new Envelope(1, session, "previous-offer", MsgType.TransportAccelerationOffer, [], 1, null), selectedLanes)!;
+            field.FieldType.GetProperty("OwnedPause")!.SetValue(predecessor, inherited);
+            field.SetValue(helper, predecessor);
+        }
+        if (reverseWrite is null)
+        {
+            await OfferPausedFileAsync(hostFiles, helperFiles, "helpee-file", ct);
+            await WaitUntilAsync(() => helperFiles.Snapshot.Inbound?.IsPeerPaused == true &&
+                hostFiles.Snapshot.Inbound?.IsPeerPaused == true, TimeSpan.FromSeconds(3));
+        }
+        else
+        {
+            Assert.NotNull(await reverseSender.TryStartSendAsync(new("reverse.bin", 1024, "helpee-file"),
+                _ => Task.FromResult<Stream>(new MemoryStream(new byte[1024])), ct));
+            await WaitUntilAsync(() => firstSender.Snapshot.Inbound?.State == FileTransferTransferState.PendingDecision, TimeSpan.FromSeconds(3));
+            Assert.NotNull(await firstSender.AcceptIncomingTransferAsync("helpee-file", (_, _) => Task.FromResult<Stream>(reverseWrite), ct));
+            await reverseWrite.Entered.Task.WaitAsync(TimeSpan.FromSeconds(4));
+        }
+        FileTransferTransferSnapshot[] Files() => [firstSender.Snapshot.Outbound!, reverseSender.Snapshot.Inbound!,
+            reverseSender.Snapshot.Outbound!, firstSender.Snapshot.Inbound!];
         var before = Files();
         Assert.All(before, file => { Assert.False(file.IsTerminal); Assert.Equal(FileTransferRouteResolver.RegularNknV4FastToken, file.RouteToken); });
 
         int handoffs = 0;
         host.OrdinaryFileHandoffBeforeDispatchForTests = helper.OrdinaryFileHandoffBeforeDispatchForTests =
             () => Interlocked.Increment(ref handoffs);
+        if (first is not null && reverseWrite is not null)
+        {
+            var writer = Assert.IsType<WriterGatePeer>(helperClient);
+            bool zeroWrites = cleanup == "zero_writes";
+            var atWriter = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var releaseWriter = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var held = new TaskCompletionSource<Envelope>(TaskCreationOptions.RunContinuationsAsynchronously);
+            int writes = 0, reopens = 0;
+            first.AvailabilityChanged += (_, e) => { if (e.IsAvailable) Interlocked.Increment(ref reopens); };
+            writer.BeforeOwnedWrite = async (kind, _) =>
+            {
+                if (!zeroWrites || kind != MsgType.TransportAccelerationOffer) return;
+                atWriter.TrySetResult();
+                await releaseWriter.Task.WaitAsync(ct);
+            };
+            writer.AfterOwnedWrite = env =>
+            {
+                if (env.Type == MsgType.TransportAccelerationOffer) Interlocked.Increment(ref writes);
+                return Task.CompletedTask;
+            };
+            // Capture the Helper's actual offer. Model the Helpee's refusal, not a
+            // successful dial that could block the reverse transfer pending its ACK.
+            helperClient.ShouldDeliverSendAsync = (_, bytes, _) =>
+            {
+                if (!EnvelopeCodec.TryDeserialize(bytes, out var env) || env.Type != MsgType.TransportAccelerationOffer)
+                    return Task.FromResult(true);
+                held.TrySetResult(env);
+                return Task.FromResult(false);
+            };
+            await helper.RequestAccelerationNegotiationAsync("runtime_unlock", ct);
+            try
+            {
+                await (zeroWrites ? atWriter.Task : (Task)held.Task).WaitAsync(ct);
+                var successor = GetPrivateField(helper, "outboundPreferenceOffer")!;
+                Assert.Equal(inherited, successor.GetType().GetProperty("OwnedPause")!.GetValue(successor));
+                Assert.Null(GetPrivateField(helper, "finalAckPreferenceOffer"));
+                Assert.False(first.IsAvailable);
+                Assert.True((await helper.OpenFileTransferDataSessionAsync(session, "helpee-file", ct)).IsAvailable);
+                reverseWrite.Release.TrySetResult();
+                await WaitUntilAsync(() => reverseSender.Snapshot.Outbound!.State == FileTransferTransferState.Completed &&
+                    firstSender.Snapshot.Inbound!.State == FileTransferTransferState.Completed, TimeSpan.FromSeconds(5));
+                Assert.Equal(new byte[1024], reverseWrite.ToArray());
+                Assert.False(first.IsAvailable);
+            }
+            finally { releaseWriter.TrySetResult(); }
+            if (!zeroWrites)
+            {
+                var original = Assert.IsType<NknTunaLaneLease>(helperLane.CaptureCurrentLaneLease());
+                var key = (byte[])InvokePrivateMethod(host, "GetControlSessionSharedKeyOrThrow")!;
+                var offer = JsonSerializer.Deserialize<TransportAccelerationOfferPayload>(
+                    SessionSecureEnvelopeCodec.Decrypt(key, (await held.Task).Payload).Plaintext)!;
+                var payload = new TransportAccelerationAnswerPayload { SessionId = offer.SessionId, Nonce = offer.Nonce,
+                    PayerDecisionId = offer.PayerDecisionId, ExpiresAtUnixMs = offer.ExpiresAtUnixMs,
+                    SidecarProtocolVersion = offer.SidecarProtocolVersion, Accepted = false,
+                    RejectReason = cleanup == "transport_recovered" ? "transport_recovered" : "helpee_payer_preferred" };
+                var negative = BuildSecureAccelerationEnvelope(host, MsgType.TransportAccelerationAnswer, payload,
+                    "transport_acceleration_answer", payload.Nonce, sequence: 954);
+                if (cleanup == "yield_replaced_listener")
+                    Assert.True(await helperLane.EnsureListenerSidecarConnectedAsync(hostClient.Address, ct));
+                var current = helperLane.CaptureCurrentLaneLease();
+                Assert.Equal(cleanup != "yield_replaced_listener", current == original);
+                var stops = helperLane.StopCalls;
+                InvokePrivateMethod(helper, "HandleTransportAccelerationAnswer", hostClient.Address, negative);
+                Assert.Equal(stops + (cleanup == "yield" ? 1 : 0), helperLane.StopCalls);
+                Assert.Equal(cleanup == "yield" ? null : current, helperLane.CaptureCurrentLaneLease());
+            }
+            await WaitUntilAsync(() => GetPrivateField(helper, "outboundAccelerationOfferNonce") is null &&
+                Volatile.Read(ref reopens) != 0, TimeSpan.FromSeconds(3));
+            Assert.Equal(!zeroWrites, Volatile.Read(ref writes) > 0);
+            Assert.True(first.IsAvailable);
+            Assert.Equal(1, Volatile.Read(ref reopens));
+            Assert.Equal(0, Volatile.Read(ref handoffs));
+            foreach (var (old, current) in before.Take(2).Zip(Files()))
+                Assert.Equal((old.TransferId, old.RouteToken, old.ProtocolVersion, old.IsPaused, old.IsPeerPaused),
+                    (current.TransferId, current.RouteToken, current.ProtocolVersion, current.IsPaused, current.IsPeerPaused));
+            return;
+        }
         if (fileOnly) selectedLanes = NknAccelerationLaneKind.File;
         if (helpeeEligible)
         {

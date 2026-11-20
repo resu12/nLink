@@ -159,6 +159,7 @@ public sealed partial class SessionFileTransferService
             if (!TryPrepareOutboundTerminalAuthorityLocked(context, terminalState, errorCode, requiredSparsePumpInstall, requiredBootstrapCallback))
             { return false; }
 
+            CloseOfferWritesAtTerminalLocked(terminalState);
             RetireBootstrapSourceCallbackLocked(context, requiredBootstrapCallback, "terminal");
             context.CancelLifetime();
             SettleAndClearFallbackFrontierRepairContractLocked(
@@ -512,6 +513,7 @@ public sealed partial class SessionFileTransferService
 
             // Only the already-validated exact finalization continuation can
             // hand off storage custody. This grants no route/completion authority.
+            CloseOfferWritesAtTerminalLocked(terminalState);
             var nativeDestinationSourceCurrent = terminalState == FileTransferTransferState.Completed &&
                 requiredFinalizationSource is not null && IsInboundFinalizationSourceCurrentLocked(context, requiredFinalizationSource);
             context.CancelLifetime();

@@ -16,6 +16,16 @@ public sealed partial class SessionFileTransferService : IFileTransferSessionPre
         idleOfferWrite?.Retire();
         idleOfferWrite = null;
     }
+
+    private void CloseOfferWritesAtTerminalLocked(FileTransferTransferState terminal)
+    {
+        if (idleOfferWrite is null) return;
+        if (terminal == FileTransferTransferState.Completed &&
+            outboundTransfer is { IsTerminal: false } && inboundTransfer is { IsTerminal: false })
+            idleOfferWrite.CloseWrites(); // Only an answer to an already submitted duplex offer may survive.
+        else
+            RetireIdleOfferWriteLocked();
+    }
     private PreparationAdmissionCapture? preparationAdmission;
     private FileTransferSessionPreparationExecution? preparationExecution;
     private FileTransferSessionPreparationAdmissionLease? preparationAdmissionLease;
@@ -191,6 +201,13 @@ public sealed partial class SessionFileTransferService : IFileTransferSessionPre
                     selectedTransfer, DateTimeOffset.UtcNow);
                 if (result.Purpose == FileTransferAccelerationRequestPurpose.IdleSessionReestablishment)
                     result = result with { IdleWrite = idleOfferWrite ??= new() };
+                else if (result.Purpose == FileTransferAccelerationRequestPurpose.TransferActivation &&
+                    idleOfferWrite is { IsCurrent: true } prior &&
+                    ((inbound && outboundTransfer is { State: FileTransferTransferState.Completed } sent && sent.SessionId == epoch.SessionId) ||
+                     (outbound && inboundTransfer is { State: FileTransferTransferState.Completed } received && received.SessionId == epoch.SessionId)))
+                    // A replacement admission retires this window. Completing one original
+                    // file does not turn the session-only answer into a handoff for the other.
+                    result = result with { PriorDuplexAnswer = prior };
             });
             return result;
         }

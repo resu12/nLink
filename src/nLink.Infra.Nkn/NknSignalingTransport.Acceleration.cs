@@ -18211,9 +18211,12 @@ public sealed partial class NknSignalingTransport : INknListenerCapHandoffContro
             }
             else
             {
-                ClearOutboundAccelerationOfferIfCurrent(nonce, payerDecisionId, offerGeneration, "offer_send_not_observed");
+                var clearedPause = ClearOutboundAccelerationOfferIfCurrent(nonce, payerDecisionId, offerGeneration, "offer_send_not_observed");
                 NotifyTransportAccelerationStateChanged("offer_queue_rejected");
-                ResumeActivationPauseIfNeeded("offer_queue_rejected", "offer_queue_rejected");
+                if (reason == DuplexSessionUnlockTrigger && clearedPause is { } inherited)
+                    TryResumeMatchingActivationPause("offer_queue_rejected", sessionId, "offer_queue_rejected", inherited, offerGeneration);
+                else
+                    ResumeActivationPauseIfNeeded("offer_queue_rejected", "offer_queue_rejected");
                 _ = ScheduleOfferRetry("offer_queue_rejected");
             }
 
@@ -18573,14 +18576,19 @@ public sealed partial class NknSignalingTransport : INknListenerCapHandoffContro
     private Task<bool>? SendOwnedHandshakeIfBound(string destination, Envelope envelope, byte[] bytes, NknBridgeChannel channel,
         bool priority, CancellationToken ct)
     {
-        if (client is not IOwnedHandshakeClient bridge || envelope.Type is not
+        if (envelope.Type is not
             (MsgType.TransportAccelerationOffer or MsgType.TransportAccelerationAnswer or MsgType.TransportAccelerationAnswerAck)) return null;
         preferenceBoundAnswers.TryGetValue(envelope, out var answer);
         var preferenceOffer = envelope.Type == MsgType.TransportAccelerationOffer && tunaAccelerationOptions.UsesRuntimeLanePreferences;
         var finalAck = IsWriterBoundFinalAck(envelope);
         writerBoundOffers.TryGetValue(envelope, out var reused);
+        var bridge = client as IOwnedHandshakeClient;
+        if (bridge is null && reused?.IdleBinding?.Request.Trigger != DuplexSessionUnlockTrigger) return null;
         if (reused is null && !preferenceOffer && !finalAck && answer is null && !negativeAnswerEndpoints.TryGetValue(envelope, out _)) return null;
-        return CountSubmissionAsync(bridge.SendOwnedHandshakeAsync(destination, bytes, channel, priority, write =>
+        return bridge is null ? SendOfferResponseCopyAsync(destination, bytes, channel, BeginOwnedWrite, ct)
+            : CountSubmissionAsync(bridge.SendOwnedHandshakeAsync(destination, bytes, channel, priority, BeginOwnedWrite, ct));
+
+        ValueTask? BeginOwnedWrite(Func<ValueTask> write)
         {
             lock (accelerationGate)
             {
@@ -18589,7 +18597,7 @@ public sealed partial class NknSignalingTransport : INknListenerCapHandoffContro
                     return (accelerationLane as INknTunaAccelerationSession)?.TryBeginOfferDialWrite(owner,
                         () => DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() < answer.DeadlineUtcMs ? write() : null);
                 ValueTask? BeginWrite() => reused?.IdleBinding is { } idle
-                    ? idle.Request.Selection.IdleWrite?.TryWrite(write) : write();
+                    ? idle.Request.Selection.IdleWrite?.TryWrite(idle.Nonce, write) : write();
                 if ((reused ?? (preferenceOffer ? outboundPreferenceOffer : finalAck ? finalAckPreferenceOffer : null))?.ListenerLease is { } lease)
                 {
                     ValueTask? started = null;
@@ -18598,7 +18606,7 @@ public sealed partial class NknSignalingTransport : INknListenerCapHandoffContro
                 }
                 return BeginWrite();
             }
-        }, ct));
+        }
 
         async Task<bool> CountSubmissionAsync(Task<bool> submission)
         {
@@ -18631,7 +18639,8 @@ public sealed partial class NknSignalingTransport : INknListenerCapHandoffContro
                 return outboundPreferenceOffer is { Revoked: false } active &&
                        (boundOffer is null || ReferenceEquals(boundOffer, active)) && ReferenceEquals(active.Envelope, envelope) &&
                        IsOfferListenerCurrentLocked(active) &&
-                       (active.IdleBinding is not { } idle || IsIdleSessionOfferCurrentLocked(idle, retired: false)) &&
+                       (active.IdleBinding is not { } idle || (idle.Request.Selection.IdleWrite?.CanWrite == true &&
+                        IsIdleSessionOfferCurrentLocked(idle, retired: false))) &&
                        (!tunaAccelerationOptions.UsesRuntimeLanePreferences || (active.Lanes & ~ResolveConfiguredAccelerationLanes()) == 0);
         }
         if (envelope.Type == MsgType.TransportAccelerationAnswer && negativeAnswerEndpoints.TryGetValue(envelope, out var negative))
@@ -28326,21 +28335,23 @@ public sealed partial class NknSignalingTransport : INknListenerCapHandoffContro
         }
     }
 
-    private void ClearOutboundAccelerationOfferIfCurrent(
+    private (long Ack, long Pause)? ClearOutboundAccelerationOfferIfCurrent(
         string nonce,
         long payerDecisionId,
         long generation,
         string reason)
     {
+        (long Ack, long Pause)? ownedPause;
         lock (accelerationGate)
         {
             if (outboundAccelerationOfferGeneration != generation ||
                 outboundAccelerationOfferPayerDecisionId != payerDecisionId ||
                 !string.Equals(outboundAccelerationOfferNonce, nonce, StringComparison.Ordinal))
             {
-                return;
+                return null;
             }
 
+            ownedPause = outboundPreferenceOffer?.OwnedPause;
             ClearOutboundAccelerationOfferLocked();
         }
 
@@ -28348,6 +28359,7 @@ public sealed partial class NknSignalingTransport : INknListenerCapHandoffContro
             "NKN.Tuna",
             $"event=tuna_acceleration_outbound_offer_cleared; reason={SanitizeLogToken(reason)}; payer_decision_id={payerDecisionId}; generation={generation}");
         SchedulePendingRuntimeUnlockAccelerationNegotiationAfterCurrentOperation("outbound_offer_cleared");
+        return ownedPause;
     }
 
     private void MarkRuntimeUnlockOfferObservedSendIfCurrent(
@@ -38677,7 +38689,7 @@ public sealed partial class NknSignalingTransport : INknListenerCapHandoffContro
             }
         }
 
-        if (expectedIdleOffer is not null && !IsIdleSessionUnlockCurrent(expectedIdleOffer.Request)) return;
+        if (expectedIdleOffer is not null && !IsIdleSessionAnswerSelectionCurrent(expectedIdleOffer, matchedRetiredOffer)) return;
 
         bool OfferStillCurrentLocked()
         {
@@ -38821,8 +38833,8 @@ public sealed partial class NknSignalingTransport : INknListenerCapHandoffContro
 
         // Core selection is checked outside the transport gate; the original
         // offer and stop lifetime are checked again atomically at mutation.
-        if (expectedIdleOffer is not null && !IsIdleSessionUnlockCurrent(expectedIdleOffer.Request)) return;
         IdleSessionBeforeAnswerCommitForTests?.Invoke();
+        if (expectedIdleOffer is not null && !IsIdleSessionAnswerSelectionCurrent(expectedIdleOffer, matchedRetiredOffer, validation.IsValid)) return;
         lock (accelerationGate) { if (!OfferStillCurrentLocked()) return; }
 
         if (!answer.Accepted || !validation.IsValid)
@@ -38850,7 +38862,12 @@ public sealed partial class NknSignalingTransport : INknListenerCapHandoffContro
                 "NKN.Tuna",
                 $"event=tuna_acceleration_answer_rejected; reason={SanitizeLogToken(effectiveRejectReason)}; offer_trigger={SanitizeLogToken(expectedTrigger)}; payer_decision_id={expectedPayerDecisionId}");
             NotifyTransportAccelerationStateChanged($"answer_rejected_{effectiveRejectReason}");
-            if (rejectedPause is { } owned && ResumeFileTransferDataSessionsAfterTunaActivationFailure(
+            // After duplex completion settle only this offer's pause and payer lease.
+            var completedDuplex = expectedIdleOffer?.Request.Trigger == DuplexSessionUnlockTrigger &&
+                expectedIdleOffer.Request.Selection.IdleWrite?.CanWrite != true;
+            if (completedDuplex)
+                answerScope = ReleaseOfferPause(rejectedPause, answerScope, "tuna_activation_failed_regular_v4_resumed", "transport_acceleration_answer_rejected");
+            else if (rejectedPause is { } owned && ResumeFileTransferDataSessionsAfterTunaActivationFailure(
                 effectiveRejectReason, answer.SessionId, "transport_acceleration_answer_rejected", expectedAckRecovery: owned,
                 expectedOfferGeneration: answerScope.OfferGeneration))
                 answerScope = answerScope with { Ack = owned.Ack, Pause = owned.Pause + 1 };
@@ -38894,6 +38911,7 @@ public sealed partial class NknSignalingTransport : INknListenerCapHandoffContro
                 return;
             }
 
+            if (completedDuplex) return;
             var retryPeerStopAfterUnlock =
                 isRuntimeUnlockOffer &&
                 ShouldRetryPeerUserStoppedAfterRuntimeUnlock(effectiveRejectReason);

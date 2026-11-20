@@ -279,12 +279,13 @@ public sealed partial class NknAccelerationTransportTests
         public readonly ConcurrentQueue<string> Liveness = new();
         public FileTransferSessionPreparationPermit Permit = null!;
 
-        public PreparationHandshakePair(bool helperPays, NknTunaAccelerationOptions? payerOptions = null, bool useWriterGatePeer = false, bool allowRuntimeRestart = false)
+        public PreparationHandshakePair(bool helperPays, NknTunaAccelerationOptions? payerOptions = null, bool useWriterGatePeer = false, bool allowRuntimeRestart = false, bool gatePayerWrites = false)
         {
             PayerLane = new(allowRuntimeRestart);
             DialerLane = new(allowRuntimeRestart, canListen: !allowRuntimeRestart);
             var id = Guid.NewGuid().ToString("N");
-            PayerClient = new($"payer.preparation-handshake.{id}.address");
+            var payerAddress = $"payer.preparation-handshake.{id}.address";
+            PayerClient = gatePayerWrites ? new WriterGatePeer(payerAddress) : new FakeNknClient(payerAddress);
             var dialerAddress = $"dialer.preparation-handshake.{id}.address";
             DialerClient = useWriterGatePeer ? new WriterGatePeer(dialerAddress) : new FakeNknClient(dialerAddress);
             var options = NknTransportOptions.Load();
@@ -420,6 +421,7 @@ public sealed partial class NknAccelerationTransportTests
         public NknTunaLanePreparationRequest? Request;
         public int Starts, ExactStops, GlobalStops, OrdinaryStarts;
         public Func<CancellationToken, Task<bool>>? OrdinaryStartForTests;
+        public bool RejectOfferDialForTests;
         public int Retains, Activations;
         public bool IsAvailable => Current is not null || runtime?.IsAvailable == true;
         public bool CanListen = true;
@@ -521,7 +523,7 @@ public sealed partial class NknAccelerationTransportTests
             if (runtime is null) throw new InvalidOperationException("ordinary_dialer_forbidden");
             Assert.Null(Current);
             Interlocked.Increment(ref OrdinaryStarts);
-            return runtime.StartOfferDialerAsync(tuna, peer, owner, ct);
+            return RejectOfferDialForTests ? Task.FromResult(false) : runtime.StartOfferDialerAsync(tuna, peer, owner, ct);
         }
         public bool IsCurrentOfferDial(object owner) => Current is null && runtime?.IsCurrentOfferDial(owner) == true;
         public bool TryCommitOfferDialer(object owner, bool retainUntilProbe, Func<bool, bool> publish)

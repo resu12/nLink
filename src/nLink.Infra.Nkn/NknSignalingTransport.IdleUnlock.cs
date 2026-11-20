@@ -54,6 +54,18 @@ public sealed partial class NknSignalingTransport
            !IsAccelerationUserStoppedForCurrentSession() &&
            !IsAccelerationPeerUserStoppedForFallbackSession(request.Epoch.SessionId);
 
+    private bool IsIdleSessionAnswerSelectionCurrent(IdleSessionOfferBinding offer, bool retired, bool allowPriorAnswer = true)
+    {
+        var request = offer.Request;
+        if (!IsIdleSessionUnlockLifetimeCurrent(request) || IsAccelerationUserStoppedForCurrentSession() ||
+            IsAccelerationPeerUserStoppedForFallbackSession(request.Epoch.SessionId)) return false;
+        var current = request.Attachment.Authority.SelectRequest(request.Attachment, request.Epoch);
+        return current == request.Selection ||
+            (allowPriorAnswer && !retired && request.Selection.Purpose == FileTransferAccelerationRequestPurpose.DuplexSessionReestablishment &&
+             request.Selection.IdleWrite is { } window && ReferenceEquals(current.PriorDuplexAnswer, window) &&
+             window.WasSubmitted(offer.Nonce));
+    }
+
     private void SchedulePreferredHelpeeNegotiation(string reason, string? peerTrigger, string sessionId, long sentAtUnixMs)
     {
         if (peerTrigger != DuplexSessionUnlockTrigger)
