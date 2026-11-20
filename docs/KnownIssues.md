@@ -16,7 +16,7 @@ These notes distinguish [published 0.7.0 hotfix 2](https://github.com/resu12/nLi
 - Options -> Diagnostics content is intended for troubleshooting and may change between builds.
 - Performance and layout should be checked on the target machine if you use unusual scaling or window sizes.
 - Screenshare streaming is available, but live NKN performance can vary with transport conditions. Include Options -> Diagnostics and any available `screenshare-operator-verdict.txt` evidence when reporting screenshare issues.
-- File transfer supports one file at a time, requires receiver acceptance, and has a `25 GiB` default cap. The 0.7.1 candidate accepts one Explorer file dropped onto chat. Folder transfer, multi-file drops, and resume after restart remain unsupported.
+- Each file offer requires receiver acceptance and has a `25 GiB` default cap. The 0.7.1 candidate accepts one Explorer file dropped onto chat. One unfinished file in each direction is supported; folder transfer, multi-file drops, and resume after restart are not.
 - Tuna is off by default. It can incur provider costs when explicitly enabled and unlocked; local payment accounting is best-effort, not the wallet's lifetime on-chain total.
 - Tuna and fallback throughput are not guaranteed. Historical GUI performance FAIL/WARN outcomes remain preserved and do not become passes because CI #102 passed. See the [release record and historical evidence](ReleaseRunbook.md#current-070-release-record-2026-11-15) for source/payload scope; CI #102 did not run the optional live GUI campaign.
 - Progress smoothing cannot eliminate network ACK latency between peers. Final checksum/terminal completion matters more than identical instantaneous percentages; report sustained divergence or a stuck terminal card.
