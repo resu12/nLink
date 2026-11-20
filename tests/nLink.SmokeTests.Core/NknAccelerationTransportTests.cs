@@ -11187,7 +11187,8 @@ public sealed partial class NknAccelerationTransportTests : CoreSmokeTestsBase, 
                 host,
                 helper,
                 cts.Token,
-                InviteCapabilities.Chat | InviteCapabilities.FileTransfer);
+                InviteCapabilities.Chat | InviteCapabilities.FileTransfer,
+                suppressAutomaticAccelerationNegotiation: true);
             const string transferId = "transfer_runtime_unlock_held_successor";
             var missingDispatchSuccessorRequestCount = 0;
             InstallRuntimeUnlockRetryDispatchCoordinatorForTests(
@@ -29558,6 +29559,8 @@ public sealed partial class NknAccelerationTransportTests : CoreSmokeTestsBase, 
             var options = NknTransportOptions.Load();
             var hostClient = new FakeNknClient("host.runtime-unlock-answer-timeout-no-closure.address");
             var helperClient = new FakeNknClient("helper.runtime-unlock-answer-timeout-no-closure.address");
+            var hostLane = new RetryableTunaAccelerationSession(canListen: true, failedDialAttemptsBeforeSuccess: 0)
+                { StrictPayerHandoffForTests = true };
             using var host = new NknSignalingTransport(
                 hostClient,
                 options,
@@ -29565,9 +29568,7 @@ public sealed partial class NknAccelerationTransportTests : CoreSmokeTestsBase, 
                     "host-runtime-unlock-answer-timeout-no-closure-id",
                     hostClient.Address),
                 NknTunaAccelerationOptions.Disabled,
-                new RetryableTunaAccelerationSession(
-                    canListen: false,
-                    failedDialAttemptsBeforeSuccess: 0));
+                hostLane);
             using var helper = new NknSignalingTransport(
                 helperClient,
                 options,
@@ -29585,6 +29586,8 @@ public sealed partial class NknAccelerationTransportTests : CoreSmokeTestsBase, 
             _ = await host.OpenFileTransferDataSessionAsync(sessionId, transferId, cts.Token);
             TrackAuthorizedRegularV4RouteForTests(host, transferId, liveRouteEpoch: 1);
             const string nonce = "cf11223344556677889900aabbccddee";
+            Assert.True(await hostLane.EnsureListenerSidecarConnectedAsync(helperClient.Address, cts.Token));
+            var listenerLease = Assert.IsType<NknTunaLaneLease>(hostLane.CaptureCurrentLaneLease());
             host.SeedRuntimeUnlockOfferCriticalSectionForTests(
                 sessionId,
                 nonce,
@@ -29594,6 +29597,16 @@ public sealed partial class NknAccelerationTransportTests : CoreSmokeTestsBase, 
                 observedLane: "control_to_bulk_endpoint",
                 peerReceived: false,
                 answerTimeoutScheduled: true);
+            var payload = CreateOfferPayload(sessionId, nonce, ["file"], payerDecisionId: 32L);
+            var envelope = BuildSecureAccelerationEnvelope(host, MsgType.TransportAccelerationOffer,
+                payload, "transport_acceleration_offer", nonce, sequence: 102);
+            var ownerType = typeof(NknSignalingTransport).GetNestedType("PreferenceBoundOffer", BindingFlags.NonPublic)!;
+            var owner = Activator.CreateInstance(ownerType, envelope, NknAccelerationLaneKind.File)!;
+            ownerType.GetProperty("ListenerLease")!.SetValue(owner, listenerLease);
+            ownerType.GetProperty("InitialPause")!.SetValue(owner, (
+                (long)GetPrivateField(host, "pendingAccelerationAnswerAckGeneration")!,
+                (long)GetPrivateField(host, "fileTransferTunaActivationPauseGeneration")!));
+            SetPrivateField(host, "outboundPreferenceOffer", owner);
             var logStart = GetOperationalLogLength();
 
             InvokePrivateMethod(
@@ -36235,7 +36248,7 @@ public sealed partial class NknAccelerationTransportTests : CoreSmokeTestsBase, 
              "TryAcquireGenericAccelerationNegotiationSlot",
              BindingFlags.Instance | BindingFlags.NonPublic);
          Assert.NotNull(acquire);
-         object?[] arguments = [0L];
+         object?[] arguments = [0L, Type.Missing];
         var acquired = Assert.IsType<bool>(
             acquire!.Invoke(transport, arguments));
         slotGeneration = Assert.IsType<long>(arguments[0]);
