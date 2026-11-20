@@ -7,10 +7,13 @@ Changes since the published 0.7.0 hotfix revision 2:
 - **File transfer:** Helper and Helpee can drop one local file from Windows Explorer into chat instead of using the file picker. The same session permission and receiver approval are required.
 - Incoming offers now have **Save as…** to choose a destination without overwriting existing files. **Accept** still saves to Downloads, and canceling the picker leaves the offer pending.
 - **Session UI:** The Tuna tooltip distinguishes a ready session from a file using regular NKN. It no longer labels local transfers as NKN or claims a route or payer after disconnect. File routing is unchanged.
+- **Tuna and wallet:** A funded payer can unlock Tuna in an approved session without reconnecting. Only the selected, permitted lanes are offered; stale answers and retries cannot reactivate a withdrawn offer. Wallet changes in another instance invalidate stale unlock results. Concurrent streams share the listener’s byte cap, and bridge shutdown has a time limit.
+- **Connection reliability:** A heartbeat received while the watchdog waits for the session lock prevents a false disconnect. A silent peer still times out.
+- **Diagnostics:** Refresh the timestamped session snapshot before copying it. Saved screen-share test results are labeled separately. Exported log tails hide receive directories even when their names contain commas or semicolons, and multi-event reports retain the original event labels in order.
 - **Tests and tooling:** Added Windows regressions for receiving files into deep folders, including when a file already exists; the receiver itself is unchanged. The evidence writer now handles long temporary paths, and the analyzer scans startup-isolation evidence only when needed.
 - **Beta Readiness:** [Case 10323 remains unpassed](docs/ReleaseRunbook.md#071-beta-readiness-decision-2026-11-19). Its unresolved risk is accepted for 0.7.1 only.
 
-## [0.7.0 hotfix revision 2] - Unreleased
+## [0.7.0 hotfix revision 2] - 2026-11-17
 
 ### Fixed
 
@@ -27,9 +30,8 @@ Changes since the published 0.7.0 hotfix revision 2:
 
 ### Release identity
 
-- App version remains `0.7.0`; proposed separate tag: `v0.7.0-hotfix.2`. Both published releases, their assets and checksums remain unchanged.
-- [Hotfix revision 2 review metadata](docs/releases/0.7.0-hotfix.2.md) records the scope and remaining release gates. This candidate is not yet published or live-validated.
-- The latest local unsigned portable/installer is built from `ba507366`. Packaging checks passed; the consolidated focused lifecycle/authentication selection passed 172/172 before packaging. Earlier failures remain historical, and no CI, live-session or installer-lifecycle qualification is claimed for these bytes.
+- [Published as `v0.7.0-hotfix.2`](https://github.com/resu12/nLink/releases/tag/v0.7.0-hotfix.2) from `36557e07` with CI #108’s portable, installer and checksums under a release-specific unsigned exception. The app version remains `0.7.0`; the original release and hotfix 1 are unchanged.
+- The [earlier local review record](docs/releases/0.7.0-hotfix.2.md) covers different bytes (`ba507366`), including its 172 passing focused regressions. Those results are not a new live or installer-upgrade qualification.
 
 ## [0.7.0 hotfix revision 1] - 2026-11-15
 

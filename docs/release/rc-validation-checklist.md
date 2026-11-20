@@ -1,6 +1,6 @@
 # RC Validation Checklist
 
-This is a sign-off template, not a record that unchecked items failed or passed. The published original `0.7.0` and hotfix-1 records are in [ReleaseRunbook.md](../ReleaseRunbook.md#published-070-hotfix-revision-1-2026-11-15); historical candidate evidence remains separately labeled there. [Hotfix 2](../releases/0.7.0-hotfix.2.md) remains unreleased. For future releases, copy only applicable source/contract/payload-bound results into an approved release sign-off. Do not infer a fresh live GUI or upgrade result from CI success.
+This is a sign-off template; an unchecked box is not a test result. For 0.7.1, use [published hotfix 2](../ReleaseRunbook.md#published-070-hotfix-revision-2-2026-11-17) as the upgrade baseline and retain the [0.7.1-only Beta Readiness decision](../ReleaseRunbook.md#071-beta-readiness-decision-2026-11-19). Record results for the selected artifacts. Neither a successful local build nor green CI proves live GUI or upgrade behavior.
 
 ## Build & Packaging
 

@@ -1,6 +1,6 @@
 # nLink Docs
 
-Start here for current repo guidance. [0.7.0 hotfix revision 1](https://github.com/resu12/nLink/releases/tag/v0.7.0-hotfix.1) is published from `d235dcf1` with CI #103's exact artifacts. The original 0.7.0 release remains unchanged. [Hotfix revision 2](releases/0.7.0-hotfix.2.md) is an unreleased candidate; source-branch features and local builds are not published-release claims.
+For Windows downloads, use [0.7.0 hotfix revision 2](https://github.com/resu12/nLink/releases/tag/v0.7.0-hotfix.2). This branch documents the **unreleased 0.7.1 candidate**. See [what changed](../CHANGELOG.md#071---unreleased) and [which local installer was checked](ReleaseRunbook.md#071-local-review-build).
 
 ## Current Operator Guides
 
@@ -19,7 +19,7 @@ Start here for current repo guidance. [0.7.0 hotfix revision 1](https://github.c
 ## Release And Validation
 
 - [Published hotfix-1 notes](releases/0.7.0-hotfix.1.md) and [original 0.7.0 notes](releases/0.7.0.md).
-- [Hotfix-2 candidate notes](releases/0.7.0-hotfix.2.md) and [release-body draft](releases/0.7.0-hotfix.2-github.md).
+- [Published hotfix-2 record](ReleaseRunbook.md#published-070-hotfix-revision-2-2026-11-17) and [historical hotfix-2 review notes](releases/0.7.0-hotfix.2.md).
 - [README screenshot provenance](images/README.md): captured version, privacy masks and pending replacements.
 - [`docs/ReleaseRunbook.md`](ReleaseRunbook.md): canonical release process, published package provenance, and historical candidate evidence.
 - [`docs/build-test-lock-avoidance.md`](build-test-lock-avoidance.md): Windows-safe build/test command shapes for avoiding generated-output locks during repeated manual runs.

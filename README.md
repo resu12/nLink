@@ -22,6 +22,10 @@ All eight required [CI #108 jobs](https://github.com/resu12/nLink/actions/runs/4
 
 **The Windows app and installer are unsigned**, under an explicit hotfix-2 exception. Windows may show publisher or SmartScreen warnings. Checksums identify the downloads but do not replace a digital signature. The [original 0.7.0 release](https://github.com/resu12/nLink/releases/tag/v0.7.0) and [hotfix 1](https://github.com/resu12/nLink/releases/tag/v0.7.0-hotfix.1), including their assets and checksums, remain unchanged.
 
+## What's new in the 0.7.1 candidate
+
+0.7.1 is available for local review, not as a published download. Either peer can drop one Explorer file into chat, and the receiver can choose where to save it. You can enable Tuna during an approved session without reconnecting; **Tuna is ready** describes the connection, not the route a file is using. See the [changelog](CHANGELOG.md#071---unreleased) and [local installer record](docs/ReleaseRunbook.md#071-local-review-build).
+
 ## Quick Start (Windows)
 
 1. Download the Installer (recommended) or Portable ZIP from [hotfix 2's release page](https://github.com/resu12/nLink/releases/tag/v0.7.0-hotfix.2). A source-branch version is not necessarily a published release.
@@ -59,8 +63,7 @@ File transfer:
 
 ## Usage notes
 
-If connection fails:
-Open Options -> Diagnostics -> Copy diagnostics and include it when reporting issues. If a screenshare soak artifact has already been analyzed, Options includes a compact screenshare evidence summary; for hangs or freezes, use Options -> Diagnostics -> Save Hang Report. See [`docs/supportability.md`](docs/supportability.md) for the support evidence checklist.
+If a connection fails, open **Options → Diagnostics**. In 0.7.1, click **Refresh** under **Session snapshot**, then **Copy diagnostics**. **Previous screen-share test run** shows saved test results, not a verdict on the session you just refreshed. For an intermittent freeze, use **Save Hang Report** while the app responds. [Review the report before sharing it](docs/supportability.md).
 
 For release-safe builds, Options -> Diagnostics should show:
 
@@ -78,7 +81,7 @@ Notes:
 - Options -> Settings includes Balanced, High quality, Tuna quality, and High performance screen-share presets. High quality now opts into 24 capture FPS / 15 transport FPS over normal NKN, while Tuna quality remains the higher-bandwidth preset recommended for Tuna-enabled screen sharing.
 - The helper-side cursor overlay, H.264 motion/keyframe safeguards, WGC GPU scaling, and same-apartment Win10 WGC teardown remain enabled.
 - Chat UX keeps `Enter` to send, `Shift+Enter` for a new line, stable pane sizing in chat-only and screen-sharing layouts, and message entry remains available during screen sharing.
-- File transfer in `0.7.0` is single-file only. No folders, drag-and-drop, or resume after restart yet.
+- Both versions transfer one file at a time. Hotfix 2 uses the file picker; 0.7.1 also accepts a single file dropped onto chat. Neither supports folders, multi-file drops, or resuming after restart.
 - Route defaults are explicit: regular NKN uses `regular_nkn_v4_fast` / protocol `4`, active file Tuna uses `file_tuna_v4` / protocol `4`, and controlled post-Tuna fallback uses `post_tuna_fallback_v6` / protocol `6` for the affected transfer. `diagnostic_regular_nkn_v6` is unsafe developer/test opt-in only; active `file_tuna_v6` is invalid.
 - Receiving a file requires explicit accept/decline, and file-transfer data is protected by nLink's session envelope plus source/session validation rather than by assuming NKN transport alone is sufficient.
 - The bundled NKN bridge/runtime remains a trust boundary; transport encryption does not replace nLink's application checks.
@@ -267,7 +270,4 @@ Run the test (same PC, two app instances):
 6. Compare the session verification symbols on both screens, then click `Allow` on the helpee side.
 7. Send chat messages both ways and confirm they appear on both sides.
 
-If it fails (copy diagnostics):
-1. In the app, open `Options`
-2. Select `Diagnostics` and click `Copy diagnostics`
-3. Include the copied text when reporting the issue
+If the connection fails, follow the [support evidence checklist](docs/supportability.md#first-evidence-to-collect). In 0.7.1, refresh the session snapshot on both peers before copying diagnostics.

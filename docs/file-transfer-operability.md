@@ -5,7 +5,9 @@ This is the operator entry point for file transfer and Tuna. For runtime archite
 ## Using File Transfer And Tuna
 
 - Complete normal session approval and verification, and allow `Transfer files` before sending. The receiver must explicitly accept each file.
-- Either side can pause, resume, or cancel the active transfer. Resume after app restart, folders, and drag-and-drop are not supported. The default cap is `25 GiB`; received files go to Downloads with collision-safe numbered names.
+- In the 0.7.1 candidate, use **Send file** or drop exactly one local Explorer file onto **chat**, including during screen sharing. Both paths make the same offer. A folder or multi-item drop makes no offer.
+- **Accept** saves to Downloads, adding a numbered suffix if needed. In 0.7.1, **Save as…** lets the receiver choose another folder or name. Canceling the picker leaves the offer pending; an occupied name is not overwritten.
+- Either side can pause, resume, or cancel an active transfer. Resume after app restart and folder transfers are not supported. The default size cap is `25 GiB`.
 - Progress displays accepted/receiver-confirmed bytes, with presentation-only smoothing. A queued send is not delivery, and the displays need not be identical at every instant. A full bar alone is not final SHA verification or terminal completion.
 - Tuna is optional and default-off. Link/validate a wallet in `Options -> Wallet`; this does not spend NKN or activate transport. Paid runtime use needs explicit enablement and a session-only unlock. Review price, volume, and duration caps first.
 - The selected listener pays; the other peer dials without paying. When both sides unlock, helpee has priority. Payment telemetry is best-effort: no reported payment event does not prove free traffic.

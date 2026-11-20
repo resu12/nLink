@@ -5,10 +5,10 @@ This document describes the current nLink file-transfer implementation. It is an
 ## Current Status
 
 - Scope: single-file transfer only.
-- Not supported yet: folders, drag-and-drop, and resume after app restart.
+- In 0.7.1, a single local Explorer file dropped on chat uses the ordinary send-offer path. Folders, multi-file drops, and resume after app restart are not supported.
 - Consent boundary: receiving a file requires explicit accept or decline.
 - Safety cap: file transfers are capped at `25 GiB` by the app release policy.
-- Destination: received files are saved to the Windows Downloads folder by default, with a numbered suffix when the target name already exists.
+- Destination: **Accept** saves to Windows Downloads, adding a numbered suffix for collisions. **Save as…** in 0.7.1 accepts only after a destination is chosen and the offer is still eligible; a chosen existing file is not overwritten.
 - Protocols: production uses protocol `4` for regular NKN and active file Tuna, and protocol `6` only for controlled post-Tuna fallback. Protocol `5` is obsolete and rejected.
 - Transport boundary: normal NKN remains the default. Tuna can carry only `MsgType.FileTransferDataFrame` on the bulk lane after session-bound Tuna negotiation succeeds.
 
@@ -290,7 +290,7 @@ publication still require their original deadlines and Coordinator authority.
 
 - Single-file transfers only.
 - No folder transfer yet.
-- No drag-and-drop yet.
+- No multi-item drops; screen-sharing displays are not drop targets.
 - No resume after app restart.
 - Default file-size cap is `25 GiB`.
 - Live throughput depends on NKN, Tuna provider health, and network delivery.
