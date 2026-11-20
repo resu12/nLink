@@ -9,7 +9,6 @@ internal sealed record TunaHeaderStateProjection(bool IsActive, string StatusRea
 internal static class TunaHeaderStateProjector
 {
     private const string FileTunaV4RouteToken = "file_tuna_v4";
-    private const string ActiveFileTunaReason = "file_transfer_route_file_tuna_v4";
     internal const string NoConnectionReason = "header_no_connection";
     internal const string LocalConnectionReason = "header_local_connection";
 
@@ -30,7 +29,6 @@ internal static class TunaHeaderStateProjector
             return new TunaHeaderStateProjection(false, LocalConnectionReason, false);
         }
 
-        var hasActiveTransfer = false;
         var activeTransferUsesTuna = false;
         var hasRegularFile = false;
         var hasOtherFile = false;
@@ -46,21 +44,9 @@ internal static class TunaHeaderStateProjector
             return new TunaHeaderStateProjection(false, "file_transfer_tuna_idle", fileUsesRegularNkn);
         }
 
-        if (!hasActiveTransfer)
-        {
-            return new TunaHeaderStateProjection(
-                transportActive,
-                string.IsNullOrWhiteSpace(transportReason) ? "inactive" : transportReason, false);
-        }
-
-        var reason = !string.IsNullOrWhiteSpace(transportReason)
-            ? transportReason
-            : activeTransferUsesTuna
-                ? ActiveFileTunaReason
-                : "inactive";
-        // A regular-NKN file route does not deactivate the session's Tuna connection.
-        // This is header presentation only; the transfer's route remains unchanged.
-        return new TunaHeaderStateProjection(transportActive || activeTransferUsesTuna, reason, fileUsesRegularNkn);
+        // A file can retain its route across a disconnect. Only the transport confirms session readiness.
+        return new TunaHeaderStateProjection(transportActive,
+            string.IsNullOrWhiteSpace(transportReason) ? "inactive" : transportReason, fileUsesRegularNkn);
 
         void Inspect(FileTransferTransferSnapshot? transfer)
         {
@@ -69,7 +55,6 @@ internal static class TunaHeaderStateProjector
                 return;
             }
 
-            hasActiveTransfer = true;
             // Offers already have a route tuple; only describe a file once its data phase starts.
             if (transfer.State is FileTransferTransferState.Sending or FileTransferTransferState.Receiving)
             {

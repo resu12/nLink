@@ -597,6 +597,75 @@ public sealed class Beta3SessionShellLayoutSmokeTests : Beta3DefaultUiSmokeTestB
     }
 
     [Theory]
+    [InlineData("Helper", true, "header_switch_off")]
+    [InlineData("Helpee", false, "remote_header_switch_off")]
+    [InlineData("Helper", false, "post_tuna_fallback_route_active")]
+    [InlineData("Helpee", true, "post_tuna_fallback_route_active")]
+    public async Task SessionHeader_SwitchOffGraysBothPeersDespitePausedTunaRoute(string role, bool localPayer, string stoppedReason)
+    {
+        await fixture.Session.Dispatch(() =>
+        {
+            EnsureAppServices();
+            var sender = role == "Helper";
+            var file = new FileTransferTransferSnapshot("session", "file",
+                sender ? FileTransferDirection.Outbound : FileTransferDirection.Inbound,
+                sender ? FileTransferTransferState.Sending : FileTransferTransferState.Receiving,
+                "file.bin", 1024, null, 0, 0, 1, 1024, null, null,
+                RouteToken: "file_tuna_v4", ProtocolVersion: 4, IsPaused: sender, IsPeerPaused: !sender);
+            var snapshot = sender ? new SessionFileTransferSnapshot(file, null) : new SessionFileTransferSnapshot(null, file);
+            var header = new SessionHeaderView { RoleText = role };
+            void Show(bool active, string reason)
+            {
+                var state = TunaHeaderStateProjector.FromSnapshot(snapshot, "NKN", active, reason);
+                header.TunaActive = state.IsActive;
+                header.TunaStatusReason = state.StatusReason;
+                header.FileUsesRegularNkn = state.FileUsesRegularNkn;
+            }
+            void CheckPendingReconnect(bool paused)
+            {
+                Show(false, "runtime_unlock_pending_route_commit");
+                Assert.False(header.TunaActive);
+                Assert.Equal("Negotiating Tuna acceleration.", header.TunaPictogramTip);
+                var current = sender ? snapshot.Outbound! : snapshot.Inbound!;
+                Assert.Equal(("file_tuna_v4", 4, paused && sender, paused && !sender),
+                    (current.RouteToken, current.ProtocolVersion, current.IsPaused, current.IsPeerPaused));
+            }
+
+            var readyReason = localPayer ? "paid_listener_active" : "free_dialer_active";
+            var readyColor = localPayer ? Color.FromRgb(255, 211, 91) : Color.FromRgb(125, 220, 255);
+            var gray = Color.FromRgb(111, 122, 136);
+            Show(true, readyReason);
+            Assert.Equal(readyColor, ((ISolidColorBrush)header.TunaPictogramBrush).Color);
+            SetPrivateField(header, "tunaRuntimeStatus", localPayer ? "locked" : "inactive");
+            Show(false, stoppedReason);
+            Assert.Equal(gray, ((ISolidColorBrush)header.TunaPictogramBrush).Color);
+            Assert.False(header.TunaActive);
+            Assert.Equal(0d, header.TunaGlowOpacity);
+            Assert.DoesNotContain("ready", header.TunaPictogramTip);
+            var retained = sender ? snapshot.Outbound! : snapshot.Inbound!;
+            Assert.Equal(("file_tuna_v4", 4, sender, !sender),
+                (retained.RouteToken, retained.ProtocolVersion, retained.IsPaused, retained.IsPeerPaused));
+
+            SetPrivateField(header, "tunaUnlockToggleOn", localPayer);
+            SetPrivateField(header, "tunaRuntimeStatus", localPayer ? "waiting_for_approved_session" : "inactive");
+            Show(false, "post_tuna_fallback_route_active");
+            Assert.Equal(gray, ((ISolidColorBrush)header.TunaPictogramBrush).Color);
+            Assert.DoesNotContain("ready", header.TunaPictogramTip);
+            CheckPendingReconnect(paused: true);
+            var resumed = file with { IsPaused = false, IsPeerPaused = false };
+            snapshot = sender ? new(resumed, null) : new(null, resumed);
+            Show(false, "post_tuna_fallback_route_active");
+            Assert.Equal(gray, ((ISolidColorBrush)header.TunaPictogramBrush).Color);
+            Assert.DoesNotContain("ready", header.TunaPictogramTip);
+            CheckPendingReconnect(paused: false);
+            Show(true, readyReason);
+            Assert.Equal(readyColor, ((ISolidColorBrush)header.TunaPictogramBrush).Color);
+            Assert.Contains("Tuna is ready.", header.TunaPictogramTip);
+            return Task.FromResult(true);
+        }, CancellationToken.None);
+    }
+
+    [Theory]
     [InlineData(true, FileTransferDirection.Outbound, "regular_nkn_v4_fast", 4)]
     [InlineData(true, FileTransferDirection.Inbound, "regular_nkn_v4_fast", 4)]
     [InlineData(false, FileTransferDirection.Outbound, "regular_nkn_v4_fast", 4)]

@@ -29,7 +29,9 @@ public sealed class TunaPostTransferStatusTests
         Assert.True(Present(starting).IsConnecting);
 
         transfer = transfer with { RouteToken = "file_tuna_v4", ProtocolVersion = 4 };
-        Assert.True(Project(transfer, Scope).IsActive);
+        var pending = Project(transfer, Scope);
+        Assert.False(pending.IsActive);
+        Assert.True(Present(pending).IsConnecting);
 
         var finished = Project(transfer with { State = terminal }, Scope);
         Assert.False(finished.IsActive);
@@ -125,9 +127,10 @@ public sealed class TunaPostTransferStatusTests
         Assert.Equal("file_transfer_tuna_idle", ProjectRuntime(runtime, latest).StatusReason);
         Assert.False(Present(ProjectRuntime(runtime, latest)).IsConnecting);
 
-        // Settlement never overrides a new coordinator-projected v4 Tuna route.
+        // The replacement's file route does not confirm a new session connection.
         ObserveSnapshot(runtime, Pair(replacement with { RouteToken = "file_tuna_v4" }));
-        Assert.True(ProjectRuntime(runtime, latest).IsActive);
+        Assert.False(ProjectRuntime(runtime, latest).IsActive);
+        Assert.Equal("file_transfer_tuna_idle", ProjectRuntime(runtime, latest).StatusReason);
         ObserveSnapshot(runtime, Pair(replacement with { State = FileTransferTransferState.Completed }));
         other = other with { State = FileTransferTransferState.Completed };
         ObserveSnapshot(runtime, Pair(replacement with { State = FileTransferTransferState.Completed }));

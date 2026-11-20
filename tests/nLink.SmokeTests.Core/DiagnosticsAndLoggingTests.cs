@@ -745,7 +745,7 @@ public void TunaStatusPresentationMapper_ActiveStateStillWinsOverProvisionalPref
 [Theory]
 [InlineData("regular_nkn_v4_fast", 4, false, false)]
 [InlineData("post_tuna_fallback_v6", 6, false, false)]
-[InlineData("file_tuna_v4", 4, false, true)]
+[InlineData("file_tuna_v4", 4, false, false)]
 [InlineData("file_tuna_v4", 6, false, false)]
 [InlineData("file_tuna_v6", 6, false, false)]
 [InlineData("regular_nkn_v4_fast", 4, true, true)]
