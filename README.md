@@ -76,7 +76,7 @@ Notes:
 - The receiver decides separately for each file. In the 0.7.1 candidate, if NKN retries the same offer after a reply is lost, the receiver doesn’t need to answer twice. A new offer still needs its own approval. File-transfer messages are protected by nLink’s session envelope and source/session checks.
 - The bundled NKN bridge/runtime remains a trust boundary; transport encryption does not replace nLink's application checks.
 - Active file transfers can be paused, resumed, or canceled from either side when file transfer is allowed.
-- In 0.7.1, if you cancel a file and the other person sends one back, nLink treats it as a new offer. A stale Tuna fallback hint from the canceled file alone won’t cause the new offer to be declined.
+- In 0.7.1, if you turn off Tuna, cancel a file, and the other person sends one back, the return file needs its own approval. Once accepted, it can start on regular NKN without inheriting the canceled file’s pause or waiting for Tuna to reconnect.
 - File-transfer lifecycle actions are hard-priority: cancel, pause, session end, peer down, window close, and app exit do not wait for file-data queues, repair queues, Tuna, or bulk backlog.
 - If Tuna stops during a Tuna V4 transfer, the same transfer live-transitions to V6 fallback over regular NKN. Explicit reactivation can return that transfer to Tuna V4. After successful final fallback completion, the next new transfer resolves from current transport state: Tuna V4 when active, otherwise regular V4.
 - Progress is based on accepted/receiver-confirmed bytes, not merely queued sends. The bars smooth reported progress without predicting future delivery; network acknowledgements can still make the two displays differ briefly. Completion requires final SHA-256 verification.
