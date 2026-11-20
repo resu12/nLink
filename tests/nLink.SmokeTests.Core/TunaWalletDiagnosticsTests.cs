@@ -3562,9 +3562,8 @@ public sealed class TunaWalletDiagnosticsTests
 
             Assert.True(result.Success);
             Assert.False(context.RuntimeService.HasSessionUnlock);
-            Assert.Equal(1, control.StopCalls);
             await WaitUntilAsync(
-                () => context.RuntimeService.RuntimeStatus == "locked",
+                () => control.StopCalls == 1 && context.RuntimeService.RuntimeStatus == "locked",
                 TimeSpan.FromSeconds(2));
             var state = await context.RuntimeService.GetUnlockStateAsync();
             Assert.True(state.IsVisible);
