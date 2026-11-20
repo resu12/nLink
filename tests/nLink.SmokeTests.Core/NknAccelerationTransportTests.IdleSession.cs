@@ -78,6 +78,331 @@ public sealed partial class NknAccelerationTransportTests
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
+    [InlineData(false, true, false)]
+    [InlineData(true, true, false)]
+    [InlineData(true, true, true)]
+    public async Task FixedLaneFinalAck_QueuedOrdinaryHandoffIsConsumedOnlyAfterCurrentAck(
+        bool failAck, bool gateWrites = false, bool installSuccessor = false)
+    {
+        FakeNknClient.ResetNetwork();
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+        var ct = timeout.Token;
+        var options = NknTransportOptions.Load();
+        var hostClient = new FakeNknClient("host.fixed-ack.address");
+        var peerClient = new FakeNknClient("helper.fixed-ack.address");
+        using var listener = new RetryableTunaAccelerationSession(true, 0) { StrictPayerHandoffForTests = true };
+        using var dialer = new RetryableTunaAccelerationSession(false, 0) { StrictPayerHandoffForTests = true };
+        using var payer = new NknSignalingTransport(hostClient, options, new NknIdentity("host", hostClient.Address),
+            NknTunaAccelerationOptions.CreateRuntimePilot("fake-sidecar.exe", NknAccelerationLaneKind.File), listener);
+        using var peer = new NknSignalingTransport(peerClient, options, new NknIdentity("helper", peerClient.Address),
+            NknTunaAccelerationOptions.CreateRuntimePilot("fake-sidecar.exe", NknAccelerationLaneKind.File, false), dialer);
+        using var files = new SessionFileTransferService();
+        using var peerFiles = new SessionFileTransferService();
+        files.AttachTransport(payer);
+        peerFiles.AttachTransport(peer);
+        var session = await ApproveNknSessionAsync(payer, peer, ct, InviteCapabilities.Chat | InviteCapabilities.FileTransfer,
+            suppressAutomaticAccelerationNegotiation: true);
+        using var data = await payer.OpenFileTransferDataSessionAsync(session, "before-fixed-ack", ct);
+        var beforeAck = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var submit = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var worker = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var consumed = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var cleanup = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var firstWrite = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var finishWrites = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var delivered = new ConcurrentQueue<string>();
+        string? exactAckId = null;
+        Task<bool>? ackResult = null;
+        Task? coreDispatch = null;
+        Func<bool>? successorFence = null;
+        using var consume = new ManualResetEventSlim();
+        using var finishCleanup = new ManualResetEventSlim();
+        if (failAck) payer.BeforeOrdinaryFinalAckCleanupForTests = () => { cleanup.TrySetResult(); finishCleanup.Wait(ct); };
+        if (gateWrites)
+        {
+            hostClient.BeforeSendCoreAsync = async (_, bytes, _, _) =>
+            {
+                if (!EnvelopeCodec.TryDeserialize(bytes, out var env) || env.Type != MsgType.TransportAccelerationAnswerAck) return;
+                Interlocked.CompareExchange(ref exactAckId, env.MessageId, null);
+                firstWrite.TrySetResult();
+                await finishWrites.Task.WaitAsync(ct);
+                if (failAck) throw new IOException("fixture: final ACK not written");
+            };
+            hostClient.ShouldDeliverSendAsync = (_, bytes, _) =>
+            {
+                if (EnvelopeCodec.TryDeserialize(bytes, out var env) && env.Type == MsgType.TransportAccelerationAnswerAck)
+                    delivered.Enqueue(env.MessageId);
+                return Task.FromResult(true);
+            };
+        }
+        payer.IdleSessionBeforeAnswerAckForTests = async () => { beforeAck.TrySetResult(); await submit.Task.WaitAsync(ct); };
+        data.AvailabilityChanged += (_, e) =>
+        {
+            if (e.Reason == "test_accept") { successorFence = e.OrdinaryTunaHandoffIsCurrent; return; }
+            if (e.Reason != "tuna_activation_negotiated") return;
+            var fence = Assert.IsType<Func<bool>>(e.OrdinaryTunaHandoffIsCurrent);
+            ackResult = Assert.IsAssignableFrom<Task<bool>>(e.OrdinaryTunaFinalAck);
+            coreDispatch = Assert.IsAssignableFrom<Task>(InvokePrivateMethod(files, "HandleDataSessionAvailabilityChangedAsync", data, e));
+            var reads = 0;
+            var queued = new FileTransferDataSessionAvailabilityChangedEventArgs(e.IsAvailable, e.Reason,
+                e.RequiresResumeRequest, e.HandoffKind, e.TargetTransport)
+            {
+                OrdinaryTunaFinalAck = ackResult,
+                OrdinaryTunaHandoffIsCurrent = () =>
+                {
+                    if (Interlocked.Increment(ref reads) == 1) return fence(); // Core event entry
+                    worker.TrySetResult();
+                    consume.Wait(ct); // Core priority worker, before any transfer mutation
+                    var current = fence();
+                    consumed.TrySetResult(current);
+                    return current;
+                }
+            };
+            InvokePrivateMethod(files, "OnDataSessionAvailabilityChanged", data, queued);
+        };
+        try
+        {
+            await payer.RequestAccelerationNegotiationAsync("session_security_state_ready", ct);
+            await Task.WhenAll(beforeAck.Task, worker.Task).WaitAsync(ct);
+            Assert.Equal(NknAccelerationLaneKind.File, payer.AccelerationNegotiatedLanesForTests);
+            Assert.False(coreDispatch!.IsCompleted);
+            if (failAck && !gateWrites) payer.FinalAckUtcMs = () => long.MaxValue;
+            submit.TrySetResult();
+            var submission = Assert.IsAssignableFrom<Task<bool>>(payer.IdleSessionAnswerAckForTests);
+            if (gateWrites)
+            {
+                await firstWrite.Task.WaitAsync(ct);
+                Assert.False(submission.IsCompleted);
+                Assert.False(ackResult!.IsCompleted);
+                Assert.False(coreDispatch.IsCompleted);
+                Assert.Empty(delivered);
+                finishWrites.TrySetResult();
+            }
+            if (failAck)
+            {
+                await cleanup.Task.WaitAsync(ct);
+                Assert.False(submission.IsCompleted);
+                Assert.True(ackResult!.IsCompletedSuccessfully);
+                Assert.False(await ackResult);
+                consume.Set();
+                Assert.False(await consumed.Task.WaitAsync(ct));
+                await coreDispatch.WaitAsync(ct);
+                if (installSuccessor)
+                {
+                    payer.SetAccelerationAcceptedForTests(NknAccelerationLaneKind.File, session);
+                    Assert.True(successorFence!());
+                }
+                finishCleanup.Set();
+            }
+            Assert.Equal(!failAck, await submission.WaitAsync(ct));
+            Assert.Equal(!failAck || installSuccessor ? NknAccelerationLaneKind.File : NknAccelerationLaneKind.None, payer.AccelerationNegotiatedLanesForTests);
+            if (installSuccessor) Assert.True(successorFence!());
+            if (gateWrites && !failAck) { Assert.NotEmpty(delivered); Assert.All(delivered, id => Assert.Equal(exactAckId, id)); }
+            if (failAck) Assert.Empty(delivered);
+        }
+        finally { submit.TrySetResult(); finishWrites.TrySetResult(); consume.Set(); finishCleanup.Set(); }
+        Assert.Equal(!failAck, await consumed.Task.WaitAsync(ct));
+        await coreDispatch!.WaitAsync(ct);
+    }
+
+    [Fact]
+    public async Task LegacyFinalAck_DelayedBindCannotReplaceSuccessor()
+    {
+        FakeNknClient.ResetNetwork();
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        var ct = timeout.Token;
+        var options = NknTransportOptions.Load();
+        var a = new FakeNknClient("host.legacy-bind.address");
+        var b = new FakeNknClient("helper.legacy-bind.address");
+        using var payer = new NknSignalingTransport(a, options, new NknIdentity("host", a.Address),
+            NknTunaAccelerationOptions.Disabled, new RetryableTunaAccelerationSession(false, 0));
+        using var peer = new NknSignalingTransport(b, options, new NknIdentity("helper", b.Address),
+            NknTunaAccelerationOptions.Disabled, new RetryableTunaAccelerationSession(false, 0));
+        var session = await ApproveNknSessionAsync(payer, peer, ct, InviteCapabilities.Chat | InviteCapabilities.FileTransfer,
+            suppressAutomaticAccelerationNegotiation: true);
+        var beforeBind = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var oldCanBind = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var beforeWrite = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var canWrite = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var attempted = new ConcurrentQueue<string>();
+        var conflictingWrite = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var calls = 0;
+        payer.IdleSessionBeforeAnswerAckForTests = async () =>
+        {
+            if (Interlocked.Increment(ref calls) != 1) return;
+            beforeBind.TrySetResult();
+            await oldCanBind.Task.WaitAsync(ct);
+        };
+        a.BeforeSendCoreAsync = async (_, bytes, _, _) =>
+        {
+            if (!EnvelopeCodec.TryDeserialize(bytes, out var e) || e.Type != MsgType.TransportAccelerationAnswerAck) return;
+            attempted.Enqueue(e.MessageId);
+            if (attempted.TryPeek(out var firstId) && e.MessageId != firstId) conflictingWrite.TrySetResult();
+            beforeWrite.TrySetResult();
+            await canWrite.Task.WaitAsync(ct);
+        };
+        Task<bool> SendLegacyAck(string nonce) =>
+            Assert.IsAssignableFrom<Task<bool>>(InvokePrivateMethod(payer, "SendAccelerationAnswerAckAsync",
+                new TransportAccelerationAnswerPayload { SessionId = session, Accepted = true, Nonce = nonce,
+                    PayerDecisionId = 11, ExpiresAtUnixMs = DateTimeOffset.UtcNow.AddSeconds(10).ToUnixTimeMilliseconds() },
+                NknAccelerationLaneKind.File, ct));
+        try
+        {
+            payer.SetAccelerationAcceptedForTests(NknAccelerationLaneKind.File, session);
+            var old = SendLegacyAck("predecessor");
+            await beforeBind.Task.WaitAsync(ct);
+            payer.SetAccelerationAcceptedForTests(NknAccelerationLaneKind.File, session);
+            var successor = SendLegacyAck("successor");
+            await beforeWrite.Task.WaitAsync(ct);
+            var shadow = GetPrivateField(payer, "pendingAccelerationAnswerAckReplyShadow")!;
+            Assert.Equal("successor", GetPrivatePropertyValue<string>(shadow, "Nonce"));
+            var id = GetPrivatePropertyValue<Envelope>(shadow, "Envelope").MessageId;
+            oldCanBind.TrySetResult();
+            var first = await Task.WhenAny(old, conflictingWrite.Task).WaitAsync(ct);
+            Assert.Same(old, first);
+            Assert.False(await old);
+            Assert.Same(shadow, GetPrivateField(payer, "pendingAccelerationAnswerAckReplyShadow"));
+            canWrite.TrySetResult();
+            Assert.True(await successor.WaitAsync(ct));
+            Assert.All(attempted, x => Assert.Equal(id, x));
+        }
+        finally { oldCanBind.TrySetResult(); canWrite.TrySetResult(); }
+    }
+
+    [Fact]
+    public async Task DialerSuccessor_WaitingForAckRetiresQueuedOrdinaryHandoff()
+    {
+        FakeNknClient.ResetNetwork();
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(12));
+        var ct = timeout.Token;
+        var options = NknTransportOptions.Load();
+        var a = new FakeNknClient("host.successor-ack.address");
+        var b = new FakeNknClient("helper.successor-ack.address");
+        var listener = new RetryableTunaAccelerationSession(false, 0);
+        using var payer = new NknSignalingTransport(a, options, new NknIdentity("host", a.Address),
+            NknTunaAccelerationOptions.Disabled, listener);
+        using var dialer = new NknSignalingTransport(b, options, new NknIdentity("helper", b.Address),
+            NknTunaAccelerationOptions.Disabled, new RetryableTunaAccelerationSession(false, 0));
+        var session = await ApproveNknSessionAsync(payer, dialer, ct, InviteCapabilities.Chat | InviteCapabilities.FileTransfer,
+            suppressAutomaticAccelerationNegotiation: true);
+        using var payerData = await payer.OpenFileTransferDataSessionAsync(session, "payer-current", ct);
+        using var data = await dialer.OpenFileTransferDataSessionAsync(session, "dialer-current", ct);
+        TrackAuthorizedRegularV4RouteForTests(payer, payerData.TransferId);
+        TrackAuthorizedRegularV4RouteForTests(dialer, data.TransferId);
+        using var core = new SessionFileTransferService();
+        using var consume = new ManualResetEventSlim();
+        var waiting = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var admitted = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var beforeAck = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseAck = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        a.BeforeSendAsync = async (_, bytes, token) =>
+        {
+            if (!EnvelopeCodec.TryDeserialize(bytes, out var envelope) || envelope.Type != MsgType.TransportAccelerationAnswerAck) return;
+            beforeAck.TrySetResult();
+            await releaseAck.Task.WaitAsync(token);
+        };
+        data.AvailabilityChanged += (_, e) =>
+        {
+            if (e.Reason != "test_accept") return;
+            var current = Assert.IsType<Func<bool>>(e.OrdinaryTunaHandoffIsCurrent);
+            var reads = 0;
+            var queued = new FileTransferDataSessionAvailabilityChangedEventArgs(e.IsAvailable, e.Reason, e.RequiresResumeRequest,
+                e.HandoffKind, e.TargetTransport) { OrdinaryTunaHandoffIsCurrent = () =>
+                {
+                    if (Interlocked.Increment(ref reads) == 1) return current();
+                    waiting.TrySetResult();
+                    consume.Wait(ct);
+                    var allowed = current();
+                    admitted.TrySetResult(allowed);
+                    return allowed;
+                } };
+            InvokePrivateMethod(core, "OnDataSessionAvailabilityChanged", data, queued);
+        };
+        try
+        {
+            dialer.SetAccelerationAcceptedForTests(NknAccelerationLaneKind.File, session);
+            await waiting.Task.WaitAsync(ct);
+            listener.SetCanListen(true);
+            await payer.RequestAccelerationNegotiationAsync("runtime_unlock", ct);
+            await beforeAck.Task.WaitAsync(ct);
+            Assert.NotNull(GetPrivateField(dialer, "pendingAccelerationAnswerAckNonce"));
+            consume.Set();
+            Assert.False(await admitted.Task.WaitAsync(ct));
+        }
+        finally { consume.Set(); releaseAck.TrySetResult(); }
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task LegacyFinalAck_WriterRejectsStaleGenerationOrReplacedEnvelope(bool replaceEnvelope)
+    {
+        FakeNknClient.ResetNetwork();
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(12));
+        var ct = timeout.Token;
+        var options = NknTransportOptions.Load();
+        var a = new WriterGatePeer("host.legacy-write.address");
+        var b = new FakeNknClient("helper.legacy-write.address");
+        using var payer = new NknSignalingTransport(a, options, new NknIdentity("host", a.Address),
+            NknTunaAccelerationOptions.Disabled, new RetryableTunaAccelerationSession(false, 0));
+        using var peer = new NknSignalingTransport(b, options, new NknIdentity("helper", b.Address),
+            NknTunaAccelerationOptions.Disabled, new RetryableTunaAccelerationSession(false, 0));
+        var session = await ApproveNknSessionAsync(payer, peer, ct, InviteCapabilities.Chat | InviteCapabilities.FileTransfer,
+            suppressAutomaticAccelerationNegotiation: true);
+        var arrived = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var written = new ConcurrentQueue<string>();
+        a.BeforeOwnedWrite = async (type, _) =>
+        {
+            if (type != MsgType.TransportAccelerationAnswerAck) return;
+            arrived.TrySetResult();
+            await release.Task.WaitAsync(ct);
+        };
+        a.BeforeSendCoreAsync = (_, bytes, _, _) =>
+        {
+            if (EnvelopeCodec.TryDeserialize(bytes, out var frame) && frame.Type == MsgType.TransportAccelerationAnswerAck)
+            {
+                written.Enqueue(frame.MessageId);
+                arrived.TrySetResult(); // Also observe an incorrectly unguarded write.
+            }
+            return Task.CompletedTask;
+        };
+        Task<bool> Send(string nonce) => Assert.IsAssignableFrom<Task<bool>>(InvokePrivateMethod(payer,
+            "SendAccelerationAnswerAckAsync", new TransportAccelerationAnswerPayload { SessionId = session, Accepted = true,
+                Nonce = nonce, PayerDecisionId = 11, ExpiresAtUnixMs = DateTimeOffset.UtcNow.AddSeconds(10).ToUnixTimeMilliseconds() },
+            NknAccelerationLaneKind.File, ct));
+        object Shadow() => GetPrivateField(payer, "pendingAccelerationAnswerAckReplyShadow")!;
+        try
+        {
+            payer.SetAccelerationAcceptedForTests(NknAccelerationLaneKind.File, session);
+            var old = Send("old");
+            await arrived.Task.WaitAsync(ct);
+            var oldId = GetPrivatePropertyValue<Envelope>(Shadow(), "Envelope").MessageId;
+            Task<bool>? current = null;
+            if (replaceEnvelope)
+            {
+                current = Send("new"); // Same answer generation, different exact envelope.
+                await WaitUntilAsync(() => GetPrivatePropertyValue<string>(Shadow(), "Nonce") == "new", TimeSpan.FromSeconds(3));
+            }
+            else
+            {
+                payer.SetAccelerationAcceptedForTests(NknAccelerationLaneKind.File, session);
+                Assert.Equal(oldId, GetPrivatePropertyValue<Envelope>(Shadow(), "Envelope").MessageId);
+            }
+            release.TrySetResult();
+            Assert.False(await old.WaitAsync(ct));
+            Assert.True(await (current ?? Send("new")).WaitAsync(ct));
+            var newId = GetPrivatePropertyValue<Envelope>(Shadow(), "Envelope").MessageId;
+            Assert.NotEqual(oldId, newId);
+            Assert.NotEmpty(written);
+            Assert.All(written, id => Assert.Equal(newId, id));
+        }
+        finally { release.TrySetResult(); }
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
     public async Task FixedLaneRefreshedOffer_RejectsPredecessorAndKeepsListenerBinding(bool replaceListener)
     {
         using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(5));

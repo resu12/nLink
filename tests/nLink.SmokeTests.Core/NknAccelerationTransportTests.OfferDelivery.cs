@@ -334,6 +334,195 @@ public sealed partial class NknAccelerationTransportTests
             }
         });
 
+    [Fact]
+    public Task OfferDelivery_SwitchOffThenCancelLetsReverseRegularTransferReceiveCreditAndFirstChunk()
+        => WithPreparationHandshakePairAsync(true, async pair =>
+        {
+            var session = pair.Permit.Scope.SessionId;
+            var old = ReplacementTestOffer(session) with { TransferId = "old-before-switch-off" };
+            var accepted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            pair.Payer.FileTransferAcceptReceived += (_, e) =>
+            {
+                if (e.Message.TransferId == old.TransferId) accepted.TrySetResult();
+            };
+            await pair.Payer.SendFileTransferOfferAsync(old, pair.Token);
+            await WaitUntilAsync(() => pair.DialerService.Snapshot.Inbound?.State == FileTransferTransferState.PendingDecision,
+                TimeSpan.FromSeconds(3));
+            await pair.DialerService.AcceptIncomingTransferAsync(old.TransferId,
+                (FileTransferWriteStreamFactory)((_, _) => Task.FromResult<Stream>(new MemoryStream())), pair.Token);
+            await accepted.Task.WaitAsync(pair.Token);
+            // Keep the old channel alive: disposing the last channel also drops the session's cached intent.
+            using var oldData = await pair.Payer.OpenFileTransferDataSessionAsync(session, old.TransferId, pair.Token);
+            Assert.True(Assert.IsType<bool>(InvokePrivateMethod(pair.Payer, "PauseFileTransferDataSessionsForTunaActivationNegotiation",
+                "tuna_activation_negotiating", session, "test_offer")));
+            var start = GetOperationalLogLength();
+            pair.Payer.SetAccelerationAcceptedForTests(NknAccelerationLaneKind.File, session);
+            pair.Dialer.SetAccelerationAcceptedForTests(NknAccelerationLaneKind.File, session);
+            Assert.Contains("event=filetransfer_v6_pending_handoff_recorded;", ReadOperationalLogTail(start));
+            await pair.Payer.StopAccelerationAsync("header_switch_off", pair.Token);
+            await WaitUntilAsync(() => pair.Dialer.AccelerationNegotiatedLanesForTests == NknAccelerationLaneKind.None,
+                TimeSpan.FromSeconds(3));
+            Assert.True(pair.Payer.IsPostTunaFileFallbackActiveForRouteSelection);
+            await pair.Payer.SendFileTransferCancelAsync(new() { SessionId = session, TransferId = old.TransferId }, pair.Token);
+            await WaitUntilAsync(() => pair.DialerService.Snapshot.Inbound?.State == FileTransferTransferState.Canceled,
+                TimeSpan.FromSeconds(3));
+
+            const string reverse = "reverse-after-switch-off";
+            byte[] payload = [0x36, 0xa2, 0x71, 0xfd];
+            using var destination = new MemoryStream();
+            await pair.DialerService.TryStartSendAsync(new("reverse.bin", payload.Length, reverse),
+                _ => Task.FromResult<Stream>(new MemoryStream(payload)), pair.Token);
+            await WaitUntilAsync(() => pair.PayerService.Snapshot.Inbound?.State == FileTransferTransferState.PendingDecision,
+                TimeSpan.FromSeconds(3));
+            Assert.Equal(FileTransferRouteResolver.RegularNknV4FastToken, pair.PayerService.Snapshot.Inbound?.RouteToken);
+            await pair.PayerService.AcceptIncomingTransferAsync(reverse,
+                (FileTransferWriteStreamFactory)((_, _) => Task.FromResult<Stream>(destination)), pair.Token);
+            await WaitUntilAsync(() => pair.PayerService.Snapshot.Inbound?.State == FileTransferTransferState.Completed &&
+                pair.DialerService.Snapshot.Outbound?.State == FileTransferTransferState.Completed, TimeSpan.FromSeconds(5));
+            Assert.Equal(payload, destination.ToArray());
+            var lines = ReadOperationalLogTail(start).Split('\n').Where(line => line.Contains($"transfer_id={reverse};")).ToArray();
+            Assert.Contains(lines, line => line.Contains("event=filetransfer_v4_state_received;") &&
+                line.Contains("route=regular_nkn_v4_fast;") && line.Contains("available_credit_chunks=1;"));
+            Assert.Contains(lines, line => line.Contains("event=filetransfer_data_path_receive_result;") &&
+                line.Contains("actual_transport=regular_nkn;") && line.Contains("start_chunk_index=0;"));
+            Assert.DoesNotContain(lines, line => line.Contains("event=filetransfer_v6_pending_handoff_replayed;"));
+        });
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public Task OfferDelivery_ReverseFileGetsCreditWhileOriginalOwnsPause(bool rollbackPending)
+        => WithPreparationHandshakePairAsync(true, async pair =>
+        {
+            var session = pair.Permit.Scope.SessionId;
+            using var a = await pair.Payer.OpenFileTransferDataSessionAsync(session, "paused-original", pair.Token);
+            Assert.True(Assert.IsType<bool>(InvokePrivateMethod(pair.Payer, "PauseFileTransferDataSessionsForTunaActivationNegotiation",
+                "tuna_activation_negotiating", session, "test_offer")));
+            var generation = ((IFileTransferDataSessionGenerationProvider)a).Generation;
+            var authority = FileTransferRouteTransitionInfraTests.CreateAuthorityForRoute("owner-a", generation,
+                sessionId: session, transferId: a.TransferId);
+            var bridge = (IFileTransferRouteTransitionBridge)pair.Payer;
+            Assert.Equal(FileTransferRouteTransitionPauseBindStatus.Installed, bridge.BindFileTransferRouteTransitionPause(new(authority)).Status);
+            Assert.False(a.IsAvailable);
+            var pending = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            using var release = new ManualResetEventSlim();
+            void Rollback() => Assert.Equal(FileTransferRouteTransitionDispositionApplyStatus.Applied,
+                bridge.ApplyFileTransferRouteTransitionDisposition(new(authority, FileTransferRouteTransitionDispositionKind.RolledBack,
+                    null, null, "test_rollback_a")).Status);
+            try
+            {
+                if (rollbackPending)
+                {
+                    pair.Payer.BeforeTransitionAvailabilityForTests = () => { pending.TrySetResult(); release.Wait(pair.Token); };
+                    Rollback();
+                    await pending.Task.WaitAsync(pair.Token);
+                }
+                const string b = "reverse-scoped-credit";
+                byte[] bytes = [0x5a, 0x91, 0x7f];
+                using var destination = new MemoryStream();
+                var start = GetOperationalLogLength();
+                await pair.DialerService.TryStartSendAsync(new("reverse.bin", bytes.Length, b),
+                    _ => Task.FromResult<Stream>(new MemoryStream(bytes)), pair.Token);
+                await WaitUntilAsync(() => pair.PayerService.Snapshot.Inbound?.State == FileTransferTransferState.PendingDecision, TimeSpan.FromSeconds(3));
+                Assert.Equal(FileTransferRouteResolver.RegularNknV4FastToken, pair.PayerService.Snapshot.Inbound?.RouteToken);
+                await pair.PayerService.AcceptIncomingTransferAsync(b, (FileTransferWriteStreamFactory)((_, _) => Task.FromResult<Stream>(destination)), pair.Token);
+                await WaitUntilAsync(() => pair.PayerService.Snapshot.Inbound?.State == FileTransferTransferState.Completed &&
+                    pair.DialerService.Snapshot.Outbound?.State == FileTransferTransferState.Completed, TimeSpan.FromSeconds(5));
+                Assert.Equal(bytes, destination.ToArray());
+                var lines = ReadOperationalLogTail(start).Split('\n').Where(line => line.Contains($"transfer_id={b};")).ToArray();
+                Assert.Contains(lines, line => line.Contains("event=filetransfer_v4_state_received;") && line.Contains("available_credit_chunks=1;"));
+                Assert.Contains(lines, line => line.Contains("event=filetransfer_data_path_receive_result;") &&
+                    line.Contains("actual_transport=regular_nkn;") && line.Contains("start_chunk_index=0;"));
+                Assert.False(a.IsAvailable);
+                if (!rollbackPending) Rollback();
+            }
+            finally { pair.Payer.BeforeTransitionAvailabilityForTests = null; release.Set(); }
+            await WaitUntilAsync(() => a.IsAvailable, TimeSpan.FromSeconds(3));
+        });
+
+    [Fact]
+    public Task OfferDelivery_ResetBetweenNewChannelPauseCaptureAndWriteKeepsChannelAvailable()
+        => WithPreparationHandshakePairAsync(true, async pair =>
+        {
+            var transport = pair.Payer;
+            var session = pair.Permit.Scope.SessionId;
+            Assert.True(Assert.IsType<bool>(InvokePrivateMethod(transport, "PauseFileTransferDataSessionsForTunaActivationNegotiation",
+                "tuna_activation_negotiating", session, "test_offer")));
+            transport.SetAccelerationAcceptedForTests(NknAccelerationLaneKind.File, session);
+            var captured = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            using var release = new ManualResetEventSlim();
+            transport.NewChannelPauseCapturedForTests = () => { captured.TrySetResult(); release.Wait(pair.Token); };
+            var opening = Task.Run(() => transport.OpenFileTransferDataSessionAsync(session, "reverse-pause-write", pair.Token));
+            try
+            {
+                await captured.Task.WaitAsync(pair.Token);
+                await transport.StopAccelerationAsync("header_switch_off", pair.Token);
+            }
+            finally { transport.NewChannelPauseCapturedForTests = null; release.Set(); }
+            using var channel = await opening.WaitAsync(pair.Token);
+            Assert.True(channel.IsAvailable);
+        });
+
+    [Fact]
+    public Task OfferDelivery_ResetDuringOrdinaryReplayRejectsOldDispatchAndLateCacheWrite()
+        => WithPreparationHandshakePairAsync(true, async pair =>
+        {
+            var transport = pair.Payer;
+            var session = pair.Permit.Scope.SessionId;
+            transport.SetAccelerationAcceptedForTests(NknAccelerationLaneKind.File, session);
+            var original = Assert.IsType<long>(GetPrivateField(transport, "fileActivationHandoffResetGeneration"));
+            using var channel = await transport.OpenFileTransferDataSessionAsync(session, "reverse-pending-replay", pair.Token);
+            var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            using var release = new ManualResetEventSlim();
+            transport.OrdinaryFileHandoffBeforeDispatchForTests = () => { entered.TrySetResult(); release.Wait(pair.Token); };
+            var notifications = new System.Collections.Concurrent.ConcurrentQueue<FileTransferDataSessionAvailabilityChangedEventArgs>();
+            var subscribe = Task.Run(() => { channel.AvailabilityChanged += (_, args) =>
+            {
+                if (args.HandoffKind == FileTransferTransportHandoffKind.NormalToTunaActivation) notifications.Enqueue(args);
+            }; });
+            try
+            {
+                await entered.Task.WaitAsync(pair.Token);
+                await transport.StopAccelerationAsync("sidecar_remote_closed", pair.Token);
+            }
+            finally { transport.OrdinaryFileHandoffBeforeDispatchForTests = null; release.Set(); }
+            await subscribe.WaitAsync(pair.Token);
+            Assert.Empty(notifications);
+
+            transport.SetAccelerationAcceptedForTests(NknAccelerationLaneKind.File, session);
+            var current = Assert.Single(notifications);
+            Assert.True(current.OrdinaryTunaHandoffIsCurrent!());
+            Assert.False(Assert.IsType<bool>(InvokePrivateMethod(transport, "TryRecordPendingFileTransferV6Handoff",
+                session, "old_delayed_answer", FileTransferTransportHandoffKind.NormalToTunaActivation,
+                FileTransferTransportKind.Tuna, "no_subscribers", null, original)));
+
+            // Admit while current, reset before the priority worker can consume the notification.
+            var admitted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var consumed = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            using var dispatch = new ManualResetEventSlim();
+            var firstRead = 1;
+            var queued = new FileTransferDataSessionAvailabilityChangedEventArgs(current.IsAvailable, current.Reason,
+                current.RequiresResumeRequest, current.HandoffKind, current.TargetTransport)
+            {
+                OrdinaryTunaHandoffIsCurrent = () =>
+                {
+                    var valid = current.OrdinaryTunaHandoffIsCurrent();
+                    if (Interlocked.Exchange(ref firstRead, 0) == 1) { admitted.TrySetResult(); dispatch.Wait(pair.Token); }
+                    else consumed.TrySetResult(valid);
+                    return valid;
+                }
+            };
+            var delivery = Task.Run(() => InvokePrivateMethod(pair.PayerService, "OnDataSessionAvailabilityChanged", channel, queued));
+            try
+            {
+                await admitted.Task.WaitAsync(pair.Token);
+                await transport.StopAccelerationAsync("header_switch_off", pair.Token);
+            }
+            finally { dispatch.Set(); }
+            await delivery.WaitAsync(pair.Token);
+            Assert.False(await consumed.Task.WaitAsync(pair.Token));
+        });
+
     [Theory]
     [InlineData("unanswered")]
     [InlineData("canceled-before-capture")]

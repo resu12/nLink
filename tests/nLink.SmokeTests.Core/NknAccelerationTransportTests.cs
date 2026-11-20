@@ -3939,7 +3939,7 @@ public sealed partial class NknAccelerationTransportTests : CoreSmokeTestsBase, 
                 "RequestFileTransferTunaActivationHandoff",
                 sessionId,
                 NknAccelerationLaneKind.File,
-                "test_accept");
+                "test_accept", null, 0L, GetPrivateField(host, "fileActivationHandoffResetGeneration"));
 
             Assert.Contains(
                 availabilityEvents,
@@ -21484,9 +21484,12 @@ public sealed partial class NknAccelerationTransportTests : CoreSmokeTestsBase, 
         }
     }
 
-    [Fact]
+    [Theory]
+    [InlineData(false, false)]
+    [InlineData(true, false)]
+    [InlineData(true, true)]
     [Trait("Category", "Smoke")]
-    public async Task TransportAccelerationAnswerAck_DefersDialerFileTransferHandoffUntilAck()
+    public async Task TransportAccelerationAnswerAck_DefersDialerFileTransferHandoffUntilAck(bool coordinatorPermits, bool permitBeforeAck)
     {
         FakeNknClient.ResetNetwork();
         var previousHelpeePriorityDelay = NknSignalingTransport.HelperPaidOfferHelpeePriorityDelayOverrideForTests;
@@ -21494,6 +21497,7 @@ public sealed partial class NknAccelerationTransportTests : CoreSmokeTestsBase, 
         NknSignalingTransport.HelperPaidOfferHelpeePriorityDelayOverrideForTests = TimeSpan.Zero;
         NknSignalingTransport.RuntimeUnlockPreCommitProbeStartTimeoutOverrideForTests = TimeSpan.FromMilliseconds(150);
         var blockedAnswerAck = new TaskCompletionSource<object?>(TaskCreationOptions.RunContinuationsAsynchronously);
+        if (coordinatorPermits) NknSignalingTransport.RuntimeUnlockPreCommitProbeStartTimeoutOverrideForTests = TimeSpan.FromSeconds(10);
         try
         {
             using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(12));
@@ -21559,13 +21563,144 @@ public sealed partial class NknAccelerationTransportTests : CoreSmokeTestsBase, 
                      e.HandoffKind == FileTransferTransportHandoffKind.NormalToTunaActivation &&
                      e.TargetTransport == FileTransferTransportKind.Tuna);
 
+            using (var late = await host.OpenFileTransferDataSessionAsync(sessionId, "late-payer-during-runtime-ack", cts.Token))
+            {
+                Assert.True(late.IsAvailable); // An unpaused subscriber reaches ordinary handoff synthesis.
+                var events = new ConcurrentQueue<FileTransferDataSessionAvailabilityChangedEventArgs>();
+                late.AvailabilityChanged += (_, e) => events.Enqueue(e);
+                Assert.DoesNotContain(events, e => e.HandoffKind == FileTransferTransportHandoffKind.NormalToTunaActivation);
+            }
+            async Task<bool> NewFileGetsOrdinaryHandoff(string transfer, NknSignalingTransport? transport = null, bool requireAvailable = true)
+            {
+                using var late = await (transport ?? host).OpenFileTransferDataSessionAsync(sessionId, transfer, cts.Token);
+                if (requireAvailable) Assert.True(late.IsAvailable);
+                var events = new ConcurrentQueue<FileTransferDataSessionAvailabilityChangedEventArgs>();
+                late.AvailabilityChanged += (_, e) => events.Enqueue(e);
+                return events.Any(e => e.HandoffKind == FileTransferTransportHandoffKind.NormalToTunaActivation &&
+                    e.RuntimeUnlockPreCommitProbeSnapshot is null);
+            }
+            void Commit(NknSignalingTransport transport, bool stale = false)
+            {
+                var tx = Assert.IsType<RuntimeUnlockTransactionSnapshot>(GetPrivateField(transport, "runtimeUnlockTransactionState"));
+                var payer = ReferenceEquals(host, transport);
+                ((IRuntimeUnlockRouteCommitProofProvider)transport).NotifyRuntimeUnlockRouteCommitResult(sessionId,
+                    payer ? "transfer_tuna_activation_ack_gate_host" : "transfer_tuna_activation_ack_gate_helper",
+                    payer ? FileTransferDirection.Outbound : FileTransferDirection.Inbound, tx.TransactionGeneration,
+                    tx.OfferGeneration + (stale ? 1 : 0), accepted: true, "fake_coordinator_commit");
+            }
+            using var waitingPayer = coordinatorPermits ? await host.OpenFileTransferDataSessionAsync(sessionId, "same-waiting-payer", cts.Token) : null;
+            using var waitingDialer = coordinatorPermits ? await helper.OpenFileTransferDataSessionAsync(sessionId, "same-waiting-dialer", cts.Token) : null;
+            var bridge = (IFileTransferRouteTransitionBridge)helper;
+            FileTransferRouteTransitionAuthority dialerPause = default;
+            if (waitingDialer is not null)
+            {
+                Assert.False(waitingDialer.IsAvailable);
+                dialerPause = FileTransferRouteTransitionInfraTests.CreateAuthorityForRoute(
+                    "waiting_dialer", Assert.IsType<long>(waitingDialer.GetType().GetProperty("Generation")!.GetValue(waitingDialer)),
+                    direction: FileTransferDirection.Inbound, sessionId: sessionId, transferId: waitingDialer.TransferId);
+                Assert.Equal(FileTransferRouteTransitionPauseBindStatus.Installed,
+                    bridge.BindFileTransferRouteTransitionPause(new(dialerPause)).Status);
+            }
+            static bool Ordinary(FileTransferDataSessionAvailabilityChangedEventArgs e) =>
+                e.RequiresResumeRequest && e.TargetTransport == FileTransferTransportKind.Tuna &&
+                e.HandoffKind == FileTransferTransportHandoffKind.NormalToTunaActivation && e.RuntimeUnlockPreCommitProbeSnapshot is null;
+            int payerDeliveries = 0, dialerDeliveries = 0, unavailableDeliveries = 0, removedDeliveries = 0;
+            void SubscribeWaitingChannels()
+            {
+                if (waitingPayer is null || waitingDialer is null) return;
+                void Record(FileTransferDataSessionAvailabilityChangedEventArgs e, ref int count)
+                {
+                    if (!Ordinary(e)) return;
+                    if (e.IsAvailable) Interlocked.Increment(ref count);
+                    else Interlocked.Increment(ref unavailableDeliveries);
+                }
+                waitingPayer.AvailabilityChanged += (_, e) => Record(e, ref payerDeliveries);
+                waitingDialer.AvailabilityChanged += (_, e) => Record(e, ref dialerDeliveries);
+                EventHandler<FileTransferDataSessionAvailabilityChangedEventArgs> removed =
+                    (_, e) => { if (Ordinary(e)) Interlocked.Increment(ref removedDeliveries); };
+                waitingPayer.AvailabilityChanged += removed;
+                waitingPayer.AvailabilityChanged -= removed;
+            }
+            void AssertWaiting()
+            {
+                Assert.Equal(0, Volatile.Read(ref payerDeliveries));
+                Assert.Equal(0, Volatile.Read(ref dialerDeliveries));
+            }
+            async Task AssertDeliveredOnce()
+            {
+                await WaitUntilAsync(() => Volatile.Read(ref payerDeliveries) > 0, TimeSpan.FromSeconds(3));
+                var release = new FileTransferRouteTransitionDispositionCommand(
+                    dialerPause, FileTransferRouteTransitionDispositionKind.RolledBack, null, null, "release_waiting_dialer");
+                Assert.Equal(FileTransferRouteTransitionDispositionApplyStatus.Rejected,
+                    bridge.ApplyFileTransferRouteTransitionDisposition(release with
+                    { Authority = FileTransferRouteTransitionInfraTests.CreateAuthorityForRoute("stale_waiter",
+                        dialerPause.DataSessionProviderGeneration + 1, direction: FileTransferDirection.Inbound,
+                        sessionId: sessionId, transferId: waitingDialer!.TransferId) }).Status);
+                Assert.False(waitingDialer!.IsAvailable);
+                Assert.False(BroadcastAgain(waitingDialer, helper));
+                Assert.Equal(0, Volatile.Read(ref unavailableDeliveries));
+                Assert.Equal(0, Volatile.Read(ref dialerDeliveries));
+                Assert.Equal(FileTransferRouteTransitionDispositionApplyStatus.Applied,
+                    bridge.ApplyFileTransferRouteTransitionDisposition(release).Status);
+                await WaitUntilAsync(() => Volatile.Read(ref dialerDeliveries) > 0, TimeSpan.FromSeconds(3));
+                Assert.True(waitingDialer.IsAvailable);
+                Commit(host);
+                Commit(helper);
+                // The ACK's normal broadcast can arrive after the targeted wake. It is satisfied
+                // for these same subscriptions, without dispatching either callback again.
+                bool BroadcastAgain(IFileTransferDataSession channel, NknSignalingTransport transport)
+                    => Assert.IsType<bool>(channel.GetType().GetMethod("TryPublishHandoff")!.Invoke(channel,
+                        ["duplicate_ack_broadcast", FileTransferTransportHandoffKind.NormalToTunaActivation,
+                         FileTransferTransportKind.Tuna, null, GetPrivateField(transport, "fileActivationHandoffResetGeneration")]));
+                Assert.True(BroadcastAgain(waitingPayer!, host));
+                Assert.True(BroadcastAgain(waitingDialer!, helper));
+                Assert.Equal(1, Volatile.Read(ref payerDeliveries));
+                Assert.Equal(1, Volatile.Read(ref dialerDeliveries));
+                Assert.Equal(0, Volatile.Read(ref unavailableDeliveries));
+                Assert.Equal(0, Volatile.Read(ref removedDeliveries));
+            }
+            AssertWaiting();
+            if (permitBeforeAck)
+            {
+                SubscribeWaitingChannels();
+                hostLane.MarkListenerAvailableForTests();
+                Commit(host);
+                Commit(helper);
+                Assert.False(await NewFileGetsOrdinaryHandoff("payer-permit-before-write"));
+                Assert.False(await NewFileGetsOrdinaryHandoff("dialer-permit-before-receipt", helper, requireAvailable: false));
+                AssertWaiting();
+                blockedAnswerAck.SetResult(null);
+                await WaitUntilAsync(() => ReadOperationalLogTail(logStart).Contains(
+                    "event=tuna_acceleration_answer_ack_received;", StringComparison.Ordinal), TimeSpan.FromSeconds(5));
+                await WaitUntilAsync(() => Equals(GetPrivateField(host, "runtimeUnlockAckHoldGeneration"), -1L), TimeSpan.FromSeconds(3));
+                Assert.True(await NewFileGetsOrdinaryHandoff("payer-ack-after-permit"));
+                Assert.True(await NewFileGetsOrdinaryHandoff("dialer-ack-after-permit", helper));
+                await AssertDeliveredOnce();
+                return;
+            }
             blockedAnswerAck.SetResult(null);
-
-            await WaitUntilAsync(
-                () => ReadOperationalLogTail(logStart).Contains(
-                    "event=filetransfer_runtime_unlock_handoff_pending_route_commit;",
-                    StringComparison.Ordinal),
-                TimeSpan.FromSeconds(6));
+            await WaitUntilAsync(() => ReadOperationalLogTail(logStart).Contains(
+                "event=filetransfer_runtime_unlock_handoff_pending_route_commit;", StringComparison.Ordinal), TimeSpan.FromSeconds(6));
+            if (coordinatorPermits)
+                await WaitUntilAsync(() => ReadOperationalLogTail(logStart).Contains(
+                    "event=runtime_unlock_answer_ack_probe_barrier_released;", StringComparison.Ordinal), TimeSpan.FromSeconds(5));
+            hostLane.MarkListenerAvailableForTests(); // Healthy IPC is evidence, not route permission.
+            SubscribeWaitingChannels(); // The same late subscribers must survive the ACK-to-commit gap.
+            Assert.False(await NewFileGetsOrdinaryHandoff("late-after-local-ack"));
+            if (coordinatorPermits)
+            {
+                Assert.True(helperLane.IsAvailable);
+                Assert.False(await NewFileGetsOrdinaryHandoff("dialer-after-received-ack", helper));
+                Commit(host, stale: true);
+                Assert.False(await NewFileGetsOrdinaryHandoff("late-after-stale-permit"));
+                AssertWaiting();
+                Commit(host);
+                Assert.True(await NewFileGetsOrdinaryHandoff("late-after-exact-permit"));
+                Commit(helper);
+                Assert.True(await NewFileGetsOrdinaryHandoff("dialer-after-exact-permit", helper));
+                await AssertDeliveredOnce();
+                return;
+            }
             await WaitUntilAsync(
                 () => ReadOperationalLogTail(logStart).Contains(
                     "event=runtime_unlock_precommit_probe_start_timeout;",
@@ -24929,18 +25064,15 @@ public sealed partial class NknAccelerationTransportTests : CoreSmokeTestsBase, 
                 sessionId,
                 snapshot);
             await WaitUntilAsync(
-                () => matchingEvents.Count == 1 && otherEvents.Count == 1,
+                () => matchingEvents.Count == 1,
                 TimeSpan.FromSeconds(2));
             var matchingBroadcast = Assert.Single(matchingEvents);
-            var otherBroadcast = Assert.Single(otherEvents);
+            Assert.Empty(otherEvents);
             Assert.Equal(
                 observation,
                 matchingBroadcast
                     .RuntimeUnlockResponderPeerProbeRouteTransitionObservation);
-            Assert.Null(
-                otherBroadcast
-                    .RuntimeUnlockResponderPeerProbeRouteTransitionObservation);
-            Assert.NotNull(otherBroadcast.RuntimeUnlockPreCommitProbeSnapshot);
+            Assert.Same(snapshot, matchingBroadcast.RuntimeUnlockPreCommitProbeSnapshot);
 
             matchingEvents.Clear();
             otherEvents.Clear();
@@ -24958,24 +25090,21 @@ public sealed partial class NknAccelerationTransportTests : CoreSmokeTestsBase, 
                 "TryReplayPendingFileTransferV6Handoff",
                 matching,
                 "unit_test_matching_replay")));
-            Assert.True(Assert.IsType<bool>(InvokePrivateMethod(
+            Assert.False(Assert.IsType<bool>(InvokePrivateMethod(
                 helper,
                 "TryReplayPendingFileTransferV6Handoff",
                 other,
                 "unit_test_other_replay")));
             await WaitUntilAsync(
-                () => matchingEvents.Count == 1 && otherEvents.Count == 1,
+                () => matchingEvents.Count == 1,
                 TimeSpan.FromSeconds(2));
             var matchingReplay = Assert.Single(matchingEvents);
-            var otherReplay = Assert.Single(otherEvents);
+            Assert.Empty(otherEvents);
             Assert.Equal(
                 observation,
                 matchingReplay
                     .RuntimeUnlockResponderPeerProbeRouteTransitionObservation);
-            Assert.Null(
-                otherReplay
-                    .RuntimeUnlockResponderPeerProbeRouteTransitionObservation);
-            Assert.NotNull(otherReplay.RuntimeUnlockPreCommitProbeSnapshot);
+            Assert.Same(snapshot, matchingReplay.RuntimeUnlockPreCommitProbeSnapshot);
         }
         finally
         {

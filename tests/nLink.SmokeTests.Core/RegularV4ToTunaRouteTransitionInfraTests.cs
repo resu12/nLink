@@ -157,21 +157,22 @@ public sealed partial class FileTransferRouteTransitionInfraTests : IDisposable
         var bridge = Assert.IsAssignableFrom<IFileTransferRouteTransitionBridge>(
             transport);
         var authority = CreateAuthority("nkn-transition", generation);
+        var ordinaryGeneration = GetPrivateFieldValue(transport, "fileActivationHandoffResetGeneration");
         InvokePrivate(
             dataSession,
-            "RequestHandoff",
+            "TryPublishHandoff",
             "coordinator_transition_handoff",
             FileTransferTransportHandoffKind.NormalToTunaActivation,
             FileTransferTransportKind.Tuna,
-            CreateLaunchSnapshot(authority));
+            CreateLaunchSnapshot(authority), null);
         Assert.False(dataSession.IsAvailable);
         InvokePrivate(
             dataSession,
-            "RequestHandoff",
+            "TryPublishHandoff",
             "legacy_null_snapshot_handoff",
             FileTransferTransportHandoffKind.NormalToTunaActivation,
             FileTransferTransportKind.Tuna,
-            null);
+            null, ordinaryGeneration);
         Assert.False(dataSession.IsAvailable);
         var bind = new FileTransferRouteTransitionPauseBindCommand(authority);
         Assert.Equal(
@@ -180,11 +181,11 @@ public sealed partial class FileTransferRouteTransitionInfraTests : IDisposable
 
         InvokePrivate(
             dataSession,
-            "RequestHandoff",
+            "TryPublishHandoff",
             "coordinator_transition_handoff",
             FileTransferTransportHandoffKind.NormalToTunaActivation,
             FileTransferTransportKind.Tuna,
-            null);
+            null, ordinaryGeneration);
         Assert.False(dataSession.IsAvailable);
         Assert.False(Assert.IsType<bool>(InvokePrivate(
             transport,
@@ -639,14 +640,14 @@ public sealed partial class FileTransferRouteTransitionInfraTests : IDisposable
         long dataSessionGeneration)
         => CreateAuthorityForRoute(reason, dataSessionGeneration);
 
-    private static FileTransferRouteTransitionAuthority CreateAuthorityForRoute(
+    internal static FileTransferRouteTransitionAuthority CreateAuthorityForRoute(
         string reason,
         long dataSessionGeneration,
         FileTransferRoute sourceRoute = FileTransferRoute.RegularNknV4Fast,
-        FileTransferDirection direction = FileTransferDirection.Outbound)
+        FileTransferDirection direction = FileTransferDirection.Outbound,
+        string sessionId = "route-transition-session",
+        string transferId = "route-transition-transfer")
     {
-        const string sessionId = "route-transition-session";
-        const string transferId = "route-transition-transfer";
         var sourceSelection = FileTransferRouteResolver.Resolve(sourceRoute);
         var sourceGeneration = sourceRoute == FileTransferRoute.PostTunaFallbackV6 ? 3 : 1;
         var sourceTransportEpoch = sourceRoute == FileTransferRoute.PostTunaFallbackV6 ? 7 : 1;

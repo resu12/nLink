@@ -3881,7 +3881,7 @@ public sealed partial class SessionFileTransferService :
 
     private void OnDataSessionAvailabilityChanged(object? sender, FileTransferDataSessionAvailabilityChangedEventArgs e)
     {
-        if (sender is not IFileTransferDataSession dataSession)
+        if (sender is not IFileTransferDataSession dataSession || e.OrdinaryTunaHandoffIsCurrent?.Invoke() == false)
         {
             return;
         }
@@ -3959,6 +3959,9 @@ public sealed partial class SessionFileTransferService :
         IFileTransferDataSession dataSession,
         FileTransferDataSessionAvailabilityChangedEventArgs availability)
     {
+        if (availability.OrdinaryTunaHandoffIsCurrent?.Invoke() == false) return;
+        if (availability.OrdinaryTunaFinalAck is { } ack &&
+            (!await ack.ConfigureAwait(false) || availability.OrdinaryTunaHandoffIsCurrent?.Invoke() == false)) return;
         if (availability.PostTunaFallbackProofBoundary is { IsComplete: true } fallbackBoundary)
         {
             SessionFileTransferSnapshot? fallbackSnapshot = null;
@@ -4245,6 +4248,7 @@ public sealed partial class SessionFileTransferService :
 
         lock (gate)
         {
+            if (availability.OrdinaryTunaHandoffIsCurrent?.Invoke() == false) return;
             var outboundPauseBlocked = IsTunaActivationNegotiationTransportPauseReason(outboundTransfer?.PullTransportPauseReason);
             var inboundPauseBlocked = IsTunaActivationNegotiationTransportPauseReason(inboundTransfer?.PullTransportPauseReason);
             if (effectiveIsAvailable &&

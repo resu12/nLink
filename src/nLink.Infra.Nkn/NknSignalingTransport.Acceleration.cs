@@ -138,6 +138,7 @@ public sealed partial class NknSignalingTransport : INknListenerCapHandoffContro
         public bool Revoked { get; set; } // Protected by accelerationGate.
         public (long Ack, long Pause)? OwnedPause { get; set; }
         public bool AwaitingFixedAckWrite { get; set; }
+        public long? OrdinaryFileHandoffGeneration { get; set; }
         public TaskCompletionSource<InitialTunaReadinessSnapshot?>? FileReadinessPublication { get; set; }
         public (long Ack, long Pause) InitialPause { get; init; }
         public NknTunaLaneLease? ListenerLease { get; init; }
@@ -265,6 +266,21 @@ public sealed partial class NknSignalingTransport : INknListenerCapHandoffContro
     private long runtimeUnlockRetiredAnswerBarrierNextGeneration;
     private RuntimeUnlockRetiredAnswerBarrier? runtimeUnlockRetiredAnswerBarrier;
     private long fileTransferTunaActivationPauseGeneration;
+    private long fileActivationHandoffResetGeneration;
+    // Fixed-lane answers can enqueue an ordinary handoff before the final ACK is written.
+    private (long Generation, Task<bool> Result)? ordinaryFileFinalAck;
+    // A runtime-unlock answer belongs to the coordinator, not to newly subscribed files.
+    private long runtimeUnlockAckHoldGeneration = -1;
+    private (long Generation, string SessionId, long TransactionGeneration, long OfferGeneration)? confirmedRuntimeUnlockAck;
+    private bool IsOrdinaryFileHandoffCurrent(long generation) =>
+        generation == Interlocked.Read(ref fileActivationHandoffResetGeneration) &&
+        generation != Interlocked.Read(ref runtimeUnlockAckHoldGeneration);
+    private long fileActivationResetGeneration;
+    private long fileActivationPauseNegotiationGeneration;
+    internal Action? NewChannelPauseCapturedForTests { get; set; }
+    internal Action? BeforeTransitionAvailabilityForTests { get; set; }
+    internal Action? OrdinaryFileHandoffBeforeDispatchForTests { get; set; }
+    internal Action? BeforeOrdinaryFinalAckCleanupForTests { get; set; }
     // Leaf lock: session writes and pause installation must agree on the generation.
     private readonly object activationPausePublicationGate = new();
     internal Action<bool>? ActivationPausePublishingForTests { get; set; }
@@ -272,6 +288,11 @@ public sealed partial class NknSignalingTransport : INknListenerCapHandoffContro
     private FileTransferRouteTransitionExecutionShadow
         fileTransferRouteTransitionExecutionShadow =
             FileTransferRouteTransitionExecutionShadow.Empty;
+    // Readers at the channel write cannot take accelerationGate (callbacks can enter it).
+    private FileTransferRouteTransitionExecutionShadow PublishedPauseShadow
+    {
+        set { lock (activationPausePublicationGate) fileTransferRouteTransitionExecutionShadow = value; }
+    }
     private event EventHandler<FileTransferFallbackV6ProofBootstrapEvaluationRequestedEventArgs>?
         fallbackV6ProofBootstrapEvaluationRequested;
     private FileTransferFallbackV6ProofBootstrapCommand?
@@ -408,6 +429,8 @@ public sealed partial class NknSignalingTransport : INknListenerCapHandoffContro
     private bool pendingAnswerOwnsPause;
     private long pendingAnswerDeadlineUtcMs;
     private RuntimeUnlockOfferAuthorityMode? pendingAccelerationAnswerAckAuthorityMode;
+    private long? pendingResponderAckTransactionGeneration;
+    private long pendingResponderHandoffGeneration = -1;
     private AccelerationReplyTargetEvidence? pendingAccelerationAnswerAckReplyTarget;
     private PendingAccelerationReplyShadow? pendingAccelerationAnswerReplyShadow;
     private PendingAccelerationReplyShadow? pendingAccelerationAnswerAckReplyShadow;
@@ -795,6 +818,7 @@ public sealed partial class NknSignalingTransport : INknListenerCapHandoffContro
     {
         public IdleSessionOfferBinding? IdleOffer { get; init; }
         public object? AnswerDialOwner { get; init; }
+        public long? FinalAckAnswerGeneration { get; init; }
     }
 
     private enum InboundRuntimeUnlockDialOfferDisposition
@@ -2555,7 +2579,7 @@ public sealed partial class NknSignalingTransport : INknListenerCapHandoffContro
                         command,
                         FileTransferRouteTransitionPauseBindStatus.Installed,
                         "filetransfer_route_transition_pause_rebound");
-                    fileTransferRouteTransitionExecutionShadow = shadow with
+                    PublishedPauseShadow = shadow with
                     {
                         Current = new FileTransferRouteTransitionPauseBindingShadow(
                             command,
@@ -2583,7 +2607,7 @@ public sealed partial class NknSignalingTransport : INknListenerCapHandoffContro
                             command,
                             FileTransferRouteTransitionPauseBindStatus.Installed,
                             "filetransfer_route_transition_pause_rebound");
-                        fileTransferRouteTransitionExecutionShadow = shadow with
+                        PublishedPauseShadow = shadow with
                         {
                             Current =
                                 new FileTransferRouteTransitionPauseBindingShadow(
@@ -2638,7 +2662,7 @@ public sealed partial class NknSignalingTransport : INknListenerCapHandoffContro
                         command,
                         FileTransferRouteTransitionPauseBindStatus.Installed,
                         "filetransfer_route_transition_pause_bound");
-                    fileTransferRouteTransitionExecutionShadow = shadow with
+                    PublishedPauseShadow = shadow with
                     {
                         Current = new FileTransferRouteTransitionPauseBindingShadow(
                             command,
@@ -2877,7 +2901,7 @@ public sealed partial class NknSignalingTransport : INknListenerCapHandoffContro
 
                 if (predecessorMatches)
                 {
-                    fileTransferRouteTransitionExecutionShadow = shadow with
+                    PublishedPauseShadow = shadow with
                     {
                         RetainedPredecessor = null,
                         LastPredecessorDisposition = receipt,
@@ -2893,7 +2917,7 @@ public sealed partial class NknSignalingTransport : INknListenerCapHandoffContro
                     var retainSuperseded =
                         command.Kind ==
                         FileTransferRouteTransitionDispositionKind.Superseded;
-                    fileTransferRouteTransitionExecutionShadow = shadow with
+                    PublishedPauseShadow = shadow with
                     {
                         Current = null,
                         RetainedPredecessor = retainSuperseded
@@ -2918,7 +2942,7 @@ public sealed partial class NknSignalingTransport : INknListenerCapHandoffContro
                     FileTransferRouteTransitionDispositionKind.RolledBack;
                 if (scheduleAvailability)
                 {
-                    fileTransferRouteTransitionExecutionShadow =
+                    PublishedPauseShadow =
                         fileTransferRouteTransitionExecutionShadow with
                         {
                             PendingAvailabilityDisposition = command,
@@ -3117,6 +3141,7 @@ public sealed partial class NknSignalingTransport : INknListenerCapHandoffContro
     private void ApplyFileTransferRouteTransitionAvailability(
         FileTransferRouteTransitionDispositionCommand command)
     {
+        BeforeTransitionAvailabilityForTests?.Invoke();
         lock (accelerationGate)
         {
             var shadow = fileTransferRouteTransitionExecutionShadow;
@@ -3149,7 +3174,7 @@ public sealed partial class NknSignalingTransport : INknListenerCapHandoffContro
                     if (fileTransferRouteTransitionExecutionShadow
                             .PendingAvailabilityDisposition == command)
                     {
-                        fileTransferRouteTransitionExecutionShadow =
+                        PublishedPauseShadow =
                             fileTransferRouteTransitionExecutionShadow with
                             {
                                 PendingAvailabilityDisposition = null,
@@ -3185,7 +3210,7 @@ public sealed partial class NknSignalingTransport : INknListenerCapHandoffContro
                 if (fileTransferRouteTransitionExecutionShadow
                         .PendingAvailabilityDisposition == command)
                 {
-                    fileTransferRouteTransitionExecutionShadow =
+                    PublishedPauseShadow =
                         fileTransferRouteTransitionExecutionShadow with
                         {
                             PendingAvailabilityDisposition = null,
@@ -3386,6 +3411,7 @@ public sealed partial class NknSignalingTransport : INknListenerCapHandoffContro
     internal void SetAccelerationAcceptedForTests(NknAccelerationLaneKind lanes, string? sessionId = null)
     {
         string? acceptedSessionId;
+        long ordinaryGeneration;
         lock (accelerationGate)
         {
             accelerationSessionId = string.IsNullOrWhiteSpace(sessionId)
@@ -3394,9 +3420,10 @@ public sealed partial class NknSignalingTransport : INknListenerCapHandoffContro
             accelerationNegotiatedLanes = lanes;
             accelerationPreparationAdmission = null;
             acceptedSessionId = accelerationSessionId;
+            ordinaryGeneration = Interlocked.Increment(ref fileActivationHandoffResetGeneration);
         }
 
-        RequestFileTransferTunaActivationHandoff(acceptedSessionId, lanes, "test_accept");
+        RequestFileTransferTunaActivationHandoff(acceptedSessionId, lanes, "test_accept", ordinaryGeneration: ordinaryGeneration);
         NotifyTransportAccelerationStateChanged("test_accept");
     }
 
@@ -3975,14 +4002,16 @@ public sealed partial class NknSignalingTransport : INknListenerCapHandoffContro
         NknAccelerationLaneKind lanes,
         string reason,
         RuntimeUnlockOfferAuthorityBoundary? expectedAnswerBoundary = null,
-        long expectedAnswerBarrierGeneration = 0)
+        long expectedAnswerBarrierGeneration = 0,
+        long? ordinaryGeneration = null)
         => RequestFileTransferTunaActivationHandoffWithResponderPeerProbe(
             sessionId,
             lanes,
             reason,
             responderPeerProbeEvidence: null,
             expectedAnswerBoundary: expectedAnswerBoundary,
-            expectedAnswerBarrierGeneration: expectedAnswerBarrierGeneration);
+            expectedAnswerBarrierGeneration: expectedAnswerBarrierGeneration,
+            ordinaryGeneration: ordinaryGeneration);
 
     private RuntimeUnlockRetiredAnswerHandoffDisposition
         RequestFileTransferTunaActivationHandoffWithResponderPeerProbe(
@@ -3991,7 +4020,8 @@ public sealed partial class NknSignalingTransport : INknListenerCapHandoffContro
         string reason,
         RuntimeUnlockResponderPeerProbeHandoffEvidence? responderPeerProbeEvidence,
         RuntimeUnlockOfferAuthorityBoundary? expectedAnswerBoundary = null,
-        long expectedAnswerBarrierGeneration = 0)
+        long expectedAnswerBarrierGeneration = 0,
+        long? ordinaryGeneration = null)
     {
         if ((lanes & NknAccelerationLaneKind.File) != NknAccelerationLaneKind.File ||
             string.IsNullOrWhiteSpace(sessionId))
@@ -4000,6 +4030,8 @@ public sealed partial class NknSignalingTransport : INknListenerCapHandoffContro
         }
 
         var normalizedReason = SanitizeLogToken(reason);
+        if (ordinaryGeneration is long source && source != Interlocked.Read(ref fileActivationHandoffResetGeneration))
+            return RuntimeUnlockRetiredAnswerHandoffDisposition.Rejected;
         var installedRetryAnswerContinuation =
             expectedAnswerBoundary is
             {
@@ -4092,12 +4124,13 @@ public sealed partial class NknSignalingTransport : INknListenerCapHandoffContro
         LocalOperationalLog.Info(
             "NKN.Tuna",
             $"event=tuna_activation_filetransfer_handoff_requested; session_id={SanitizeLogToken(sessionId)}; reason={normalizedReason}; lanes={FormatAccelerationLanesForLog(lanes)}");
-        RequestFileTransferDataSessionsHandoff(
+        var requested = RequestFileTransferDataSessionsHandoff(
             normalizedReason,
             FileTransferTransportHandoffKind.NormalToTunaActivation,
             FileTransferTransportKind.Tuna,
-            sessionId);
-        return RuntimeUnlockRetiredAnswerHandoffDisposition.HandoffRequested;
+            sessionId,
+            ordinaryGeneration: ordinaryGeneration);
+        return requested ? RuntimeUnlockRetiredAnswerHandoffDisposition.HandoffRequested : RuntimeUnlockRetiredAnswerHandoffDisposition.Rejected;
     }
 
     private static bool RuntimeUnlockAnswerBoundaryMatchesTransactionSnapshot(
@@ -5137,7 +5170,11 @@ public sealed partial class NknSignalingTransport : INknListenerCapHandoffContro
     {
         lock (activationPausePublicationGate)
         {
-            if (sessionId is not null) ActivationPausePublishingForTests?.Invoke(true);
+            if (sessionId is not null)
+            {
+                ActivationPausePublishingForTests?.Invoke(true);
+                fileActivationPauseNegotiationGeneration = fileActivationResetGeneration;
+            }
             fileTransferTunaActivationPauseSessionId = sessionId;
             return ++fileTransferTunaActivationPauseGeneration;
         }
@@ -8853,6 +8890,7 @@ public sealed partial class NknSignalingTransport : INknListenerCapHandoffContro
         var normalizedReason = string.IsNullOrWhiteSpace(reason)
             ? (accepted ? "route_commit_accepted" : "route_commit_rejected")
             : reason.Trim();
+        long? releasedHandoff = null;
         lock (accelerationGate)
         {
             var current = runtimeUnlockTransactionState;
@@ -8892,6 +8930,7 @@ public sealed partial class NknSignalingTransport : INknListenerCapHandoffContro
                     current.TransactionGeneration,
                     current.OfferGeneration,
                     normalizedReason);
+                releasedHandoff = TryReleaseOrdinaryHandoffsAfterRuntimeUnlockLocked();
             }
         }
 
@@ -8904,6 +8943,7 @@ public sealed partial class NknSignalingTransport : INknListenerCapHandoffContro
                 "runtime_unlock_route_commit_accepted",
                 normalizedReason);
         }
+        if (releasedHandoff is long released) DeliverWaitingOrdinaryHandoffs(sessionId, released);
 
         LogRuntimeUnlockTransactionDecision(
             accepted
@@ -9163,6 +9203,20 @@ public sealed partial class NknSignalingTransport : INknListenerCapHandoffContro
         LocalOperationalLog.Info(
             "NKN.Tuna",
             $"event=runtime_unlock_paired_route_commit_publication_enabled; session_id={SanitizeLogToken(runtimeUnlockPublishedRouteCommitSessionId)}; transaction_generation={transactionGeneration}; offer_generation={offerGeneration}; reason={SanitizeLogToken(reason)}");
+    }
+
+    // Either proof may arrive first, but both must belong to the same accepted answer.
+    private long? TryReleaseOrdinaryHandoffsAfterRuntimeUnlockLocked()
+    {
+        if (confirmedRuntimeUnlockAck is not { } ack ||
+            ack.Generation != fileActivationHandoffResetGeneration || ack.Generation != runtimeUnlockAckHoldGeneration ||
+            ack.TransactionGeneration != runtimeUnlockPublishedRouteCommitTransactionGeneration ||
+            ack.OfferGeneration != runtimeUnlockPublishedRouteCommitOfferGeneration ||
+            !HasRuntimeUnlockPublishedRouteCommitUnsafe(ack.SessionId)) return null;
+
+        Interlocked.Exchange(ref runtimeUnlockAckHoldGeneration, -1);
+        confirmedRuntimeUnlockAck = null;
+        return ack.Generation;
     }
 
     private void ClearRuntimeUnlockPublishedRouteCommitUnsafe()
@@ -18363,9 +18417,15 @@ public sealed partial class NknSignalingTransport : INknListenerCapHandoffContro
         }
     }
 
+    // An old ACK completion can invalidate its queued evidence, never its successor.
+    private bool RetireOrdinaryFileHandoff(long generation)
+        => Interlocked.CompareExchange(ref fileActivationHandoffResetGeneration, generation + 1, generation) == generation;
+
     private (long Ack, long Pause)? RevokeFinalAckAndTakeOwnedPauseLocked()
     {
         if (finalAckPreferenceOffer is not { } final) return null;
+        if (final.OrdinaryFileHandoffGeneration is long generation)
+            RetireOrdinaryFileHandoff(generation);
         if (final.AwaitingFixedAckWrite || !IsOfferListenerCurrentLocked(final)) accelerationNegotiatedLanes = NknAccelerationLaneKind.None;
         var owned = accelerationNegotiatedLanes == NknAccelerationLaneKind.None &&
             final.OwnedPause == (pendingAccelerationAnswerAckGeneration, fileTransferTunaActivationPauseGeneration)
@@ -18428,9 +18488,7 @@ public sealed partial class NknSignalingTransport : INknListenerCapHandoffContro
         selection.Envelope = successor;
     }
 
-    private bool IsWriterBoundFinalAck(Envelope envelope) =>
-        envelope.Type == MsgType.TransportAccelerationAnswerAck &&
-        (tunaAccelerationOptions.UsesRuntimeLanePreferences || leaseBoundFinalAcks.TryGetValue(envelope, out _));
+    private static bool IsWriterBoundFinalAck(Envelope envelope) => envelope.Type == MsgType.TransportAccelerationAnswerAck;
 
     private bool CanSendAccelerationHandshakeEnvelope(Envelope envelope)
     {
@@ -18464,8 +18522,11 @@ public sealed partial class NknSignalingTransport : INknListenerCapHandoffContro
             lock (accelerationGate)
             {
                 if (pendingAccelerationAnswerAckReplyShadow is not { } ack || !ReferenceEquals(ack.Envelope, envelope) ||
+                    ack.FinalAckAnswerGeneration != fileActivationHandoffResetGeneration ||
                     FinalAckUtcMs() >= ack.DeadlineUtcMs ||
                     (ack.IdleOffer is not null && !IsIdleSessionAcceptedAnswerCurrentLocked(ack.IdleOffer))) return false;
+                if (!tunaAccelerationOptions.UsesRuntimeLanePreferences && !leaseBoundFinalAcks.TryGetValue(envelope, out _))
+                    return finalAckPreferenceOffer is null;
                 return finalAckPreferenceOffer is { Revoked: false } final && IsOfferListenerCurrentLocked(final) &&
                        (!leaseBoundFinalAcks.TryGetValue(envelope, out var boundFinal) || ReferenceEquals(final, boundFinal)) &&
                        (final.Lanes & ~ResolveConfiguredAccelerationLanes()) == 0;
@@ -27427,6 +27488,9 @@ public sealed partial class NknSignalingTransport : INknListenerCapHandoffContro
                 sessionId,
                 answerAckGeneration,
                 "transport_acceleration_answer_pending");
+            if (pendingAccelerationAnswerAckGeneration == answerAckGeneration && pendingAccelerationAnswerAckSessionId == sessionId &&
+                pendingAccelerationAnswerAckNonce == offer.Nonce.Trim() && pendingAccelerationAnswerAckPayerDecisionId == offer.PayerDecisionId)
+                pendingResponderAckTransactionGeneration = started.State.TransactionGeneration;
         }
 
         LogRuntimeUnlockTransactionDecision(RuntimeUnlockTransactionEventKind.OfferGenerationCreated, started);
@@ -33499,6 +33563,7 @@ public sealed partial class NknSignalingTransport : INknListenerCapHandoffContro
             pendingAnswerTunaEndpoint = offer.TunaAddress;
             pendingAnswerSemantics = PendingOfferSemantics(offer);
             pendingAccelerationAnswerAckTrigger = SanitizeLogToken(offer.Trigger);
+            pendingResponderAckTransactionGeneration = null;
             pendingAccelerationAnswerAckLanes = lanes;
             pendingAccelerationAnswerAckPayerDecisionId = offer.PayerDecisionId;
             pendingAccelerationAnswerAckAuthorityMode =
@@ -33506,6 +33571,11 @@ public sealed partial class NknSignalingTransport : INknListenerCapHandoffContro
                 pairedRetryScope is { IsDefault: false }
                     ? RuntimeUnlockOfferAuthorityMode.InitialActivation
                     : null;
+            // Installing the successor retires work already queued to Core, not just future replays.
+            pendingResponderHandoffGeneration = Interlocked.Increment(ref fileActivationHandoffResetGeneration);
+            confirmedRuntimeUnlockAck = null;
+            if (pendingAccelerationAnswerAckAuthorityMode.HasValue && (lanes & NknAccelerationLaneKind.File) != 0)
+                Interlocked.Exchange(ref runtimeUnlockAckHoldGeneration, pendingResponderHandoffGeneration);
             pendingAccelerationAnswerAckPairedRetryBindingReceipt =
                 pairedRetryScope is { IsDefault: false } paired
                     ? paired.BindingReceipt
@@ -33660,6 +33730,7 @@ public sealed partial class NknSignalingTransport : INknListenerCapHandoffContro
         string nonce,
         long payerDecisionId,
         long pendingGeneration,
+        long answerGeneration,
         long deadlineUtcMs,
         bool runtimeUnlock,
         out bool workerCreated,
@@ -33668,11 +33739,13 @@ public sealed partial class NknSignalingTransport : INknListenerCapHandoffContro
         lock (accelerationGate)
         {
             workerCreated = false;
+            if (answerGeneration != fileActivationHandoffResetGeneration) return null;
             if ((selection is not null || tunaAccelerationOptions.UsesRuntimeLanePreferences) &&
                 (selection is null || !ReferenceEquals(selection, finalAckPreferenceOffer) || selection.Revoked || !IsOfferListenerCurrentLocked(selection) ||
                  (selection.Lanes & ~ResolveConfiguredAccelerationLanes()) != 0)) return null;
             if (idleOffer is not null && !IsIdleSessionAcceptedAnswerCurrentLocked(idleOffer)) return null;
             if (pendingAccelerationAnswerAckReplyShadow is { } current &&
+                current.FinalAckAnswerGeneration == answerGeneration &&
                 string.Equals(current.SessionId, sessionId.Trim(), StringComparison.Ordinal) &&
                 string.Equals(current.Nonce, nonce.Trim(), StringComparison.Ordinal) &&
                 current.PayerDecisionId == payerDecisionId &&
@@ -33697,7 +33770,7 @@ public sealed partial class NknSignalingTransport : INknListenerCapHandoffContro
                 ++pendingAccelerationReplyWorkerGeneration,
                 "answer_ack",
                 new TaskCompletionSource<bool>(
-                    TaskCreationOptions.RunContinuationsAsynchronously)) { IdleOffer = idleOffer };
+                    TaskCreationOptions.RunContinuationsAsynchronously)) { IdleOffer = idleOffer, FinalAckAnswerGeneration = answerGeneration };
             if (selection is not null) leaseBoundFinalAcks.Add(envelope, selection);
             pendingAccelerationAnswerAckReplyShadow = shadow;
             workerCreated = true;
@@ -34458,6 +34531,8 @@ public sealed partial class NknSignalingTransport : INknListenerCapHandoffContro
         pendingAccelerationAnswerAckLanes = NknAccelerationLaneKind.None;
         pendingAccelerationAnswerAckPayerDecisionId = 0;
         pendingAccelerationAnswerAckAuthorityMode = null;
+        pendingResponderAckTransactionGeneration = null;
+        pendingResponderHandoffGeneration = -1;
         pendingAccelerationAnswerAckPairedRetryBindingReceipt = null;
         pendingAccelerationAnswerAckReplyTarget = null;
         pendingAccelerationAnswerReplyShadow = null;
@@ -34959,7 +35034,7 @@ public sealed partial class NknSignalingTransport : INknListenerCapHandoffContro
     }
 
     private bool ValidateRuntimeUnlockAnswerHandoffBarrier(
-        long barrierGeneration, RuntimeUnlockOfferAuthorityBoundary boundary, RetryPauseScope? counterOwner = null)
+        long barrierGeneration, RuntimeUnlockOfferAuthorityBoundary boundary, long? answerGeneration = null, RetryPauseScope? counterOwner = null)
     {
         if (barrierGeneration <= 0)
         {
@@ -34981,7 +35056,8 @@ public sealed partial class NknSignalingTransport : INknListenerCapHandoffContro
 
         lock (accelerationGate)
         {
-            if (runtimeUnlockRetiredAnswerBarrier is not { Phase: RuntimeUnlockRetiredAnswerBarrierPhase.AwaitingHandoffDisposition } barrier ||
+            if ((answerGeneration is long expected && expected != fileActivationHandoffResetGeneration) ||
+                runtimeUnlockRetiredAnswerBarrier is not { Phase: RuntimeUnlockRetiredAnswerBarrierPhase.AwaitingHandoffDisposition } barrier ||
                 barrier.BarrierGeneration != barrierGeneration || barrier.Boundary != boundary ||
                 !ReferenceEquals(barrier, captured) || !TryValidateRuntimeUnlockRetiredAnswerBarrierUnsafe(barrier, out _)) return false;
             if (counterOwner is { } owner && IsRetryPauseCurrentLocked(owner)) Interlocked.Exchange(ref accelerationNegotiationRetryAttempts, 0);
@@ -35748,11 +35824,13 @@ public sealed partial class NknSignalingTransport : INknListenerCapHandoffContro
         AccelerationReplyTargetEvidence replyTarget,
         NknAccelerationLaneKind lanes,
         CancellationToken ct,
+        long answerGeneration,
         bool runtimeUnlock = false,
-        IdleSessionOfferBinding? idleOffer = null, PreferenceBoundOffer? selection = null)
+        IdleSessionOfferBinding? idleOffer = null, PreferenceBoundOffer? selection = null, TaskCompletionSource<bool>? handoffAck = null)
     {
         if (IdleSessionBeforeAnswerAckForTests is { } beforeAck) await beforeAck().ConfigureAwait(false);
-        if (idleOffer is not null && !IsIdleSessionAcceptedAnswerCurrent(idleOffer)) return false;
+        bool Reject() { handoffAck?.TrySetResult(false); return false; }
+        if (idleOffer is not null && !IsIdleSessionAcceptedAnswerCurrent(idleOffer)) return Reject();
         if (!ValidateAccelerationReplyTarget(
                 replyTarget,
                 answer.SessionId,
@@ -35761,11 +35839,11 @@ public sealed partial class NknSignalingTransport : INknListenerCapHandoffContro
                 "answer_ack_send") ||
             !TryGetCurrentEnvelopeCode(out var envelopeCode))
         {
-            return false;
+            return Reject();
         }
 
         var nowMs = FinalAckUtcMs();
-        if (nowMs >= answer.ExpiresAtUnixMs) return false;
+        if (nowMs >= answer.ExpiresAtUnixMs) return Reject();
         var ack = new TransportAccelerationAnswerAckPayload
         {
             SessionId = answer.SessionId,
@@ -35789,11 +35867,12 @@ public sealed partial class NknSignalingTransport : INknListenerCapHandoffContro
             answer.Nonce,
             answer.PayerDecisionId,
             replyTarget.LineageGeneration,
+            answerGeneration,
             ack.ExpiresAtUnixMs,
             runtimeUnlock,
             out var replayWorkerCreated,
             idleOffer, selection);
-        if (replyShadow is null) return false;
+        if (replyShadow is null) return Reject();
         envelope = replyShadow.Envelope;
         replyTarget = replyShadow.ReplyTarget;
         var queued = await SendAccelerationControlEnvelopeWithBulkBypassAsync(
@@ -35801,22 +35880,21 @@ public sealed partial class NknSignalingTransport : INknListenerCapHandoffContro
                 envelope,
                 "answer_ack",
                 ct,
-                requireObservedSend: tunaAccelerationOptions.UsesRuntimeLanePreferences,
-                allowObservedQueueSend: tunaAccelerationOptions.UsesRuntimeLanePreferences && !runtimeUnlock,
+                requireObservedSend: true,
+                allowObservedQueueSend: !runtimeUnlock || !tunaAccelerationOptions.UsesRuntimeLanePreferences,
                 expectedIdleAnswer: idleOffer)
             .ConfigureAwait(false);
-        if (selection is not null)
+        lock (accelerationGate)
         {
-            lock (accelerationGate)
+            if (answerGeneration != fileActivationHandoffResetGeneration ||
+                (selection is not null && !ReferenceEquals(finalAckPreferenceOffer, selection)) ||
+                !ReferenceEquals(pendingAccelerationAnswerAckReplyShadow?.Envelope, envelope)) return Reject();
+            if (FinalAckUtcMs() >= replyShadow.DeadlineUtcMs || (!runtimeUnlock && !queued.Succeeded))
             {
-                if (!ReferenceEquals(finalAckPreferenceOffer, selection) ||
-                    !ReferenceEquals(pendingAccelerationAnswerAckReplyShadow?.Envelope, envelope)) return false;
-                if (FinalAckUtcMs() >= replyShadow.DeadlineUtcMs || (!runtimeUnlock && !queued.Succeeded))
-                {
-                    // No later queued copy may deliver a handshake we have abandoned.
-                    selection.Revoked = true;
-                    return false;
-                }
+                // Invalidate this answer's queued Core work before publishing the rejection.
+                Reject();
+                if (selection is not null) selection.Revoked = true;
+                return false;
             }
         }
         LocalOperationalLog.Info(
@@ -35873,7 +35951,7 @@ public sealed partial class NknSignalingTransport : INknListenerCapHandoffContro
                 lineageGeneration: 0,
                 purpose: "answer_ack"),
             lanes,
-            ct);
+            ct, Interlocked.Read(ref fileActivationHandoffResetGeneration));
 
     private Task SendAccelerationAnswerAsync(
         TransportAccelerationOfferPayload offer,
@@ -35954,8 +36032,8 @@ public sealed partial class NknSignalingTransport : INknListenerCapHandoffContro
                                 currentShadow.Envelope,
                                 "answer_ack_replay",
                                 CancellationToken.None,
-                                requireObservedSend: tunaAccelerationOptions.UsesRuntimeLanePreferences,
-                                allowObservedQueueSend: tunaAccelerationOptions.UsesRuntimeLanePreferences && currentShadow.AuthorityMode is null,
+                                requireObservedSend: true,
+                                allowObservedQueueSend: currentShadow.AuthorityMode is null || !tunaAccelerationOptions.UsesRuntimeLanePreferences,
                                 expectedIdleAnswer: currentShadow.IdleOffer)
                             .ConfigureAwait(false);
                         LocalOperationalLog.Info(
@@ -38852,7 +38930,10 @@ public sealed partial class NknSignalingTransport : INknListenerCapHandoffContro
         }
 
         object? supersededAnswerDial;
+        long ordinaryAnswerGeneration;
         var deferUntilAck = tunaAccelerationOptions.UsesRuntimeLanePreferences;
+        var handoffAck = !deferUntilAck && !isRuntimeUnlockOffer && (validation.AcceptedLanes & NknAccelerationLaneKind.File) != 0
+            ? new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously) : null;
         var ackSelection = deferUntilAck || expectedPreferenceOffer?.ListenerLease is not null || expectedIdleOffer is not null
             ? expectedPreferenceOffer : null;
         var fixedListenerCurrent = true;
@@ -38894,6 +38975,12 @@ public sealed partial class NknSignalingTransport : INknListenerCapHandoffContro
             if (ackSelection is not null) ackSelection.AwaitingFixedAckWrite = !deferUntilAck && ackSelection.ListenerLease is not null;
             accelerationSessionId = answer.SessionId.Trim();
             accelerationNegotiatedLanes = deferUntilAck ? NknAccelerationLaneKind.None : validation.AcceptedLanes;
+            ordinaryAnswerGeneration = Interlocked.Increment(ref fileActivationHandoffResetGeneration);
+            confirmedRuntimeUnlockAck = null;
+            if (isRuntimeUnlockOffer) Interlocked.Exchange(ref runtimeUnlockAckHoldGeneration, ordinaryAnswerGeneration);
+            ordinaryFileFinalAck = handoffAck is null ? null : (ordinaryAnswerGeneration, handoffAck.Task);
+            if (!isRuntimeUnlockOffer && ackSelection is not null)
+                ackSelection.OrdinaryFileHandoffGeneration = ordinaryAnswerGeneration;
             counterOwner = CaptureRetryPauseScopeLocked(accelerationSessionId, false);
             if (!isRuntimeUnlockOffer && !deferUntilAck) Interlocked.Exchange(ref accelerationNegotiationRetryAttempts, 0);
             accelerationPreparationAdmission = null;
@@ -38922,11 +39009,13 @@ public sealed partial class NknSignalingTransport : INknListenerCapHandoffContro
             try
             {
                 if (!fixedListenerCurrent || !await SendAccelerationAnswerAckAsync(answer, answerReplyTarget, validation.AcceptedLanes, CancellationToken.None,
-                        runtimeUnlock: runtimeUnlock, idleOffer: expectedIdleOffer, selection: ackSelection).ConfigureAwait(false))
+                        ordinaryAnswerGeneration, runtimeUnlock: runtimeUnlock, idleOffer: expectedIdleOffer, selection: ackSelection, handoffAck: handoffAck).ConfigureAwait(false))
                     return false;
-                if (ackSelection is null) return expectedIdleOffer is null || IsIdleSessionAcceptedAnswerCurrent(expectedIdleOffer);
                 lock (accelerationGate)
                 {
+                    if (ordinaryAnswerGeneration != fileActivationHandoffResetGeneration) return false;
+                    if (ackSelection is null)
+                        return published = expectedIdleOffer is null || IsIdleSessionAcceptedAnswerCurrentLocked(expectedIdleOffer);
                     if (!ReferenceEquals(finalAckPreferenceOffer, ackSelection) || ackSelection.Revoked ||
                         pendingAccelerationAnswerAckReplyShadow is not { } ack ||
                         (ack.IdleOffer is not null && !IsIdleSessionAcceptedAnswerCurrentLocked(ack.IdleOffer)) ||
@@ -38956,16 +39045,18 @@ public sealed partial class NknSignalingTransport : INknListenerCapHandoffContro
             }
             finally
             {
-                if (!published && ackSelection is not null)
+                if (!published && handoffAck is not null) BeforeOrdinaryFinalAckCleanupForTests?.Invoke();
+                handoffAck?.TrySetResult(published);
+                if (!published)
                 {
-                    (long Ack, long Pause)? abandoned;
+                    (long Ack, long Pause)? abandoned = null;
                     lock (accelerationGate)
                     {
-                        if (!ReferenceEquals(finalAckPreferenceOffer, ackSelection)) abandoned = null;
-                        else
+                        if ((runtimeUnlock ? ackSelection is not null : RetireOrdinaryFileHandoff(ordinaryAnswerGeneration)) &&
+                            ReferenceEquals(finalAckPreferenceOffer, ackSelection))
                         {
                             if (!deferUntilAck) accelerationNegotiatedLanes = NknAccelerationLaneKind.None;
-                            abandoned = RevokeFinalAckAndTakeOwnedPauseLocked();
+                            if (ackSelection is not null) abandoned = RevokeFinalAckAndTakeOwnedPauseLocked();
                         }
                     }
                     if (abandoned.HasValue)
@@ -39008,9 +39099,20 @@ public sealed partial class NknSignalingTransport : INknListenerCapHandoffContro
                             "answer_ack_submission_rejected");
                         return;
                     }
+                    long? releasedHandoff = null;
+                    lock (accelerationGate)
+                    {
+                        if (ordinaryAnswerGeneration == fileActivationHandoffResetGeneration && ordinaryAnswerGeneration == runtimeUnlockAckHoldGeneration)
+                        {
+                            var boundary = expectedOfferAuthorityBoundary!;
+                            confirmedRuntimeUnlockAck = (ordinaryAnswerGeneration, boundary.SessionId, boundary.TransactionGeneration, boundary.OfferGeneration);
+                            releasedHandoff = TryReleaseOrdinaryHandoffsAfterRuntimeUnlockLocked();
+                        }
+                    }
+                    if (releasedHandoff is long released) DeliverWaitingOrdinaryHandoffs(answer.SessionId, released);
                     await Task.Delay(RuntimeUnlockAnswerAckProbeSettleDelay, CancellationToken.None).ConfigureAwait(false);
                     if (!ValidateRuntimeUnlockAnswerHandoffBarrier(
-                            retainedAnswerHandoffBarrierGeneration, expectedOfferAuthorityBoundary!, counterOwner))
+                            retainedAnswerHandoffBarrierGeneration, expectedOfferAuthorityBoundary!, ordinaryAnswerGeneration, counterOwner))
                     {
                         CompleteRuntimeUnlockRetiredAnswerHandoffBarrier(
                             retainedAnswerHandoffBarrierGeneration,
@@ -39028,7 +39130,7 @@ public sealed partial class NknSignalingTransport : INknListenerCapHandoffContro
                             validation.AcceptedLanes,
                             "runtime_unlock_answer_ack_probe_ready",
                             expectedOfferAuthorityBoundary,
-                            retainedAnswerHandoffBarrierGeneration);
+                            retainedAnswerHandoffBarrierGeneration, ordinaryAnswerGeneration);
                     if (expectedOfferAuthorityBoundary?.Mode ==
                             RuntimeUnlockOfferAuthorityMode.InstalledRetry &&
                         handoffDisposition is
@@ -39076,7 +39178,8 @@ public sealed partial class NknSignalingTransport : INknListenerCapHandoffContro
             LocalOperationalLog.Info("NKN.Tuna",
                 $"event=tuna_acceleration_negotiated; session_id={answer.SessionId}; lanes={FormatAccelerationLanesForLog(validation.AcceptedLanes)}; payer_decision_id={answer.PayerDecisionId}");
             CompleteRuntimeUnlockRecoveryContractIfActive(answer.SessionId, "transport_acceleration_answer", completionInstallReceipt: null);
-            RequestFileTransferTunaActivationHandoff(answer.SessionId, validation.AcceptedLanes, "tuna_activation_negotiated");
+            RequestFileTransferTunaActivationHandoff(answer.SessionId, validation.AcceptedLanes, "tuna_activation_negotiated",
+                ordinaryGeneration: ordinaryAnswerGeneration);
             NotifyTransportAccelerationStateChanged(GetActiveAccelerationStatusReason());
         }
     }
@@ -39671,6 +39774,8 @@ public sealed partial class NknSignalingTransport : INknListenerCapHandoffContro
         var pendingLanes = NknAccelerationLaneKind.None;
         var pendingPayerDecisionId = 0L;
         var pendingAnswerAckGeneration = 0L;
+        long? ordinaryAckGeneration = null;
+        long? releasedHandoff = null;
         string? pendingTrigger = null;
         RuntimeUnlockOfferAuthorityMode? pendingAuthorityMode = null;
         RuntimeUnlockResponderAnswerProbeConvergenceHold? responderConvergence = null;
@@ -39790,6 +39895,7 @@ public sealed partial class NknSignalingTransport : INknListenerCapHandoffContro
                     }
                     else
                     {
+                        if (pendingResponderHandoffGeneration != fileActivationHandoffResetGeneration) return;
                         var needsProof = pendingAuthorityMode.HasValue &&
                             (IsRuntimeUnlockResponderWaitingForPeerProbe(
                                  runtimeUnlockTransactionState) ||
@@ -39824,6 +39930,15 @@ public sealed partial class NknSignalingTransport : INknListenerCapHandoffContro
                                     responderConvergence with { DialCleanupOwner = owner };
                             accelerationSessionId = ack.SessionId.Trim();
                             accelerationNegotiatedLanes = acceptedLanes;
+                            ordinaryAckGeneration = pendingResponderHandoffGeneration;
+                            if (pendingAuthorityMode.HasValue && (acceptedLanes & NknAccelerationLaneKind.File) != 0)
+                            {
+                                if (pendingResponderAckTransactionGeneration is long tx)
+                                    confirmedRuntimeUnlockAck = (ordinaryAckGeneration.Value, accelerationSessionId, tx, pendingAnswerAckGeneration);
+                                else if (responderConvergence is { } bound)
+                                    confirmedRuntimeUnlockAck = (ordinaryAckGeneration.Value, bound.SessionId, bound.TransactionGeneration, bound.OfferGeneration);
+                                releasedHandoff = TryReleaseOrdinaryHandoffsAfterRuntimeUnlockLocked();
+                            }
                             Interlocked.Exchange(ref accelerationNegotiationRetryAttempts, 0);
                             accelerationPreparationAdmission = null;
                             if (pendingAuthorityMode is null)
@@ -39866,6 +39981,7 @@ public sealed partial class NknSignalingTransport : INknListenerCapHandoffContro
             }
         }
 
+        if (releasedHandoff is long released) DeliverWaitingOrdinaryHandoffs(ack.SessionId, released);
         if (activationFailureReason is not null)
         {
             StopOfferDial(rejectedDial, activationFailureReason);
@@ -39913,7 +40029,7 @@ public sealed partial class NknSignalingTransport : INknListenerCapHandoffContro
                 ack.SessionId,
                 validation.AcceptedLanes & pendingLanes,
                 "runtime_unlock_answer_ack_probe_ready",
-                responderPeerProbeEvidence: null);
+                responderPeerProbeEvidence: null, ordinaryGeneration: ordinaryAckGeneration);
             NotifyTransportAccelerationStateChanged("runtime_unlock_pending_probe_commit");
             return;
         }
@@ -39925,7 +40041,8 @@ public sealed partial class NknSignalingTransport : INknListenerCapHandoffContro
             ack.SessionId,
             "transport_acceleration_answer_ack",
             completionInstallReceipt: null);
-        RequestFileTransferTunaActivationHandoff(ack.SessionId, validation.AcceptedLanes & pendingLanes, "tuna_activation_answer_ack");
+        RequestFileTransferTunaActivationHandoff(ack.SessionId, validation.AcceptedLanes & pendingLanes, "tuna_activation_answer_ack",
+            ordinaryGeneration: ordinaryAckGeneration);
         NotifyTransportAccelerationStateChanged(GetActiveAccelerationStatusReason());
     }
 
@@ -42795,6 +42912,7 @@ public sealed partial class NknSignalingTransport : INknListenerCapHandoffContro
         RetireFallbackListenerPreparation();
         string? fallbackSessionId;
         NknAccelerationLaneKind fallbackLanes;
+        long stoppedPauseGeneration;
         bool preserveRuntimeUnlockPendingAnswer;
         bool retryUnobservedRuntimeUnlockOfferAfterReset;
         bool retryInterruptedRuntimeUnlockOfferAfterReset;
@@ -42837,6 +42955,14 @@ public sealed partial class NknSignalingTransport : INknListenerCapHandoffContro
             runtimeUnlockResponderProbeAckScopeReceipt = null;
             fallbackSessionId = accelerationSessionId;
             fallbackLanes = accelerationNegotiatedLanes;
+            stoppedPauseGeneration = fileTransferTunaActivationPauseGeneration;
+            // Serialize retirement with new-channel pause writes, including the interval
+            // before fallback distinguishes an owned barrier from an admission-only pause.
+            lock (activationPausePublicationGate)
+            {
+                fileActivationResetGeneration++;
+                Interlocked.Increment(ref fileActivationHandoffResetGeneration);
+            }
             preserveRuntimeUnlockPendingAnswer =
                 ShouldPreserveRuntimeUnlockPendingAnswerAcrossResetLocked(normalizedReason);
             retryUnobservedRuntimeUnlockOfferAfterReset =
@@ -42915,6 +43041,20 @@ public sealed partial class NknSignalingTransport : INknListenerCapHandoffContro
              (!suppressFallbackProof && ShouldStartTunaFallbackProofForResetReason(normalizedReason)));
         if (shouldStartFallbackProof)
         {
+            if ((effectiveFallbackLanes & NknAccelerationLaneKind.File) != 0 && fallbackSessionId is not null)
+            {
+                lock (accelerationGate)
+                {
+                    // Retire only the stopped negotiation's unowned admission pause. Existing channels
+                    // still wait for their coordinator's fallback disposition; do not broadcast resume.
+                    if (accelerationSessionId is null &&
+                        fileTransferTunaActivationPauseSessionId == fallbackSessionId &&
+                        fileTransferTunaActivationPauseGeneration == stoppedPauseGeneration &&
+                        GetFileTransferRouteTransitionPauseAuthorityUnsafe()?.SessionId != fallbackSessionId &&
+                        !IsInitialReceiverBarrierPauseBoundUnsafe(fallbackSessionId))
+                        AdvanceActivationPauseLocked(null);
+                }
+            }
             if (!bootstrapLocalStopAlreadyPublished)
             {
                 StartTunaFallbackProofIfNeeded(normalizedReason, fallbackSessionId, effectiveFallbackLanes);

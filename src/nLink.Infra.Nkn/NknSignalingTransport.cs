@@ -53,6 +53,7 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
         FileTransferTransportHandoffKind HandoffKind,
         FileTransferTransportKind TargetTransport,
         DateTimeOffset RecordedUtc,
+        long? OrdinaryGeneration,
         RuntimeUnlockRouteCommitSnapshot? RuntimeUnlockPreCommitProbeSnapshot = null);
 
     private sealed record FileTransferFallbackV6BootstrapTrigger(

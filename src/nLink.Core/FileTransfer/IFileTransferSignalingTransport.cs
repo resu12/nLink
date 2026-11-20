@@ -3141,6 +3141,9 @@ public sealed class FileTransferDataSessionAvailabilityChangedEventArgs : EventA
     public FileTransferTransportKind TargetTransport { get; }
 
     internal RuntimeUnlockRouteCommitSnapshot? RuntimeUnlockPreCommitProbeSnapshot { get; }
+    // Veto only: an ordinary transport notification queued before reset cannot authorize work in Core.
+    internal Func<bool>? OrdinaryTunaHandoffIsCurrent { get; init; }
+    internal Task<bool>? OrdinaryTunaFinalAck { get; init; }
 
     internal RuntimeUnlockResponderPeerProbeRouteTransitionObservation?
         RuntimeUnlockResponderPeerProbeRouteTransitionObservation =>
