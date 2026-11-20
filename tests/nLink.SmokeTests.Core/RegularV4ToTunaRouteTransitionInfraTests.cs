@@ -306,7 +306,8 @@ public sealed partial class FileTransferRouteTransitionInfraTests : IDisposable
             FileTransferTransportHandoffKind.TunaToNormalFallback,
             FileTransferTransportKind.RegularNkn,
             evidence,
-            null);
+            null,
+            Type.Missing);
 
         await WaitUntilAsync(
             () => availabilityEvents.Any(
@@ -327,7 +328,8 @@ public sealed partial class FileTransferRouteTransitionInfraTests : IDisposable
             FileTransferTransportHandoffKind.None,
             FileTransferTransportKind.RegularNkn,
             null,
-            null);
+            null,
+            Type.Missing);
         await Task.Delay(50);
 
         Assert.Empty(availabilityEvents);
