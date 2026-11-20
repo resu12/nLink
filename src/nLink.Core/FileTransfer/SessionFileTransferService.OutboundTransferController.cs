@@ -148,7 +148,7 @@ public sealed partial class SessionFileTransferService
         int dataCancelProtocolVersion;
         long dataCancelTransportEpoch;
         IFileTransferRouteCompletionObserver? routeCompletionObserver;
-        IFileTransferTerminalObserver? terminalObserver;
+        Action<FileTransferTerminalNotification>? terminalObserver;
         string? normalizedErrorCodeForNotify;
         IFileTransferBridgeRecoveryExecutionBridge? bridgeRecoveryExecutionBridge = null;
         FileTransferBridgeRecoveryExecutionCommand? bridgeRecoveryExecutionCommand = null;
@@ -249,7 +249,7 @@ public sealed partial class SessionFileTransferService
             normalizedCancelReason = NormalizeReason(cancelReason) ?? CanceledReason;
             dataSessionToDispose = context.DetachDataSession();
             routeCompletionObserver = transport as IFileTransferRouteCompletionObserver;
-            terminalObserver = transport as IFileTransferTerminalObserver;
+            terminalObserver = (transport as IFileTransferTerminalObserver)?.CaptureTerminalObserver();
         }
 
         if (bridgeRecoveryExecutionBridge is not null &&
@@ -270,7 +270,7 @@ public sealed partial class SessionFileTransferService
             {
                 if (terminalState == FileTransferTransferState.Canceled)
                 {
-                    var controlCancelTask = SendCancelAsync(sessionId, transferId, normalizedCancelReason, CancellationToken.None);
+                    var controlCancelTask = SendCancelAsync(sessionId, transferId, normalizedCancelReason, CancellationToken.None, context.OfferInstanceId);
                     Task? redundantDataCancelTask = null;
                     var redundantDataSession = dataSessionToDispose;
                     if (redundantDataSession is not null)
@@ -340,7 +340,8 @@ public sealed partial class SessionFileTransferService
                         dataSessionToDispose = null;
                     }
 
-                    await SendErrorAsync(sessionId, transferId, context.ErrorCode ?? InvalidStateErrorCode, context.StatusMessage, CancellationToken.None).ConfigureAwait(false);
+                    await SendErrorAsync(sessionId, transferId, context.ErrorCode ?? InvalidStateErrorCode, context.StatusMessage, CancellationToken.None,
+                        instance: context.OfferInstanceId).ConfigureAwait(false);
                 }
             }
         }
@@ -385,7 +386,8 @@ public sealed partial class SessionFileTransferService
             sessionId,
             transferId,
             context.ErrorCode,
-            context.StatusMessage);
+            context.StatusMessage,
+            context.OfferInstanceId);
         NotifyRouteCompletedIfNeeded(routeCompletionObserver, context.RouteSelection, terminalState, sessionId, transferId);
         return true;
     }
@@ -414,8 +416,10 @@ public sealed partial class SessionFileTransferService
         CancellationToken ct,
         InboundBootstrapFeedbackOperation? requiredFeedbackOperation,
         InboundBootstrapWriteSource? requiredWriteSource = null,
-        InboundFinalizationSource? requiredFinalizationSource = null)
+        InboundFinalizationSource? requiredFinalizationSource = null, bool failedOfferResponse = false)
     {
+        bool closingOffer = terminalState == FileTransferTransferState.Declined || failedOfferResponse;
+        TaskCompletionSource? offerCleanup = null;
         NativeDestinationEvidence? completedNativeDestination = null;
         SessionFileTransferSnapshot? snapshot = null;
         bool shouldSendError;
@@ -428,7 +432,7 @@ public sealed partial class SessionFileTransferService
         int dataCancelProtocolVersion;
         long dataCancelTransportEpoch;
         IFileTransferRouteCompletionObserver? routeCompletionObserver;
-        IFileTransferTerminalObserver? terminalObserver;
+        Action<FileTransferTerminalNotification>? terminalObserver;
         string? normalizedErrorCodeForNotify;
         IFileTransferBridgeRecoveryExecutionBridge? bridgeRecoveryExecutionBridge = null;
         FileTransferBridgeRecoveryExecutionCommand? bridgeRecoveryExecutionCommand = null;
@@ -446,6 +450,7 @@ public sealed partial class SessionFileTransferService
             {
                 return;
             }
+            if (closingOffer && !context.CanAnswerOffer) return;
 
             if (context.IsTerminal)
             {
@@ -591,7 +596,7 @@ public sealed partial class SessionFileTransferService
                                !string.IsNullOrWhiteSpace(cancelReason);
             dataSessionToDispose = context.DetachDataSession();
             routeCompletionObserver = transport as IFileTransferRouteCompletionObserver;
-            terminalObserver = transport as IFileTransferTerminalObserver;
+            terminalObserver = (transport as IFileTransferTerminalObserver)?.CaptureTerminalObserver();
             if (nativeDestinationSourceCurrent && ReferenceEquals(inboundTransfer, context) &&
                 ReferenceEquals(context.WriteDestination, requiredFinalizationSource!.Destination) &&
                 context.NativeDestinationEvidence is { } destinationEvidence &&
@@ -605,8 +610,25 @@ public sealed partial class SessionFileTransferService
             // An explicitly moved evidence hold is no longer owned by the guard.
             if (terminalState == FileTransferTransferState.Completed)
                 context.WriteDestination?.ReleaseFinalizedNativeRead();
+            if (closingOffer && terminalObserver is not null)
+            {
+                offerCleanup = new(TaskCreationOptions.RunContinuationsAsynchronously);
+                context.PeerTerminalDispatch = offerCleanup.Task;
+            }
         }
 
+        if (offerCleanup is not null)
+        {
+            // Retire A's retry state before B can be installed. Never hold B behind a network write.
+            try
+            {
+                NotifyTransferTerminal(terminalObserver, FileTransferDirection.Inbound, context.RouteSelection, terminalState,
+                    sessionId, transferId, normalizedErrorCode, statusMessage);
+                RaiseTransferChanged(snapshot);
+            }
+            finally { offerCleanup.TrySetResult(); }
+            terminalObserver = null;
+        }
         frontierAppLifetime?.TryStartNativeDestinationHandoff(completedNativeDestination);
 
         if (bridgeRecoveryExecutionBridge is not null &&
@@ -632,16 +654,17 @@ public sealed partial class SessionFileTransferService
                 context.BytesTransferred);
         }
 
-        RaiseTransferChanged(snapshot);
+        if (offerCleanup is null) RaiseTransferChanged(snapshot);
         try
         {
             if (terminalState == FileTransferTransferState.Declined)
             {
-                await SendDeclineAsync(sessionId, transferId, cancelReason ?? DeclinedReason, ct).ConfigureAwait(false);
+                await SendDeclineAsync(sessionId, transferId, cancelReason ?? DeclinedReason, ct,
+                    context.DeclineIfCurrentAsync ?? (context.OfferTransport is { } source ? source.SendFileTransferDeclineAsync : null)).ConfigureAwait(false);
             }
             else if (shouldSendCancel)
             {
-                var controlCancelTask = SendCancelAsync(sessionId, transferId, normalizedCancelReason, CancellationToken.None);
+                var controlCancelTask = SendCancelAsync(sessionId, transferId, normalizedCancelReason, CancellationToken.None, context.OfferInstanceId);
                 Task? redundantDataCancelTask = null;
                 var redundantDataSession = dataSessionToDispose;
                 if (redundantDataSession is not null)
@@ -711,7 +734,8 @@ public sealed partial class SessionFileTransferService
                     dataSessionToDispose = null;
                 }
 
-                await SendErrorAsync(sessionId, transferId, normalizedErrorCode ?? InvalidStateErrorCode, errorMessage ?? statusMessage, CancellationToken.None).ConfigureAwait(false);
+                await SendErrorAsync(sessionId, transferId, normalizedErrorCode ?? InvalidStateErrorCode, errorMessage ?? statusMessage, CancellationToken.None,
+                    failedOfferResponse ? context.ErrorIfCurrentAsync : null, context.OfferInstanceId).ConfigureAwait(false);
             }
         }
         finally
@@ -761,16 +785,17 @@ public sealed partial class SessionFileTransferService
     }
 
     private static void NotifyTransferTerminal(
-        IFileTransferTerminalObserver? observer,
+        Action<FileTransferTerminalNotification>? observer,
         FileTransferDirection direction,
         FileTransferRouteSelection routeSelection,
         FileTransferTransferState terminalState,
         string sessionId,
         string transferId,
         string? errorCode,
-        string? reason)
+        string? reason,
+        Guid? offerInstanceId = null)
     {
-        observer?.ObserveFileTransferTerminal(
+        observer?.Invoke(
             new FileTransferTerminalNotification(
                 sessionId,
                 transferId,
@@ -779,7 +804,7 @@ public sealed partial class SessionFileTransferService
                 routeSelection.ProtocolVersion,
                 terminalState,
                 errorCode,
-                reason));
+                reason) { OfferInstanceId = offerInstanceId });
     }
 
     private static void NotifyRouteCompletedIfNeeded(
@@ -848,12 +873,13 @@ public sealed partial class SessionFileTransferService
         }
     }
 
-    private async Task SendDeclineAsync(string sessionId, string transferId, string? reason, CancellationToken ct)
+    private async Task SendDeclineAsync(string sessionId, string transferId, string? reason, CancellationToken ct,
+        Func<FileTransferDeclineV1, CancellationToken, Task>? send = null)
     {
         try
         {
-            var currentTransport = GetTransportOrThrow();
-            await currentTransport.SendFileTransferDeclineAsync(
+            send ??= GetTransportOrThrow().SendFileTransferDeclineAsync;
+            await send(
                 new FileTransferDeclineV1
                 {
                     SessionId = sessionId,
@@ -868,13 +894,13 @@ public sealed partial class SessionFileTransferService
         }
     }
 
-    private async Task SendCancelAsync(string sessionId, string transferId, string? reason, CancellationToken ct)
+    private async Task SendCancelAsync(string sessionId, string transferId, string? reason, CancellationToken ct, Guid? instance)
     {
         var normalizedReason = NormalizeReason(reason) ?? CanceledReason;
         try
         {
             using var timeout = new CancellationTokenSource(TimeSpan.FromMilliseconds(LifecyclePrioritySendTimeoutMs));
-            await TrySendCancelControlOnceAsync(sessionId, transferId, normalizedReason, attempt: 1, timeout.Token).ConfigureAwait(false);
+            await TrySendCancelControlOnceAsync(sessionId, transferId, normalizedReason, attempt: 1, timeout.Token, instance).ConfigureAwait(false);
         }
         catch (OperationCanceledException)
         {
@@ -883,24 +909,32 @@ public sealed partial class SessionFileTransferService
                 $"event=filetransfer_lifecycle_priority_send_failed; kind=cancel; transfer_id={transferId}; session_id={sessionId}; reason={FormatProtocolLogValue(normalizedReason)}; path=control; error=timeout");
         }
 
-        _ = Task.Run(
-            () => RunCancelControlRetryLoopAsync(sessionId, transferId, normalizedReason),
+        LastCancelControlRetryForTests = Task.Run(
+            () => RunCancelControlRetryLoopAsync(sessionId, transferId, normalizedReason, instance),
             CancellationToken.None);
     }
 
-    private async Task RunCancelControlRetryLoopAsync(string sessionId, string transferId, string? reason)
+    internal Task? LastCancelControlRetryForTests { get; private set; }
+
+    private async Task RunCancelControlRetryLoopAsync(string sessionId, string transferId, string? reason, Guid? instance)
     {
         for (var index = 0; index < CancelRetryDelaysMs.Length; index++)
         {
             try
             {
                 await Task.Delay(CancelRetryDelaysMs[index]).ConfigureAwait(false);
+                lock (gate)
+                {
+                    if (disposed ||
+                        outboundTransfer is { } newerOut && newerOut.SessionId == sessionId && newerOut.TransferId == transferId && newerOut.OfferInstanceId != instance ||
+                        inboundTransfer is { } newerIn && newerIn.SessionId == sessionId && newerIn.TransferId == transferId && newerIn.OfferInstanceId != instance) return;
+                }
                 await TrySendCancelControlOnceAsync(
                         sessionId,
                         transferId,
                         reason,
                         attempt: index + 2,
-                        CancellationToken.None)
+                        CancellationToken.None, instance)
                     .ConfigureAwait(false);
             }
             catch (OperationCanceledException)
@@ -922,7 +956,7 @@ public sealed partial class SessionFileTransferService
         string transferId,
         string? reason,
         int attempt,
-        CancellationToken ct)
+        CancellationToken ct, Guid? instance)
     {
         try
         {
@@ -932,6 +966,7 @@ public sealed partial class SessionFileTransferService
                 {
                     SessionId = sessionId,
                     TransferId = transferId,
+                    OfferInstanceId = instance,
                     Reason = NormalizeReason(reason),
                 },
                 ct).ConfigureAwait(false);
@@ -1207,21 +1242,22 @@ public sealed partial class SessionFileTransferService
         }
     }
 
-    private async Task SendErrorAsync(string sessionId, string transferId, string errorCode, string? message, CancellationToken ct)
+    private async Task SendErrorAsync(string sessionId, string transferId, string errorCode, string? message, CancellationToken ct,
+        Func<FileTransferErrorV1, CancellationToken, Task<bool>>? boundSend = null, Guid? instance = null)
     {
         try
         {
             using var timeout = new CancellationTokenSource(TimeSpan.FromMilliseconds(LifecyclePrioritySendTimeoutMs));
-            var currentTransport = GetTransportOrThrow();
-            await currentTransport.SendFileTransferErrorAsync(
-                new FileTransferErrorV1
+            var error = new FileTransferErrorV1
                 {
                     SessionId = sessionId,
                     TransferId = transferId,
+                    OfferInstanceId = instance,
                     ErrorCode = NormalizeErrorCode(errorCode) ?? InvalidStateErrorCode,
                     Message = NormalizeReason(message),
-                },
-                timeout.Token).ConfigureAwait(false);
+                };
+            if (boundSend is null) await GetTransportOrThrow().SendFileTransferErrorAsync(error, timeout.Token).ConfigureAwait(false);
+            else if (!await boundSend(error, timeout.Token).ConfigureAwait(false)) return;
             LocalOperationalLog.Info(
                 "FileTransferService",
                 $"event=filetransfer_lifecycle_priority_sent; kind=error; transfer_id={transferId}; session_id={sessionId}; reason={FormatProtocolLogValue(NormalizeReason(message) ?? "(none)")}; path=control; error_code={NormalizeErrorCode(errorCode) ?? InvalidStateErrorCode}");
@@ -1544,11 +1580,11 @@ public sealed partial class SessionFileTransferService
         }
     }
 
-    private FileTransferTransferSnapshot? CaptureCurrentInboundSnapshot()
+    private FileTransferTransferSnapshot? CaptureCurrentInboundSnapshot(InboundTransferContext? expected = null)
     {
         lock (gate)
         {
-            return inboundTransfer is { } inbound
+            return inboundTransfer is { } inbound && (expected is null || ReferenceEquals(expected, inbound))
                 ? CreateTransferSnapshotLocked(inbound)
                 : null;
         }

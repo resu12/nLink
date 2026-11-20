@@ -12,6 +12,82 @@ public sealed partial class NknAccelerationTransportTests
     [InlineData(true, false)]
     [InlineData(true, true)]
     [Trait("FileTransferInfraSuite", "SessionPreparationAdmission")]
+    public Task PreparationAdmission_PeerTerminalBeforeInstallRetiresExactInboundOffer(bool afterRetention, bool error)
+        => WithPreparationHandshakePairAsync(false, async pair =>
+        {
+            Assert.True(await pair.Start().WaitAsync(pair.Token));
+            await pair.WaitReady();
+            var receiver = pair.DialerService;
+            var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var retained = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var offered = new TaskCompletionSource<FileTransferOfferReceivedEventArgs>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var retired = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            pair.Dialer.FileTransferOfferReceived += (_, e) => offered.TrySetResult(e);
+            pair.Dialer.FileTransferCancelReceived += (_, e) => { if (e.Message.TransferId == "prepared-admission") retired.TrySetResult(); };
+            pair.Dialer.FileTransferErrorReceived += (_, e) => { if (e.Message.TransferId == "prepared-admission") retired.TrySetResult(); };
+            if (afterRetention)
+                pair.Dialer.SessionPreparationAfterRetentionForTests = () =>
+                {
+                    retained.TrySetResult();
+                    release.Task.WaitAsync(pair.Token).GetAwaiter().GetResult();
+                };
+            else
+                InvokePrivateMethod(receiver, "EnqueueInboundLifecycle", "hold_prepared_offer", (Func<Task>)(() => release.Task));
+            FileTransferOfferReceivedEventArgs envelope;
+            try
+            {
+                Assert.Equal("file_tuna_v4", (await StartPreparedAdmission(pair.PayerService, pair.Token))!.RouteToken);
+                envelope = await offered.Task.WaitAsync(pair.Token);
+                if (afterRetention) await retained.Task.WaitAsync(pair.Token);
+                var admission = pair.State(receiver).Admission!;
+                Assert.NotNull(admission.Readiness);
+                Assert.Equal(FileTransferDirection.Inbound, admission.Direction);
+                Assert.Null(receiver.Snapshot.Inbound);
+                if (error)
+                    await pair.Payer.SendFileTransferErrorAsync(new() { SessionId = envelope.Message.SessionId,
+                        TransferId = admission.TransferId, ErrorCode = "peer_error" }, pair.Token);
+                else
+                    await pair.Payer.SendFileTransferCancelAsync(new() { SessionId = envelope.Message.SessionId,
+                        TransferId = admission.TransferId, Reason = "user_cancel" }, pair.Token);
+                await retired.Task.WaitAsync(pair.Token);
+                Assert.Null(GetPrivateField(receiver, "preparationAdmission"));
+                if (afterRetention) Assert.False(AdmissionLease(receiver).IsCurrent);
+            }
+            finally { release.TrySetResult(); }
+            await ((Task)GetPrivateField(receiver, "inboundLifecycleTail")!).WaitAsync(pair.Token);
+            // Simulate an already-authenticated event delivered late, after its terminal was handled.
+            InvokePrivateMethod(receiver, "OnFileTransferOfferReceived", pair.Dialer, envelope);
+            await ((Task)GetPrivateField(receiver, "inboundLifecycleTail")!).WaitAsync(pair.Token);
+            Assert.Null(receiver.Snapshot.Inbound);
+            Assert.False(pair.Dialer.IsAccelerationAvailableForTests);
+            await pair.DialerLane.Stopped.Task.WaitAsync(pair.Token);
+            Assert.Equal(0, pair.DialerLane.GlobalStops);
+        });
+
+    [Fact]
+    [Trait("FileTransferInfraSuite", "SessionPreparationAdmission")]
+    public Task PreparationAdmission_RegularOfferDoesNotClaimPreparedTunaReadiness()
+        => WithPreparationHandshakePairAsync(false, async pair =>
+        {
+            Assert.True(await pair.Start().WaitAsync(pair.Token));
+            await pair.WaitReady();
+            await pair.Payer.SendFileTransferOfferAsync(new() { SessionId = pair.Permit.Scope.SessionId,
+                TransferId = "regular-admission", FileName = "regular.bin", FileSizeBytes = 4, PreferredDataProtocolVersion = 4,
+                FileTransferRoute = FileTransferRouteResolver.RegularNknV4FastToken }, pair.Token);
+            await WaitUntilAsync(() => pair.DialerService.Snapshot.Inbound is { TransferId: "regular-admission",
+                RouteToken: FileTransferRouteResolver.RegularNknV4FastToken, State: FileTransferTransferState.PendingDecision }, TimeSpan.FromSeconds(3));
+            Assert.Equal("regular-admission", pair.State(pair.DialerService).Admission!.TransferId);
+            Assert.Null(pair.State(pair.DialerService).ClaimedEvidence);
+            await pair.DialerLane.Stopped.Task.WaitAsync(pair.Token);
+            Assert.Equal((0, 0, 0), (pair.DialerLane.Retains, pair.DialerLane.Activations, pair.DialerLane.GlobalStops));
+        });
+
+    [Theory]
+    [InlineData(false, false)]
+    [InlineData(false, true)]
+    [InlineData(true, false)]
+    [InlineData(true, true)]
+    [Trait("FileTransferInfraSuite", "SessionPreparationAdmission")]
     public Task PreparationAdmission_JoinedPayloadSurvivesPreparationRetirement(bool helperPays, bool payerSends)
         => WithPreparationHandshakePairAsync(helperPays, async pair =>
         {

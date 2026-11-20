@@ -42,7 +42,7 @@ public sealed partial class NknSignalingTransport
             CancellationToken ct,
             bool isLowPriorityMouseMove = false,
             bool isLowPriorityScreenShareCursorState = false,
-            IdleSessionOfferBinding? idleAnswer = null)
+            IdleSessionOfferBinding? idleAnswer = null, OwnedHandshakeWrite? fileOfferWrite = null)
         {
             var completion = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
             var queued = new QueuedControlEnvelope(
@@ -51,7 +51,7 @@ public sealed partial class NknSignalingTransport
                 completion,
                 ct,
                 isLowPriorityMouseMove,
-                isLowPriorityScreenShareCursorState) { IdleAnswer = idleAnswer };
+                isLowPriorityScreenShareCursorState) { IdleAnswer = idleAnswer, FileOfferWrite = fileOfferWrite };
             var logBootstrapScreenShareControl = TryGetStartupScreenShareControlMetadata(envelope, out var startupScreenShareMetadata);
             List<TaskCompletionSource<bool>>? droppedCompletions = null;
             var shouldStartDrainer = false;
@@ -402,7 +402,7 @@ public sealed partial class NknSignalingTransport
                 try
                 {
                     var sent = await owner.SendEnvelopeAsync(queued.Destination, queued.Envelope,
-                        EnvelopeCodec.Serialize(queued.Envelope), queued.CancellationToken, queued.IdleAnswer).ConfigureAwait(false);
+                        EnvelopeCodec.Serialize(queued.Envelope), queued.CancellationToken, queued.IdleAnswer, queued.FileOfferWrite).ConfigureAwait(false);
                     if (logBootstrapScreenShareControl)
                     {
                         LogBootstrapScreenShareControlStage("sent", queued.Envelope, startupScreenShareMetadata!, queuedResult: true);

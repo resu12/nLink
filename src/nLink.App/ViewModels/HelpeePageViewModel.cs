@@ -1693,7 +1693,7 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatFileT
             "file_transfer_accept_ui_requested",
             normalizedTransferId,
             includeDecline: false);
-        if (!CanAcceptIncomingFile(normalizedTransferId))
+        if (InboundFileTransfer is not { } displayed || !CanAcceptIncomingFile(normalizedTransferId))
         {
             LogFileTransferActionUi(
                 "file_transfer_accept_ui_ignored",
@@ -1702,7 +1702,7 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatFileT
             return;
         }
 
-        await sessionRuntime.AcceptIncomingAsync(normalizedTransferId!, CancellationToken.None).ConfigureAwait(false);
+        await sessionRuntime.AcceptIncomingForOfferAsync((displayed.SessionId, displayed.InboundOfferToken), normalizedTransferId!, CancellationToken.None).ConfigureAwait(false);
     }
 
     private bool CanAcceptIncomingFile(string? transferId)
@@ -1720,12 +1720,12 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatFileT
             "file_transfer_decline_ui_requested",
             normalizedTransferId,
             includeDecline: true);
-        if (!CanDeclineIncomingFile(normalizedTransferId))
+        if (InboundFileTransfer is not { } displayed || !CanDeclineIncomingFile(normalizedTransferId))
         {
             return;
         }
 
-        await sessionRuntime.DeclineIncomingAsync(normalizedTransferId!, uiCt: CancellationToken.None).ConfigureAwait(false);
+        await sessionRuntime.DeclineIncomingForOfferAsync((displayed.SessionId, displayed.InboundOfferToken), normalizedTransferId!, null, CancellationToken.None).ConfigureAwait(false);
     }
 
     private bool CanDeclineIncomingFile(string? transferId)

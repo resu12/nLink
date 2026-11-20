@@ -191,12 +191,12 @@ public sealed partial class NknAccelerationTransportTests
             pair.AssertNoFileEffects();
         });
 
-    private static async Task WithPreparationHandshakePairAsync(bool helperPays, Func<PreparationHandshakePair, Task> test)
+    private static async Task WithPreparationHandshakePairAsync(bool helperPays, Func<PreparationHandshakePair, Task> test, bool useWriterGatePeer = false)
     {
         FakeNknClient.ResetNetwork();
         try
         {
-            using var pair = new PreparationHandshakePair(helperPays);
+            using var pair = new PreparationHandshakePair(helperPays, useWriterGatePeer: useWriterGatePeer);
             await pair.Approve();
             await test(pair);
         }
@@ -279,11 +279,12 @@ public sealed partial class NknAccelerationTransportTests
         public readonly ConcurrentQueue<string> Liveness = new();
         public FileTransferSessionPreparationPermit Permit = null!;
 
-        public PreparationHandshakePair(bool helperPays, NknTunaAccelerationOptions? payerOptions = null)
+        public PreparationHandshakePair(bool helperPays, NknTunaAccelerationOptions? payerOptions = null, bool useWriterGatePeer = false)
         {
             var id = Guid.NewGuid().ToString("N");
             PayerClient = new($"payer.preparation-handshake.{id}.address");
-            DialerClient = new($"dialer.preparation-handshake.{id}.address");
+            var dialerAddress = $"dialer.preparation-handshake.{id}.address";
+            DialerClient = useWriterGatePeer ? new WriterGatePeer(dialerAddress) : new FakeNknClient(dialerAddress);
             var options = NknTransportOptions.Load();
             Payer = new(PayerClient, options, new NknIdentity("preparation-payer", PayerClient.Address),
                 payerOptions ?? NknTunaAccelerationOptions.Disabled, PayerLane);

@@ -2341,7 +2341,7 @@ public sealed partial class NknSignalingTransport
     }
 
     private async Task<bool> SendEnvelopeAsync(string destination, Envelope envelope, byte[] bytes, CancellationToken ct,
-        IdleSessionOfferBinding? idleAnswer = null)
+        IdleSessionOfferBinding? idleAnswer = null, OwnedHandshakeWrite? admitOfferResponse = null)
     {
         var logBootstrapGate = false;
         QueuedScreenShareEnvelopeMetadata? bootstrapMetadata = null;
@@ -2378,7 +2378,11 @@ public sealed partial class NknSignalingTransport
                 // Recheck after the outbound gate: queued ACKs may outlive their handshake.
                 if (!CanSendAccelerationHandshakeEnvelope(envelope)) return false;
                 if (idleAnswer is not null && !IsIdleSessionAcceptedAnswerCurrent(idleAnswer)) return false;
-                if (SendOwnedHandshakeIfBound(destination, envelope, bytes, NknBridgeChannel.Control, false, ct) is { } owned)
+                if (admitOfferResponse is not null)
+                {
+                    if (!await SendOfferResponseCopyAsync(destination, bytes, NknBridgeChannel.Control, admitOfferResponse, ct).ConfigureAwait(false)) return false;
+                }
+                else if (SendOwnedHandshakeIfBound(destination, envelope, bytes, NknBridgeChannel.Control, false, ct) is { } owned)
                 {
                     if (!await owned.ConfigureAwait(false)) return false;
                 }
@@ -2414,6 +2418,23 @@ public sealed partial class NknSignalingTransport
         }
     }
 
+    private async Task<bool> SendOfferResponseCopyAsync(string destination, byte[] bytes, NknBridgeChannel channel,
+        OwnedHandshakeWrite admission, CancellationToken ct)
+    {
+        if (client is IOwnedHandshakeClient bridge)
+        {
+            if (!await bridge.SendOwnedHandshakeAsync(destination, bytes, channel, false, admission, ct).ConfigureAwait(false)) return false;
+        }
+        else
+        {
+            if (admission(() => new ValueTask(channel == NknBridgeChannel.Bulk ? client.SendBulkAsync(destination, bytes, ct)
+                    : client.SendAsync(destination, bytes, ct))) is not { } write) return false;
+            await write.ConfigureAwait(false);
+        }
+        NknRuntimeDiagnostics.IncrementMessagesSent();
+        return true;
+    }
+
     private enum BulkSendResult { Skipped, RegularNkn, Accelerated }
 
     private Task<BulkSendResult> SendBulkEnvelopeAsync(string destination, Envelope envelope, CancellationToken ct)
@@ -2428,7 +2449,7 @@ public sealed partial class NknSignalingTransport
         byte[] bytes,
         CancellationToken ct,
         bool allowAcceleration = true,
-        bool allowAccelerationDuringRegularNknFallback = false)
+        bool allowAccelerationDuringRegularNknFallback = false, OwnedHandshakeWrite? admitOfferResponse = null)
     {
 
         try
@@ -2455,7 +2476,11 @@ public sealed partial class NknSignalingTransport
             }
 
             if (!CanSendAccelerationHandshakeEnvelope(envelope)) return BulkSendResult.Skipped;
-            if (SendOwnedHandshakeIfBound(destination, envelope, bytes, NknBridgeChannel.Bulk, false, ct) is { } owned)
+            if (admitOfferResponse is not null)
+            {
+                if (!await SendOfferResponseCopyAsync(destination, bytes, NknBridgeChannel.Bulk, admitOfferResponse, ct).ConfigureAwait(false)) return BulkSendResult.Skipped;
+            }
+            else if (SendOwnedHandshakeIfBound(destination, envelope, bytes, NknBridgeChannel.Bulk, false, ct) is { } owned)
             {
                 if (!await owned.ConfigureAwait(false)) return BulkSendResult.Skipped;
             }
@@ -3829,6 +3854,7 @@ public sealed partial class NknSignalingTransport
         bool IsLowPriorityScreenShareCursorState)
     {
         public IdleSessionOfferBinding? IdleAnswer { get; init; }
+        public OwnedHandshakeWrite? FileOfferWrite { get; init; }
     }
 
     private sealed class JoinRequestPayload

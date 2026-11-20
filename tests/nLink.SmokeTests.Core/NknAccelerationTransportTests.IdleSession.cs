@@ -15,11 +15,14 @@ public sealed partial class NknAccelerationTransportTests
     {
         public BridgeStdioWriter? Writer;
         public Action? AfterFrameWritten;
+        public Func<MsgType, NknBridgeChannel, Task>? BeforeOwnedWrite;
         public readonly TaskCompletionSource Arrived = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public readonly TaskCompletionSource<bool> WriteCompleted = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public async Task<bool> SendOwnedHandshakeAsync(string destination, byte[] bytes, NknBridgeChannel channel, bool priority,
             OwnedHandshakeWrite admit, CancellationToken ct)
         {
+            if (BeforeOwnedWrite is { } before && EnvelopeCodec.TryDeserialize(bytes, out var envelope))
+                await before(envelope.Type, channel);
             if (Writer is { } writer)
             {
                 Arrived.TrySetResult();
@@ -28,7 +31,8 @@ public sealed partial class NknAccelerationTransportTests
                 WriteCompleted.TrySetResult(written);
                 return written;
             }
-            if (admit(() => new ValueTask(SendAsync(destination, bytes, ct))) is not { } write) return false;
+            if (admit(() => new ValueTask(channel == NknBridgeChannel.Bulk ? SendBulkAsync(destination, bytes, ct)
+                : SendAsync(destination, bytes, ct))) is not { } write) return false;
             await write;
             return true;
         }
@@ -1839,6 +1843,7 @@ public sealed partial class NknAccelerationTransportTests
     public async Task LaneSelection_OrdinaryHandshakeKeepsExactOfferThroughFinalAck(string scenario)
     {
         FakeNknClient.ResetNetwork();
+        using var profile = NknTransportOptions.OverrideLocalAppDataPathForTests(Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N")));
         using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(15));
         var ct = timeout.Token;
         const NknAccelerationLaneKind both = NknAccelerationLaneKind.File | NknAccelerationLaneKind.Screen;
@@ -2130,6 +2135,7 @@ public sealed partial class NknAccelerationTransportTests
             await entered.Task.WaitAsync(ct);
             Assert.Equal(NknAccelerationLaneKind.None, payer.AccelerationNegotiatedLanesForTests);
             Assert.False(ack.Task.IsCompleted);
+            Assert.Null(GetPrivateField(payer, "initialTunaReadinessState"));
             SetPrivateField(payer, "accelerationNegotiationRetryAttempts", 3);
             if (payerClient is WriterGatePeer writerPeer)
             {
@@ -2173,6 +2179,7 @@ public sealed partial class NknAccelerationTransportTests
                 var published = await Assert.IsAssignableFrom<Task<bool>>(payer.IdleSessionAnswerAckForTests).WaitAsync(ct);
                 Assert.Equal(!leaseAck, published);
                 Assert.Equal(published ? both : NknAccelerationLaneKind.None, payer.AccelerationNegotiatedLanesForTests);
+                if (!published) Assert.Null(GetPrivateField(payer, "initialTunaReadinessState"));
                 Assert.Equal(scenario != "lease-before-ack", ack.Task.IsCompleted);
                 Assert.Equal(!leaseAck, originalLease == listener.CaptureCurrentLaneLease());
                 Assert.True(listener.IsLocalPaidListenerActive);
@@ -2290,6 +2297,7 @@ public sealed partial class NknAccelerationTransportTests
             {
                 Assert.False(await Assert.IsAssignableFrom<Task<bool>>(payer.IdleSessionAnswerAckForTests));
                 Assert.Equal(scenario != "expired-replacement-pause", data!.IsAvailable);
+                Assert.Null(GetPrivateField(payer, "initialTunaReadinessState"));
                 Assert.Null(GetPrivateField(payer, "finalAckPreferenceOffer"));
                 Assert.Equal(3, GetPrivateField(payer, "accelerationNegotiationRetryAttempts"));
                 Assert.Equal(NknAccelerationLaneKind.None, payer.AccelerationNegotiatedLanesForTests);

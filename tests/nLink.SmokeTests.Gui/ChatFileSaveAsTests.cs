@@ -78,13 +78,20 @@ public sealed class ChatFileSaveAsTests(ChatViewScrollFixture fixture) : CoreSmo
                     await WaitUntilAsync(() => receiver.InboundFileTransfer is { ShowAccept: true } card && card.TransferId == sent!.TransferId, wait);
                     window.UpdateLayout();
                 }
-                void Click(string id)
+                void Click(string id, Guid? staleToken = null)
                 {
                     var button = chat.GetVisualDescendants().OfType<Button>().Single(b =>
                         AutomationProperties.GetAutomationId(b) == "Chat.FileTransfer." + id &&
                         b.DataContext is FileTransferPanelItemViewModel { ShowAccept: true });
                     Assert.True(button.IsEffectivelyVisible);
-                    button.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+                    if (staleToken is { } oldToken)
+                    {
+                        var card = (FileTransferPanelItemViewModel)button.DataContext!;
+                        button.DataContext = card with { InboundOfferToken = oldToken };
+                        try { button.RaiseEvent(new RoutedEventArgs(Button.ClickEvent)); }
+                        finally { button.ClearValue(Control.DataContextProperty); }
+                    }
+                    else button.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
                 }
                 async Task AssertSavedAsync(string path)
                 {
@@ -166,6 +173,10 @@ public sealed class ChatFileSaveAsTests(ChatViewScrollFixture fixture) : CoreSmo
                 await OfferAsync();
                 Assert.NotEqual(canceledId, receiver.InboundFileTransfer!.TransferId);
                 Assert.NotEqual(canceledToken, receiver.InboundFileTransfer!.InboundOfferToken);
+                Click("Accept", canceledToken);
+                Click("Decline", canceledToken);
+                Assert.True(receivingRuntime.FileTransferSnapshot.Inbound is { State: FileTransferTransferState.PendingDecision });
+                Assert.Equal(1, Volatile.Read(ref accepts));
                 var stalePath = Path.Combine(elsewhere, "stale.txt");
                 delayed.SetResult(stalePath);
                 await Dispatcher.UIThread.InvokeAsync(() => { }, DispatcherPriority.Background);

@@ -38881,8 +38881,10 @@ public sealed partial class NknAccelerationTransportTests : CoreSmokeTestsBase, 
         public bool StrictPayerHandoffForTests { get; set; }
 
         public NknTunaLaneLease? CaptureCurrentLaneLease() => StrictPayerHandoffForTests && IsAvailable ? handoffLease : null;
+        public Action<NknTunaLaneLease>? BeforeListenerPublishForTests { get; set; }
         public bool TryPublishForListenerLease(NknTunaLaneLease lease, Action publish)
         {
+            BeforeListenerPublishForTests?.Invoke(lease);
             if (!IsLocalPaidListenerActive || CaptureCurrentLaneLease() != lease) return false;
             publish();
             return true;

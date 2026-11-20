@@ -102,11 +102,11 @@ internal sealed class SessionRuntimeFileTransferHost
         CancellationToken ct)
         => owner.StartSendCoreAsync(descriptor, openReadStreamAsync, ct);
 
-    public Task<FileTransferTransferSnapshot?> AcceptIncomingAsync(string transferId, CancellationToken ct)
-        => owner.AcceptIncomingCoreAsync(transferId, ct);
+    public Task<FileTransferTransferSnapshot?> AcceptIncomingAsync(string transferId, CancellationToken ct, (string SessionId, Guid Token)? offer)
+        => owner.AcceptIncomingCoreAsync(transferId, ct, offer);
 
-    public Task<FileTransferTransferSnapshot?> DeclineIncomingAsync(string transferId, string? reason, CancellationToken ct)
-        => owner.DeclineIncomingCoreAsync(transferId, reason, ct);
+    public Task<FileTransferTransferSnapshot?> DeclineIncomingAsync(string transferId, string? reason, CancellationToken ct, (string SessionId, Guid Token)? offer)
+        => owner.DeclineIncomingCoreAsync(transferId, reason, ct, offer);
 
     public Task<FileTransferTransferSnapshot?> CancelTransferAsync(string transferId, string? reason, CancellationToken ct)
         => owner.CancelTransferCoreAsync(transferId, reason, ct);

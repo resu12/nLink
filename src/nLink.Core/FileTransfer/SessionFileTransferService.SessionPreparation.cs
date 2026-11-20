@@ -45,6 +45,7 @@ public sealed partial class SessionFileTransferService : IFileTransferSessionPre
 
     private FileTransferSessionPreparationAttachment? DetachPreparationTransportLocked()
     {
+        RetireWaitingFileOffersLocked();
         RetireIdleOfferWriteLocked();
         var old = preparationAttachment;
         preparationAttachment = null;
@@ -60,6 +61,7 @@ public sealed partial class SessionFileTransferService : IFileTransferSessionPre
 
     private void RevokePreparationScopeLocked()
     {
+        RetireWaitingFileOffersLocked();
         RetireIdleOfferWriteLocked();
         preparationBlockedThroughGeneration = Math.Max(preparationBlockedThroughGeneration,
             preparationAttachment?.Lifecycle.Generation ?? 0);
@@ -538,6 +540,15 @@ public sealed partial class SessionFileTransferService : IFileTransferSessionPre
         lock (gate)
             if (preparationAdmissionLease is { } lease && ReferenceEquals(lease.Admission, capture?.Admission) && !lease.IsAdopted)
                 lease.Retire();
+    }
+
+    private void RetirePendingInboundPreparationLocked(PreparationAdmissionCapture capture)
+    {
+        if (!ReferenceEquals(preparationAdmission, capture)) return;
+        preparationAdmission = null; // Queued work and late retention callbacks no longer own this reservation.
+        RetireUnadoptedPreparationAdmission(capture);
+        if (preparationExecution is { } execution && ReferenceEquals(execution.Admission, capture.Admission))
+            execution.Retire();
     }
 
     private FileTransferSessionPreparationExecution? CurrentPreparationExecutionLocked()

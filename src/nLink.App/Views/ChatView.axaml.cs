@@ -486,6 +486,13 @@ public partial class ChatView : UserControl
         Func<IChatPanelBindings, CommunityToolkit.Mvvm.Input.IAsyncRelayCommand<string?>> fallbackCommandSelector)
     {
         var item = (sender as Control)?.DataContext as FileTransferPanelItemViewModel;
+        if (actionName is "accept" or "decline" && DataContext is IChatFileTransferActions receiver &&
+            (item is null || item.InboundOfferToken == Guid.Empty || receiver.InboundFileTransfer is not { } current ||
+             current.SessionId != item.SessionId || current.TransferId != item.TransferId || current.InboundOfferToken != item.InboundOfferToken))
+        {
+            LogFileTransferClickIgnored(actionName, "stale_offer", item, item?.TransferId);
+            return;
+        }
         var transferId = item?.TransferId ?? (sender as Button)?.CommandParameter as string;
         var command = item is null ? null : itemCommandSelector(item);
         command ??= DataContext is IChatPanelBindings bindings

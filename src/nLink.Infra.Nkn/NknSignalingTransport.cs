@@ -202,6 +202,10 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
         windowSize: FileTransferInboundReplayWindowSize,
         maxForwardAdvance: FileTransferInboundReplayMaxForwardAdvance);
     private readonly Dictionary<string, FileTransferTransportState> fileTransferStates = new(StringComparer.Ordinal);
+    private readonly HashSet<string> issuedFileOfferIds = new(StringComparer.Ordinal);
+    private readonly HashSet<(string TransferId, Guid Instance)> receivedFileOfferInstances = [];
+    private sealed class FileOfferSubmission { public readonly Guid WireId = Guid.NewGuid(); public bool Installed; public int Attempt; }
+    private readonly System.Runtime.CompilerServices.ConditionalWeakTable<FileTransferOfferV2, FileOfferSubmission> fileOfferSubmissions = new();
     private readonly Dictionary<string, ExpectedControlReplayDuplicateSuppressionState> expectedControlReplayDuplicateSuppressions = new(StringComparer.Ordinal);
     private readonly Dictionary<string, FileTransferTerminalTombstone> fileTransferTerminalTombstones = new(StringComparer.Ordinal);
     private readonly Dictionary<string, DateTimeOffset> fileTransferCancelEchoLastSent = new(StringComparer.Ordinal);
@@ -2602,7 +2606,8 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
                 if (TryCreateLifecyclePreSendValidationFailure(options, "control_queue") is { } delayedFailure)
                     return delayedFailure;
             }
-            var queued = await QueueControlEnvelopeAsync(options.ControlDestination, envelope, ControlOutboundLane.High, copyCt).ConfigureAwait(false);
+            var queued = await controlOutboundQueue.QueueEnvelopeAsync(options.ControlDestination, envelope, ControlOutboundLane.High, copyCt,
+                fileOfferWrite: options.FileOfferWrite).ConfigureAwait(false);
             succeeded = queued;
             return new LifecycleCopySendResult("control_queue", queued, null);
         }
@@ -2700,9 +2705,10 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
                     return delayedFailure;
             }
 
+            var bytes = EnvelopeCodec.Serialize(envelope);
             succeeded = useBulkLane
-                ? await SendBulkEnvelopeAsync(destination, envelope, copyCts.Token).ConfigureAwait(false) != BulkSendResult.Skipped
-                : await SendEnvelopeAsync(destination, envelope, copyCts.Token).ConfigureAwait(false);
+                ? await SendBulkEnvelopeAsync(destination, envelope, bytes, copyCts.Token, admitOfferResponse: options.FileOfferWrite).ConfigureAwait(false) != BulkSendResult.Skipped
+                : await SendEnvelopeAsync(destination, envelope, bytes, copyCts.Token, admitOfferResponse: options.FileOfferWrite).ConfigureAwait(false);
             return new LifecycleCopySendResult(lane, succeeded, null);
         }
         catch (Exception ex)
@@ -2813,7 +2819,10 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
         Func<bool>? PreSendValidator = null,
         bool DrainChildrenOnCompletion = false,
         IOfflinePublicationDelay? OfflinePublicationDelay = null,
-        Action<Task>? PhysicalCompletionObserver = null);
+        Action<Task>? PhysicalCompletionObserver = null)
+    {
+        public OwnedHandshakeWrite? FileOfferWrite { get; init; }
+    }
 
     private sealed class LifecyclePreSendValidationException : Exception
     {
