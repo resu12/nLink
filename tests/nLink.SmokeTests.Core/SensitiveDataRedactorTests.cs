@@ -19,6 +19,16 @@ public sealed class SensitiveDataRedactorTests
     }
 
     [Fact]
+    public void MultiLineRedaction_PreservesExactEventLabelsInOrder()
+    {
+        string[] labels = ["start", "connect", "join", "ack", "open", "read", "chunk", "progress", "sync", "finish", "receive_terminal", "EVP1"];
+        var input = string.Join("\r\n", labels.Select(label => $"event={label}; secret=private-value"));
+        var expected = string.Join("\r\n", labels.Select(label => $"event={label}; [redacted]"));
+
+        Assert.Equal(expected, SensitiveDataRedactor.Redact(input));
+    }
+
+    [Fact]
     public void SensitiveDataRedactor_Preserves_Long_Structured_Diagnostic_Keys()
     {
         const string input =

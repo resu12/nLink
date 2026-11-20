@@ -1709,8 +1709,7 @@ public sealed partial class SessionRuntime : IDisposable, ISessionRuntimeScreenS
                $"outbound_state={snapshot.OutboundState}; " +
                $"outbound_transfer_id={NormalizeDiagnosticsText(snapshot.Outbound?.TransferId)}; " +
                $"outbound_bytes={snapshot.Outbound?.BytesTransferred.ToString() ?? "(none)"}; " +
-               $"last_failure_code={NormalizeDiagnosticsText(GetLastFileTransferFailureCode(snapshot))}; " +
-               $"last_saved_path={NormalizeDiagnosticsText(GetLastFileTransferSavedPath(snapshot))}";
+               $"last_failure_code={NormalizeDiagnosticsText(GetLastFileTransferFailureCode(snapshot))}";
     }
 
     private static string? GetLastFileTransferFailureCode(SessionFileTransferSnapshot snapshot)

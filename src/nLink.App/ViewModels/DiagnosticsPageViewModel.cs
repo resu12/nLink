@@ -35,7 +35,9 @@ public sealed class DiagnosticsPageViewModel : ViewModelBase, IDisposable
 
     private readonly InlineTransientText copyFeedback = new();
     private readonly string? bugReportUrl;
-    private readonly DiagnosticsSnapshot runtimeDiagnosticsSnapshot;
+    private readonly SessionRuntime? sessionRuntime;
+    private ChatRuntimeCountersSnapshot chatCounters;
+    private DiagnosticsSnapshot runtimeDiagnosticsSnapshot;
     private readonly MetricsRegistry? metricsRegistry;
     private readonly ResourceRuntimeTracker? resourceRuntimeTracker;
     private readonly HangReportService? hangReportService;
@@ -46,10 +48,10 @@ public sealed class DiagnosticsPageViewModel : ViewModelBase, IDisposable
     private readonly Func<string> diagnosticsExportRootProvider;
     private readonly Action<string, string, string, string, string> persistScreenSharePresetInBackground;
     private readonly InviteSecurityStatus inviteSecurityStatus;
-    private readonly NknRuntimeDiagnosticsSnapshot nknDiagnosticsSnapshot;
-    private readonly PersistenceDiagnosticsSnapshot persistenceDiagnosticsSnapshot;
+    private NknRuntimeDiagnosticsSnapshot nknDiagnosticsSnapshot;
+    private PersistenceDiagnosticsSnapshot persistenceDiagnosticsSnapshot;
     private readonly ScreenShareEvidenceSnapshot screenShareEvidenceSnapshot;
-    private readonly ScreenShareLiveDiagnosticsSnapshot screenShareLiveSnapshot;
+    private ScreenShareLiveDiagnosticsSnapshot screenShareLiveSnapshot;
     private TunaWalletLinkState tunaWalletState = TunaWalletLinkState.Unlinked;
     private bool isTunaWalletValidating;
 
@@ -114,7 +116,6 @@ public sealed class DiagnosticsPageViewModel : ViewModelBase, IDisposable
         persistScreenSharePresetInBackground = screenSharePresetPersistence ?? PersistScreenSharePresetInBackground;
         tunaWalletState = LoadTunaWalletState(tunaWalletLinkStore);
         screenShareEvidenceSnapshot = screenShareEvidenceLocator.ReadLatest();
-        screenShareLiveSnapshot = sessionRuntime?.GetScreenShareLiveDiagnosticsSnapshot() ?? ScreenShareLiveDiagnosticsSnapshot.Unavailable;
 
         ActiveTransport = transportConfig.DisplayName;
         TransportKey = transportConfig.Key;
@@ -133,73 +134,14 @@ public sealed class DiagnosticsPageViewModel : ViewModelBase, IDisposable
         ProcessArchitecture = RuntimeInformation.ProcessArchitecture.ToString();
         OsArchitecture = RuntimeInformation.OSArchitecture.ToString();
         BridgeResolutionRid = ResolveBridgeRidForDiagnostics();
-        persistenceDiagnosticsSnapshot = PersistenceDiagnostics.Snapshot();
-        runtimeDiagnosticsSnapshot = sessionRuntime?.GetDiagnosticsSnapshot() ?? new DiagnosticsSnapshot(
-            CurrentState: "(unknown)",
-            SessionUiState: "(unknown)",
-            AttemptNumber: 0,
-            LastFailureCategory: "(none)",
-            LastFailureMessage: "(none)",
-            LastConnectDurationMs: null,
-            LastHandshakeDurationMs: null,
-            LastBridgeStartDurationMs: null,
-            PersistenceSummary: persistenceDiagnosticsSnapshot.Summary,
-            PersistenceWarning: persistenceDiagnosticsSnapshot.LastWarning);
-
         if (string.Equals(transportConfig.Key, "NKN", StringComparison.OrdinalIgnoreCase))
         {
             NknRuntimeDiagnostics.EnsureInitialized();
         }
 
-        var counters = ChatRuntimeCounters.Snapshot();
-        nknDiagnosticsSnapshot = NknRuntimeDiagnostics.Snapshot();
-        NknAddress = nknDiagnosticsSnapshot.Address;
-        MessagesSent = nknDiagnosticsSnapshot.MessagesSent.ToString();
-        MessagesReceived = nknDiagnosticsSnapshot.MessagesReceived.ToString();
-        LastError = nknDiagnosticsSnapshot.LastError;
-        BridgePid = nknDiagnosticsSnapshot.BridgePid > 0 ? nknDiagnosticsSnapshot.BridgePid.ToString() : "(not running)";
-        NodeSdk = string.IsNullOrWhiteSpace(nknDiagnosticsSnapshot.NodeVersion) ? "(unknown)" : nknDiagnosticsSnapshot.NodeVersion;
-        LastHeartbeat = nknDiagnosticsSnapshot.BridgeLastPongUtcTicks > 0
-            ? new DateTimeOffset(nknDiagnosticsSnapshot.BridgeLastPongUtcTicks, TimeSpan.Zero).ToString("u")
-            : "(none)";
-        BridgeRestarts = nknDiagnosticsSnapshot.BridgeRestartCount.ToString();
-        LastBridgeExit = BuildLastBridgeExitText(nknDiagnosticsSnapshot.BridgeLastExitCode, nknDiagnosticsSnapshot.BridgeLastExitReason);
-        BridgeRawMessagesReceived = nknDiagnosticsSnapshot.BridgeRawMessagesReceived.ToString();
-        ScreenShareOutboundBusyDrops = nknDiagnosticsSnapshot.ScreenShareOutboundBusyDrops.ToString();
-        ScreenSharePayloadBytesSent = nknDiagnosticsSnapshot.ScreenSharePayloadBytesSent.ToString();
-        ScreenShareMessagesSent = nknDiagnosticsSnapshot.ScreenShareMessagesSent.ToString();
-        ScreenShareBridgeBytesSent = nknDiagnosticsSnapshot.ScreenShareBridgeBytesSent.ToString();
-        HighPriorityControlQueueOverflows = nknDiagnosticsSnapshot.HighPriorityControlQueueOverflows.ToString();
-        HighPriorityControlRejected = nknDiagnosticsSnapshot.HighPriorityControlRejected.ToString();
-        HighPriorityControlCoalesced = nknDiagnosticsSnapshot.HighPriorityControlCoalesced.ToString();
-        HighPriorityControlDroppedForStop = nknDiagnosticsSnapshot.HighPriorityControlDroppedForStop.ToString();
-        LastBridgeMessageSource = nknDiagnosticsSnapshot.LastBridgeMessageSource;
-        LastBridgeMessageKind = BuildBridgeMessageKind(nknDiagnosticsSnapshot.LastBridgeMessageIsTopic);
-        LastEnvelopeType = nknDiagnosticsSnapshot.LastEnvelopeType;
-        LastEnvelopeDropReason = nknDiagnosticsSnapshot.LastEnvelopeDropReason;
-        JoinRequestsReceived = nknDiagnosticsSnapshot.JoinRequestsReceived.ToString();
-        IncomingJoinRequestRaisedCount = nknDiagnosticsSnapshot.IncomingJoinRequestRaisedCount.ToString();
-        AcksReceived = nknDiagnosticsSnapshot.AcksReceived.ToString();
-        AcksIgnoredSourceMismatch = nknDiagnosticsSnapshot.AcksIgnoredSourceMismatch.ToString();
-        LastDisconnectReason = nknDiagnosticsSnapshot.LastDisconnectReason;
-        HelperAddressSource = nknDiagnosticsSnapshot.HelperAddressSource;
-        HelperAddressAuthoritative = nknDiagnosticsSnapshot.HelperAddressAuthoritative ? "Yes" : "No";
-        HelperVerificationCodeVisible = nknDiagnosticsSnapshot.HelperVerificationCodeVisible ? "Yes" : "No";
-        HelperIdentityRegeneratedCount = nknDiagnosticsSnapshot.HelperIdentityRegeneratedCount.ToString(CultureInfo.InvariantCulture);
-        HelperIdentityLastRegeneratedUtc = nknDiagnosticsSnapshot.HelperIdentityLastRegeneratedUtcTicks > 0
-            ? new DateTimeOffset(nknDiagnosticsSnapshot.HelperIdentityLastRegeneratedUtcTicks, TimeSpan.Zero).ToString("u")
-            : "(none)";
-        FirstColdStartObserved = nknDiagnosticsSnapshot.FirstColdStartObserved ? "Yes" : "No";
-        FirstColdStartMs = nknDiagnosticsSnapshot.FirstColdStartObserved && nknDiagnosticsSnapshot.FirstColdStartMs >= 0
-            ? nknDiagnosticsSnapshot.FirstColdStartMs.ToString("F2")
-            : "(none)";
-        FirstColdStartRecordedUtc = nknDiagnosticsSnapshot.FirstColdStartUtcTicks > 0
-            ? new DateTimeOffset(nknDiagnosticsSnapshot.FirstColdStartUtcTicks, TimeSpan.Zero).ToString("u")
-            : "(none)";
-        ChatSent = counters.ChatSent.ToString();
-        ChatReceived = counters.ChatReceived.ToString();
-        DecryptFailed = counters.ChatDecryptFailed.ToString();
-        RecentConnectionAttemptsText = BuildRecentConnectionAttemptsText(SessionReliabilityLog.SnapshotRecent(10));
+        this.sessionRuntime = sessionRuntime;
+        CaptureSessionSnapshot();
+        RefreshSessionSnapshotCommand = new RelayCommand(RefreshSessionSnapshot);
         CopyReliabilityLogCommand = new RelayCommand(RequestCopyReliabilityLog);
         SaveHangReportCommand = new RelayCommand(SaveHangReport);
         ExportMetricsJsonCommand = new RelayCommand(ExportMetricsJson);
@@ -215,6 +157,61 @@ public sealed class DiagnosticsPageViewModel : ViewModelBase, IDisposable
         UnlinkTunaWalletCommand = new RelayCommand(UnlinkTunaWallet, CanUnlinkTunaWallet);
         UnlockTunaRuntimeCommand = new RelayCommand(RequestUnlockTunaRuntime, CanUnlockTunaRuntime);
     }
+
+    private void CaptureSessionSnapshot()
+    {
+        persistenceDiagnosticsSnapshot = PersistenceDiagnostics.Snapshot();
+        runtimeDiagnosticsSnapshot = sessionRuntime?.GetDiagnosticsSnapshot() ?? new DiagnosticsSnapshot(
+            CurrentState: "(unknown)",
+            SessionUiState: "(unknown)",
+            AttemptNumber: 0,
+            LastFailureCategory: "(none)",
+            LastFailureMessage: "(none)",
+            LastConnectDurationMs: null,
+            LastHandshakeDurationMs: null,
+            LastBridgeStartDurationMs: null,
+            PersistenceSummary: persistenceDiagnosticsSnapshot.Summary,
+            PersistenceWarning: persistenceDiagnosticsSnapshot.LastWarning);
+        screenShareLiveSnapshot = sessionRuntime?.GetScreenShareLiveDiagnosticsSnapshot() ?? ScreenShareLiveDiagnosticsSnapshot.Unavailable;
+        nknDiagnosticsSnapshot = NknRuntimeDiagnostics.Snapshot();
+        chatCounters = ChatRuntimeCounters.Snapshot();
+        RecentConnectionAttemptsText = BuildRecentConnectionAttemptsText(SessionReliabilityLog.SnapshotRecent(10));
+        SessionSnapshotAsOfUtc = nowProvider().UtcDateTime.ToString("u", CultureInfo.InvariantCulture);
+    }
+
+    private void RefreshSessionSnapshot()
+    {
+        CaptureSessionSnapshot();
+        OnPropertyChanged(nameof(SessionSnapshotAsOfUtc));
+        OnPropertyChanged(nameof(ConnectionStateSummary));
+        OnPropertyChanged(nameof(AuthorizationSummary));
+        OnPropertyChanged(nameof(ScreenShareSummary));
+        OnPropertyChanged(nameof(RemoteControlSummary));
+        OnPropertyChanged(nameof(FileTransferSummary));
+        OnPropertyChanged(nameof(PersistenceSummary));
+        OnPropertyChanged(nameof(ConnectionErrorSummary));
+        OnPropertyChanged(nameof(HelperIdentitySummary));
+        OnPropertyChanged(nameof(AuthoritativeConnectedAddress));
+        OnPropertyChanged(nameof(LastRejectedMessageSummary));
+        OnPropertyChanged(nameof(ScreenShareLiveState));
+        OnPropertyChanged(nameof(ScreenShareLiveProfileSummary));
+        OnPropertyChanged(nameof(ScreenShareLivePerformanceSummary));
+        OnPropertyChanged(nameof(ScreenShareLiveCpuSummary));
+        OnPropertyChanged(nameof(ScreenShareLiveCursorSummary));
+        OnPropertyChanged(nameof(ScreenShareLiveVisualSafetySummary));
+        OnPropertyChanged(nameof(MessagesSent));
+        OnPropertyChanged(nameof(MessagesReceived));
+        OnPropertyChanged(nameof(ScreenShareMessagesSent));
+        OnPropertyChanged(nameof(HighPriorityControlQueueOverflows));
+        OnPropertyChanged(nameof(BridgePid));
+        OnPropertyChanged(nameof(NodeSdk));
+        OnPropertyChanged(nameof(LastHeartbeat));
+        OnPropertyChanged(nameof(LastBridgeExit));
+        OnPropertyChanged(nameof(RecentConnectionAttemptsText));
+    }
+
+    public IRelayCommand RefreshSessionSnapshotCommand { get; }
+    public string SessionSnapshotAsOfUtc { get; private set; } = string.Empty;
 
     public string PageTitle => "Options";
 
@@ -572,78 +569,86 @@ public sealed class DiagnosticsPageViewModel : ViewModelBase, IDisposable
     public bool ShowScreenShareResetHint => ScreenShareQualitySettings.WasLegacyHigherClarityPresetMigrated ||
         string.Equals(ScreenShareEffectivePresetName, "Custom", StringComparison.OrdinalIgnoreCase);
 
-    public string NknAddress { get; }
+    public string NknAddress => nknDiagnosticsSnapshot.Address;
 
-    public string MessagesSent { get; }
+    public string MessagesSent => nknDiagnosticsSnapshot.MessagesSent.ToString();
 
-    public string MessagesReceived { get; }
+    public string MessagesReceived => nknDiagnosticsSnapshot.MessagesReceived.ToString();
 
-    public string ChatSent { get; }
+    public string ChatSent => chatCounters.ChatSent.ToString();
 
-    public string ChatReceived { get; }
+    public string ChatReceived => chatCounters.ChatReceived.ToString();
 
-    public string DecryptFailed { get; }
+    public string DecryptFailed => chatCounters.ChatDecryptFailed.ToString();
 
-    public string LastError { get; }
+    public string LastError => nknDiagnosticsSnapshot.LastError;
 
-    public string BridgePid { get; }
+    public string BridgePid => nknDiagnosticsSnapshot.BridgePid > 0 ? nknDiagnosticsSnapshot.BridgePid.ToString() : "(not running)";
 
-    public string NodeSdk { get; }
+    public string NodeSdk => string.IsNullOrWhiteSpace(nknDiagnosticsSnapshot.NodeVersion) ? "(unknown)" : nknDiagnosticsSnapshot.NodeVersion;
 
-    public string LastHeartbeat { get; }
+    public string LastHeartbeat => nknDiagnosticsSnapshot.BridgeLastPongUtcTicks > 0
+        ? new DateTimeOffset(nknDiagnosticsSnapshot.BridgeLastPongUtcTicks, TimeSpan.Zero).ToString("u")
+        : "(none)";
 
-    public string BridgeRestarts { get; }
+    public string BridgeRestarts => nknDiagnosticsSnapshot.BridgeRestartCount.ToString();
 
-    public string LastBridgeExit { get; }
+    public string LastBridgeExit => BuildLastBridgeExitText(nknDiagnosticsSnapshot.BridgeLastExitCode, nknDiagnosticsSnapshot.BridgeLastExitReason);
     public string BridgeManifestSummary => BuildBridgeManifestSummary();
 
-    public string BridgeRawMessagesReceived { get; }
+    public string BridgeRawMessagesReceived => nknDiagnosticsSnapshot.BridgeRawMessagesReceived.ToString();
 
-    public string ScreenShareOutboundBusyDrops { get; }
+    public string ScreenShareOutboundBusyDrops => nknDiagnosticsSnapshot.ScreenShareOutboundBusyDrops.ToString();
 
-    public string ScreenSharePayloadBytesSent { get; }
+    public string ScreenSharePayloadBytesSent => nknDiagnosticsSnapshot.ScreenSharePayloadBytesSent.ToString();
 
-    public string ScreenShareMessagesSent { get; }
+    public string ScreenShareMessagesSent => nknDiagnosticsSnapshot.ScreenShareMessagesSent.ToString();
 
-    public string ScreenShareBridgeBytesSent { get; }
+    public string ScreenShareBridgeBytesSent => nknDiagnosticsSnapshot.ScreenShareBridgeBytesSent.ToString();
 
-    public string HighPriorityControlQueueOverflows { get; }
+    public string HighPriorityControlQueueOverflows => nknDiagnosticsSnapshot.HighPriorityControlQueueOverflows.ToString();
 
-    public string HighPriorityControlRejected { get; }
+    public string HighPriorityControlRejected => nknDiagnosticsSnapshot.HighPriorityControlRejected.ToString();
 
-    public string HighPriorityControlCoalesced { get; }
+    public string HighPriorityControlCoalesced => nknDiagnosticsSnapshot.HighPriorityControlCoalesced.ToString();
 
-    public string HighPriorityControlDroppedForStop { get; }
+    public string HighPriorityControlDroppedForStop => nknDiagnosticsSnapshot.HighPriorityControlDroppedForStop.ToString();
 
-    public string LastBridgeMessageSource { get; }
+    public string LastBridgeMessageSource => nknDiagnosticsSnapshot.LastBridgeMessageSource;
 
-    public string LastBridgeMessageKind { get; }
+    public string LastBridgeMessageKind => BuildBridgeMessageKind(nknDiagnosticsSnapshot.LastBridgeMessageIsTopic);
 
-    public string LastEnvelopeType { get; }
+    public string LastEnvelopeType => nknDiagnosticsSnapshot.LastEnvelopeType;
 
-    public string LastEnvelopeDropReason { get; }
+    public string LastEnvelopeDropReason => nknDiagnosticsSnapshot.LastEnvelopeDropReason;
 
-    public string JoinRequestsReceived { get; }
+    public string JoinRequestsReceived => nknDiagnosticsSnapshot.JoinRequestsReceived.ToString();
 
-    public string IncomingJoinRequestRaisedCount { get; }
+    public string IncomingJoinRequestRaisedCount => nknDiagnosticsSnapshot.IncomingJoinRequestRaisedCount.ToString();
 
-    public string AcksReceived { get; }
+    public string AcksReceived => nknDiagnosticsSnapshot.AcksReceived.ToString();
 
-    public string AcksIgnoredSourceMismatch { get; }
+    public string AcksIgnoredSourceMismatch => nknDiagnosticsSnapshot.AcksIgnoredSourceMismatch.ToString();
 
-    public string LastDisconnectReason { get; }
-    public string HelperAddressSource { get; }
-    public string HelperAddressAuthoritative { get; }
-    public string HelperVerificationCodeVisible { get; }
-    public string HelperIdentityRegeneratedCount { get; }
-    public string HelperIdentityLastRegeneratedUtc { get; }
-    public string FirstColdStartObserved { get; }
-    public string FirstColdStartMs { get; }
-    public string FirstColdStartRecordedUtc { get; }
+    public string LastDisconnectReason => nknDiagnosticsSnapshot.LastDisconnectReason;
+    public string HelperAddressSource => nknDiagnosticsSnapshot.HelperAddressSource;
+    public string HelperAddressAuthoritative => nknDiagnosticsSnapshot.HelperAddressAuthoritative ? "Yes" : "No";
+    public string HelperVerificationCodeVisible => nknDiagnosticsSnapshot.HelperVerificationCodeVisible ? "Yes" : "No";
+    public string HelperIdentityRegeneratedCount => nknDiagnosticsSnapshot.HelperIdentityRegeneratedCount.ToString(CultureInfo.InvariantCulture);
+    public string HelperIdentityLastRegeneratedUtc => nknDiagnosticsSnapshot.HelperIdentityLastRegeneratedUtcTicks > 0
+        ? new DateTimeOffset(nknDiagnosticsSnapshot.HelperIdentityLastRegeneratedUtcTicks, TimeSpan.Zero).ToString("u")
+        : "(none)";
+    public string FirstColdStartObserved => nknDiagnosticsSnapshot.FirstColdStartObserved ? "Yes" : "No";
+    public string FirstColdStartMs => nknDiagnosticsSnapshot.FirstColdStartObserved && nknDiagnosticsSnapshot.FirstColdStartMs >= 0
+        ? nknDiagnosticsSnapshot.FirstColdStartMs.ToString("F2")
+        : "(none)";
+    public string FirstColdStartRecordedUtc => nknDiagnosticsSnapshot.FirstColdStartUtcTicks > 0
+        ? new DateTimeOffset(nknDiagnosticsSnapshot.FirstColdStartUtcTicks, TimeSpan.Zero).ToString("u")
+        : "(none)";
 
     public string RecentConnectionAttemptsTitle => "Recent connection attempts";
 
-    public string RecentConnectionAttemptsText { get; }
+    public string RecentConnectionAttemptsText { get; private set; } = string.Empty;
 
     public bool ShowCopyFeedback
         => copyFeedback.IsVisible;
@@ -1376,6 +1381,7 @@ public sealed class DiagnosticsPageViewModel : ViewModelBase, IDisposable
             $"Process architecture: {ProcessArchitecture}",
             $"OS architecture: {OsArchitecture}",
             $"Bridge RID: {BridgeResolutionRid}",
+            $"session_snapshot_as_of_utc: {SessionSnapshotAsOfUtc}",
             $"current_state: {CurrentTransportState}",
             $"session_ui_state: {SessionUiState}",
             $"attempt: {AttemptNumber}",

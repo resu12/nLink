@@ -7,6 +7,7 @@ using NLink.App.Services;
 using NLink.App.ViewModels;
 using NLink.App.Views;
 using NLink.Core.FileTransfer;
+using NLink.Core.Logging;
 using NLink.Core.SessionConnect;
 using NLink.Infra.DevLocal;
 
@@ -25,7 +26,8 @@ public sealed class ChatFileSaveAsTests(ChatViewScrollFixture fixture) : CoreSmo
         {
             var root = Directory.CreateTempSubdirectory("nlink-save-as-");
             var downloads = root.CreateSubdirectory("Downloads").FullName;
-            var elsewhere = root.CreateSubdirectory("chosen folder").FullName;
+            const string privateSuffix = "private-save-folder";
+            var elsewhere = root.CreateSubdirectory((helperReceives ? "chosen," : "chosen;") + privateSuffix).FullName;
             using var downloadsOverride = new EnvironmentOverride("NLINK_FILE_TRANSFER_TEST_INBOUND_ROOT", downloads);
             var window = new Window { Width = 1050, Height = 760 };
             try
@@ -127,6 +129,29 @@ public sealed class ChatFileSaveAsTests(ChatViewScrollFixture fixture) : CoreSmo
                 await AssertSavedAsync(chosen);
                 Assert.Equal(1, Volatile.Read(ref accepts));
                 Assert.Empty(Directory.EnumerateFiles(downloads));
+
+                // The local transfer card can show the path; shared support reports must not expose its directory.
+                var locator = new ScreenShareEvidenceLocator([root.FullName]);
+                var reports = new HangReportService(locator, receivingRuntime, hangArtifactsRootProvider: () => root.FullName);
+                using (var diagnostics = new DiagnosticsPageViewModel(locator, () => { }, config, sessionRuntime: receivingRuntime))
+                {
+                    var copied = diagnostics.BuildDiagnosticsCopyTextForTests();
+                    Assert.DoesNotContain(elsewhere, copied, StringComparison.OrdinalIgnoreCase);
+                    Assert.Contains("file_transfer_last_saved_path: [REDACTED_PATH]/renamed.txt", copied, StringComparison.Ordinal);
+                    Assert.DoesNotContain("last_saved_path=", diagnostics.FileTransferSummary, StringComparison.Ordinal);
+                    var inbound = receivingRuntime.FileTransferSnapshot.Inbound!;
+                    var terminal = "event=file_transfer_inbound_terminal; " + FileTransferDiagnosticScopeEvidence.Format(inbound.SessionId, inbound.TransferId);
+                    Assert.True(LocalOperationalLog.TryReadRetainedTail(terminal, out _));
+                    var report = reports.Capture(HangReportTriggerKind.UiWatchdog, "test");
+                    var saved = File.ReadAllText(Path.Combine(report.FolderPath, "diagnostics-snapshot.txt"));
+                    Assert.DoesNotContain(elsewhere, saved, StringComparison.OrdinalIgnoreCase);
+                    Assert.Contains("file_transfer_last_saved_path: [REDACTED_PATH]/renamed.txt", saved, StringComparison.Ordinal);
+                    var tail = File.ReadAllLines(Path.Combine(report.FolderPath, "log-tail.txt"));
+                    Assert.Contains(tail, line => line.Contains("final_path=[REDACTED]", StringComparison.Ordinal));
+                    Assert.Contains(tail, line => line.Contains(terminal, StringComparison.Ordinal) &&
+                        line.Contains("saved_path=[REDACTED]", StringComparison.Ordinal));
+                    Assert.DoesNotContain(tail, line => line.Contains(privateSuffix, StringComparison.OrdinalIgnoreCase));
+                }
 
                 File.WriteAllBytes(Path.Combine(downloads, offered), sentinel);
                 await OfferAsync();

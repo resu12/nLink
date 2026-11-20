@@ -306,8 +306,14 @@
 
                             <Border Classes="appCard" Padding="20">
                                 <StackPanel Spacing="14">
-                                    <TextBlock Text="Health"
-                                               Classes="appSectionTitle"/>
+                                    <Grid ColumnDefinitions="*,Auto" ColumnSpacing="12">
+                                        <StackPanel Spacing="4">
+                                            <TextBlock Text="Session snapshot" Classes="appSectionTitle"/>
+                                            <TextBlock Classes="appMuted" Text="{Binding SessionSnapshotAsOfUtc, StringFormat='As of {0} (UTC)'}"/>
+                                        </StackPanel>
+                                        <Button Grid.Column="1" Content="Refresh" Classes="appButton secondaryButton compactButton"
+                                                Command="{Binding RefreshSessionSnapshotCommand}"/>
+                                    </Grid>
 
                                     <Grid ColumnDefinitions="220,*"
                                           RowDefinitions="Auto,Auto,Auto,Auto,Auto,Auto,Auto"
@@ -354,10 +360,10 @@
                                                Classes="appSectionTitle"/>
 
                                     <Grid ColumnDefinitions="220,*"
-                                          RowDefinitions="Auto,Auto,Auto,Auto,Auto"
+                                          RowDefinitions="Auto,Auto,Auto,Auto"
                                           RowSpacing="8"
                                           ColumnSpacing="12">
-                                        <TextBlock Grid.Row="0" Grid.Column="0" Classes="appLabel" Text="Transport"/>
+                                        <TextBlock Grid.Row="0" Grid.Column="0" Classes="appLabel" Text="Configured transport"/>
                                         <TextBlock Grid.Row="0" Grid.Column="1" Classes="appBody" Text="{Binding ActiveTransport}" FontSize="16"/>
 
                                         <TextBlock Grid.Row="1" Grid.Column="0" Classes="appLabel" Text="Helper identity"/>
@@ -366,11 +372,8 @@
                                         <TextBlock Grid.Row="2" Grid.Column="0" Classes="appLabel" Text="Authoritative address"/>
                                         <TextBlock Grid.Row="2" Grid.Column="1" Classes="appBody" Text="{Binding AuthoritativeConnectedAddress}" FontSize="16"/>
 
-                                        <TextBlock Grid.Row="3" Grid.Column="0" Classes="appLabel" Text="External topology"/>
-                                        <TextBlock Grid.Row="3" Grid.Column="1" Classes="appBody" Text="{Binding ScreenShareEvidenceExternalTopologySummary}" FontSize="16" TextWrapping="Wrap"/>
-
-                                        <TextBlock Grid.Row="4" Grid.Column="0" Classes="appLabel" Text="Last rejected message"/>
-                                        <TextBlock Grid.Row="4" Grid.Column="1" Classes="appBody" Text="{Binding LastRejectedMessageSummary}" FontSize="16" TextWrapping="Wrap"/>
+                                        <TextBlock Grid.Row="3" Grid.Column="0" Classes="appLabel" Text="Last rejected message"/>
+                                        <TextBlock Grid.Row="3" Grid.Column="1" Classes="appBody" Text="{Binding LastRejectedMessageSummary}" FontSize="16" TextWrapping="Wrap"/>
                                     </Grid>
                                 </StackPanel>
                             </Border>
@@ -381,16 +384,16 @@
                                                Classes="appSectionTitle"/>
 
                                     <Grid ColumnDefinitions="220,*"
-                                          RowDefinitions="Auto,Auto,Auto,Auto,Auto,Auto,Auto,Auto,Auto,Auto"
+                                          RowDefinitions="Auto,Auto,Auto,Auto,Auto,Auto"
                                           RowSpacing="8"
                                           ColumnSpacing="12">
-                                        <TextBlock Grid.Row="0" Grid.Column="0" Classes="appLabel" Text="Live state"/>
+                                        <TextBlock Grid.Row="0" Grid.Column="0" Classes="appLabel" Text="State at refresh"/>
                                         <TextBlock Grid.Row="0" Grid.Column="1" Classes="appBody" Text="{Binding ScreenShareLiveState}" FontSize="16"/>
 
-                                        <TextBlock Grid.Row="1" Grid.Column="0" Classes="appLabel" Text="Live profile"/>
+                                        <TextBlock Grid.Row="1" Grid.Column="0" Classes="appLabel" Text="Profile at refresh"/>
                                         <TextBlock Grid.Row="1" Grid.Column="1" Classes="appBody" Text="{Binding ScreenShareLiveProfileSummary}" FontSize="16" TextWrapping="Wrap"/>
 
-                                        <TextBlock Grid.Row="2" Grid.Column="0" Classes="appLabel" Text="Live performance"/>
+                                        <TextBlock Grid.Row="2" Grid.Column="0" Classes="appLabel" Text="Performance at refresh"/>
                                         <TextBlock Grid.Row="2" Grid.Column="1" Classes="appBody" Text="{Binding ScreenShareLivePerformanceSummary}" FontSize="16" TextWrapping="Wrap"/>
 
                                         <TextBlock Grid.Row="3" Grid.Column="0" Classes="appLabel" Text="CPU / preprocess"/>
@@ -401,18 +404,28 @@
 
                                         <TextBlock Grid.Row="5" Grid.Column="0" Classes="appLabel" Text="Visual safety"/>
                                         <TextBlock Grid.Row="5" Grid.Column="1" Classes="appBody" Text="{Binding ScreenShareLiveVisualSafetySummary}" FontSize="16" TextWrapping="Wrap"/>
+                                    </Grid>
+                                </StackPanel>
+                            </Border>
 
-                                        <TextBlock Grid.Row="6" Grid.Column="0" Classes="appLabel" Text="Latest artifact"/>
-                                        <TextBlock Grid.Row="6" Grid.Column="1" Classes="appBody" Text="{Binding ScreenShareEvidenceArtifactName}" FontSize="16"/>
+                            <Expander Header="Previous screen-share test run" HorizontalContentAlignment="Stretch">
+                                <StackPanel Spacing="14">
+                                    <TextBlock Classes="appMuted" Text="Saved test evidence, not a verdict on this session." TextWrapping="Wrap"/>
+                                    <Grid ColumnDefinitions="220,*" RowDefinitions="Auto,Auto,Auto,Auto,Auto" RowSpacing="8" ColumnSpacing="12">
+                                        <TextBlock Grid.Row="0" Grid.Column="0" Classes="appLabel" Text="Artifact"/>
+                                        <TextBlock Grid.Row="0" Grid.Column="1" Classes="appBody" Text="{Binding ScreenShareEvidenceArtifactName}" FontSize="16"/>
 
-                                        <TextBlock Grid.Row="7" Grid.Column="0" Classes="appLabel" Text="Latest quality"/>
-                                        <TextBlock Grid.Row="7" Grid.Column="1" Classes="appBody" Text="{Binding ScreenShareEvidenceQualitySummary}" FontSize="16" TextWrapping="Wrap"/>
+                                        <TextBlock Grid.Row="1" Grid.Column="0" Classes="appLabel" Text="Quality"/>
+                                        <TextBlock Grid.Row="1" Grid.Column="1" Classes="appBody" Text="{Binding ScreenShareEvidenceQualitySummary}" FontSize="16" TextWrapping="Wrap"/>
 
-                                        <TextBlock Grid.Row="8" Grid.Column="0" Classes="appLabel" Text="Latest low-FPS"/>
-                                        <TextBlock Grid.Row="8" Grid.Column="1" Classes="appBody" Text="{Binding ScreenShareEvidenceLowFpsSummary}" FontSize="16" TextWrapping="Wrap"/>
+                                        <TextBlock Grid.Row="2" Grid.Column="0" Classes="appLabel" Text="Low-FPS"/>
+                                        <TextBlock Grid.Row="2" Grid.Column="1" Classes="appBody" Text="{Binding ScreenShareEvidenceLowFpsSummary}" FontSize="16" TextWrapping="Wrap"/>
 
-                                        <TextBlock Grid.Row="9" Grid.Column="0" Classes="appLabel" Text="Latest verdict"/>
-                                        <TextBlock Grid.Row="9" Grid.Column="1" Classes="appBody" Text="{Binding ScreenShareEvidenceVerdict}" FontSize="16" TextWrapping="Wrap"/>
+                                        <TextBlock Grid.Row="3" Grid.Column="0" Classes="appLabel" Text="Verdict"/>
+                                        <TextBlock Grid.Row="3" Grid.Column="1" Classes="appBody" Text="{Binding ScreenShareEvidenceVerdict}" FontSize="16" TextWrapping="Wrap"/>
+
+                                        <TextBlock Grid.Row="4" Grid.Column="0" Classes="appLabel" Text="External topology"/>
+                                        <TextBlock Grid.Row="4" Grid.Column="1" Classes="appBody" Text="{Binding ScreenShareEvidenceExternalTopologySummary}" FontSize="16" TextWrapping="Wrap"/>
                                     </Grid>
 
                                     <TextBlock Classes="appMuted"
@@ -420,7 +433,7 @@
                                                FontSize="13"
                                                TextWrapping="Wrap"/>
                                 </StackPanel>
-                            </Border>
+                            </Expander>
 
                             <Border Classes="appCard" Padding="20">
                                 <StackPanel Spacing="16">

@@ -320,6 +320,33 @@ public void ScreenShareEvidenceLocator_ReadLatest_DoesNotModifyArtifactFiles()
 }
 
 [Fact]
+public void RefreshSessionSnapshot_UpdatesDisplayedAndCopiedStateAtTheSameTime()
+{
+    var now = DateTimeOffset.Parse("2026-11-20T10:00:00Z");
+    using var runtime = new SessionRuntime(() => new ScriptedSignalingTransport());
+    using var vm = new DiagnosticsPageViewModel(static () => { }, CreateDevLocalTestConfig(),
+        sessionRuntime: runtime, nowProvider: () => now);
+    var initialState = vm.ConnectionStateSummary;
+    var changed = new List<string?>();
+    vm.PropertyChanged += (_, e) => changed.Add(e.PropertyName);
+    runtime.TryTransitionTransportStateForTests(TransportState.TransportInitializing, "test");
+    runtime.TryTransitionTransportStateForTests(TransportState.Connecting, "test");
+    now = now.AddMinutes(2);
+    Assert.Equal(initialState, vm.ConnectionStateSummary);
+    Assert.Equal("2026-11-20 10:00:00Z", vm.SessionSnapshotAsOfUtc);
+
+    vm.RefreshSessionSnapshotCommand.Execute(null);
+
+    Assert.Contains("transport=Connecting", vm.ConnectionStateSummary, StringComparison.Ordinal);
+    Assert.Equal("2026-11-20 10:02:00Z", vm.SessionSnapshotAsOfUtc);
+    Assert.Contains(nameof(vm.ConnectionStateSummary), changed);
+    Assert.Contains(nameof(vm.SessionSnapshotAsOfUtc), changed);
+    var copy = vm.BuildDiagnosticsCopyTextForTests();
+    Assert.Contains("current_state: Connecting", copy, StringComparison.Ordinal);
+    Assert.Contains("session_snapshot_as_of_utc: 2026-11-20 10:02:00Z", copy, StringComparison.Ordinal);
+}
+
+[Fact]
 public void DiagnosticsCopy_IncludesScreenshareEvidenceSnapshot_AndRedactsArtifactPath()
 {
     var tempRoot = Path.Combine(Path.GetTempPath(), "nlink-evidence-diagnostics-" + Guid.NewGuid().ToString("N"));
@@ -343,7 +370,7 @@ public void DiagnosticsCopy_IncludesScreenshareEvidenceSnapshot_AndRedactsArtifa
 
         var copied = vm.BuildDiagnosticsCopyTextForTests();
 
-        Assert.Contains("Screenshare evidence", copied, StringComparison.Ordinal);
+        Assert.Contains("Screenshare evidence (previous test run; not current session health)", copied, StringComparison.Ordinal);
         Assert.Contains("screenshare_evidence_status: verdict_available", copied, StringComparison.Ordinal);
         Assert.Contains("screenshare_operator_verdict: fail_live_transport_evidence", copied, StringComparison.Ordinal);
         Assert.Contains("screenshare_deepest_classification: steady_external_delivery_latency", copied, StringComparison.Ordinal);
@@ -868,6 +895,15 @@ public void DiagnosticsPageView_UsesOptionsTabs()
     Assert.Contains("Save Hang Report", xaml, StringComparison.Ordinal);
     Assert.Contains("Open logs folder", xaml, StringComparison.Ordinal);
     Assert.Contains("Screen share health", xaml, StringComparison.Ordinal);
+    var diagnostics = System.Xml.Linq.XDocument.Parse(xaml).Descendants().Single(
+        el => el.Name.LocalName == "TabItem" && (string?)el.Attribute("Header") == "Diagnostics");
+    var history = diagnostics.Descendants().Single(
+        el => el.Name.LocalName == "Expander" && (string?)el.Attribute("Header") == "Previous screen-share test run");
+    var retained = diagnostics.Descendants().Where(el =>
+        ((string?)el.Attribute("Text"))?.StartsWith("{Binding ScreenShareEvidence", StringComparison.Ordinal) == true).ToArray();
+    Assert.Equal(6, retained.Length);
+    Assert.All(retained, el => Assert.Contains(history, el.Ancestors()));
+    Assert.Contains(diagnostics.Descendants(), el => (string?)el.Attribute("Command") == "{Binding RefreshSessionSnapshotCommand}");
     Assert.Contains("Text=\"Tuna\"", xaml, StringComparison.Ordinal);
     Assert.Contains("Content=\"Enable Tuna acceleration\"", xaml, StringComparison.Ordinal);
     Assert.Contains("Wallet and runtime", xaml, StringComparison.Ordinal);
