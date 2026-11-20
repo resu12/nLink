@@ -14,6 +14,7 @@ public sealed partial class NknAccelerationTransportTests
     [InlineData("fresh_offer")]
     [InlineData("pre_stop_offer")]
     [InlineData("binding_retired_after_capture")]
+    [InlineData("delayed_idless")]
     [Trait("FileTransferInfraSuite", "RuntimeUnlockResponderPeerProbe")]
     public async Task PostFallbackPairedRetryOffer_CheckpointAcceptanceRefreshesExactPublishedScope(string stopControl)
     {
@@ -33,6 +34,15 @@ public sealed partial class NknAccelerationTransportTests
             var sessionId = await ApproveNknSessionAsync(peer, transport, cts.Token,
                 InviteCapabilities.Chat | InviteCapabilities.FileTransfer,
                 suppressAutomaticAccelerationNegotiation: true);
+            // Save a first-delivery offer while A is open, then replace its channel with B.
+            TransportAccelerationOfferPayload? delayed = null;
+            if (stopControl == "delayed_idless")
+            {
+                using var old = await transport.OpenFileTransferDataSessionAsync(sessionId, "former-file", cts.Token);
+                delayed = CreateOfferPayload(sessionId, "oldpaired00112233445566778899", supportedLanes: ["file"], payerDecisionId: 91);
+                delayed.Trigger = "fallback_paired_tail_yield";
+                delayed.SenderRole = "helpee";
+            }
             const string transferId = "post_fallback_checkpoint_paired_binding";
             using var dataSession = await transport.OpenFileTransferDataSessionAsync(sessionId, transferId, cts.Token);
             using var peerDataSession = await peer.OpenFileTransferDataSessionAsync(sessionId, transferId, cts.Token);
@@ -115,6 +125,7 @@ public sealed partial class NknAccelerationTransportTests
             var offer = CreateOfferPayload(sessionId, "checkpointpaired0011223344556677",
                 supportedLanes: ["file"], payerDecisionId: 91);
             offer.Trigger = "fallback_paired_tail_yield";
+            offer.PairedRetryTransferId = transferId;
             offer.SenderRole = "helpee";
             bool Capture(string messageId)
             {
@@ -196,6 +207,14 @@ public sealed partial class NknAccelerationTransportTests
                 Assert.Equal(1, paired.CurrentLeg.CheckpointGeneration);
             }
 
+            if (delayed is not null)
+            {
+                await Assert.IsAssignableFrom<Task>(InvokePrivateMethod(transport, "HandleTransportAccelerationOfferAsync",
+                    peerClient.Address, delayed, "old-file-message", cts.Token));
+                Assert.Empty(observations); // No attempt to obtain B's grant for A.
+                Assert.Equal(0, lane.StartDialerCalls);
+                Assert.Equal(publication, State().CurrentRoutePublicationToken);
+            }
             var captured = Capture("checkpoint-accepted-paired-offer");
             var observed = Assert.Single(observations);
             // Without the scope refresh, the transport submits the retired ID
@@ -241,7 +260,7 @@ public sealed partial class NknAccelerationTransportTests
             observations.Clear();
             var beforeTransaction = Assert.IsType<RuntimeUnlockTransactionSnapshot>(
                 GetPrivateField(transport, "runtimeUnlockTransactionState"));
-            if (stopControl != "not_stopped")
+            if (stopControl is not ("not_stopped" or "delayed_idless"))
             {
                 InvokePrivateMethod(transport, "MarkAccelerationUserStoppedForCurrentSession", sessionId);
                 var stoppedAt = Assert.IsType<long>(GetPrivateField(transport, "accelerationUserStoppedUtcMs"));
@@ -295,6 +314,31 @@ public sealed partial class NknAccelerationTransportTests
             var pendingGeneration = Assert.IsType<long>(GetPrivateField(transport, "pendingAccelerationAnswerAckGeneration"));
             var authorityMode = GetPrivateField(transport, "pendingAccelerationAnswerAckAuthorityMode");
             Assert.Equal("InitialActivation", authorityMode?.ToString());
+            if (delayed is not null)
+            {
+                var retained = GetPrivateField(transport, "pendingAccelerationAnswerReplyShadow");
+                Assert.NotNull(retained);
+                const string boundMessage = "checkpoint-accepted-real-paired-offer";
+                async Task<string> DeliverIdless(string id)
+                {
+                    var start = GetOperationalLogLength();
+                    await Assert.IsAssignableFrom<Task>(InvokePrivateMethod(transport, "HandleTransportAccelerationOfferAsync",
+                        peerClient.Address, offer, id, cts.Token));
+                    return ReadOperationalLogTail(start);
+                }
+                observations.Clear();
+                offer.PairedRetryTransferId = null;
+                Assert.Contains("event=runtime_unlock_idless_paired_retry_coalesced", await DeliverIdless(boundMessage));
+                Assert.Contains("paired_retry_file_binding_missing", await DeliverIdless("different-message"));
+                offer.SentAtUnixMs++;
+                Assert.Contains("paired_retry_file_binding_missing", await DeliverIdless(boundMessage));
+                offer.SentAtUnixMs--;
+                offer.PairedRetryTransferId = transferId;
+                Assert.Empty(observations);
+                Assert.Same(retained, GetPrivateField(transport, "pendingAccelerationAnswerReplyShadow"));
+                Assert.Equal(1, lane.StartDialerCalls);
+                Assert.Equal(transaction, GetPrivateField(transport, "runtimeUnlockTransactionState"));
+            }
             var now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
             var ack = new TransportAccelerationAnswerAckPayload
             {

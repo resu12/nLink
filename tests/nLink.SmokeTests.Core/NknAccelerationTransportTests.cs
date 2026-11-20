@@ -4058,7 +4058,7 @@ public sealed partial class NknAccelerationTransportTests : CoreSmokeTestsBase, 
             var options = NknTransportOptions.Load();
             var hostClient = new FakeNknClient("host.runtime-unlock-precommit-pause-bypass.address");
             var helperClient = new FakeNknClient("helper.runtime-unlock-precommit-pause-bypass.address");
-            var hostLane = new FakeNknAccelerationLane(isAvailable: true);
+            var (hostLane, sent) = CreateRecordingProbeListener(helperClient.Address);
             using var host = new NknSignalingTransport(
                 hostClient,
                 options,
@@ -4119,6 +4119,7 @@ public sealed partial class NknAccelerationTransportTests : CoreSmokeTestsBase, 
                 Reason = "precommit_probe_received",
             };
 
+            StartPayerProbeForBulkTest(host, probe);
             await dataSession.SendAsync(probe, cts.Token);
             await dataSession.SendAsync(ack, cts.Token);
 
@@ -4144,7 +4145,7 @@ public sealed partial class NknAccelerationTransportTests : CoreSmokeTestsBase, 
             Assert.Contains("delivery_result=sent", logTail, StringComparison.Ordinal);
             Assert.Contains("effective_transport=tuna", logTail, StringComparison.Ordinal);
             Assert.DoesNotContain("event=filetransfer_data_session_send_canceled_for_tuna_activation_pause;", logTail, StringComparison.Ordinal);
-            Assert.Equal(2, hostLane.Sent.Count);
+            Assert.Equal(2, sent.Count);
         }
         finally
         {
@@ -4163,7 +4164,7 @@ public sealed partial class NknAccelerationTransportTests : CoreSmokeTestsBase, 
             var options = NknTransportOptions.Load();
             var hostClient = new FakeNknClient("host.runtime-unlock-precommit-probe-authority.address");
             var helperClient = new FakeNknClient("helper.runtime-unlock-precommit-probe-authority.address");
-            var hostLane = new FakeNknAccelerationLane(isAvailable: true);
+            var (hostLane, sent) = CreateRecordingProbeListener(helperClient.Address);
             using var host = new NknSignalingTransport(
                 hostClient,
                 options,
@@ -4179,7 +4180,8 @@ public sealed partial class NknAccelerationTransportTests : CoreSmokeTestsBase, 
                 host,
                 helper,
                 cts.Token,
-                InviteCapabilities.Chat | InviteCapabilities.FileTransfer);
+                InviteCapabilities.Chat | InviteCapabilities.FileTransfer,
+                suppressAutomaticAccelerationNegotiation: true);
             const string transferId = "transfer_runtime_unlock_precommit_probe_authority";
             var dataSession = await host.OpenFileTransferDataSessionAsync(sessionId, transferId, cts.Token);
 
@@ -4201,12 +4203,12 @@ public sealed partial class NknAccelerationTransportTests : CoreSmokeTestsBase, 
             var logStart = GetOperationalLogLength();
             Assert.False(host.IsAccelerationAvailableForTests);
 
+            StartPayerProbeForBulkTest(host, probe);
             await dataSession.SendAsync(probe, cts.Token);
 
             var logTail = ReadOperationalLogTail(logStart);
             Assert.False(host.IsAccelerationAvailableForTests);
-            Assert.Single(hostLane.Sent);
-            Assert.Equal(NknBridgeChannel.Bulk, hostLane.Sent.Single().Lane);
+            Assert.Equal(NknBridgeChannel.Bulk, Assert.Single(sent));
             Assert.Contains("event=runtime_unlock_precommit_probe_authority_sent;", logTail, StringComparison.Ordinal);
             Assert.Contains("event=runtime_unlock_precommit_probe_delivery_result;", logTail, StringComparison.Ordinal);
             Assert.Contains("frame_type=filetransfer.runtime_unlock.precommit_probe", logTail, StringComparison.Ordinal);
@@ -4924,6 +4926,7 @@ public sealed partial class NknAccelerationTransportTests : CoreSmokeTestsBase, 
                 TunaPathLeaseListenerRunId = "listener-start-9",
                 TunaPathLeaseCurrent = true,
             };
+            InstallPayerProbeOwnerForTests(host, snapshot);
             InvokePrivateMethod(
                 host,
                 "RequestRuntimeUnlockPreCommitProbeLaunch",
@@ -5003,6 +5006,7 @@ public sealed partial class NknAccelerationTransportTests : CoreSmokeTestsBase, 
                 TunaPathLeaseListenerRunId = "listener-start-9",
                 TunaPathLeaseCurrent = true,
             };
+            InstallPayerProbeOwnerForTests(host, snapshot);
             InvokePrivateMethod(
                 host,
                 "RequestRuntimeUnlockPreCommitProbeLaunch",
@@ -35465,6 +35469,7 @@ public sealed partial class NknAccelerationTransportTests : CoreSmokeTestsBase, 
                 supportedLanes: new[] { "file" },
                 payerDecisionId: 91L);
             offer.Trigger = "fallback_paired_tail_yield";
+            offer.PairedRetryTransferId = transferId;
             offer.SenderRole = "helpee";
             var bridge =
                 Assert.IsAssignableFrom<
@@ -38967,6 +38972,8 @@ public sealed partial class NknAccelerationTransportTests : CoreSmokeTestsBase, 
         private string? lastStopReason;
         private NknTunaListenerAdoptionSnapshot? listenerAdoptionSnapshot;
         private NknTunaLaneLease? handoffLease;
+        private readonly Guid physicalLaneId = Guid.NewGuid();
+        private long physicalGeneration;
         private (object Owner, NknTunaLaneLease? Lease)? offerDial;
         private (object Owner, NknTunaLaneLease? Lease)? heldCleanupDial;
         public Action? AfterOfferDialCommit { get; set; }
@@ -39008,8 +39015,10 @@ public sealed partial class NknAccelerationTransportTests : CoreSmokeTestsBase, 
             return true;
         }
         public bool StrictPayerHandoffForTests { get; set; }
+        public bool TrackListenerLeaseForTests { get; set; }
 
-        public NknTunaLaneLease? CaptureCurrentLaneLease() => StrictPayerHandoffForTests && IsAvailable ? handoffLease : null;
+        public NknTunaLaneLease? CaptureCurrentLaneLease() =>
+            IsAvailable && (StrictPayerHandoffForTests || (TrackListenerLeaseForTests && IsLocalPaidListenerActive)) ? handoffLease : null;
         public Action<NknTunaLaneLease>? BeforeListenerPublishForTests { get; set; }
         public bool TryPublishForListenerLease(NknTunaLaneLease lease, Action publish)
         {
@@ -39044,8 +39053,9 @@ public sealed partial class NknAccelerationTransportTests : CoreSmokeTestsBase, 
 
         private void CaptureHandoffLease()
         {
-            if (!StrictPayerHandoffForTests) return;
-            handoffLease = new(Guid.NewGuid(), 1, 1, new NknTunaSidecarClient(supportedLanes, 16),
+            if (!StrictPayerHandoffForTests && !(TrackListenerLeaseForTests && IsLocalPaidListenerActive)) return;
+            var generation = ++physicalGeneration;
+            handoffLease = new(physicalLaneId, generation, generation, new NknTunaSidecarClient(supportedLanes, 16),
                 IsLocalPaidListenerActive ? null : (NknTunaSidecarProcessOwner)typeof(NknTunaSidecarProcessOwner)
                     .GetConstructors(BindingFlags.Instance | BindingFlags.NonPublic).Single()
                     .Invoke(new object?[] { "dialer", new System.Diagnostics.Process(), null }),
@@ -39137,9 +39147,10 @@ public sealed partial class NknAccelerationTransportTests : CoreSmokeTestsBase, 
                     "127.0.0.1:30303",
                     LocalTunaAddress),
                 ProcessId: 16704,
-                ProcessRunId: "test-current-listener-run",
+                ProcessRunId: TrackListenerLeaseForTests ? $"test-current-listener-run-{physicalGeneration + 1}" : "test-current-listener-run",
                 ProcessStartedUtc: DateTimeOffset.UtcNow.AddMinutes(-4));
             IsLocalPaidListenerActive = true;
+            if (TrackListenerLeaseForTests) CaptureHandoffLease();
             Volatile.Write(ref available, 1);
         }
 
@@ -39168,7 +39179,7 @@ public sealed partial class NknAccelerationTransportTests : CoreSmokeTestsBase, 
             {
                 CurrentRequest = successorRequest,
             };
-            if (StrictPayerHandoffForTests && handoffLease is not null)
+            if (handoffLease is not null)
                 handoffLease = handoffLease with { Listener = listenerAdoptionSnapshot };
             receipt = new NknTunaListenerAdoptionReceipt(
                 snapshot,

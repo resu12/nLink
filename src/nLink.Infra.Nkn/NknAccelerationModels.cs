@@ -314,6 +314,10 @@ internal sealed record NknAccelerationLocalEndpoint(
 
 internal sealed class TransportAccelerationOfferPayload
 {
+    [JsonPropertyName("pairedRetryTransferId")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? PairedRetryTransferId { get; set; }
+
     [JsonPropertyName("sessionId")]
     public string SessionId { get; set; } = string.Empty;
 

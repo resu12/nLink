@@ -387,6 +387,7 @@ public sealed partial class NknSignalingTransport : INknListenerCapHandoffContro
         RuntimeUnlockRetryDispatchInitialEvaluationDecisionOverrideForTests { get; set; }
     private long runtimeUnlockTransactionNextGeneration;
     private RuntimeUnlockTransactionSnapshot runtimeUnlockTransactionState = RuntimeUnlockTransactionSnapshot.Idle;
+    private (RuntimeUnlockPreCommitProbeSendAuthority Probe, string ListenerRunId, NknTunaLaneLease Physical)? payerProbeListener;
     private string? runtimeUnlockPublishedRouteCommitSessionId;
     private long runtimeUnlockPublishedRouteCommitTransactionGeneration;
     private long runtimeUnlockPublishedRouteCommitOfferGeneration;
@@ -434,6 +435,7 @@ public sealed partial class NknSignalingTransport : INknListenerCapHandoffContro
     private long pendingAnswerOutboundOfferGeneration;
     private bool pendingAnswerOwnsPause;
     private long pendingAnswerDeadlineUtcMs;
+    private long pendingAnswerOfferSentUtcMs;
     private RuntimeUnlockOfferAuthorityMode? pendingAccelerationAnswerAckAuthorityMode;
     private long? pendingResponderAckTransactionGeneration;
     private long pendingResponderHandoffGeneration = -1;
@@ -4096,6 +4098,20 @@ public sealed partial class NknSignalingTransport : INknListenerCapHandoffContro
                 return RuntimeUnlockRetiredAnswerHandoffDisposition.Rejected;
             }
 
+            // Either peer's raw transaction may omit the file ID. Scope the probe
+            // to this offer's bound lease, never to the other open file.
+            var lease = runtimeUnlockCapture.Lease;
+            if (runtimeUnlockSnapshot.TransferId is null && lease.TransferId is not null &&
+                lease.IsCurrent && runtimeUnlockSnapshot.TunaPathLeaseCurrent &&
+                lease.SessionId == runtimeUnlockSnapshot.SessionId &&
+                lease.TransactionGeneration == runtimeUnlockSnapshot.TransactionGeneration &&
+                lease.OfferGeneration == runtimeUnlockSnapshot.OfferGeneration &&
+                lease.LeaseGeneration == runtimeUnlockSnapshot.TunaPathLeaseGeneration &&
+                lease.ListenerRunId == runtimeUnlockSnapshot.TunaPathLeaseListenerRunId)
+            {
+                runtimeUnlockSnapshot = runtimeUnlockSnapshot with { TransferId = lease.TransferId };
+            }
+
             if (runtimeUnlockSnapshot.IsTerminal &&
                 IsRuntimeUnlockRetryDispatchEvaluationHeldForSession(
                     sessionId,
@@ -4475,12 +4491,17 @@ public sealed partial class NknSignalingTransport : INknListenerCapHandoffContro
         lock (gate)
         lock (accelerationGate)
         {
-            if (launchRole == RuntimeUnlockPreCommitProbeLaunchRole.Initiator &&
-                snapshot.TunaPathLeaseListenerRunId?.StartsWith("peer-offer-dialer-", StringComparison.OrdinalIgnoreCase) == true &&
-                (!TryResolveRuntimeUnlockPreCommitProbeLaunchRole(snapshot, responderPeerProbeEvidence, out var currentRole) ||
-                 currentRole != launchRole))
+            if (launchRole == RuntimeUnlockPreCommitProbeLaunchRole.Initiator)
             {
-                return;
+                if (snapshot.TunaPathLeaseListenerRunId?.StartsWith("peer-offer-dialer-", StringComparison.OrdinalIgnoreCase) == true)
+                {
+                    if (!TryResolveRuntimeUnlockPreCommitProbeLaunchRole(snapshot, responderPeerProbeEvidence, out var currentRole) ||
+                        currentRole != launchRole) return;
+                }
+                else if (!IsCurrentPayerProbeLeaseLocked(sessionId, launchTransferId, snapshot))
+                {
+                    return;
+                }
             }
 
             RuntimeUnlockResponderAnswerProbeConvergenceHold?
@@ -4641,6 +4662,21 @@ public sealed partial class NknSignalingTransport : INknListenerCapHandoffContro
                     launchSnapshot);
             }
         }
+    }
+
+    private bool IsCurrentPayerProbeLeaseLocked(string sessionId, string? file, RuntimeUnlockTransactionSnapshot snapshot)
+    {
+        var current = runtimeUnlockTransactionState;
+        var lease = runtimeUnlockTunaPathLeaseState;
+        return !current.IsTerminal && !current.RouteCommitted && current.AnswerReceived &&
+            current.PathProbeState == RuntimeUnlockPathProbeState.None &&
+            snapshot.TunaPathLeaseCurrent && current.TunaPathLeaseCurrent && lease.IsCurrent &&
+            sessionId == snapshot.SessionId && sessionId == current.SessionId && sessionId == lease.SessionId &&
+            snapshot.TransactionGeneration == current.TransactionGeneration && current.TransactionGeneration == lease.TransactionGeneration &&
+            snapshot.OfferGeneration == current.OfferGeneration && current.OfferGeneration == lease.OfferGeneration &&
+            snapshot.TunaPathLeaseGeneration == current.TunaPathLeaseGeneration && current.TunaPathLeaseGeneration == lease.LeaseGeneration &&
+            snapshot.TunaPathLeaseListenerRunId == current.TunaPathLeaseListenerRunId && current.TunaPathLeaseListenerRunId == lease.ListenerRunId &&
+            (current.TransferId is null || current.TransferId == file) && lease.TransferId == file;
     }
 
     private static bool HasSameRuntimeUnlockPreCommitProbeLaunchTuple(
@@ -7777,6 +7813,31 @@ public sealed partial class NknSignalingTransport : INknListenerCapHandoffContro
             expectedLocalPathProbeState);
     }
 
+    // Called under accelerationGate at the start transition and again at lane submission.
+    private bool MatchesLocalPreCommitProbeOwnerLocked(string sessionId, string file, long transaction,
+        long offer, long leaseGeneration, string? listenerRunId)
+    {
+        var current = runtimeUnlockTransactionState;
+        if (transaction <= 0 || offer <= 0 || string.IsNullOrWhiteSpace(file) ||
+            current.IsTerminal || current.RouteCommitted || !current.AnswerReceived ||
+            current.SessionId != sessionId || current.TransactionGeneration != transaction ||
+            current.OfferGeneration != offer || (current.TransferId is not null && current.TransferId != file))
+        {
+            return false;
+        }
+
+        var lease = runtimeUnlockTunaPathLeaseState;
+        if (!RuntimeUnlockTunaPathLease.IsApplicableToOffer(lease, sessionId, transaction, offer))
+        {
+            return leaseGeneration == 0 && listenerRunId is null && current.TunaPathLeaseGeneration == 0;
+        }
+
+        return lease.IsCurrent && current.TunaPathLeaseCurrent &&
+            (lease.TransferId ?? current.TransferId) == file &&
+            lease.LeaseGeneration == leaseGeneration && current.TunaPathLeaseGeneration == leaseGeneration &&
+            lease.ListenerRunId == listenerRunId && current.TunaPathLeaseListenerRunId == listenerRunId;
+    }
+
     private bool NotifyRuntimeUnlockPathProbe(
         RuntimeUnlockTransactionEventKind kind,
         string sessionId,
@@ -7847,11 +7908,18 @@ public sealed partial class NknSignalingTransport : INknListenerCapHandoffContro
                 retainedResponderConvergence?.PeerReceipt;
             var retainedAckScopeReceipt =
                 runtimeUnlockResponderProbeAckScopeReceipt;
+            var localPreCommitStart = kind == RuntimeUnlockTransactionEventKind.PathProbeStarted &&
+                transportEpoch == 0 && targetTransport == FileTransferTransportKind.Tuna && currentReceiveScope.IsDefault &&
+                !peerCallbackTupleRequired && expectedLocalPathProbeState == RuntimeUnlockPathProbeState.None;
             if ((peerCallbackTupleRequired &&
                  (callbackTransactionGeneration <= 0 ||
                   callbackOfferGeneration <= 0 ||
                   callbackTunaPathLeaseGeneration < 0)) ||
-                (localCallbackTupleRequired &&
+                (localPreCommitStart &&
+                 (current.PathProbeState != RuntimeUnlockPathProbeState.None || current.PathProbeId is not null ||
+                  !MatchesLocalPreCommitProbeOwnerLocked(sessionId, transferId, expectedLocalTransactionGeneration,
+                      expectedLocalOfferGeneration, expectedLocalTunaPathLeaseGeneration, expectedLocalTunaPathLeaseListenerRunId))) ||
+                (localCallbackTupleRequired && !localPreCommitStart &&
                  (expectedLocalTransactionGeneration <= 0 ||
                   expectedLocalOfferGeneration <= 0 ||
                   expectedLocalTunaPathLeaseGeneration < 0 ||
@@ -7980,6 +8048,12 @@ public sealed partial class NknSignalingTransport : INknListenerCapHandoffContro
                     current.PathProbeId,
                     probeId.Trim(),
                     StringComparison.Ordinal);
+            NknTunaLaneLease? acceptedListener = null;
+            if (localPreCommitStart && RequiresPaidProbeListener(expectedLocalTunaPathLeaseGeneration, expectedLocalTunaPathLeaseListenerRunId))
+            {
+                acceptedListener = (accelerationLane as INknTunaAccelerationSession)?.CaptureListenerOffer().Lease;
+                if (acceptedListener is null) return false;
+            }
             decision = exactScopedResponderProbeAckAlreadyApplied
                 ? new RuntimeUnlockTransactionDecision(
                     current,
@@ -7998,6 +8072,12 @@ public sealed partial class NknSignalingTransport : INknListenerCapHandoffContro
                     preserveResponderConvergenceForScopedProbeBeforePeerReceipt:
                         scopedResponderProbeCallback &&
                         retainedPeerReceipt is null);
+            if (acceptedListener is not null)
+            {
+                payerProbeListener = (new(sessionId.Trim(), transferId.Trim(), expectedLocalTransactionGeneration,
+                    expectedLocalOfferGeneration, expectedLocalTunaPathLeaseGeneration, probeId.Trim()),
+                    expectedLocalTunaPathLeaseListenerRunId!, acceptedListener);
+            }
         }
 
         LogRuntimeUnlockTransactionDecision(kind, decision);
@@ -9050,6 +9130,8 @@ public sealed partial class NknSignalingTransport : INknListenerCapHandoffContro
             runtimeUnlockTransactionState);
         var stateWithLease = AttachRuntimeUnlockTunaPathLeaseUnsafe(decision.State);
         runtimeUnlockTransactionState = stateWithLease;
+        if (stateWithLease.IsTerminal || stateWithLease.PathProbeState != RuntimeUnlockPathProbeState.Started)
+            payerProbeListener = null;
         if (ShouldInvalidateRuntimeUnlockResponderAnswerProbeConvergenceUnsafe(
                 kind,
                 stateWithLease,
@@ -9491,7 +9573,8 @@ public sealed partial class NknSignalingTransport : INknListenerCapHandoffContro
         string sessionId,
         out FileTransferRoutePublicationAuthority authority,
         out long dataSessionGeneration,
-        out string rejectionReason)
+        out string rejectionReason,
+        string? offeredTransferId = null)
     {
         authority = null!;
         dataSessionGeneration = 0;
@@ -9512,6 +9595,7 @@ public sealed partial class NknSignalingTransport : INknListenerCapHandoffContro
         {
             var candidates = fileTransferRoutePublicationAuthorities
                 .Where(pair =>
+                    (offeredTransferId is null || offeredTransferId == pair.Key.TransferId) &&
                     IsCurrentRuntimeUnlockFileTransferOwnerAuthority(
                         pair.Key,
                         pair.Value,
@@ -9769,14 +9853,17 @@ public sealed partial class NknSignalingTransport : INknListenerCapHandoffContro
         }
 
         var sessionId = offer.SessionId.Trim();
+        var offeredTransferId = offer.PairedRetryTransferId;
         if (!AddressMatchesForSessionPolicy(
                 source,
                 ResolveExpectedRemotePeerAddressForCurrentSession()) ||
+            string.IsNullOrWhiteSpace(offeredTransferId) ||
             !TryCaptureCurrentRuntimeUnlockFileTransferOwnerAndDataSession(
                 sessionId,
                 out var authority,
                 out var dataSessionGeneration,
-                out _) ||
+                out _,
+                offeredTransferId) ||
             !string.Equals(
                 authority.RouteToken,
                 FileTransferRouteResolver.PostTunaFallbackV6Token,
@@ -9868,6 +9955,7 @@ public sealed partial class NknSignalingTransport : INknListenerCapHandoffContro
                 expected.PublicationAuthority.SessionId,
                 StringComparison.Ordinal) ||
             offer.PayerDecisionId != request.PayerDecisionId ||
+            offer.PairedRetryTransferId != request.PublicationAuthority.TransferId ||
             !TryRecaptureInboundPostFallbackPairedRetryOfferLocalScope(request))
         {
             return false;
@@ -9884,6 +9972,28 @@ public sealed partial class NknSignalingTransport : INknListenerCapHandoffContro
 
         rejectionReason = "accepted";
         return true;
+    }
+
+    // A duplicate without a file ID cannot create or refresh authority. Leave
+    // replay to the existing answer worker only for its exact, still-pending offer.
+    private bool IsRetainedIdlessPairedRetry(string source, string messageId, TransportAccelerationOfferPayload offer)
+    {
+        lock (gate)
+        lock (accelerationGate)
+        {
+            if (pendingAccelerationAnswerAckPairedRetryBindingReceipt is not { IsDefault: false } receipt ||
+                pendingAccelerationAnswerReplyShadow is not { } answer ||
+                answer.PendingGeneration != pendingAccelerationAnswerAckGeneration ||
+                answer.ReplyTarget.Target != source || receipt.Request.MessageId != messageId ||
+                answer.DeadlineUtcMs <= DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() ||
+                pendingAnswerDeadlineUtcMs != offer.ExpiresAtUnixMs || pendingAnswerOfferSentUtcMs != offer.SentAtUnixMs ||
+                !TryRecaptureInboundPostFallbackPairedRetryOfferLocalScope(receipt.Request))
+                return false;
+
+            var original = CloneTransportAccelerationOffer(offer);
+            original.PairedRetryTransferId = receipt.Request.PublicationAuthority.TransferId;
+            return MatchPendingAnswerOfferLocked(original) == PendingAnswerOfferMatch.Exact;
+        }
     }
 
     private bool TryRecaptureInboundPostFallbackPairedRetryOfferLocalScope(
@@ -17131,6 +17241,9 @@ public sealed partial class NknSignalingTransport : INknListenerCapHandoffContro
         var sentAtUnixMs = idleUnlock?.RequestedAtUnixMs ?? DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
         var offer = new TransportAccelerationOfferPayload
         {
+            PairedRetryTransferId = usesInstalledRetryAuthority &&
+                expectedInstallReceipt is { Authority.ReleaseKind: RuntimeUnlockRetryReleaseKind.FallbackPairedTailYield } pairedReceipt
+                    ? pairedReceipt.Authority.TransferId : null,
             SessionId = sessionId,
             SenderRole = localRole,
             TunaAddress = listenerAddress,
@@ -19874,6 +19987,7 @@ public sealed partial class NknSignalingTransport : INknListenerCapHandoffContro
             $"event=runtime_unlock_initial_activation_offer_envelope_refresh_issued; {FormatRuntimeUnlockInitialActivationReceiveRecoveryHoldRequest(command.HoldRequest)}; refresh_generation={command.RefreshGeneration}; refresh_release_profile={command.ReleaseProfile}; successor_envelope_generation={command.SuccessorEnvelopeGeneration}; successor_sent_at_unix_ms={command.SuccessorSentAtUnixMs}; successor_expires_at_unix_ms={command.SuccessorExpiresAtUnixMs}; decision_reason=coordinator_refresh_command_current");
         var refreshedOffer = new TransportAccelerationOfferPayload
         {
+            PairedRetryTransferId = predecessor.Offer.PairedRetryTransferId,
             SessionId = predecessor.Offer.SessionId,
             SenderRole = predecessor.Offer.SenderRole,
             TunaAddress = predecessor.Offer.TunaAddress,
@@ -21920,6 +22034,8 @@ public sealed partial class NknSignalingTransport : INknListenerCapHandoffContro
             offer.Nonce,
             offer.SidecarProtocolVersion.ToString(
                 CultureInfo.InvariantCulture));
+        if (offer.PairedRetryTransferId is not null)
+            stableTuple += "\u001f" + offer.PairedRetryTransferId;
         return Convert.ToHexString(
                 SHA256.HashData(Encoding.UTF8.GetBytes(stableTuple)))
             .ToLowerInvariant();
@@ -30986,6 +31102,14 @@ public sealed partial class NknSignalingTransport : INknListenerCapHandoffContro
             return;
         }
 
+        if (offer.PairedRetryTransferId is null && SanitizeLogToken(offer.Trigger) == "fallback_paired_tail_yield")
+        {
+            if (validation.IsValid && IsRetainedIdlessPairedRetry(source, messageId, offer))
+                LocalOperationalLog.Info("NKN.Tuna", "event=runtime_unlock_idless_paired_retry_coalesced; authority_effect=none");
+            else
+                RejectAccelerationEnvelope("transport_acceleration_offer", "paired_retry_file_binding_missing", messageId);
+            return;
+        }
         if (PendingAnswerConflictReason(offer) is { } conflictReason)
         {
             RejectAccelerationEnvelope("transport_acceleration_offer", conflictReason, messageId);
@@ -33300,6 +33424,7 @@ public sealed partial class NknSignalingTransport : INknListenerCapHandoffContro
             TransportAccelerationOfferPayload offer)
         => new()
         {
+            PairedRetryTransferId = offer.PairedRetryTransferId,
             SessionId = offer.SessionId,
             SenderRole = offer.SenderRole,
             TunaAddress = offer.TunaAddress,
@@ -33583,6 +33708,7 @@ public sealed partial class NknSignalingTransport : INknListenerCapHandoffContro
             pendingAnswerPauseGeneration = acquiredPause?.Pause ?? fileTransferTunaActivationPauseGeneration;
             pendingAnswerOutboundOfferGeneration = outboundAccelerationOfferGeneration;
             pendingAnswerDeadlineUtcMs = offer.ExpiresAtUnixMs;
+            pendingAnswerOfferSentUtcMs = offer.SentAtUnixMs;
             pendingAccelerationAnswerAckNonce = nonce;
             pendingAnswerTunaEndpoint = offer.TunaAddress;
             pendingAnswerSemantics = PendingOfferSemantics(offer);
@@ -34548,6 +34674,7 @@ public sealed partial class NknSignalingTransport : INknListenerCapHandoffContro
         pendingAnswerDialOwner = null;
         pendingAnswerOwnsPause = false;
         pendingAnswerDeadlineUtcMs = 0;
+        pendingAnswerOfferSentUtcMs = 0;
         pendingAccelerationAnswerAckNonce = null;
         pendingAnswerTunaEndpoint = null;
         pendingAnswerSemantics = null;

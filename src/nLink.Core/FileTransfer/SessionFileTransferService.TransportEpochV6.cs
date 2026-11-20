@@ -910,23 +910,13 @@ public sealed partial class SessionFileTransferService
             SentUnixTimeMilliseconds = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
         };
 
-        proofProvider.NotifyRuntimeUnlockPathProbeStarted(
-            sessionId,
-            transferId,
-            transportEpoch: 0,
-            probeId,
-            FileTransferTransportKind.Tuna,
-            "precommit_probe_sent");
-        LogRuntimeUnlockPreCommitProbeStarted(
-            direction,
-            transferId,
-            sessionId,
-            frame,
-            snapshot.LaunchGeneration);
-
         try
         {
-            await tunaProbeSender.SendRuntimeUnlockTunaPreCommitProbeAsync(frame, ct).ConfigureAwait(false);
+            if (!await TrySendAuthorizedPreCommitProbeAsync(proofProvider, tunaProbeSender, direction,
+                    frame, snapshot, ct).ConfigureAwait(false))
+            {
+                return;
+            }
             LocalOperationalLog.Info(
                 "FileTransferService",
                 $"event=runtime_unlock_precommit_probe_sent; direction={direction.ToString().ToLowerInvariant()}; transfer_id={FormatProtocolLogValue(transferId)}; session_id={FormatProtocolLogValue(sessionId)}; transaction_generation={frame.TransactionGeneration}; offer_generation={frame.OfferGeneration}; tuna_path_lease_generation={frame.TunaPathLeaseGeneration}; launch_generation={snapshot.LaunchGeneration}; probe_id={FormatProtocolLogValue(probeId)}; target_transport=tuna; reason={FormatProtocolLogValue(reason)}");
@@ -1017,6 +1007,27 @@ public sealed partial class SessionFileTransferService
                 transferId,
                 ex.GetType().Name);
         }
+    }
+
+    internal static async Task<bool> TrySendAuthorizedPreCommitProbeAsync(
+        IRuntimeUnlockRouteCommitProofProvider provider, IFileTransferRuntimeUnlockTunaProbeSender sender,
+        FileTransferDirection direction, FileTransferRuntimeUnlockPreCommitProbeFrame frame,
+        RuntimeUnlockRouteCommitSnapshot snapshot, CancellationToken ct)
+    {
+        if (!provider.NotifyRuntimeUnlockPathProbeStarted(frame.SessionId, frame.TransferId, 0, frame.ProbeId!,
+                FileTransferTransportKind.Tuna, "precommit_probe_sent",
+                expectedLocalTransactionGeneration: snapshot.TransactionGeneration,
+                expectedLocalOfferGeneration: snapshot.OfferGeneration,
+                expectedLocalTunaPathLeaseGeneration: snapshot.TunaPathLeaseGeneration,
+                expectedLocalTunaPathLeaseListenerRunId: snapshot.TunaPathLeaseListenerRunId,
+                expectedLocalPathProbeState: RuntimeUnlockPathProbeState.None))
+        {
+            return false;
+        }
+
+        LogRuntimeUnlockPreCommitProbeStarted(direction, frame.TransferId, frame.SessionId, frame, snapshot.LaunchGeneration);
+        await sender.SendRuntimeUnlockTunaPreCommitProbeAsync(frame, ct).ConfigureAwait(false);
+        return true;
     }
 
     private bool

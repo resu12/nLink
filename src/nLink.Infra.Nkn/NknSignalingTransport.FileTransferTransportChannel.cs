@@ -1236,6 +1236,9 @@ public sealed partial class NknSignalingTransport : IFileTransferControlPlanePhy
         long TunaPathLeaseGeneration,
         string ProbeId);
 
+    private static bool RequiresPaidProbeListener(long leaseGeneration, string? listenerRunId)
+        => leaseGeneration > 0 && listenerRunId?.StartsWith("peer-offer-dialer-", StringComparison.OrdinalIgnoreCase) != true;
+
     private async Task SendFileTransferEnvelopeRawAsync(
         MsgType messageType,
         string transferId,
@@ -1539,7 +1542,32 @@ public sealed partial class NknSignalingTransport : IFileTransferControlPlanePhy
 
         try
         {
-            var sent = await laneClient.TrySendAsync(channel, envelopeBytes, ct).ConfigureAwait(false);
+            Task<bool>? submission = null;
+            lock (accelerationGate)
+            {
+                var current = runtimeUnlockTransactionState;
+                if (current.PathProbeState != RuntimeUnlockPathProbeState.Started || current.PathProbeId != authority.ProbeId ||
+                    current.PathProbeTransport != FileTransferTransportKind.Tuna ||
+                    !MatchesLocalPreCommitProbeOwnerLocked(authority.SessionId, authority.TransferId, authority.TransactionGeneration,
+                        authority.OfferGeneration, authority.TunaPathLeaseGeneration, current.TunaPathLeaseListenerRunId))
+                {
+                    return false;
+                }
+                if (RequiresPaidProbeListener(authority.TunaPathLeaseGeneration, current.TunaPathLeaseListenerRunId))
+                {
+                    if (payerProbeListener is not { } bound || bound.Probe != authority ||
+                        bound.ListenerRunId != current.TunaPathLeaseListenerRunId ||
+                        laneClient is not INknTunaAccelerationSession listener ||
+                        !listener.TryPublishForListenerLease(bound.Physical,
+                            () => submission = listener.TrySendAsync(channel, envelopeBytes, ct)))
+                        return false;
+                }
+                else
+                {
+                    submission = laneClient.TrySendAsync(channel, envelopeBytes, ct);
+                }
+            }
+            var sent = submission is not null && await submission.ConfigureAwait(false);
             if (sent)
             {
                 LocalOperationalLog.Info(
