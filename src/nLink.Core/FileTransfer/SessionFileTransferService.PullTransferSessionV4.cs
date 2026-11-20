@@ -26011,7 +26011,9 @@ public sealed partial class SessionFileTransferService
             errorCode: errorCode,
             statusMessage: statusMessage,
             sendError: true,
-            errorMessage: errorMessage,
+            // Both V4 and V6 report destination-open failures here. Only the receiver gets the filesystem detail.
+            errorMessage: errorCode is StreamOpenFailedErrorCode or V4SparseDestinationRequiredErrorCode
+                ? "The receiver could not open the file destination." : errorMessage,
             cancelReason: null,
             ct: CancellationToken.None,
             requiredFeedbackOperation: null,

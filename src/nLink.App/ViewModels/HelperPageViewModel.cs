@@ -29,7 +29,7 @@ using NLink.Infra.Nkn;
 
 namespace NLink.App.ViewModels;
 
-public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatFileSender, IWindowCloseAware
+public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatFileTransferActions, IWindowCloseAware
 {
     private static readonly TimeSpan DefaultConnectFailureCooldown = TimeSpan.FromSeconds(2);
     private static readonly TimeSpan DefaultApprovalTimeout = SessionApprovalTimeouts.DefaultHumanDecisionTimeout;
@@ -2149,8 +2149,10 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatFileS
         }
     }
 
-    SessionId? IChatFileSender.FileSendSessionId => sessionRuntime.CurrentSessionGrant?.SessionId;
-    bool IChatFileSender.TryAuthorizeFileSelection() => TryAuthorizeFileSelection();
+    SessionId? IChatFileTransferActions.FileSendSessionId => sessionRuntime.CurrentSessionGrant?.SessionId;
+    bool IChatFileTransferActions.TryAuthorizeFileSelection() => TryAuthorizeFileSelection();
+    Task<FileTransferTransferSnapshot?> IChatFileTransferActions.AcceptIncomingAsAsync(string sessionId, string transferId, Guid offerToken, string path)
+        => sessionRuntime.AcceptIncomingAsAsync(sessionId, transferId, offerToken, path);
 
     private bool TryAuthorizeFileSelection()
     {

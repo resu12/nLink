@@ -423,8 +423,43 @@ public sealed class FileTransferSecurityGuardTests
         }
     }
 
+    [Theory]
+    [InlineData("../outside.txt", "safe.txt")]
+    [InlineData("safe.txt", "../outside.txt")]
+    public void SaveAs_RequiresSafeOfferedAndSelectedNames(string offered, string selected)
+    {
+        var now = DateTimeOffset.UtcNow;
+        var state = CreateApprovedSecurityState(now, CapabilityGrant.FileTransfer);
+        var root = CreateTempRoot();
+        try
+        {
+            var result = new SessionFileTransferGuard(() => now).OpenReceiveWriteStream(true, state,
+                CreateGrant(state, now, CapabilityGrant.FileTransfer),
+                new FileTransferDescriptor(state.SessionId!.Value, state.HelperAddress!.Value, offered, 5),
+                new FileTransferStoragePolicy(root) { ReceiverSelectedFileName = selected });
+            Assert.False(result.IsAllowed);
+            Assert.Equal(FileTransferValidationFailure.PathTraversalDetected, result.Access.Failure);
+            Assert.Empty(Directory.EnumerateFileSystemEntries(root));
+        }
+        finally { CleanupTempRoot(root); }
+    }
+
     [Fact]
-    public async Task FinalizeAsync_PreservesTempArtifact_WhenFinalPathAppearsBeforeMove()
+    public void SaveAs_CanPlanFileDirectlyUnderVolumeRoot()
+    {
+        var now = DateTimeOffset.UtcNow;
+        var state = CreateApprovedSecurityState(now, CapabilityGrant.FileTransfer);
+        var result = new SessionFileTransferGuard(() => now).ValidateReceiveMetadata(true, state,
+            CreateGrant(state, now, CapabilityGrant.FileTransfer),
+            new FileTransferDescriptor(state.SessionId!.Value, state.HelperAddress!.Value, "source.txt", 5),
+            new FileTransferStoragePolicy(Path.GetPathRoot(Path.GetTempPath())!) { ReceiverSelectedFileName = $"nlink-{Guid.NewGuid():N}.txt" });
+        Assert.True(result.IsAllowed, result.Message); // validate only; don't write at the volume root
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("receiver-choice.txt")]
+    public async Task FinalizeAsync_PreservesTempArtifact_WhenFinalPathAppearsBeforeMove(string? selected)
     {
         var nowUtc = DateTimeOffset.FromUnixTimeMilliseconds(1_760_200_000_000);
         var guard = new SessionFileTransferGuard(() => nowUtc);
@@ -443,7 +478,7 @@ public sealed class FileTransferSecurityGuardTests
                     state.HelperAddress!.Value,
                     "late-collision.txt",
                     5),
-                storagePolicy: new FileTransferStoragePolicy(tempRoot));
+                storagePolicy: new FileTransferStoragePolicy(tempRoot) { ReceiverSelectedFileName = selected });
 
             Assert.True(result.IsAllowed);
             Assert.NotNull(result.Plan);
@@ -455,7 +490,8 @@ public sealed class FileTransferSecurityGuardTests
 
             var ex = await Assert.ThrowsAsync<IOException>(() => handle.FinalizeAsync(CancellationToken.None));
             Assert.Contains("already exists", ex.Message, StringComparison.OrdinalIgnoreCase);
-            Assert.True(File.Exists(result.Plan.FinalPath));
+            Assert.Equal(Path.Combine(tempRoot, selected ?? "late-collision.txt"), result.Plan.FinalPath);
+            Assert.Equal("existing", File.ReadAllText(result.Plan.FinalPath));
             Assert.True(File.Exists(result.Plan.TempPath));
         }
         finally

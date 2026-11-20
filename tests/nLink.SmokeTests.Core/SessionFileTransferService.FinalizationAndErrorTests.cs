@@ -8,6 +8,66 @@ namespace NLink.SmokeTests;
 public sealed class SessionFileTransferServiceFinalizationAndErrorTests : SessionFileTransferServiceTestBase
 {
     [Fact]
+    public async Task SaveAs_StaleOfferTokenCannotAcceptSameIdReplacement()
+    {
+        const string sessionId = "session_save_as_replacement";
+        using var peer = new LoopbackFileTransferTransport(sessionId);
+        using var local = new LoopbackFileTransferTransport(sessionId);
+        peer.Connect(local);
+        using var receiver = new SessionFileTransferService();
+        receiver.AttachTransport(local);
+        var offer = new FileTransferOfferV2
+        {
+            SessionId = sessionId, TransferId = "transfer_reused", FileName = "same.txt", FileSizeBytes = 4,
+            PreferredDataProtocolVersion = FileTransferProtocol.ProtocolVersionV4, FileTransferRoute = "regular_nkn_v4_fast",
+        };
+        await peer.SendFileTransferOfferAsync(offer, CancellationToken.None);
+        await WaitUntilAsync(() => receiver.Snapshot.InboundState == FileTransferTransferState.PendingDecision);
+        var original = receiver.Snapshot.Inbound!.InboundOfferToken;
+        await peer.SendFileTransferCancelAsync(new FileTransferCancelV1 { SessionId = sessionId, TransferId = offer.TransferId }, CancellationToken.None);
+        await WaitUntilAsync(() => receiver.Snapshot.InboundState == FileTransferTransferState.Canceled);
+        await peer.SendFileTransferOfferAsync(offer, CancellationToken.None);
+        await WaitUntilAsync(() => receiver.Snapshot.InboundState == FileTransferTransferState.PendingDecision);
+        var replacement = receiver.Snapshot.Inbound!.InboundOfferToken;
+        Assert.NotEqual(original, replacement);
+        static Task<FileTransferReceiveDestination> Open(FileTransferIncomingOffer _, CancellationToken ct)
+            => throw new InvalidOperationException("No manifest has been sent.");
+        Assert.Null(await receiver.AcceptIncomingTransferForOfferAsync((sessionId, original), offer.TransferId, Open, CancellationToken.None));
+        Assert.Empty(local.SentAccepts);
+        Assert.Equal(FileTransferTransferState.PendingDecision, receiver.Snapshot.InboundState);
+        Assert.NotNull(await receiver.AcceptIncomingTransferForOfferAsync((sessionId, replacement), offer.TransferId, Open, CancellationToken.None));
+        Assert.Single(local.SentAccepts);
+    }
+
+    [Fact]
+    public async Task DestinationOpenFailure_KeepsLocalPathOutOfPeerError()
+    {
+        const string sessionId = "session_private_destination";
+        const string transferId = "transfer_private_destination";
+        const string detail = @"Cannot open Z:\Private Folder\renamed.txt";
+        using var senderTransport = new LoopbackFileTransferTransport(sessionId);
+        using var receiverTransport = new LoopbackFileTransferTransport(sessionId);
+        senderTransport.Connect(receiverTransport);
+        using var sender = new SessionFileTransferService();
+        using var receiver = new SessionFileTransferService();
+        sender.AttachTransport(senderTransport);
+        receiver.AttachTransport(receiverTransport);
+
+        Assert.NotNull(await sender.TryStartSendAsync(new FileTransferSendDescriptor("offered.txt", 1, transferId),
+            _ => Task.FromResult<Stream>(new MemoryStream(new byte[1])), CancellationToken.None));
+        await WaitUntilAsync(() => receiver.Snapshot.InboundState == FileTransferTransferState.PendingDecision);
+        Assert.NotNull(await receiver.AcceptIncomingTransferAsync(transferId,
+            (_, _) => Task.FromException<FileTransferReceiveDestination>(new InvalidOperationException(detail)), CancellationToken.None));
+        await WaitUntilAsync(() => receiver.Snapshot.InboundState == FileTransferTransferState.Failed &&
+                                   sender.Snapshot.OutboundState == FileTransferTransferState.Failed);
+        Assert.Equal(detail, receiver.Snapshot.Inbound!.StatusMessage);
+        var error = Assert.Single(receiverTransport.SentErrors);
+        Assert.Equal(transferId, error.TransferId);
+        Assert.Equal(receiver.Snapshot.Inbound.ErrorCode, error.ErrorCode);
+        Assert.Equal("The receiver could not open the file destination.", error.Message);
+    }
+
+    [Fact]
     public async Task TryStartSendAsync_SendsOfferBeforePreparingMetadata()
     {
         const string transferId = "transfer_service_prehash";

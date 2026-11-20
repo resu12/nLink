@@ -1174,8 +1174,12 @@ public sealed partial class SessionRuntime : IDisposable, ISessionRuntimeScreenS
         FileTransferAccessResult result,
         FileTransferDescriptor? descriptor = null)
     {
-        var authReason = MapAuthorizationFailureReason(result.AuthorizationFailure);
-        lastAuthorizationDenialReason = authReason;
+        var authReason = "(none)";
+        if (result.AuthorizationFailure != SessionAuthorizationFailure.None)
+        {
+            authReason = MapAuthorizationFailureReason(result.AuthorizationFailure);
+            lastAuthorizationDenialReason = authReason;
+        }
         var fileNameLength = descriptor is null
             ? "(none)"
             : descriptor.FileName.Length.ToString(CultureInfo.InvariantCulture);
@@ -1462,6 +1466,10 @@ public sealed partial class SessionRuntime : IDisposable, ISessionRuntimeScreenS
     }
 
     internal Task<FileTransferReceiveDestination> OpenInboundFileTransferDestinationAsync(FileTransferIncomingOffer offer, CancellationToken ct)
+        => OpenInboundFileTransferDestinationAsync(offer, ct, CreateInboundFileTransferStoragePolicy(offer));
+
+    private Task<FileTransferReceiveDestination> OpenInboundFileTransferDestinationAsync(
+        FileTransferIncomingOffer offer, CancellationToken ct, FileTransferStoragePolicy storagePolicy)
     {
         ArgumentNullException.ThrowIfNull(offer);
         ct.ThrowIfCancellationRequested();
@@ -1477,7 +1485,6 @@ public sealed partial class SessionRuntime : IDisposable, ISessionRuntimeScreenS
             helperIdentity,
             offer.FileName,
             offer.FileSizeBytes);
-        var storagePolicy = CreateInboundFileTransferStoragePolicy(offer);
         var result = OpenAuthorizedInboundFileWriteStream(descriptor, storagePolicy);
         if (!result.IsAllowed || result.Handle is null)
         {
@@ -2435,6 +2442,45 @@ public sealed partial class SessionRuntime : IDisposable, ISessionRuntimeScreenS
             "Session",
             $"event=file_transfer_accept_requested; role={role}; session_id={sessionSecurityState.SessionId?.Value ?? "(none)"}; transfer_id={transferId}");
         return fileTransferService.AcceptIncomingTransferAsync(transferId, fileTransferHost.OpenInboundWriteStreamAsync, uiCt);
+    }
+
+    internal async Task<FileTransferTransferSnapshot?> AcceptIncomingAsAsync(
+        string expectedSessionId, string transferId, Guid offerToken, string path, Action? beforeDestinationCheckForTests = null)
+    {
+        var action = new SessionPrivilegedAction(SessionPrivilegedActionKind.FileTransferAcceptIncoming, "file_transfer_accept_as");
+        if (!TryAuthorizePrivilegedAction(action) ||
+            FileTransferSnapshot.Inbound is not { State: FileTransferTransferState.PendingDecision } offer ||
+            offer.SessionId != expectedSessionId || offer.TransferId != transferId || offer.InboundOfferToken != offerToken ||
+            sessionSecurityState.HelperAddress is not PeerAddress helperIdentity)
+            return null;
+
+        if (!Path.IsPathFullyQualified(path) || Path.GetDirectoryName(path) is not { } parent)
+            throw new IOException("Choose a file in an existing folder.");
+        var policy = new FileTransferStoragePolicy(parent) { ReceiverSelectedFileName = Path.GetFileName(path) };
+        var descriptor = new FileTransferDescriptor(new SessionId(offer.SessionId), helperIdentity, offer.FileName, offer.FileSizeBytes);
+        var security = BuildEffectiveSecurityStateForAuthorization();
+        var grant = currentSessionGrant;
+        var hasSecurityTransport = transport is ISessionSecuritySignalingTransport;
+        var validation = await Task.Run(() =>
+        {
+            beforeDestinationCheckForTests?.Invoke();
+            if (!Directory.Exists(parent))
+                throw new IOException("Choose a file in an existing folder.");
+            return fileTransferGuard.ValidateReceiveMetadata(hasSecurityTransport, security, grant, descriptor, policy);
+        });
+        if (!validation.IsAllowed)
+        {
+            LogFileTransferRejected("file_transfer_metadata_receive", validation, descriptor);
+            throw new IOException(validation.Message);
+        }
+
+        // A slow filesystem check is not consent. Reauthorize now and match the exact offer under the service lock.
+        return await privilegedCommandExecutor.ExecuteAsync(action,
+            ct => sessionSecurityState.HelperAddress == helperIdentity && currentSessionGrant?.SessionId == descriptor.SessionId
+                ? fileTransferService.AcceptIncomingTransferForOfferAsync((expectedSessionId, offerToken), transferId,
+                    (incoming, token) => OpenInboundFileTransferDestinationAsync(incoming, token, policy), ct)
+                : Task.FromResult<FileTransferTransferSnapshot?>(null),
+            deniedValue: null);
     }
 
     public Task<FileTransferTransferSnapshot?> DeclineIncomingAsync(

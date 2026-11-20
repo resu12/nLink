@@ -1684,7 +1684,14 @@ public sealed partial class SessionFileTransferService :
             .ConfigureAwait(false);
     }
 
-    public async Task<FileTransferTransferSnapshot?> AcceptIncomingTransferAsync(
+    public Task<FileTransferTransferSnapshot?> AcceptIncomingTransferAsync(
+        string transferId,
+        FileTransferWriteDestinationFactory openWriteDestinationAsync,
+        CancellationToken ct)
+        => AcceptIncomingTransferForOfferAsync(null, transferId, openWriteDestinationAsync, ct);
+
+    internal async Task<FileTransferTransferSnapshot?> AcceptIncomingTransferForOfferAsync(
+        (string SessionId, Guid Token)? expectedOffer,
         string transferId,
         FileTransferWriteDestinationFactory openWriteDestinationAsync,
         CancellationToken ct)
@@ -1701,6 +1708,7 @@ public sealed partial class SessionFileTransferService :
                 context.IsTerminal ||
                 context.State != FileTransferTransferState.PendingDecision ||
                 context.AcceptInProgress ||
+                (expectedOffer is { } expected && (context.SessionId != expected.SessionId || context.OfferToken != expected.Token)) ||
                 !string.Equals(context.TransferId, NormalizeTransferId(transferId), StringComparison.Ordinal))
             {
                 return null;
@@ -26962,6 +26970,8 @@ public sealed partial class SessionFileTransferService :
 
         public bool IsTerminal => ToSnapshot().IsTerminal;
 
+        public Guid OfferToken { get; } = Guid.NewGuid();
+
         public FileTransferIncomingOffer CreateOffer()
             => new(SessionId, TransferId, FileName, FileSizeBytes, Sha256Base64);
 
@@ -26997,6 +27007,7 @@ public sealed partial class SessionFileTransferService :
                 ProtocolVersion: NegotiatedDataProtocolVersion)
             {
                 IsPauseBlockedByTransport = IsTunaActivationNegotiationTransportPauseReason(PullTransportPauseReason),
+                InboundOfferToken = OfferToken,
                 PeerComparableProgressBytes = RouteRuntime.UsesV6RequestPump
                     ? Math.Clamp(BytesTransferred, 0L, Math.Max(0L, FileSizeBytes))
                     : ResolveInboundV4StateBytesCommittedLocked(this),

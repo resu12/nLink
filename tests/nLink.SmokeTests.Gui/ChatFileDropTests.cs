@@ -74,7 +74,7 @@ public sealed class ChatFileDropTests(ChatViewScrollFixture fixture) : CoreSmoke
                 Assert.True(DragDrop.GetAllowDrop(chat));
                 Assert.False(DragDrop.GetAllowDrop(shell.MainContent!));
                 var target = chat.FindControl<ScrollViewer>("MessagesScrollViewer")!;
-                var hint = chat.FindControl<TextBlock>("FileDropHint")!;
+                var hint = chat.FindControl<TextBlock>("FileActionHint")!;
                 File.WriteAllBytes(path, [3, 1, 4]);
                 using var file = Assert.IsAssignableFrom<IStorageFile>(await window.StorageProvider.TryGetFileFromPathAsync(path));
                 using var folder = Assert.IsAssignableFrom<IStorageFolder>(await window.StorageProvider.TryGetFolderFromPathAsync(directory.FullName));

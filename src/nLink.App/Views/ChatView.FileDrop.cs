@@ -14,7 +14,7 @@ public partial class ChatView
     private static readonly DataFormat<byte[]> ShellIdList = DataFormat.CreateBytesPlatformFormat("Shell IDList Array");
     private const string UnsupportedDrop = "Drop one local file from Explorer. Folders and multiple items aren't supported.";
     private const string SendUnavailable = "Sending files isn't available right now.";
-    private IDisposable? hideFileDropHint;
+    private IDisposable? hideFileActionHint;
     private bool preparingFileDrop;
 
     private async void ChatFileDrag(object? sender, DragEventArgs e)
@@ -23,36 +23,36 @@ public partial class ChatView
         var allowsCopy = (e.DragEffects & DragDropEffects.Copy) != 0;
         e.DragEffects = DragDropEffects.None;
         e.Handled = true;
-        var target = DataContext as IChatFileSender;
+        var target = DataContext as IChatFileTransferActions;
         try
         {
             if (preparingFileDrop || target is not { ShowSendFileAction: true, CanSendFileAction: true })
             {
-                SetFileDropHint(SendUnavailable, dropping);
+                SetFileActionHint(SendUnavailable, dropping);
                 return;
             }
 
             if (!allowsCopy || SingleLocalFile(e.DataTransfer) is not { } file)
             {
-                SetFileDropHint(UnsupportedDrop, dropping);
+                SetFileActionHint(UnsupportedDrop, dropping);
                 return;
             }
 
             if (!dropping)
             {
                 e.DragEffects = DragDropEffects.Copy;
-                SetFileDropHint(null);
+                SetFileActionHint(null);
                 return;
             }
 
             if (!target.TryAuthorizeFileSelection() || target.FileSendSessionId is not { } sessionId)
             {
-                SetFileDropHint(SendUnavailable, true);
+                SetFileActionHint(SendUnavailable, true);
                 return;
             }
 
             e.DragEffects = DragDropEffects.Copy;
-            SetFileDropHint(null);
+            SetFileActionHint(null);
             preparingFileDrop = true;
             try
             {
@@ -61,7 +61,7 @@ public partial class ChatView
                     return;
                 if (!target.TryAuthorizeFileSelection())
                 {
-                    SetFileDropHint(SendUnavailable, true);
+                    SetFileActionHint(SendUnavailable, true);
                     return;
                 }
                 await target.StartSendFileAsync(selection.Descriptor, selection.OpenReadStreamAsync);
@@ -75,7 +75,7 @@ public partial class ChatView
         {
             // OS drag data or the file can disappear while the user is dropping it.
             if (DataContext == target)
-                SetFileDropHint("Couldn't offer the dropped file.", dropping);
+                SetFileActionHint("Couldn't offer the dropped file.", dropping);
         }
     }
 
@@ -100,13 +100,13 @@ public partial class ChatView
         return file;
     }
 
-    private void SetFileDropHint(string? message, bool briefly = false)
+    private void SetFileActionHint(string? message, bool briefly = false)
     {
-        hideFileDropHint?.Dispose();
-        hideFileDropHint = null;
-        FileDropHint.Text = message;
-        FileDropHint.IsVisible = message is not null;
+        hideFileActionHint?.Dispose();
+        hideFileActionHint = null;
+        FileActionHint.Text = message;
+        FileActionHint.IsVisible = message is not null;
         if (briefly)
-            hideFileDropHint = DispatcherTimer.RunOnce(() => SetFileDropHint(null), TimeSpan.FromSeconds(3));
+            hideFileActionHint = DispatcherTimer.RunOnce(() => SetFileActionHint(null), TimeSpan.FromSeconds(3));
     }
 }

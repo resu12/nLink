@@ -31,7 +31,7 @@ All eight required [CI #108 jobs](https://github.com/resu12/nLink/actions/runs/4
 5. Both sides compare the session verification symbols, then Helpee clicks `Allow`.
 6. Chat opens on both sides.
 7. If `Transfer files` is allowed for the session, either side can click `Send file`.
-   In the 0.7.1 candidate, either side can also drop one local file from Windows Explorer into chat. When sharing a screen, drop it in the chat panel, not on the shared display. The other person still chooses **Accept** or **Decline**.
+   In the 0.7.1 candidate, either side can also drop one local file from Windows Explorer into chat. When sharing a screen, drop it in the chat panel, not on the shared display. The receiver can choose **Accept** for Downloads, **Save as…** to pick a folder and filename, or **Decline**. Canceling the picker leaves the offer pending. If the chosen name is already in use, choose another name; nLink won’t replace the existing file.
 
 ## Screenshots
 

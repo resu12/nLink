@@ -32,7 +32,7 @@ using NLink.Infra.Nkn;
 
 namespace NLink.App.ViewModels;
 
-public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatFileSender, IWindowCloseAware
+public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatFileTransferActions, IWindowCloseAware
 {
 
     private enum HelpeeConnectionViewState
@@ -1656,8 +1656,10 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatFileS
         }
     }
 
-    SessionId? IChatFileSender.FileSendSessionId => sessionRuntime.CurrentSessionGrant?.SessionId;
-    bool IChatFileSender.TryAuthorizeFileSelection() => TryAuthorizeFileSelection();
+    SessionId? IChatFileTransferActions.FileSendSessionId => sessionRuntime.CurrentSessionGrant?.SessionId;
+    bool IChatFileTransferActions.TryAuthorizeFileSelection() => TryAuthorizeFileSelection();
+    Task<FileTransferTransferSnapshot?> IChatFileTransferActions.AcceptIncomingAsAsync(string sessionId, string transferId, Guid offerToken, string path)
+        => sessionRuntime.AcceptIncomingAsAsync(sessionId, transferId, offerToken, path);
 
     private bool TryAuthorizeFileSelection()
     {

@@ -37,6 +37,7 @@ public sealed record FileTransferPanelItemViewModel(
     bool IsTerminal)
 {
     public string SessionId { get; init; } = string.Empty;
+    internal Guid InboundOfferToken { get; init; }
 
     public long ProgressBytes { get; init; }
 
@@ -121,6 +122,7 @@ public sealed record FileTransferPanelItemViewModel(
             IsTerminal: snapshot.IsTerminal)
         {
             SessionId = snapshot.SessionId,
+            InboundOfferToken = snapshot.InboundOfferToken,
             // Match the receiver's reporting basis; the sender still waits for its acknowledgment.
             ProgressBytes = progressBytes,
             AnimateProgress = !effectivePaused && snapshot.State is
@@ -258,9 +260,9 @@ public sealed record FileTransferPanelItemViewModel(
             return null;
         }
 
-        return string.Create(
-            CultureInfo.InvariantCulture,
-            $"Saved to {snapshot.SavedDirectoryPath}");
+        return !string.IsNullOrEmpty(snapshot.SavedFilePath) && snapshot.SavedFileName != snapshot.FileName
+            ? $"Saved to {snapshot.SavedFilePath}"
+            : $"Saved to {snapshot.SavedDirectoryPath}";
     }
 
     private static string FormatByteSize(long bytes)
