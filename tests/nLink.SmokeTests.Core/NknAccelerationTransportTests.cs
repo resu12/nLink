@@ -11182,7 +11182,10 @@ public sealed partial class NknAccelerationTransportTests : CoreSmokeTestsBase, 
                 NknTunaAccelerationOptions.Disabled,
                 new RetryableTunaAccelerationSession(
                     canListen: true,
-                    failedDialAttemptsBeforeSuccess: 0));
+                    failedDialAttemptsBeforeSuccess: 0,
+                    // The test drives the send and its missing-dispatch settlement.
+                    listenerAttemptOutcome: new TaskCompletionSource<bool>(
+                        TaskCreationOptions.RunContinuationsAsynchronously)));
             using var helper = new NknSignalingTransport(
                 helperClient,
                 options,
@@ -11271,19 +11274,8 @@ public sealed partial class NknAccelerationTransportTests : CoreSmokeTestsBase, 
                 "test_predecessor_missing_dispatch"));
             Assert.True(settled);
 
-            await WaitUntilAsync(
-                () =>
-                {
-                    var currentState = retryStateField.GetValue(host);
-                    return currentState is not null &&
-                           Assert.IsType<bool>(currentState.GetType()
-                               .GetProperty("DispatchAuthorityGranted")!
-                               .GetValue(currentState)) &&
-                           Assert.IsType<int>(currentState.GetType()
-                               .GetProperty("MissingDispatchSuccessorGeneration")!
-                               .GetValue(currentState)) == 1;
-                },
-                TimeSpan.FromSeconds(2));
+            await host.DrainRuntimeUnlockRetryDispatchInstallFollowUpsForTestsAsync()
+                .WaitAsync(TimeSpan.FromSeconds(2));
             var tail = ReadOperationalLogTail(logStart);
             Assert.Equal(1, Volatile.Read(ref missingDispatchSuccessorRequestCount));
             Assert.Contains(
