@@ -86,6 +86,7 @@ public sealed class TestArchitectureContractTests
         "FileTransferAnalyzerRuntimeUnlock",
         "FileTransferAnalyzerV4Transport",
         "FileTransferEvidenceIntegrity",
+        "FileTransferAcceptanceScenarios",
         "FileTransferAcceptanceFake",
         "Smoke",
         "NonGui",
