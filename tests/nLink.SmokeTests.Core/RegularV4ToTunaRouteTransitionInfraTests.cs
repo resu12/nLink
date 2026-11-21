@@ -308,6 +308,7 @@ public sealed partial class FileTransferRouteTransitionInfraTests : IDisposable
             FileTransferTransportKind.RegularNkn,
             evidence,
             null,
+            Type.Missing,
             Type.Missing);
 
         await WaitUntilAsync(
@@ -330,6 +331,7 @@ public sealed partial class FileTransferRouteTransitionInfraTests : IDisposable
             FileTransferTransportKind.RegularNkn,
             null,
             null,
+            Type.Missing,
             Type.Missing);
         await Task.Delay(50);
 
