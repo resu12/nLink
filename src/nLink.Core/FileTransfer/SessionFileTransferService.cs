@@ -4229,6 +4229,8 @@ public sealed partial class SessionFileTransferService :
         bool inboundResumed = false;
         bool outboundActivationPauseStarted = false;
         bool inboundActivationPauseStarted = false;
+        FileTransferRouteRuntimeDescriptor outboundActivationPauseRoute = default;
+        FileTransferRouteRuntimeDescriptor inboundActivationPauseRoute = default;
         bool outboundActivationPauseResumed = false;
         bool inboundActivationPauseResumed = false;
         bool outboundNormalToTunaActivationResumed = false;
@@ -4393,6 +4395,7 @@ public sealed partial class SessionFileTransferService :
                         outboundPausedSessionId = outbound.SessionId;
                         outboundPaused = outbound;
                         outboundActivationPauseStarted = IsTunaActivationNegotiationTransportPauseReason(effectiveReason);
+                        outboundActivationPauseRoute = outbound.RouteRuntime;
                     }
 
                     if (TryStartOutboundV6TransportEpochWhileUnavailableLocked(
@@ -4520,6 +4523,7 @@ public sealed partial class SessionFileTransferService :
                         inboundPausedSessionId = inbound.SessionId;
                         inboundPaused = inbound;
                         inboundActivationPauseStarted = IsTunaActivationNegotiationTransportPauseReason(effectiveReason);
+                        inboundActivationPauseRoute = inbound.RouteRuntime;
                     }
 
                     if (TryStartInboundV6TransportEpochWhileUnavailableLocked(
@@ -4621,7 +4625,8 @@ public sealed partial class SessionFileTransferService :
                         outboundPaused,
                         paused: true,
                         effectiveReason,
-                        localTunaActivationBarrier: true);
+                        localTunaActivationBarrier: true,
+                        pauseSourceRoute: outboundActivationPauseRoute);
                 }
 
                 SignalOutboundSparseSenderPump(outboundPaused);
@@ -4637,7 +4642,8 @@ public sealed partial class SessionFileTransferService :
                     inboundPaused,
                     paused: true,
                     effectiveReason,
-                    localTunaActivationBarrier: true);
+                    localTunaActivationBarrier: true,
+                    pauseSourceRoute: inboundActivationPauseRoute);
             }
         }
 

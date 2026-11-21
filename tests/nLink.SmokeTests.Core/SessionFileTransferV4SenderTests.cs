@@ -10671,6 +10671,78 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
     }
 
     [Fact]
+    [Trait("FileTransferRuntimeSuite", "SparseWorkerHandoff")]
+    public async Task PrimaryRegularNknV4Fast_DelayedLocalPauseDoesNotBecomePeerPauseAfterRouteChange()
+    {
+        const string sessionId = "session_local_pause_route_change";
+        const string transferId = "transfer_local_pause_route_change";
+        const string reason = "tuna_activation_negotiating";
+        var payload = new byte[4_000_000];
+        using var senderTransport = new LoopbackFileTransferTransport(sessionId)
+        {
+            FileTransferTransportProfileKind = FileTransferTransportProfileKind.ConservativeNknStartup,
+            DataSessionSendDelayMs = 10,
+        };
+        using var receiverTransport = new LoopbackFileTransferTransport(sessionId)
+        {
+            FileTransferTransportProfileKind = FileTransferTransportProfileKind.ConservativeNknStartup,
+        };
+        senderTransport.Connect(receiverTransport);
+        using var sender = new SessionFileTransferService();
+        using var receiver = new SessionFileTransferService();
+        using var destination = new NonDisposingMemoryStream();
+        sender.AttachTransport(senderTransport);
+        receiver.AttachTransport(receiverTransport);
+        await sender.TryStartSendAsync(new("pause-race.bin", payload.Length, transferId),
+            _ => Task.FromResult<Stream>(new MemoryStream(payload, writable: false)), CancellationToken.None);
+        await WaitUntilAsync(() => receiver.Snapshot.Inbound?.State == FileTransferTransferState.PendingDecision);
+        await receiver.AcceptIncomingTransferAsync(transferId, (_, _) => Task.FromResult<Stream>(destination), CancellationToken.None);
+        await WaitUntilAsync(() => senderTransport.SentDataFrames.OfType<FileTransferChunkBatchFrameV4>().Any());
+
+        var context = typeof(SessionFileTransferService).GetField("outboundTransfer", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .GetValue(sender)!;
+        var serviceGate = typeof(SessionFileTransferService).GetField("gate", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .GetValue(sender)!;
+        var route = context.GetType().GetProperty("RouteRuntime")!;
+        var original = Assert.IsType<FileTransferRouteRuntimeDescriptor>(route.GetValue(context));
+        Assert.True(original.UsesRegularNknV4FastRuntime);
+        var routeChanged = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        sender.TransferChanged += (_, e) =>
+        {
+            if (e.Snapshot.Outbound?.IsPauseBlockedByTransport != true || routeChanged.Task.IsCompleted) return;
+            // Model a route publication between the locked pause decision and
+            // the remaining availability callback, without changing the pause.
+            lock (serviceGate)
+            {
+                route.SetValue(context, FileTransferRouteResolver.Resolve(FileTransferRoute.FileTunaV4).RuntimeDescriptor);
+            }
+            routeChanged.TrySetResult();
+        };
+        var logStart = GetOperationalLogLength();
+        senderTransport.SetLocalDataSessionsUnavailableForTests(reason);
+        await routeChanged.Task.WaitAsync(TimeSpan.FromSeconds(5));
+
+        const string suppressed = "event=filetransfer_tuna_activation_transport_pause_control_suppressed; direction=outbound; transfer_id=" + transferId;
+        const string scheduled = "event=filetransfer_transport_pause_control_retry_scheduled; direction=outbound; transfer_id=" + transferId;
+        try
+        {
+            await WaitUntilAsync(() =>
+            {
+                var log = ReadV4SenderLogSnapshot(logStart);
+                return log.Contains(suppressed, StringComparison.Ordinal) || log.Contains(scheduled, StringComparison.Ordinal);
+            });
+            var log = ReadV4SenderLogSnapshot(logStart);
+            Assert.Contains(suppressed, log, StringComparison.Ordinal);
+            Assert.DoesNotContain(scheduled, log, StringComparison.Ordinal);
+            Assert.False(receiver.Snapshot.Inbound!.IsPeerPaused);
+        }
+        finally
+        {
+            lock (serviceGate) { route.SetValue(context, original); }
+        }
+    }
+
+    [Fact]
     public Task PrimaryRegularNknV4Fast_TunaActivationReadyWaitsForRouteHandoffBeforeResumingPump()
         => NknAccelerationTransportTests.RunCoordinatorRegularActivationForTestAsync(
             NknAccelerationTransportTests.RegularActivationCase.ReadyBarrier);
