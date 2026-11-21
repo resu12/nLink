@@ -4,10 +4,40 @@ namespace NLink.Core.FileTransfer;
 
 internal enum FileTransferSessionPreparationPhase { Unavailable, Eligible, Pending, Ready, AdmissionReserved, Revoked, Starting }
 internal enum FileTransferSessionPreparationStatus { Accepted, Idempotent, Rejected, Stale }
-internal enum FileTransferAccelerationRequestPurpose { Unavailable, SessionPreparation, TransferActivation, IdleSessionReestablishment }
+internal enum FileTransferAccelerationRequestPurpose { Unavailable, SessionPreparation, TransferActivation, IdleSessionReestablishment, DuplexSessionReestablishment }
 internal sealed record FileTransferAccelerationRequestSelection(FileTransferAccelerationRequestPurpose Purpose,
     string Reason, FileTransferSessionPreparationPermit? Permit = null,
-    string? TerminalTransferId = null, FileTransferDirection? TerminalDirection = null, long TerminalGeneration = 0);
+    string? TerminalTransferId = null, FileTransferDirection? TerminalDirection = null, long TerminalGeneration = 0)
+{
+    internal IdleOfferWriteWindow? IdleWrite { get; init; }
+    // May finish an already offered session handshake, never start an offer or activate a file.
+    internal IdleOfferWriteWindow? PriorDuplexAnswer { get; init; }
+}
+
+// Serializes the start of an idle offer write with replacement of the terminal transfer.
+// This does not grant a lane, a route, or permission to write any other message.
+internal sealed class IdleOfferWriteWindow
+{
+    private readonly object gate = new();
+    private volatile bool retired;
+    private volatile bool writesClosed;
+    private string? writtenNonce;
+    internal bool IsCurrent => !retired;
+    internal bool CanWrite => !retired && !writesClosed;
+    internal void CloseWrites() { lock (gate) writesClosed = true; }
+    internal bool WasSubmitted(string nonce) => IsCurrent && Volatile.Read(ref writtenNonce) == nonce;
+    internal void Retire() { lock (gate) retired = true; }
+    internal ValueTask? TryWrite(string nonce, Func<ValueTask> write)
+    {
+        lock (gate)
+        {
+            if (!CanWrite) return null;
+            var pending = write();
+            Volatile.Write(ref writtenNonce, nonce);
+            return pending;
+        }
+    }
+}
 
 internal sealed record FileTransferSessionPreparationScope(
     Guid ServiceInstanceId, long AttachmentGeneration, long SecurityGeneration,

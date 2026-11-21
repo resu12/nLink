@@ -102,7 +102,7 @@ internal static class NativeFileTransferPicker
             _ => Task.FromResult<Stream>(File.OpenRead(fullPath)));
     }
 
-    private static async Task<FileTransferPickerSelection> CreateSelectionAsync(IStorageFile file, CancellationToken ct)
+    internal static async Task<FileTransferPickerSelection> CreateSelectionAsync(IStorageFile file, CancellationToken ct = default)
     {
         ArgumentNullException.ThrowIfNull(file);
 

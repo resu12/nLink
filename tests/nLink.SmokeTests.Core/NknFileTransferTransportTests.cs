@@ -1694,21 +1694,18 @@ public sealed partial class NknFileTransferTransportTests : CoreSmokeTestsBase
             Assert.Contains(deliveredFrames, static message => message.Channel == NknBridgeChannel.Bulk);
             Assert.DoesNotContain(deliveredFrames, static message => message.Channel == NknBridgeChannel.Control);
 
-            MethodInfo setAvailability = Assert.Single(
-                outboundSession.GetType()
-                    .GetMethods(BindingFlags.Instance | BindingFlags.Public)
-                    .Where(static method => method.Name == "SetAvailability"));
-            setAvailability.Invoke(
-                outboundSession,
+            outboundSession.GetType().InvokeMember(
+                "SetAvailability",
+                BindingFlags.Instance | BindingFlags.Public | BindingFlags.InvokeMethod | BindingFlags.OptionalParamBinding,
+                binder: null,
+                target: outboundSession,
+                args:
                 [
                     false,
                     "tuna_activation_negotiating",
                     false,
                     FileTransferTransportHandoffKind.None,
                     FileTransferTransportKind.RegularNkn,
-                    null,
-                    null,
-                    0L, // Existing receiverBarrierPauseGeneration default; reflection does not supply it.
                 ]);
 
             await submission.PhysicalCompletionTask.WaitAsync(TimeSpan.FromSeconds(2));

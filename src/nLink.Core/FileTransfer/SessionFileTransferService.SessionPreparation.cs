@@ -9,6 +9,23 @@ public sealed partial class SessionFileTransferService : IFileTransferSessionPre
     private IFileTransferSignalingTransport? preparationTransport;
     private FileTransferSessionPreparationSecurityEpoch? preparationEpoch;
     private long preparationBlockedThroughGeneration;
+    private IdleOfferWriteWindow? idleOfferWrite;
+
+    private void RetireIdleOfferWriteLocked()
+    {
+        idleOfferWrite?.Retire();
+        idleOfferWrite = null;
+    }
+
+    private void CloseOfferWritesAtTerminalLocked(FileTransferTransferState terminal)
+    {
+        if (idleOfferWrite is null) return;
+        if (terminal == FileTransferTransferState.Completed &&
+            outboundTransfer is { IsTerminal: false } && inboundTransfer is { IsTerminal: false })
+            idleOfferWrite.CloseWrites(); // Only an answer to an already submitted duplex offer may survive.
+        else
+            RetireIdleOfferWriteLocked();
+    }
     private PreparationAdmissionCapture? preparationAdmission;
     private FileTransferSessionPreparationExecution? preparationExecution;
     private FileTransferSessionPreparationAdmissionLease? preparationAdmissionLease;
@@ -23,6 +40,7 @@ public sealed partial class SessionFileTransferService : IFileTransferSessionPre
         lock (gate)
         {
             transport = source;
+            RetireIdleOfferWriteLocked();
             preparationTransport = source;
             preparationAttachment = attachment;
             preparationEpoch = null;
@@ -37,6 +55,8 @@ public sealed partial class SessionFileTransferService : IFileTransferSessionPre
 
     private FileTransferSessionPreparationAttachment? DetachPreparationTransportLocked()
     {
+        RetireWaitingFileOffersLocked();
+        RetireIdleOfferWriteLocked();
         var old = preparationAttachment;
         preparationAttachment = null;
         preparationTransport = null;
@@ -51,6 +71,8 @@ public sealed partial class SessionFileTransferService : IFileTransferSessionPre
 
     private void RevokePreparationScopeLocked()
     {
+        RetireWaitingFileOffersLocked();
+        RetireIdleOfferWriteLocked();
         preparationBlockedThroughGeneration = Math.Max(preparationBlockedThroughGeneration,
             preparationAttachment?.Lifecycle.Generation ?? 0);
         preparationAdmission = null;
@@ -87,6 +109,7 @@ public sealed partial class SessionFileTransferService : IFileTransferSessionPre
             epoch.Id, epoch.Security!, DateTimeOffset.UtcNow);
         if (decision.Status != FileTransferSessionPreparationStatus.Accepted) return false;
         sessionPreparation = decision.State;
+        RetireIdleOfferWriteLocked();
         preparationEpoch = epoch;
         preparationAdmission = null;
         return true;
@@ -156,7 +179,14 @@ public sealed partial class SessionFileTransferService : IFileTransferSessionPre
                     !epoch.IsCurrent || epoch.Security?.ApprovalExpiresAt is not { } expires || expires <= DateTimeOffset.UtcNow) return;
                 var outbound = outboundTransfer is { IsTerminal: false };
                 var inbound = inboundTransfer is { IsTerminal: false };
-                if (outbound && inbound) return; // No ambiguous transfer owner selection.
+                if (outbound && inbound)
+                {
+                    // Reconnect the session, never select one file as authority for the other.
+                    if (outboundTransfer!.SessionId == epoch.SessionId && inboundTransfer!.SessionId == epoch.SessionId)
+                        result = new(FileTransferAccelerationRequestPurpose.DuplexSessionReestablishment,
+                            "unfinished_files_in_both_directions") { IdleWrite = idleOfferWrite ??= new() };
+                    return;
+                }
                 FileTransferCoordinatorState? selectedTransfer = outbound ? CreateCoordinatorStateLocked(outboundTransfer!)
                     : inbound ? CreateCoordinatorStateLocked(inboundTransfer!) : null;
                 if (selectedTransfer is null)
@@ -169,6 +199,15 @@ public sealed partial class SessionFileTransferService : IFileTransferSessionPre
                 }
                 result = FileTransferCoordinator.SelectSessionPreparationRequest(sessionPreparation, epoch.SessionId,
                     selectedTransfer, DateTimeOffset.UtcNow);
+                if (result.Purpose == FileTransferAccelerationRequestPurpose.IdleSessionReestablishment)
+                    result = result with { IdleWrite = idleOfferWrite ??= new() };
+                else if (result.Purpose == FileTransferAccelerationRequestPurpose.TransferActivation &&
+                    idleOfferWrite is { IsCurrent: true } prior &&
+                    ((inbound && outboundTransfer is { State: FileTransferTransferState.Completed } sent && sent.SessionId == epoch.SessionId) ||
+                     (outbound && inboundTransfer is { State: FileTransferTransferState.Completed } received && received.SessionId == epoch.SessionId)))
+                    // A replacement admission retires this window. Completing one original
+                    // file does not turn the session-only answer into a handoff for the other.
+                    result = result with { PriorDuplexAnswer = prior };
             });
             return result;
         }
@@ -525,6 +564,15 @@ public sealed partial class SessionFileTransferService : IFileTransferSessionPre
         lock (gate)
             if (preparationAdmissionLease is { } lease && ReferenceEquals(lease.Admission, capture?.Admission) && !lease.IsAdopted)
                 lease.Retire();
+    }
+
+    private void RetirePendingInboundPreparationLocked(PreparationAdmissionCapture capture)
+    {
+        if (!ReferenceEquals(preparationAdmission, capture)) return;
+        preparationAdmission = null; // Queued work and late retention callbacks no longer own this reservation.
+        RetireUnadoptedPreparationAdmission(capture);
+        if (preparationExecution is { } execution && ReferenceEquals(execution.Admission, capture.Admission))
+            execution.Retire();
     }
 
     private FileTransferSessionPreparationExecution? CurrentPreparationExecutionLocked()

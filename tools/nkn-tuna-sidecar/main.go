@@ -70,6 +70,7 @@ const (
 	providerReadyPollInterval = 500 * time.Millisecond
 	bridgeIdleGapThreshold    = 2 * time.Second
 	bridgeSlowOpThreshold     = 2 * time.Second
+	bridgeCloseWriteTimeout   = 250 * time.Millisecond
 	providerReadyMinPaths     = 4
 	providerDegradedMinPaths  = 3
 	providerReadyTimeout      = 45 * time.Second
@@ -89,6 +90,7 @@ type config struct {
 	localIPC          string
 
 	walletPath               string
+	expectedPayerHash        []byte
 	passwordPrompt           bool
 	passwordStdin            bool
 	allowRemote              string
@@ -368,6 +370,14 @@ func parseArgs(args []string) (*config, error) {
 		fs.BoolVar(&cfg.passwordStdin, "password-stdin", false, "read wallet password from stdin")
 	case modeListen:
 		fs.StringVar(&cfg.walletPath, "wallet", "", "linked NKN wallet.json path")
+		fs.Func("expected-payer-sha256", "require the opened wallet to match the approved payer", func(value string) error {
+			hash, err := hex.DecodeString(value)
+			if err != nil || len(hash) != sha256.Size {
+				return errors.New("expected a SHA-256 digest")
+			}
+			cfg.expectedPayerHash = hash
+			return nil
+		})
 		fs.BoolVar(&cfg.passwordPrompt, "password-prompt", false, "prompt for wallet password without echo")
 		fs.BoolVar(&cfg.passwordStdin, "password-stdin", false, "test automation only: read wallet password from stdin")
 		fs.StringVar(&cfg.allowRemote, "allow-remote", "", "allowed remote NKN address; exact by default")
@@ -1073,10 +1083,10 @@ func bridgeConns(ctx context.Context, cfg *config, appConn net.Conn, tunaConn ne
 	}
 	ctx, cancel := context.WithTimeout(ctx, duration)
 	defer cancel()
-	var totalBytes atomic.Int64
+	budget := bridgeByteBudget{limit: limitBytes}
 	var capHandoffRequested atomic.Bool
 	if activePaymentObserver != nil {
-		defer activePaymentObserver.observeBytes(&totalBytes)()
+		defer activePaymentObserver.observeBytes(&budget.forwarded)()
 	}
 	errCh := make(chan bridgeDirectionResult, 2)
 	bridgeStarted := time.Now()
@@ -1108,8 +1118,8 @@ func bridgeConns(ctx context.Context, cfg *config, appConn net.Conn, tunaConn ne
 	}
 	emit.deliveryOnce.Do(func() { emit.deliveryTrace = newDeliveryTraceProducer(emit) })
 	deliveryTrace := emit.deliveryTrace.connect()
-	go bridgeDirection(ctx, role, "app_to_tuna", appConn, tunaConn, &totalBytes, limitBytes, softLimitBytes, &capHandoffRequested, emit, errCh, deliveryTrace)
-	go bridgeDirection(ctx, role, "tuna_to_app", tunaConn, appConn, &totalBytes, limitBytes, softLimitBytes, &capHandoffRequested, emit, errCh, deliveryTrace)
+	go bridgeDirection(ctx, role, "app_to_tuna", appConn, tunaConn, &budget, softLimitBytes, &capHandoffRequested, emit, errCh, deliveryTrace)
+	go bridgeDirection(ctx, role, "tuna_to_app", tunaConn, appConn, &budget, softLimitBytes, &capHandoffRequested, emit, errCh, deliveryTrace)
 
 	var err error
 	var result bridgeDirectionResult
@@ -1121,7 +1131,11 @@ func bridgeConns(ctx context.Context, cfg *config, appConn net.Conn, tunaConn ne
 	case <-ctx.Done():
 		err = ctx.Err()
 	}
-	_ = writeFrame(appConn, frameTypeClose, 0, 0, time.Now().UnixMilli(), nil)
+	cancel()
+	// Also bounds an outstanding forwarding write to the same connection.
+	if appConn.SetWriteDeadline(time.Now().Add(bridgeCloseWriteTimeout)) == nil {
+		_ = writeFrame(appConn, frameTypeClose, 0, 0, time.Now().UnixMilli(), nil)
+	}
 	_ = appConn.Close()
 	_ = tunaConn.Close()
 	waitForBridgeResults := time.NewTimer(1500 * time.Millisecond)
@@ -1152,7 +1166,7 @@ doneCollectingBridgeResults:
 	if activePaymentObserver != nil {
 		paymentEventCount, cumulativeSpend = activePaymentObserver.snapshot()
 	}
-	bytesMoved := totalBytes.Load()
+	bytesMoved := budget.forwarded.Load()
 	paymentStatus := "none"
 	if paymentEventCount > 0 {
 		paymentStatus = "reported"
@@ -1282,14 +1296,31 @@ func (r bridgeFrameReader) Read(p []byte) (int, error) {
 	}
 }
 
+type bridgeByteBudget struct {
+	limit     int64
+	reserved  atomic.Int64 // Includes in-flight writes; a failed frame ends the bridge without refund.
+	forwarded atomic.Int64 // Only fully written payloads count towards payment telemetry.
+}
+
+func (b *bridgeByteBudget) reserve(n int64) (int64, bool) {
+	for {
+		used := b.reserved.Load()
+		if n > b.limit-used {
+			return used, false
+		}
+		if b.reserved.CompareAndSwap(used, used+n) {
+			return used + n, true
+		}
+	}
+}
+
 func bridgeDirection(
 	ctx context.Context,
 	role string,
 	direction string,
 	src net.Conn,
 	dst net.Conn,
-	totalBytes *atomic.Int64,
-	limitBytes int64,
+	budget *bridgeByteBudget,
 	softLimitBytes int64,
 	capHandoffRequested *atomic.Bool,
 	emit *emitter,
@@ -1440,23 +1471,24 @@ func bridgeDirection(
 			})
 		}
 		moved := int64(len(frame.payload))
-		projectedBytesMoved := totalBytes.Load() + moved
-		if projectedBytesMoved > limitBytes {
+		projectedBytesMoved, admitted := budget.reserve(moved)
+		if !admitted {
 			finish("cap", fmt.Errorf("byte cap reached"), lastFrame)
 			return
 		}
 		if softLimitBytes > 0 && projectedBytesMoved >= softLimitBytes && capHandoffRequested.CompareAndSwap(false, true) {
+			forwarded := budget.forwarded.Load()
 			emit.emit(event{
 				"event":          "tuna_cap_handoff_requested",
 				"transport":      "tuna",
 				"role":           role,
 				"direction":      direction,
 				"capReason":      "byte_cap_reached",
-				"bytesMoved":     totalBytes.Load(),
+				"bytesMoved":     forwarded,
 				"projectedBytes": projectedBytesMoved,
-				"limitBytes":     limitBytes,
+				"limitBytes":     budget.limit,
 				"softLimitBytes": softLimitBytes,
-				"remainingBytes": maxInt64(0, limitBytes-totalBytes.Load()),
+				"remainingBytes": budget.limit - forwarded,
 				"frameType":      frameTypeName(frame.typ),
 				"frameLane":      frameLaneName(frame.lane),
 				"frameSeq":       frame.seq,
@@ -1476,7 +1508,7 @@ func bridgeDirection(
 		if deliveryFrame != nil {
 			trace.record(direction, "write_completed", "none", deliveryFrame)
 		}
-		totalBytes.Add(moved)
+		budget.forwarded.Add(moved)
 		writeMs := time.Since(writeStarted).Milliseconds()
 		if writeMs > maxWriteMs {
 			maxWriteMs = writeMs
@@ -2472,17 +2504,9 @@ func openLinkedWallet(cfg *config, emit *emitter) (*walletInfo, error) {
 		return nil, err
 	}
 	defer zeroBytes(passwordBytes)
-	password := string(passwordBytes)
-	raw, err := os.ReadFile(cfg.walletPath)
+	wallet, err := loadLinkedWallet(cfg, string(passwordBytes))
 	if err != nil {
-		return nil, fmt.Errorf("read wallet file %q failed: %s", filepath.Base(cfg.walletPath), scrubError(err, cfg.walletPath))
-	}
-	wallet, err := nkn.WalletFromJSON(string(raw), &nkn.WalletConfig{Password: password})
-	if err != nil {
-		return nil, fmt.Errorf("unlock wallet %q failed: %s", filepath.Base(cfg.walletPath), scrubError(err, cfg.walletPath))
-	}
-	if err := wallet.VerifyPassword(password); err != nil {
-		return nil, fmt.Errorf("wallet password verification failed")
+		return nil, err
 	}
 	balance, err := wallet.Balance()
 	if err != nil {
@@ -2500,6 +2524,28 @@ func openLinkedWallet(cfg *config, emit *emitter) (*walletInfo, error) {
 		"sidecarVersion":       sidecarVersion,
 	})
 	return info, nil
+}
+
+// Check the decrypted account before balance lookup or starting a paid client.
+func loadLinkedWallet(cfg *config, password string) (*nkn.Wallet, error) {
+	raw, err := os.ReadFile(cfg.walletPath)
+	if err != nil {
+		return nil, fmt.Errorf("read wallet file %q failed: %s", filepath.Base(cfg.walletPath), scrubError(err, cfg.walletPath))
+	}
+	wallet, err := nkn.WalletFromJSON(string(raw), &nkn.WalletConfig{Password: password})
+	if err != nil {
+		return nil, fmt.Errorf("unlock wallet %q failed: %s", filepath.Base(cfg.walletPath), scrubError(err, cfg.walletPath))
+	}
+	if err := wallet.VerifyPassword(password); err != nil {
+		return nil, fmt.Errorf("wallet password verification failed")
+	}
+	if cfg.expectedPayerHash != nil {
+		actual := sha256.Sum256([]byte(wallet.Address()))
+		if !bytes.Equal(actual[:], cfg.expectedPayerHash) {
+			return nil, errors.New("listener wallet does not match the approved payer")
+		}
+	}
+	return wallet, nil
 }
 
 func readWalletPassword(cfg *config) ([]byte, error) {

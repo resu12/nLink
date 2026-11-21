@@ -33,6 +33,104 @@ public sealed class NknTunaLaneOwnershipTests
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
+    public async Task ListenerRearm_CannotReplaceSuccessorAtSupervisor(bool afterDetach)
+    {
+        using var supervisor = new ExactSupervisor();
+        using var lane = CreateLane(supervisor);
+        using var client = ReadyClient();
+        using var owner = Owner();
+        InstallReady(lane, client, true, owner, supervisor.Request);
+        var old = Assert.IsType<NknTunaLaneLease>(lane.CaptureCurrentLaneLease());
+        var next = supervisor.Request with { ExecutionIdentity = "same-successor-request" };
+        NknTunaListenerAdoptionSnapshot? successor = null;
+        if (afterDetach) supervisor.BeforeExactStop = () => successor = supervisor.EnsureStartedIfIdleAsync(next, default).Result;
+        else supervisor.BeforeRearmDetach = () => { supervisor.ReplaceRun(next); successor = supervisor.CaptureCurrentListenerAdoptionSnapshot(); };
+        Assert.Equal(default, await lane.RearmListenerAsync(new(old, null), next, default));
+        Assert.NotNull(successor);
+        Assert.Equal(successor, supervisor.CaptureCurrentListenerAdoptionSnapshot());
+        Assert.DoesNotContain(successor.ProcessRunId, supervisor.DetachedRuns);
+        Assert.Equal(afterDetach ? 1 : 0, supervisor.ExactStops);
+        Assert.Equal(0, supervisor.GlobalStops);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task ListenerRearm_IpcFailureRetiresOnlyTheStartedRun(bool replacedDuringIpc)
+    {
+        using var ct = new CancellationTokenSource(TimeSpan.FromSeconds(8));
+        using var server = new TcpListener(IPAddress.Loopback, 0);
+        server.Start();
+        using var supervisor = new ExactSupervisor(server.LocalEndpoint.ToString()!);
+        using var lane = CreateLane(supervisor);
+        using var client = ReadyClient();
+        using var owner = Owner();
+        InstallReady(lane, client, true, owner, supervisor.Request);
+        var old = Assert.IsType<NknTunaLaneLease>(lane.CaptureCurrentLaneLease());
+        var request = supervisor.Request with { ExecutionIdentity = "second-run" };
+        var rearm = lane.RearmListenerAsync(new(old, null), request, ct.Token);
+        using (var socket = await server.AcceptTcpClientAsync(ct.Token))
+        {
+            Assert.Equal(Assert.Single(supervisor.CreatedRuns), supervisor.CaptureCurrentListenerAdoptionSnapshot()!.ProcessRunId);
+            Assert.False(rearm.IsCompleted);
+            if (replacedDuringIpc) supervisor.ReplaceRun(request);
+        } // Close the accepted local IPC socket before the ready frame.
+        var failed = await rearm.WaitAsync(ct.Token);
+        Assert.Equal(0, supervisor.GlobalStops);
+        if (replacedDuringIpc)
+        {
+            Assert.Equal(default, failed);
+            Assert.Equal(new[] { old.Listener!.ProcessRunId }, supervisor.DetachedRuns);
+            Assert.NotEqual(supervisor.CreatedRuns.Single(), supervisor.CaptureCurrentListenerAdoptionSnapshot()!.ProcessRunId);
+            return;
+        }
+        Assert.Null(supervisor.CaptureCurrentListenerAdoptionSnapshot());
+        Assert.Equal(new[] { old.Listener!.ProcessRunId, supervisor.CreatedRuns.Single() }, supervisor.DetachedRuns);
+        Assert.True(lane.IsFailedListenerStartCurrent(Assert.IsType<long>(failed.FailedGeneration)));
+        var retry = lane.RearmListenerAsync(failed, request, ct.Token);
+        using var connected = await server.AcceptTcpClientAsync(ct.Token);
+        await WriteStatusAsync(connected, ct.Token);
+        var ready = Assert.IsType<NknTunaLaneLease>((await retry.WaitAsync(ct.Token)).Lease);
+        Assert.Equal(supervisor.CreatedRuns.Last(), ready.Listener!.ProcessRunId);
+        Assert.Equal(ready, lane.CaptureCurrentLaneLease());
+        Assert.Equal(2, supervisor.ExactStops);
+    }
+
+    [Fact]
+    public async Task ListenerRearm_FailureReceiptCannotRetryOverReplacement()
+    {
+        using var supervisor = new ExactSupervisor();
+        using var lane = CreateLane(supervisor);
+        using var oldClient = ReadyClient();
+        using var replacementClient = ReadyClient();
+        using var owner = Owner();
+        InstallReady(lane, oldClient, true, owner, supervisor.Request);
+        var oldLease = Assert.IsType<NknTunaLaneLease>(lane.CaptureCurrentLaneLease());
+        // Refuse the new request before IPC; the original physical owner was already consumed.
+        var next = supervisor.Request with { ExecutionIdentity = "new-request" };
+        supervisor.RefuseIdleStart = true;
+        var failed = await lane.RearmListenerAsync(new(oldLease, null), next, CancellationToken.None);
+        Assert.Null(failed.Lease);
+        var generation = Assert.IsType<long>(failed.FailedGeneration);
+        Assert.True(lane.IsFailedListenerStartCurrent(generation));
+        Assert.Empty(supervisor.CreatedRuns);
+        Assert.Equal(new[] { oldLease.Listener!.ProcessRunId }, supervisor.DetachedRuns);
+        supervisor.RefuseIdleStart = false;
+        var successor = await supervisor.EnsureStartedIfIdleAsync(supervisor.Request, CancellationToken.None);
+        Assert.NotNull(successor);
+        // The supervisor can acquire a new process before its client reaches the lane.
+        Assert.Equal(default, await lane.RearmListenerAsync(failed, next, CancellationToken.None));
+        Assert.Equal(successor, supervisor.CaptureCurrentListenerAdoptionSnapshot());
+        InstallReady(lane, replacementClient, true, owner, supervisor.Request);
+        var replacement = Assert.IsType<NknTunaLaneLease>(lane.CaptureCurrentLaneLease());
+        Assert.False(lane.IsFailedListenerStartCurrent(generation));
+        Assert.Equal(default, await lane.RearmListenerAsync(failed, next, CancellationToken.None));
+        Assert.Equal(replacement, lane.CaptureCurrentLaneLease());
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
     public void ListenerStartup_ReadyCannotOutliveItsFailureReceipt(bool duringCallback)
     {
         using var supervisor = new ExactSupervisor();
@@ -656,6 +754,27 @@ public sealed class NknTunaLaneOwnershipTests
     }
 
     [Fact]
+    public void DeferredPayerStop_CleansOnlyDetachedListener_NotSuccessorDial()
+    {
+        using var supervisor = new ExactSupervisor();
+        using var lane = CreateLane(supervisor);
+        using var first = ReadyClient();
+        using var successor = ReadyClient();
+        using var owner = Owner();
+        InstallReady(lane, first, true, owner, supervisor.Request);
+        var lease = Assert.IsType<NknTunaLaneLease>(lane.CaptureCurrentLaneLease());
+        var cleanup = Assert.IsType<Action>(lane.DetachPaidListenerForStop(lease, "yield"));
+        InstallReady(lane, successor, false, owner);
+        var successorLease = Assert.IsType<NknTunaLaneLease>(lane.CaptureCurrentLaneLease());
+        Assert.Null(lane.DetachPaidListenerForStop(lease, "late-yield"));
+        Assert.Null(lane.DetachPaidListenerForStop(successorLease, "not-a-listener"));
+        cleanup();
+        Assert.True(successor.IsAvailable);
+        Assert.Equal(successorLease, lane.CaptureCurrentLaneLease());
+        Assert.Equal(0, supervisor.GlobalStops);
+    }
+
+    [Fact]
     public void CleanupOutsideLaneLock_CannotStopReplacementInstalledDuringProcessShutdown()
     {
         using var supervisor = new ExactSupervisor();
@@ -1119,10 +1238,13 @@ public sealed class NknTunaLaneOwnershipTests
     [InlineData("request")]
     [InlineData("run")]
     [InlineData("exact")]
+    [InlineData("summarized")]
     public void RealSupervisor_ConditionalDetachChecksExactPhysicalAndOwnershipIdentity(string change)
     {
+        var incomplete = 0;
         using var supervisor = new NknTunaListenerSidecarSupervisor(new()
         {
+            UsageSink = new RetiringStartupUsageSink { OnIncomplete = () => incomplete++ },
             SidecarExePath = "not-started", WalletPath = "not-opened", TakeWalletPassword = () => throw new InvalidOperationException(),
             MaxPriceNknPerMb = "0", MaxTotalMiB = 1, MaxDurationSec = 60,
         });
@@ -1142,16 +1264,59 @@ public sealed class NknTunaLaneOwnershipTests
             "run" => snapshot with { ProcessRunId = "wrong-run" },
             _ => snapshot,
         };
-        Assert.Equal(change == "exact", supervisor.TryDetachCurrentListener(expected, out var stop));
+        Set(supervisor, "summaryObserved", change == "summarized");
+        Assert.Equal(change is "exact" or "summarized", supervisor.TryDetachCurrentListener(expected, out var stop));
+        Assert.Equal(change == "exact" ? 1 : 0, incomplete);
         Assert.False((bool)Field(owner, "stopped"));
-        if (change == "exact")
+        if (change is "exact" or "summarized")
         {
             Assert.NotNull(stop);
             Assert.False(supervisor.TryDetachCurrentListener(expected, out _));
             stop!("exact-owner-cleanup");
+            Assert.Equal(change == "exact" ? 1 : 0, incomplete);
             Assert.True((bool)Field(owner, "stopped"));
         }
         else Assert.Null(stop);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task RealSupervisor_OnlyTheReservedVacancyMayReportStartupFailure(bool retireVacancy)
+    {
+        var incomplete = 0;
+        using var supervisor = new NknTunaListenerSidecarSupervisor(new()
+        {
+            SidecarExePath = "not-started", WalletPath = "not-opened", TakeWalletPassword = () => throw new InvalidOperationException(),
+            MaxPriceNknPerMb = "0", MaxTotalMiB = 1, MaxDurationSec = 60,
+            UsageSink = new RetiringStartupUsageSink { OnIncomplete = () => incomplete++ },
+        });
+        using var original = Owner();
+        var request = new NknTunaListenerStartRequest("test-peer", NknAccelerationLaneKind.File);
+        var receipt = new NknTunaListenerAdoptionSnapshot(request, new("127.0.0.1:1", "test-listener"),
+            original.Pid, original.RunId, original.StartedUtc, 0);
+        Set(supervisor, "processOwner", original);
+        Set(supervisor, "currentRequest", request);
+        Set(supervisor, "endpoint", receipt.Endpoint);
+        var gate = (SemaphoreSlim)Field(supervisor, "startGate");
+        await gate.WaitAsync();
+        try
+        {
+            Assert.False(supervisor.TryDetachForRearm(receipt, out var refused, out _, replacing: true));
+            Assert.Null(refused);
+            Assert.Equal(0, incomplete);
+        }
+        finally { gate.Release(); }
+        Assert.True(supervisor.TryDetachForRearm(receipt, out var stop, out var vacant, replacing: true));
+        Assert.Equal(1, incomplete);
+        stop!("listener_rearm");
+        Assert.True(supervisor.IsCurrentVacancy(vacant!));
+        if (retireVacancy) supervisor.Stop("external_lock"); // Physically empty again, but not the same vacancy.
+        NknListenerVacancy? failure = null;
+        Assert.Null(await supervisor.StartInVacancyAsync(vacant!, request, default, observed => failure = observed));
+        Assert.Equal(!retireVacancy, failure is not null);
+        if (failure is not null) Assert.True(supervisor.IsCurrentVacancy(failure));
+        Assert.Equal(1, incomplete);
     }
 
     [Theory]
@@ -1611,6 +1776,83 @@ public sealed class NknTunaLaneOwnershipTests
         finally { server.Stop(); }
     }
 
+    [Theory]
+    [InlineData("revoked")]
+    [InlineData("successor")]
+    [InlineData("established")]
+    public async Task RevokedOfferCleanup_UsesOnlyTheExactProvisionalDial(string state)
+    {
+        using var lane = CreateLane();
+        using var client = ReadyClient();
+        using var process = Owner(); // Unstarted fake, no sidecar.
+        var operation = Invoke(lane, "BeginDialStartUnsafe", "fake-endpoint", "fake-peer")!;
+        var original = new object();
+        operation.GetType().GetField("DialOfferOwner")!.SetValue(operation, original);
+        Assert.True(Install(lane, client, false, process, operation));
+        Finish(lane, operation);
+        var lease = Assert.IsType<NknTunaLaneLease>(lane.CaptureCurrentLaneLease());
+        var successor = new object();
+        Assert.True(await lane.StartOfferDialerAsync("fake-endpoint", "fake-peer", original, CancellationToken.None));
+        if (state == "established") Assert.True(lane.TryCommitOfferDialer(original, false, owns => owns));
+        if (state != "revoked")
+        {
+            Assert.True(await lane.StartOfferDialerAsync("fake-endpoint", "fake-peer", successor, CancellationToken.None));
+            Assert.False(lane.TryCommitOfferDialer(original, false, _ => throw new InvalidOperationException()));
+        }
+        Assert.Equal(state == "revoked", lane.TryStopOfferDialer(original, "offer_lanes_revoked"));
+        if (state != "revoked") Assert.Equal(lease, lane.CaptureCurrentLaneLease());
+        Assert.Equal(state == "successor", lane.TryStopOfferDialer(successor, "offer_lanes_revoked"));
+        Assert.Equal(state == "established", lane.CaptureCurrentLaneLease() is not null);
+    }
+
+    [Theory]
+    [InlineData(false, false)]
+    [InlineData(false, true)]
+    [InlineData(true, false)]
+    [InlineData(true, true)]
+    public async Task OfferDialReuse_RequiresExactPeerAndEndpoint(bool starting, bool changePeer)
+    {
+        const string peer = "fake-peer", endpoint = "fake-endpoint";
+        using var lane = CreateLane();
+        var operation = Invoke(lane, "BeginDialStartUnsafe", endpoint, peer)!;
+        var original = new object();
+        operation.GetType().GetField("DialOfferOwner")!.SetValue(operation, original);
+        var startup = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        if (starting) Set(lane, "dialerStartTask", startup.Task);
+        else InstallAndFinish();
+
+        var matching = lane.StartOfferDialerAsync(endpoint, peer, original, CancellationToken.None);
+        Assert.Equal(!starting, matching.IsCompletedSuccessfully);
+        var other = new object();
+        Assert.False(await lane.StartOfferDialerAsync(changePeer ? endpoint : "other-endpoint",
+            changePeer ? "other-peer" : peer, other, CancellationToken.None).WaitAsync(TimeSpan.FromSeconds(2)));
+        if (starting)
+        {
+            InstallAndFinish();
+            startup.SetResult(true);
+        }
+        Assert.True(await matching.WaitAsync(TimeSpan.FromSeconds(2)));
+        Assert.False(lane.IsCurrentOfferDial(other));
+        Assert.False(lane.TryStopOfferDialer(other, "wrong_target"));
+        Assert.True(lane.TryCommitOfferDialer(original, false, owns => owns));
+
+        void InstallAndFinish()
+        {
+            Assert.True(Install(lane, ReadyClient(), false, Owner(), operation));
+            Finish(lane, operation);
+        }
+    }
+
+    internal static NknTunaAccelerationLane InstalledFakeDialForOffer(bool provisional, string endpoint, string peer)
+    {
+        var lane = CreateLane();
+        var operation = Invoke(lane, "BeginDialStartUnsafe", endpoint, peer)!;
+        if (provisional) operation.GetType().GetField("DialOfferOwner")!.SetValue(operation, new object());
+        Assert.True(Install(lane, ReadyClient(), false, Owner(), operation));
+        Finish(lane, operation);
+        return lane;
+    }
+
     private static NknTunaAccelerationLane CreateLane(INknTunaListenerSidecarSupervisor? supervisor = null,
         NknAccelerationLaneKind lanes = NknAccelerationLaneKind.File)
         => new(NknTunaAccelerationOptions.CreateRuntimePilot(
@@ -1661,7 +1903,9 @@ public sealed class NknTunaLaneOwnershipTests
         private NknTunaListenerAdoptionSnapshot? snapshot;
         public int GlobalStops, ExactStops, IdleStarts;
         private readonly string ipc;
-        public Action? BeforeExactStop;
+        public Action? BeforeExactStop, BeforeRearmDetach;
+        public bool RefuseIdleStart;
+        public readonly List<string> CreatedRuns = new(), DetachedRuns = new();
         public Action<NknTunaListenerStartRequest>? BeforeStart;
         public bool ReplaceBeforeStartReturns;
         public bool TerminalFailure;
@@ -1677,11 +1921,29 @@ public sealed class NknTunaLaneOwnershipTests
         public Task<NknTunaListenerAdoptionSnapshot?> EnsureStartedIfIdleAsync(NknTunaListenerStartRequest request, CancellationToken ct)
         {
             IdleStarts++;
-            if (snapshot is not null) return Task.FromResult<NknTunaListenerAdoptionSnapshot?>(null);
+            if (RefuseIdleStart || snapshot is not null) return Task.FromResult<NknTunaListenerAdoptionSnapshot?>(null);
             snapshot = new(request, new(ipc, "test-listener"), 1, Guid.NewGuid().ToString("N"), DateTimeOffset.UtcNow, 1);
             var started = snapshot;
+            CreatedRuns.Add(started.ProcessRunId);
             if (ReplaceBeforeStartReturns) ReplaceRun();
             return Task.FromResult<NknTunaListenerAdoptionSnapshot?>(started);
+        }
+        private long vacancyGeneration;
+        public bool IsCurrentVacancy(NknListenerVacancy vacant) => snapshot is null &&
+            ReferenceEquals(vacant.Supervisor, this) && vacant.Ownership == vacancyGeneration;
+        public async Task<NknTunaListenerAdoptionSnapshot?> StartInVacancyAsync(NknListenerVacancy vacant,
+            NknTunaListenerStartRequest request, CancellationToken ct, Action<NknListenerVacancy> failed)
+        {
+            if (!IsCurrentVacancy(vacant)) return null;
+            var started = await EnsureStartedIfIdleAsync(request, ct);
+            if (started is null) failed(vacant);
+            return started;
+        }
+        public bool TryUseExactListener(NknTunaListenerAdoptionSnapshot expected, Action use)
+        {
+            if (expected != CaptureCurrentListenerAdoptionSnapshot()) return false;
+            use();
+            return true;
         }
         public Task<NknTunaListenerSidecarEndpoint?> EnsureStartedAsync(NknTunaListenerStartRequest request, CancellationToken ct)
         {
@@ -1695,15 +1957,19 @@ public sealed class NknTunaLaneOwnershipTests
             snapshot = snapshot with { CurrentRequest = request, OwnershipGeneration = snapshot.OwnershipGeneration + 1 };
             return true;
         }
-        public bool TryDetachCurrentListener(NknTunaListenerAdoptionSnapshot expected, out Action<string>? stop)
+        public bool TryDetachCurrentListener(NknTunaListenerAdoptionSnapshot expected, out Action<string>? stop) => TryDetachForRearm(expected, out stop, out _);
+        public bool TryDetachForRearm(NknTunaListenerAdoptionSnapshot expected, out Action<string>? stop, out NknListenerVacancy? vacant, bool replacing = false)
         {
             stop = null;
+            vacant = null;
+            if (replacing) BeforeRearmDetach?.Invoke();
             if (snapshot != expected) return false;
             snapshot = null;
-            stop = _ => { BeforeExactStop?.Invoke(); ExactStops++; };
+            vacant = new(this, 0, ++vacancyGeneration);
+            stop = _ => { BeforeExactStop?.Invoke(); DetachedRuns.Add(expected.ProcessRunId); ExactStops++; };
             return true;
         }
-        public void Stop(string reason) { GlobalStops++; snapshot = null; }
+        public void Stop(string reason) { GlobalStops++; vacancyGeneration++; snapshot = null; }
         public void Dispose() { snapshot = null; }
     }
 }

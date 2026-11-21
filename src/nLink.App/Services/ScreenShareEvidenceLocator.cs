@@ -37,8 +37,8 @@ internal sealed record ScreenShareEvidenceSnapshot(
     {
         var lines = new[]
         {
-            "Screenshare evidence",
-            "--------------------",
+            "Screenshare evidence (previous test run; not current session health)",
+            "-------------------------------------------------------------------",
             $"screenshare_evidence_status: {StatusKey}",
             $"screenshare_artifact_name: {ArtifactName}",
             $"screenshare_artifact_dir: {RedactedArtifactDirectory}",

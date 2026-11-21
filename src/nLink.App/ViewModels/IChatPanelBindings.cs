@@ -1,7 +1,20 @@
+using System;
 using System.Collections.ObjectModel;
+using System.Threading;
+using System.Threading.Tasks;
 using CommunityToolkit.Mvvm.Input;
+using NLink.Core.FileTransfer;
+using NLink.Core.SessionConnect;
 
 namespace NLink.App.ViewModels;
+
+internal interface IChatFileTransferActions : IChatPanelBindings
+{
+    SessionId? FileSendSessionId { get; }
+    bool TryAuthorizeFileSelection();
+    Task StartSendFileAsync(FileTransferSendDescriptor descriptor, FileTransferReadStreamFactory openReadStreamAsync, CancellationToken ct = default);
+    Task<FileTransferTransferSnapshot?> AcceptIncomingAsAsync(string sessionId, string transferId, Guid offerToken, string path);
+}
 
 public interface IChatPanelBindings
 {

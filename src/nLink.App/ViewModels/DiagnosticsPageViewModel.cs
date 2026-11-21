@@ -35,7 +35,9 @@ public sealed class DiagnosticsPageViewModel : ViewModelBase, IDisposable
 
     private readonly InlineTransientText copyFeedback = new();
     private readonly string? bugReportUrl;
-    private readonly DiagnosticsSnapshot runtimeDiagnosticsSnapshot;
+    private readonly SessionRuntime? sessionRuntime;
+    private ChatRuntimeCountersSnapshot chatCounters;
+    private DiagnosticsSnapshot runtimeDiagnosticsSnapshot;
     private readonly MetricsRegistry? metricsRegistry;
     private readonly ResourceRuntimeTracker? resourceRuntimeTracker;
     private readonly HangReportService? hangReportService;
@@ -46,10 +48,10 @@ public sealed class DiagnosticsPageViewModel : ViewModelBase, IDisposable
     private readonly Func<string> diagnosticsExportRootProvider;
     private readonly Action<string, string, string, string, string> persistScreenSharePresetInBackground;
     private readonly InviteSecurityStatus inviteSecurityStatus;
-    private readonly NknRuntimeDiagnosticsSnapshot nknDiagnosticsSnapshot;
-    private readonly PersistenceDiagnosticsSnapshot persistenceDiagnosticsSnapshot;
+    private NknRuntimeDiagnosticsSnapshot nknDiagnosticsSnapshot;
+    private PersistenceDiagnosticsSnapshot persistenceDiagnosticsSnapshot;
     private readonly ScreenShareEvidenceSnapshot screenShareEvidenceSnapshot;
-    private readonly ScreenShareLiveDiagnosticsSnapshot screenShareLiveSnapshot;
+    private ScreenShareLiveDiagnosticsSnapshot screenShareLiveSnapshot;
     private TunaWalletLinkState tunaWalletState = TunaWalletLinkState.Unlinked;
     private bool isTunaWalletValidating;
 
@@ -114,7 +116,6 @@ public sealed class DiagnosticsPageViewModel : ViewModelBase, IDisposable
         persistScreenSharePresetInBackground = screenSharePresetPersistence ?? PersistScreenSharePresetInBackground;
         tunaWalletState = LoadTunaWalletState(tunaWalletLinkStore);
         screenShareEvidenceSnapshot = screenShareEvidenceLocator.ReadLatest();
-        screenShareLiveSnapshot = sessionRuntime?.GetScreenShareLiveDiagnosticsSnapshot() ?? ScreenShareLiveDiagnosticsSnapshot.Unavailable;
 
         ActiveTransport = transportConfig.DisplayName;
         TransportKey = transportConfig.Key;
@@ -133,73 +134,14 @@ public sealed class DiagnosticsPageViewModel : ViewModelBase, IDisposable
         ProcessArchitecture = RuntimeInformation.ProcessArchitecture.ToString();
         OsArchitecture = RuntimeInformation.OSArchitecture.ToString();
         BridgeResolutionRid = ResolveBridgeRidForDiagnostics();
-        persistenceDiagnosticsSnapshot = PersistenceDiagnostics.Snapshot();
-        runtimeDiagnosticsSnapshot = sessionRuntime?.GetDiagnosticsSnapshot() ?? new DiagnosticsSnapshot(
-            CurrentState: "(unknown)",
-            SessionUiState: "(unknown)",
-            AttemptNumber: 0,
-            LastFailureCategory: "(none)",
-            LastFailureMessage: "(none)",
-            LastConnectDurationMs: null,
-            LastHandshakeDurationMs: null,
-            LastBridgeStartDurationMs: null,
-            PersistenceSummary: persistenceDiagnosticsSnapshot.Summary,
-            PersistenceWarning: persistenceDiagnosticsSnapshot.LastWarning);
-
         if (string.Equals(transportConfig.Key, "NKN", StringComparison.OrdinalIgnoreCase))
         {
             NknRuntimeDiagnostics.EnsureInitialized();
         }
 
-        var counters = ChatRuntimeCounters.Snapshot();
-        nknDiagnosticsSnapshot = NknRuntimeDiagnostics.Snapshot();
-        NknAddress = nknDiagnosticsSnapshot.Address;
-        MessagesSent = nknDiagnosticsSnapshot.MessagesSent.ToString();
-        MessagesReceived = nknDiagnosticsSnapshot.MessagesReceived.ToString();
-        LastError = nknDiagnosticsSnapshot.LastError;
-        BridgePid = nknDiagnosticsSnapshot.BridgePid > 0 ? nknDiagnosticsSnapshot.BridgePid.ToString() : "(not running)";
-        NodeSdk = string.IsNullOrWhiteSpace(nknDiagnosticsSnapshot.NodeVersion) ? "(unknown)" : nknDiagnosticsSnapshot.NodeVersion;
-        LastHeartbeat = nknDiagnosticsSnapshot.BridgeLastPongUtcTicks > 0
-            ? new DateTimeOffset(nknDiagnosticsSnapshot.BridgeLastPongUtcTicks, TimeSpan.Zero).ToString("u")
-            : "(none)";
-        BridgeRestarts = nknDiagnosticsSnapshot.BridgeRestartCount.ToString();
-        LastBridgeExit = BuildLastBridgeExitText(nknDiagnosticsSnapshot.BridgeLastExitCode, nknDiagnosticsSnapshot.BridgeLastExitReason);
-        BridgeRawMessagesReceived = nknDiagnosticsSnapshot.BridgeRawMessagesReceived.ToString();
-        ScreenShareOutboundBusyDrops = nknDiagnosticsSnapshot.ScreenShareOutboundBusyDrops.ToString();
-        ScreenSharePayloadBytesSent = nknDiagnosticsSnapshot.ScreenSharePayloadBytesSent.ToString();
-        ScreenShareMessagesSent = nknDiagnosticsSnapshot.ScreenShareMessagesSent.ToString();
-        ScreenShareBridgeBytesSent = nknDiagnosticsSnapshot.ScreenShareBridgeBytesSent.ToString();
-        HighPriorityControlQueueOverflows = nknDiagnosticsSnapshot.HighPriorityControlQueueOverflows.ToString();
-        HighPriorityControlRejected = nknDiagnosticsSnapshot.HighPriorityControlRejected.ToString();
-        HighPriorityControlCoalesced = nknDiagnosticsSnapshot.HighPriorityControlCoalesced.ToString();
-        HighPriorityControlDroppedForStop = nknDiagnosticsSnapshot.HighPriorityControlDroppedForStop.ToString();
-        LastBridgeMessageSource = nknDiagnosticsSnapshot.LastBridgeMessageSource;
-        LastBridgeMessageKind = BuildBridgeMessageKind(nknDiagnosticsSnapshot.LastBridgeMessageIsTopic);
-        LastEnvelopeType = nknDiagnosticsSnapshot.LastEnvelopeType;
-        LastEnvelopeDropReason = nknDiagnosticsSnapshot.LastEnvelopeDropReason;
-        JoinRequestsReceived = nknDiagnosticsSnapshot.JoinRequestsReceived.ToString();
-        IncomingJoinRequestRaisedCount = nknDiagnosticsSnapshot.IncomingJoinRequestRaisedCount.ToString();
-        AcksReceived = nknDiagnosticsSnapshot.AcksReceived.ToString();
-        AcksIgnoredSourceMismatch = nknDiagnosticsSnapshot.AcksIgnoredSourceMismatch.ToString();
-        LastDisconnectReason = nknDiagnosticsSnapshot.LastDisconnectReason;
-        HelperAddressSource = nknDiagnosticsSnapshot.HelperAddressSource;
-        HelperAddressAuthoritative = nknDiagnosticsSnapshot.HelperAddressAuthoritative ? "Yes" : "No";
-        HelperVerificationCodeVisible = nknDiagnosticsSnapshot.HelperVerificationCodeVisible ? "Yes" : "No";
-        HelperIdentityRegeneratedCount = nknDiagnosticsSnapshot.HelperIdentityRegeneratedCount.ToString(CultureInfo.InvariantCulture);
-        HelperIdentityLastRegeneratedUtc = nknDiagnosticsSnapshot.HelperIdentityLastRegeneratedUtcTicks > 0
-            ? new DateTimeOffset(nknDiagnosticsSnapshot.HelperIdentityLastRegeneratedUtcTicks, TimeSpan.Zero).ToString("u")
-            : "(none)";
-        FirstColdStartObserved = nknDiagnosticsSnapshot.FirstColdStartObserved ? "Yes" : "No";
-        FirstColdStartMs = nknDiagnosticsSnapshot.FirstColdStartObserved && nknDiagnosticsSnapshot.FirstColdStartMs >= 0
-            ? nknDiagnosticsSnapshot.FirstColdStartMs.ToString("F2")
-            : "(none)";
-        FirstColdStartRecordedUtc = nknDiagnosticsSnapshot.FirstColdStartUtcTicks > 0
-            ? new DateTimeOffset(nknDiagnosticsSnapshot.FirstColdStartUtcTicks, TimeSpan.Zero).ToString("u")
-            : "(none)";
-        ChatSent = counters.ChatSent.ToString();
-        ChatReceived = counters.ChatReceived.ToString();
-        DecryptFailed = counters.ChatDecryptFailed.ToString();
-        RecentConnectionAttemptsText = BuildRecentConnectionAttemptsText(SessionReliabilityLog.SnapshotRecent(10));
+        this.sessionRuntime = sessionRuntime;
+        CaptureSessionSnapshot();
+        RefreshSessionSnapshotCommand = new RelayCommand(RefreshSessionSnapshot);
         CopyReliabilityLogCommand = new RelayCommand(RequestCopyReliabilityLog);
         SaveHangReportCommand = new RelayCommand(SaveHangReport);
         ExportMetricsJsonCommand = new RelayCommand(ExportMetricsJson);
@@ -215,6 +157,61 @@ public sealed class DiagnosticsPageViewModel : ViewModelBase, IDisposable
         UnlinkTunaWalletCommand = new RelayCommand(UnlinkTunaWallet, CanUnlinkTunaWallet);
         UnlockTunaRuntimeCommand = new RelayCommand(RequestUnlockTunaRuntime, CanUnlockTunaRuntime);
     }
+
+    private void CaptureSessionSnapshot()
+    {
+        persistenceDiagnosticsSnapshot = PersistenceDiagnostics.Snapshot();
+        runtimeDiagnosticsSnapshot = sessionRuntime?.GetDiagnosticsSnapshot() ?? new DiagnosticsSnapshot(
+            CurrentState: "(unknown)",
+            SessionUiState: "(unknown)",
+            AttemptNumber: 0,
+            LastFailureCategory: "(none)",
+            LastFailureMessage: "(none)",
+            LastConnectDurationMs: null,
+            LastHandshakeDurationMs: null,
+            LastBridgeStartDurationMs: null,
+            PersistenceSummary: persistenceDiagnosticsSnapshot.Summary,
+            PersistenceWarning: persistenceDiagnosticsSnapshot.LastWarning);
+        screenShareLiveSnapshot = sessionRuntime?.GetScreenShareLiveDiagnosticsSnapshot() ?? ScreenShareLiveDiagnosticsSnapshot.Unavailable;
+        nknDiagnosticsSnapshot = NknRuntimeDiagnostics.Snapshot();
+        chatCounters = ChatRuntimeCounters.Snapshot();
+        RecentConnectionAttemptsText = BuildRecentConnectionAttemptsText(SessionReliabilityLog.SnapshotRecent(10));
+        SessionSnapshotAsOfUtc = nowProvider().UtcDateTime.ToString("u", CultureInfo.InvariantCulture);
+    }
+
+    private void RefreshSessionSnapshot()
+    {
+        CaptureSessionSnapshot();
+        OnPropertyChanged(nameof(SessionSnapshotAsOfUtc));
+        OnPropertyChanged(nameof(ConnectionStateSummary));
+        OnPropertyChanged(nameof(AuthorizationSummary));
+        OnPropertyChanged(nameof(ScreenShareSummary));
+        OnPropertyChanged(nameof(RemoteControlSummary));
+        OnPropertyChanged(nameof(FileTransferSummary));
+        OnPropertyChanged(nameof(PersistenceSummary));
+        OnPropertyChanged(nameof(ConnectionErrorSummary));
+        OnPropertyChanged(nameof(HelperIdentitySummary));
+        OnPropertyChanged(nameof(AuthoritativeConnectedAddress));
+        OnPropertyChanged(nameof(LastRejectedMessageSummary));
+        OnPropertyChanged(nameof(ScreenShareLiveState));
+        OnPropertyChanged(nameof(ScreenShareLiveProfileSummary));
+        OnPropertyChanged(nameof(ScreenShareLivePerformanceSummary));
+        OnPropertyChanged(nameof(ScreenShareLiveCpuSummary));
+        OnPropertyChanged(nameof(ScreenShareLiveCursorSummary));
+        OnPropertyChanged(nameof(ScreenShareLiveVisualSafetySummary));
+        OnPropertyChanged(nameof(MessagesSent));
+        OnPropertyChanged(nameof(MessagesReceived));
+        OnPropertyChanged(nameof(ScreenShareMessagesSent));
+        OnPropertyChanged(nameof(HighPriorityControlQueueOverflows));
+        OnPropertyChanged(nameof(BridgePid));
+        OnPropertyChanged(nameof(NodeSdk));
+        OnPropertyChanged(nameof(LastHeartbeat));
+        OnPropertyChanged(nameof(LastBridgeExit));
+        OnPropertyChanged(nameof(RecentConnectionAttemptsText));
+    }
+
+    public IRelayCommand RefreshSessionSnapshotCommand { get; }
+    public string SessionSnapshotAsOfUtc { get; private set; } = string.Empty;
 
     public string PageTitle => "Options";
 
@@ -313,7 +310,7 @@ public sealed class DiagnosticsPageViewModel : ViewModelBase, IDisposable
                 ? "Advanced opt-in"
                 : "Off";
     public string TunaFallbackState => NknTunaAccelerationOptions.Load().Enabled
-        ? "Experimental acceleration can negotiate only after an approved secure session."
+        ? "Tuna acceleration can negotiate only after an approved secure session."
         : CurrentTunaRuntimePreferences().Enabled
             ? "Tuna can start only after approved session unlock; current NKN remains fallback."
             : "Current NKN will be used.";
@@ -346,7 +343,7 @@ public sealed class DiagnosticsPageViewModel : ViewModelBase, IDisposable
                 MaxDurationSec = current.MaxDurationSec,
                 AllowDegradedProviderReady = current.AllowDegradedProviderReady,
                 LastRuntimeStatus = value ? "locked" : "off",
-            });
+            }, disablingFromCheckbox: !value);
         }
     }
 
@@ -572,78 +569,86 @@ public sealed class DiagnosticsPageViewModel : ViewModelBase, IDisposable
     public bool ShowScreenShareResetHint => ScreenShareQualitySettings.WasLegacyHigherClarityPresetMigrated ||
         string.Equals(ScreenShareEffectivePresetName, "Custom", StringComparison.OrdinalIgnoreCase);
 
-    public string NknAddress { get; }
+    public string NknAddress => nknDiagnosticsSnapshot.Address;
 
-    public string MessagesSent { get; }
+    public string MessagesSent => nknDiagnosticsSnapshot.MessagesSent.ToString();
 
-    public string MessagesReceived { get; }
+    public string MessagesReceived => nknDiagnosticsSnapshot.MessagesReceived.ToString();
 
-    public string ChatSent { get; }
+    public string ChatSent => chatCounters.ChatSent.ToString();
 
-    public string ChatReceived { get; }
+    public string ChatReceived => chatCounters.ChatReceived.ToString();
 
-    public string DecryptFailed { get; }
+    public string DecryptFailed => chatCounters.ChatDecryptFailed.ToString();
 
-    public string LastError { get; }
+    public string LastError => nknDiagnosticsSnapshot.LastError;
 
-    public string BridgePid { get; }
+    public string BridgePid => nknDiagnosticsSnapshot.BridgePid > 0 ? nknDiagnosticsSnapshot.BridgePid.ToString() : "(not running)";
 
-    public string NodeSdk { get; }
+    public string NodeSdk => string.IsNullOrWhiteSpace(nknDiagnosticsSnapshot.NodeVersion) ? "(unknown)" : nknDiagnosticsSnapshot.NodeVersion;
 
-    public string LastHeartbeat { get; }
+    public string LastHeartbeat => nknDiagnosticsSnapshot.BridgeLastPongUtcTicks > 0
+        ? new DateTimeOffset(nknDiagnosticsSnapshot.BridgeLastPongUtcTicks, TimeSpan.Zero).ToString("u")
+        : "(none)";
 
-    public string BridgeRestarts { get; }
+    public string BridgeRestarts => nknDiagnosticsSnapshot.BridgeRestartCount.ToString();
 
-    public string LastBridgeExit { get; }
+    public string LastBridgeExit => BuildLastBridgeExitText(nknDiagnosticsSnapshot.BridgeLastExitCode, nknDiagnosticsSnapshot.BridgeLastExitReason);
     public string BridgeManifestSummary => BuildBridgeManifestSummary();
 
-    public string BridgeRawMessagesReceived { get; }
+    public string BridgeRawMessagesReceived => nknDiagnosticsSnapshot.BridgeRawMessagesReceived.ToString();
 
-    public string ScreenShareOutboundBusyDrops { get; }
+    public string ScreenShareOutboundBusyDrops => nknDiagnosticsSnapshot.ScreenShareOutboundBusyDrops.ToString();
 
-    public string ScreenSharePayloadBytesSent { get; }
+    public string ScreenSharePayloadBytesSent => nknDiagnosticsSnapshot.ScreenSharePayloadBytesSent.ToString();
 
-    public string ScreenShareMessagesSent { get; }
+    public string ScreenShareMessagesSent => nknDiagnosticsSnapshot.ScreenShareMessagesSent.ToString();
 
-    public string ScreenShareBridgeBytesSent { get; }
+    public string ScreenShareBridgeBytesSent => nknDiagnosticsSnapshot.ScreenShareBridgeBytesSent.ToString();
 
-    public string HighPriorityControlQueueOverflows { get; }
+    public string HighPriorityControlQueueOverflows => nknDiagnosticsSnapshot.HighPriorityControlQueueOverflows.ToString();
 
-    public string HighPriorityControlRejected { get; }
+    public string HighPriorityControlRejected => nknDiagnosticsSnapshot.HighPriorityControlRejected.ToString();
 
-    public string HighPriorityControlCoalesced { get; }
+    public string HighPriorityControlCoalesced => nknDiagnosticsSnapshot.HighPriorityControlCoalesced.ToString();
 
-    public string HighPriorityControlDroppedForStop { get; }
+    public string HighPriorityControlDroppedForStop => nknDiagnosticsSnapshot.HighPriorityControlDroppedForStop.ToString();
 
-    public string LastBridgeMessageSource { get; }
+    public string LastBridgeMessageSource => nknDiagnosticsSnapshot.LastBridgeMessageSource;
 
-    public string LastBridgeMessageKind { get; }
+    public string LastBridgeMessageKind => BuildBridgeMessageKind(nknDiagnosticsSnapshot.LastBridgeMessageIsTopic);
 
-    public string LastEnvelopeType { get; }
+    public string LastEnvelopeType => nknDiagnosticsSnapshot.LastEnvelopeType;
 
-    public string LastEnvelopeDropReason { get; }
+    public string LastEnvelopeDropReason => nknDiagnosticsSnapshot.LastEnvelopeDropReason;
 
-    public string JoinRequestsReceived { get; }
+    public string JoinRequestsReceived => nknDiagnosticsSnapshot.JoinRequestsReceived.ToString();
 
-    public string IncomingJoinRequestRaisedCount { get; }
+    public string IncomingJoinRequestRaisedCount => nknDiagnosticsSnapshot.IncomingJoinRequestRaisedCount.ToString();
 
-    public string AcksReceived { get; }
+    public string AcksReceived => nknDiagnosticsSnapshot.AcksReceived.ToString();
 
-    public string AcksIgnoredSourceMismatch { get; }
+    public string AcksIgnoredSourceMismatch => nknDiagnosticsSnapshot.AcksIgnoredSourceMismatch.ToString();
 
-    public string LastDisconnectReason { get; }
-    public string HelperAddressSource { get; }
-    public string HelperAddressAuthoritative { get; }
-    public string HelperVerificationCodeVisible { get; }
-    public string HelperIdentityRegeneratedCount { get; }
-    public string HelperIdentityLastRegeneratedUtc { get; }
-    public string FirstColdStartObserved { get; }
-    public string FirstColdStartMs { get; }
-    public string FirstColdStartRecordedUtc { get; }
+    public string LastDisconnectReason => nknDiagnosticsSnapshot.LastDisconnectReason;
+    public string HelperAddressSource => nknDiagnosticsSnapshot.HelperAddressSource;
+    public string HelperAddressAuthoritative => nknDiagnosticsSnapshot.HelperAddressAuthoritative ? "Yes" : "No";
+    public string HelperVerificationCodeVisible => nknDiagnosticsSnapshot.HelperVerificationCodeVisible ? "Yes" : "No";
+    public string HelperIdentityRegeneratedCount => nknDiagnosticsSnapshot.HelperIdentityRegeneratedCount.ToString(CultureInfo.InvariantCulture);
+    public string HelperIdentityLastRegeneratedUtc => nknDiagnosticsSnapshot.HelperIdentityLastRegeneratedUtcTicks > 0
+        ? new DateTimeOffset(nknDiagnosticsSnapshot.HelperIdentityLastRegeneratedUtcTicks, TimeSpan.Zero).ToString("u")
+        : "(none)";
+    public string FirstColdStartObserved => nknDiagnosticsSnapshot.FirstColdStartObserved ? "Yes" : "No";
+    public string FirstColdStartMs => nknDiagnosticsSnapshot.FirstColdStartObserved && nknDiagnosticsSnapshot.FirstColdStartMs >= 0
+        ? nknDiagnosticsSnapshot.FirstColdStartMs.ToString("F2")
+        : "(none)";
+    public string FirstColdStartRecordedUtc => nknDiagnosticsSnapshot.FirstColdStartUtcTicks > 0
+        ? new DateTimeOffset(nknDiagnosticsSnapshot.FirstColdStartUtcTicks, TimeSpan.Zero).ToString("u")
+        : "(none)";
 
     public string RecentConnectionAttemptsTitle => "Recent connection attempts";
 
-    public string RecentConnectionAttemptsText { get; }
+    public string RecentConnectionAttemptsText { get; private set; } = string.Empty;
 
     public bool ShowCopyFeedback
         => copyFeedback.IsVisible;
@@ -673,8 +678,8 @@ public sealed class DiagnosticsPageViewModel : ViewModelBase, IDisposable
 
     public event EventHandler<string>? CopyReliabilityLogRequested;
     public event EventHandler? LinkTunaWalletRequested;
-    public event EventHandler? ValidateTunaWalletPasswordRequested;
-    public event EventHandler? UnlockTunaRuntimePasswordRequested;
+    internal event EventHandler<TunaWalletLinkState>? ValidateTunaWalletPasswordRequested;
+    internal event EventHandler<TunaWalletLinkState>? UnlockTunaRuntimePasswordRequested;
     public event EventHandler<string>? CopyTunaWalletAddressRequested;
 
     public event EventHandler<string>? OpenLogsFolderRequested;
@@ -713,8 +718,8 @@ public sealed class DiagnosticsPageViewModel : ViewModelBase, IDisposable
         try
         {
             var state = TunaWalletLinkState.Linked(walletPath, nowProvider());
-            await SaveTunaWalletStateAsync(state, ct, replacingLink: true);
-            copyFeedback.Show("Wallet linked");
+            var linked = await SaveTunaWalletStateAsync(state, ct, expectedValidation: null);
+            copyFeedback.Show(linked ? "Wallet linked" : "Stop the paid Tuna listener before changing wallets.");
         }
         catch (Exception ex)
         {
@@ -723,45 +728,71 @@ public sealed class DiagnosticsPageViewModel : ViewModelBase, IDisposable
         }
     }
 
-    public async Task ValidateTunaWalletAsync(char[]? password, CancellationToken ct = default)
-    {
-        if (!tunaWalletState.IsLinked || string.IsNullOrWhiteSpace(tunaWalletState.WalletPath))
-        {
-            copyFeedback.Show("Link a wallet first");
-            return;
-        }
+    public Task ValidateTunaWalletAsync(char[]? password, CancellationToken ct = default)
+        => ValidateTunaWalletAsync(tunaWalletState, password, ct);
 
+    internal async Task ValidateTunaWalletAsync(TunaWalletLinkState expectedWallet, char[]? password, CancellationToken ct = default)
+    {
+        var checkingWallet = tunaWalletState;
         if (password is null || password.Length == 0)
         {
             copyFeedback.Show("Password required");
             return;
         }
 
-        if (isTunaWalletValidating)
-        {
-            return;
-        }
-
-        SetTunaWalletValidating(true);
+        var ownsValidation = false;
         try
         {
+            if (!checkingWallet.IsLinked || string.IsNullOrWhiteSpace(checkingWallet.WalletPath))
+            {
+                copyFeedback.Show("Link a wallet first");
+                return;
+            }
+            if (isTunaWalletValidating || !expectedWallet.IsSameValidationAs(checkingWallet)) return;
+            ownsValidation = true;
+            SetTunaWalletValidating(true);
+            if (tunaWalletLinkStore is not null)
+            {
+                var current = await LoadTunaWalletStateAsync(ct);
+                ct.ThrowIfCancellationRequested();
+                if (!ReferenceEquals(checkingWallet, tunaWalletState)) return;
+                if (!checkingWallet.IsSameValidationAs(current))
+                {
+                    PublishWalletIfCurrent(checkingWallet, current, "Wallet changed. Balance check discarded.");
+                    return;
+                }
+            }
             var result = tunaWalletVerifier is null
-                ? TunaWalletValidationResult.Fail("verifier_service_missing", tunaWalletState.WalletFileName)
-                : await tunaWalletVerifier.ValidateAsync(tunaWalletState.WalletPath, password, ct);
-            var nextState = tunaWalletState.WithValidationResult(result, nowProvider());
-            await SaveTunaWalletStateAsync(nextState, ct);
+                ? TunaWalletValidationResult.Fail("verifier_service_missing", checkingWallet.WalletFileName)
+                : await tunaWalletVerifier.ValidateAsync(checkingWallet.WalletPath, password, ct);
+            var nextState = checkingWallet.WithValidationResult(result, nowProvider());
+            if (!await SaveTunaWalletStateAsync(nextState, ct, checkingWallet))
+            {
+                if (ReferenceEquals(tunaWalletState, checkingWallet))
+                {
+                    var latest = await LoadTunaWalletStateAsync(ct);
+                    ct.ThrowIfCancellationRequested();
+                    PublishWalletIfCurrent(checkingWallet, latest, "Wallet changed. Balance check discarded.");
+                }
+                return;
+            }
             copyFeedback.Show(result.Success
                 ? (nextState.Status == TunaWalletLinkStatus.VerifiedFunded ? "Wallet verified" : "Wallet is empty")
                 : "Wallet validation failed");
         }
+        catch (Exception ex) when (JsonTunaWalletLinkStore.IsStorageError(ex))
+        {
+            if (ReferenceEquals(checkingWallet, tunaWalletState))
+                copyFeedback.Show("Couldn't confirm the wallet balance. Check access to nLink's wallet settings.");
+        }
         finally
         {
             Array.Clear(password);
-            SetTunaWalletValidating(false);
+            if (ownsValidation) SetTunaWalletValidating(false);
         }
     }
 
-    public async Task UnlockTunaRuntimeAsync(char[]? password, CancellationToken ct = default)
+    internal async Task UnlockTunaRuntimeAsync(TunaWalletLinkState expectedWallet, char[]? password, CancellationToken ct = default)
     {
         if (tunaRuntimePilotService is null)
         {
@@ -785,16 +816,30 @@ public sealed class DiagnosticsPageViewModel : ViewModelBase, IDisposable
             return;
         }
 
+        var selection = tunaWalletState;
+        if (!expectedWallet.IsSamePayerLinkAs(selection))
+        {
+            Array.Clear(password);
+            return;
+        }
         SetTunaWalletValidating(true);
         try
         {
-            var result = await tunaRuntimePilotService
-                .UnlockForSessionAsync(password, TunaRuntimeUnlockSource.Options, ct)
-                .ConfigureAwait(false);
-            tunaWalletState = await LoadTunaWalletStateAsync(ct).ConfigureAwait(false);
-            copyFeedback.Show(result.Message);
-            RefreshTunaRuntimeProperties();
-            RefreshTunaWalletProperties();
+            var result = await tunaRuntimePilotService.UnlockForSessionAsync(password, TunaRuntimeUnlockSource.Options, expectedWallet, ct);
+            if (!ReferenceEquals(tunaWalletState, selection)) return;
+            var latest = await LoadTunaWalletStateAsync(ct);
+            ct.ThrowIfCancellationRequested();
+            var resultApplies = expectedWallet.IsSamePayerLinkAs(latest) &&
+                (!result.Success || latest.Status == TunaWalletLinkStatus.VerifiedFunded);
+            string? message = resultApplies ? result.Message : "Wallet changed.";
+            if (resultApplies && result.Success && !tunaRuntimePilotService.HoldsUnlockFor(latest))
+                message = null; // Keep any newer lock/disable feedback.
+            PublishWalletIfCurrent(selection, latest, message);
+        }
+        catch (Exception ex) when (JsonTunaWalletLinkStore.IsStorageError(ex))
+        {
+            if (ReferenceEquals(selection, tunaWalletState))
+                copyFeedback.Show("Couldn't confirm the wallet unlock. Check access to nLink's wallet settings.");
         }
         finally
         {
@@ -832,7 +877,7 @@ public sealed class DiagnosticsPageViewModel : ViewModelBase, IDisposable
         }
     }
 
-    private async Task<TunaWalletLinkState> LoadTunaWalletStateAsync(CancellationToken ct)
+    private async Task<TunaWalletLinkState> LoadTunaWalletStateAsync(CancellationToken ct, bool tolerateReadFailure = false)
     {
         if (tunaWalletLinkStore is null)
         {
@@ -843,28 +888,43 @@ public sealed class DiagnosticsPageViewModel : ViewModelBase, IDisposable
         {
             return await tunaWalletLinkStore.LoadAsync(ct).ConfigureAwait(false);
         }
-        catch
+        catch when (tolerateReadFailure)
         {
             return TunaWalletLinkState.Unlinked;
         }
     }
 
-    private async Task SaveTunaWalletStateAsync(TunaWalletLinkState state, CancellationToken ct, bool replacingLink = false)
+    private async Task<bool> SaveTunaWalletStateAsync(TunaWalletLinkState state, CancellationToken ct, TunaWalletLinkState? expectedValidation)
     {
         if (tunaRuntimePilotService is not null)
         {
-            await (replacingLink
-                ? tunaRuntimePilotService.ReplaceWalletLinkAsync(state, ct)
-                : tunaRuntimePilotService.SaveWalletLinkAsync(state, ct));
+            if (expectedValidation is null)
+            {
+                if (!await tunaRuntimePilotService.TryReplaceWalletLinkAsync(state, ct)) return false;
+            }
+            else if (!await tunaRuntimePilotService.TrySaveWalletValidationAsync(expectedValidation, state, ct))
+            {
+                return false;
+            }
         }
-        else if (tunaWalletLinkStore is not null)
+        else if (tunaWalletLinkStore is not null && !await tunaWalletLinkStore.SaveAsync(state, ct, expectedValidation))
         {
-            await tunaWalletLinkStore.SaveAsync(state, ct);
+            return false;
         }
 
-        tunaWalletState = state;
+        if (expectedValidation is null) tunaWalletState = state;
+        else if (!ReferenceEquals(Interlocked.CompareExchange(ref tunaWalletState, state, expectedValidation), expectedValidation)) return false;
         RefreshTunaWalletProperties();
         RefreshTunaRuntimeProperties();
+        return true;
+    }
+
+    private void PublishWalletIfCurrent(TunaWalletLinkState expected, TunaWalletLinkState latest, string? message)
+    {
+        if (!ReferenceEquals(Interlocked.CompareExchange(ref tunaWalletState, latest, expected), expected)) return;
+        RefreshTunaWalletProperties();
+        RefreshTunaRuntimeProperties();
+        if (message is not null) copyFeedback.Show(message);
     }
 
     private void SetTunaWalletValidating(bool value)
@@ -1014,9 +1074,17 @@ public sealed class DiagnosticsPageViewModel : ViewModelBase, IDisposable
         }
     }
 
-    private void SaveTunaRuntimePreferences(TunaRuntimePreferenceState state)
+    private void SaveTunaRuntimePreferences(TunaRuntimePreferenceState state, bool disablingFromCheckbox = false)
     {
-        tunaRuntimePilotService?.SavePreferences(state);
+        try
+        {
+            tunaRuntimePilotService?.SavePreferences(state);
+        }
+        catch (Exception ex) when (disablingFromCheckbox && !IsTunaRuntimeEnabled &&
+                                   ex is IOException or UnauthorizedAccessException or System.Security.SecurityException)
+        {
+            copyFeedback.Show("Tuna is off for this session, but the setting couldn't be saved.");
+        }
         RefreshTunaRuntimeProperties();
     }
 
@@ -1062,14 +1130,14 @@ public sealed class DiagnosticsPageViewModel : ViewModelBase, IDisposable
 
     private void RequestValidateTunaWallet()
     {
-        ValidateTunaWalletPasswordRequested?.Invoke(this, EventArgs.Empty);
+        ValidateTunaWalletPasswordRequested?.Invoke(this, tunaWalletState);
     }
 
     private bool CanValidateTunaWallet() => tunaWalletState.IsLinked && !isTunaWalletValidating;
 
     private void RequestUnlockTunaRuntime()
     {
-        UnlockTunaRuntimePasswordRequested?.Invoke(this, EventArgs.Empty);
+        UnlockTunaRuntimePasswordRequested?.Invoke(this, tunaWalletState);
     }
 
     private bool CanUnlockTunaRuntime()
@@ -1101,21 +1169,15 @@ public sealed class DiagnosticsPageViewModel : ViewModelBase, IDisposable
 
     internal async Task UnlinkTunaWalletAsync(CancellationToken ct = default)
     {
+        var selection = tunaWalletState;
         try
         {
-            if (tunaRuntimePilotService is not null)
-            {
-                await tunaRuntimePilotService.UnlinkWalletAsync(ct);
-            }
-            else if (tunaWalletLinkStore is not null)
-            {
-                await tunaWalletLinkStore.ClearAsync(ct);
-            }
-
-            tunaWalletState = TunaWalletLinkState.Unlinked;
-            RefreshTunaWalletProperties();
-            RefreshTunaRuntimeProperties();
-            copyFeedback.Show("Wallet unlinked");
+            var cleared = tunaRuntimePilotService is not null
+                ? await tunaRuntimePilotService.TryUnlinkWalletAsync(selection, ct)
+                : tunaWalletLinkStore is not null && await tunaWalletLinkStore.TryClearAsync(selection, ct);
+            var latest = cleared ? TunaWalletLinkState.Unlinked : await LoadTunaWalletStateAsync(ct, tolerateReadFailure: true);
+            ct.ThrowIfCancellationRequested();
+            PublishWalletIfCurrent(selection, latest, cleared ? "Wallet unlinked" : "Wallet changed. Current wallet was not unlinked.");
         }
         catch (Exception ex)
         {
@@ -1319,6 +1381,7 @@ public sealed class DiagnosticsPageViewModel : ViewModelBase, IDisposable
             $"Process architecture: {ProcessArchitecture}",
             $"OS architecture: {OsArchitecture}",
             $"Bridge RID: {BridgeResolutionRid}",
+            $"session_snapshot_as_of_utc: {SessionSnapshotAsOfUtc}",
             $"current_state: {CurrentTransportState}",
             $"session_ui_state: {SessionUiState}",
             $"attempt: {AttemptNumber}",

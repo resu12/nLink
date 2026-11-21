@@ -320,6 +320,33 @@ public void ScreenShareEvidenceLocator_ReadLatest_DoesNotModifyArtifactFiles()
 }
 
 [Fact]
+public void RefreshSessionSnapshot_UpdatesDisplayedAndCopiedStateAtTheSameTime()
+{
+    var now = DateTimeOffset.Parse("2026-11-20T10:00:00Z");
+    using var runtime = new SessionRuntime(() => new ScriptedSignalingTransport());
+    using var vm = new DiagnosticsPageViewModel(static () => { }, CreateDevLocalTestConfig(),
+        sessionRuntime: runtime, nowProvider: () => now);
+    var initialState = vm.ConnectionStateSummary;
+    var changed = new List<string?>();
+    vm.PropertyChanged += (_, e) => changed.Add(e.PropertyName);
+    runtime.TryTransitionTransportStateForTests(TransportState.TransportInitializing, "test");
+    runtime.TryTransitionTransportStateForTests(TransportState.Connecting, "test");
+    now = now.AddMinutes(2);
+    Assert.Equal(initialState, vm.ConnectionStateSummary);
+    Assert.Equal("2026-11-20 10:00:00Z", vm.SessionSnapshotAsOfUtc);
+
+    vm.RefreshSessionSnapshotCommand.Execute(null);
+
+    Assert.Contains("transport=Connecting", vm.ConnectionStateSummary, StringComparison.Ordinal);
+    Assert.Equal("2026-11-20 10:02:00Z", vm.SessionSnapshotAsOfUtc);
+    Assert.Contains(nameof(vm.ConnectionStateSummary), changed);
+    Assert.Contains(nameof(vm.SessionSnapshotAsOfUtc), changed);
+    var copy = vm.BuildDiagnosticsCopyTextForTests();
+    Assert.Contains("current_state: Connecting", copy, StringComparison.Ordinal);
+    Assert.Contains("session_snapshot_as_of_utc: 2026-11-20 10:02:00Z", copy, StringComparison.Ordinal);
+}
+
+[Fact]
 public void DiagnosticsCopy_IncludesScreenshareEvidenceSnapshot_AndRedactsArtifactPath()
 {
     var tempRoot = Path.Combine(Path.GetTempPath(), "nlink-evidence-diagnostics-" + Guid.NewGuid().ToString("N"));
@@ -343,7 +370,7 @@ public void DiagnosticsCopy_IncludesScreenshareEvidenceSnapshot_AndRedactsArtifa
 
         var copied = vm.BuildDiagnosticsCopyTextForTests();
 
-        Assert.Contains("Screenshare evidence", copied, StringComparison.Ordinal);
+        Assert.Contains("Screenshare evidence (previous test run; not current session health)", copied, StringComparison.Ordinal);
         Assert.Contains("screenshare_evidence_status: verdict_available", copied, StringComparison.Ordinal);
         Assert.Contains("screenshare_operator_verdict: fail_live_transport_evidence", copied, StringComparison.Ordinal);
         Assert.Contains("screenshare_deepest_classification: steady_external_delivery_latency", copied, StringComparison.Ordinal);
@@ -505,7 +532,7 @@ public void TunaStatusPresentationMapper_ActiveTransportWins()
         runtimeStatus: "locked",
         sessionUnlockOn: false);
 
-    Assert.Equal("Tuna acceleration is active.", presentation.Text);
+    Assert.Equal("Tuna is ready.", presentation.Text);
     Assert.False(presentation.IsConnecting);
 }
 
@@ -523,9 +550,9 @@ public void TunaStatusPresentationMapper_ActiveTransportPreservesLocalPayerSigna
         runtimeStatus: "peer_connected",
         sessionUnlockOn: true);
 
-    Assert.Equal("Tuna is active. This computer is paying as the Tuna listener.", payer.Text);
+    Assert.Equal("Tuna is ready. This computer is paying as the Tuna listener.", payer.Text);
     Assert.True(payer.IsLocalPayer);
-    Assert.Equal("Tuna is active and the other computer is paying.", dialer.Text);
+    Assert.Equal("Tuna is ready. The other computer is paying.", dialer.Text);
     Assert.False(dialer.IsLocalPayer);
 }
 
@@ -536,17 +563,17 @@ public void TunaStatusPresentationMapper_ActiveFileFallbackShowsRegularNknPath()
         transportActive: true,
         transportReason: "paid_listener_active_file_regular_nkn_fallback",
         runtimeStatus: "listener_ready",
-        sessionUnlockOn: true);
+        sessionUnlockOn: true, fileUsesRegularNkn: true);
     var dialer = TunaStatusPresentationMapper.FromState(
         transportActive: true,
         transportReason: "free_dialer_active_file_regular_nkn_fallback",
         runtimeStatus: "peer_connected",
-        sessionUnlockOn: true);
+        sessionUnlockOn: true, fileUsesRegularNkn: true);
 
-    Assert.Equal("Tuna is active for the session, but file transfer is using regular NKN. This computer is paying as the Tuna listener.", payer.Text);
+    Assert.Equal("Tuna is ready. This file uses regular NKN. This computer is paying as the Tuna listener.", payer.Text);
     Assert.True(payer.IsLocalPayer);
     Assert.False(payer.IsConnecting);
-    Assert.Equal("Tuna is active for the session, but file transfer is using regular NKN.", dialer.Text);
+    Assert.Equal("Tuna is ready. This file uses regular NKN. The other computer is paying.", dialer.Text);
     Assert.False(dialer.IsLocalPayer);
     Assert.False(dialer.IsConnecting);
 }
@@ -710,7 +737,7 @@ public void TunaStatusPresentationMapper_ActiveStateStillWinsOverProvisionalPref
     foreach (var reason in new[] { "preflight_listener_unavailable", "session_security_state_not_eligible" })
     {
         var presentation = TunaStatusPresentationMapper.FromState(true, reason, "listener_ready", true);
-        Assert.Equal("Tuna acceleration is active.", presentation.Text);
+        Assert.Equal("Tuna is ready.", presentation.Text);
         Assert.False(presentation.IsConnecting);
     }
 }
@@ -718,11 +745,13 @@ public void TunaStatusPresentationMapper_ActiveStateStillWinsOverProvisionalPref
 [Theory]
 [InlineData("regular_nkn_v4_fast", 4, false, false)]
 [InlineData("post_tuna_fallback_v6", 6, false, false)]
-[InlineData("file_tuna_v4", 4, false, true)]
+[InlineData("file_tuna_v4", 4, false, false)]
 [InlineData("file_tuna_v4", 6, false, false)]
 [InlineData("file_tuna_v6", 6, false, false)]
 [InlineData("regular_nkn_v4_fast", 4, true, true)]
 [InlineData("post_tuna_fallback_v6", 6, true, true)]
+[InlineData("regular_nkn_v4_fast", 6, true, true)]
+[InlineData("post_tuna_fallback_v6", 4, true, true)]
 [InlineData("file_tuna_v4", 4, true, true)]
 public void TunaHeaderStateProjector_PreservesSessionActivityAndValidatedFileRoute(
     string route,
@@ -740,11 +769,16 @@ public void TunaHeaderStateProjector_PreservesSessionActivityAndValidatedFileRou
     var reason = transportActive ? "paid_listener_active" : "listener_starting";
     var projection = TunaHeaderStateProjector.FromSnapshot(
         new SessionFileTransferSnapshot(transfer, Inbound: null),
+        "NKN",
         transportActive,
         transportReason: reason);
 
     Assert.Equal(expectedActive, projection.IsActive);
+    var regular = (route, protocolVersion) is ("regular_nkn_v4_fast", 4) or ("post_tuna_fallback_v6", 6);
     Assert.Equal(reason, projection.StatusReason);
+    Assert.Equal(regular, projection.FileUsesRegularNkn);
+    var text = TunaStatusPresentationMapper.FromState(projection.IsActive, projection.StatusReason, "listener_ready", true, projection.FileUsesRegularNkn).Text;
+    Assert.Equal(regular, text.Contains("This file uses regular NKN.", StringComparison.Ordinal));
     Assert.Equal(route, transfer.RouteToken);
     Assert.Equal(protocolVersion, transfer.ProtocolVersion);
 }
@@ -761,10 +795,12 @@ public void TunaHeaderStateProjector_TerminalOrMissingTransferUsesTransportState
 
     var terminalProjection = TunaHeaderStateProjector.FromSnapshot(
         new SessionFileTransferSnapshot(Outbound: null, Inbound: terminal),
+        "NKN",
         transportActive: false,
         transportReason: "dialer_starting");
     var emptyProjection = TunaHeaderStateProjector.FromSnapshot(
         new SessionFileTransferSnapshot(Outbound: null, Inbound: null),
+        "NKN",
         transportActive: true,
         transportReason: "paid_listener_active");
 
@@ -859,7 +895,17 @@ public void DiagnosticsPageView_UsesOptionsTabs()
     Assert.Contains("Save Hang Report", xaml, StringComparison.Ordinal);
     Assert.Contains("Open logs folder", xaml, StringComparison.Ordinal);
     Assert.Contains("Screen share health", xaml, StringComparison.Ordinal);
-    Assert.Contains("Tuna (experimental)", xaml, StringComparison.Ordinal);
+    var diagnostics = System.Xml.Linq.XDocument.Parse(xaml).Descendants().Single(
+        el => el.Name.LocalName == "TabItem" && (string?)el.Attribute("Header") == "Diagnostics");
+    var history = diagnostics.Descendants().Single(
+        el => el.Name.LocalName == "Expander" && (string?)el.Attribute("Header") == "Previous screen-share test run");
+    var retained = diagnostics.Descendants().Where(el =>
+        ((string?)el.Attribute("Text"))?.StartsWith("{Binding ScreenShareEvidence", StringComparison.Ordinal) == true).ToArray();
+    Assert.Equal(6, retained.Length);
+    Assert.All(retained, el => Assert.Contains(history, el.Ancestors()));
+    Assert.Contains(diagnostics.Descendants(), el => (string?)el.Attribute("Command") == "{Binding RefreshSessionSnapshotCommand}");
+    Assert.Contains("Text=\"Tuna\"", xaml, StringComparison.Ordinal);
+    Assert.Contains("Content=\"Enable Tuna acceleration\"", xaml, StringComparison.Ordinal);
     Assert.Contains("Wallet and runtime", xaml, StringComparison.Ordinal);
     Assert.Contains("Tuna can speed up screen sharing and file transfers", xaml, StringComparison.Ordinal);
     Assert.Contains("if Tuna is unavailable, nLink keeps using regular NKN automatically", xaml, StringComparison.Ordinal);

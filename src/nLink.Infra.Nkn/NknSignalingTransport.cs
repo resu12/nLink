@@ -53,6 +53,7 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
         FileTransferTransportHandoffKind HandoffKind,
         FileTransferTransportKind TargetTransport,
         DateTimeOffset RecordedUtc,
+        long? OrdinaryGeneration,
         RuntimeUnlockRouteCommitSnapshot? RuntimeUnlockPreCommitProbeSnapshot = null);
 
     private sealed record FileTransferFallbackV6BootstrapTrigger(
@@ -202,6 +203,10 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
         windowSize: FileTransferInboundReplayWindowSize,
         maxForwardAdvance: FileTransferInboundReplayMaxForwardAdvance);
     private readonly Dictionary<string, FileTransferTransportState> fileTransferStates = new(StringComparer.Ordinal);
+    private readonly HashSet<string> issuedFileOfferIds = new(StringComparer.Ordinal);
+    private readonly HashSet<(string TransferId, Guid Instance)> receivedFileOfferInstances = [];
+    private sealed class FileOfferSubmission { public readonly Guid WireId = Guid.NewGuid(); public bool Installed; public int Attempt; }
+    private readonly System.Runtime.CompilerServices.ConditionalWeakTable<FileTransferOfferV2, FileOfferSubmission> fileOfferSubmissions = new();
     private readonly Dictionary<string, ExpectedControlReplayDuplicateSuppressionState> expectedControlReplayDuplicateSuppressions = new(StringComparer.Ordinal);
     private readonly Dictionary<string, FileTransferTerminalTombstone> fileTransferTerminalTombstones = new(StringComparer.Ordinal);
     private readonly Dictionary<string, DateTimeOffset> fileTransferCancelEchoLastSent = new(StringComparer.Ordinal);
@@ -568,6 +573,8 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
     public bool IsFileTunaActiveForRouteSelection =>
         HasActiveFileTunaV4FileTransferRouteHint(currentSessionSecurityState.SessionId?.Value);
     public bool IsPostTunaFileFallbackActiveForRouteSelection => IsFileTransferUsingRegularNknFallbackForCurrentSession();
+    bool IFileTransferRouteStatus.IsPostTunaFileFallbackActiveForNewOffer =>
+        HasRegularNknFileFallback(currentSessionSecurityState.SessionId?.Value, forNewOffer: true);
     public bool IsDiagnosticRegularNknV6RouteEnabled => IsDiagnosticRegularNknV6RouteEnabledCore();
     public string TransportAccelerationStatusReason
     {
@@ -580,18 +587,8 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
         }
     }
 
-    private TransportAccelerationPendingFileTransfer? pendingAccelerationFileTransfer;
-
-    public TransportAccelerationPendingFileTransfer? PendingAccelerationFileTransfer
-    {
-        get
-        {
-            lock (accelerationGate)
-            {
-                return pendingAccelerationFileTransfer;
-            }
-        }
-    }
+    public TransportAccelerationStateChangedEventArgs PublishedAccelerationStatus => publishedAccelerationStatus;
+    public TransportAccelerationPendingFileTransfer? PendingAccelerationFileTransfer => publishedAccelerationStatus.PendingFileTransfer;
 
     private void RaiseSessionLivenessProof(
         string? sessionId,
@@ -2602,7 +2599,8 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
                 if (TryCreateLifecyclePreSendValidationFailure(options, "control_queue") is { } delayedFailure)
                     return delayedFailure;
             }
-            var queued = await QueueControlEnvelopeAsync(options.ControlDestination, envelope, ControlOutboundLane.High, copyCt).ConfigureAwait(false);
+            var queued = await controlOutboundQueue.QueueEnvelopeAsync(options.ControlDestination, envelope, ControlOutboundLane.High, copyCt,
+                fileOfferWrite: options.FileOfferWrite).ConfigureAwait(false);
             succeeded = queued;
             return new LifecycleCopySendResult("control_queue", queued, null);
         }
@@ -2629,10 +2627,10 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
 
         try
         {
-            await SendEnvelopeWithAckRetryAsync(
+            var sent = await SendEnvelopeWithAckRetryAsync(
                 options.ControlDestination, envelope, ct,
                 registeredAck: registeredAck).ConfigureAwait(false);
-            return new LifecycleCopySendResult("control_ack", true, null);
+            return new LifecycleCopySendResult("control_ack", sent, null);
         }
         catch (Exception ex)
         {
@@ -2700,17 +2698,11 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
                     return delayedFailure;
             }
 
-            if (useBulkLane)
-            {
-                await SendBulkEnvelopeAsync(destination, envelope, copyCts.Token).ConfigureAwait(false);
-            }
-            else
-            {
-                await SendEnvelopeAsync(destination, envelope, copyCts.Token).ConfigureAwait(false);
-            }
-
-            succeeded = true;
-            return new LifecycleCopySendResult(lane, true, null);
+            var bytes = EnvelopeCodec.Serialize(envelope);
+            succeeded = useBulkLane
+                ? await SendBulkEnvelopeAsync(destination, envelope, bytes, copyCts.Token, admitOfferResponse: options.FileOfferWrite).ConfigureAwait(false) != BulkSendResult.Skipped
+                : await SendEnvelopeAsync(destination, envelope, bytes, copyCts.Token, admitOfferResponse: options.FileOfferWrite).ConfigureAwait(false);
+            return new LifecycleCopySendResult(lane, succeeded, null);
         }
         catch (Exception ex)
         {
@@ -2820,7 +2812,10 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
         Func<bool>? PreSendValidator = null,
         bool DrainChildrenOnCompletion = false,
         IOfflinePublicationDelay? OfflinePublicationDelay = null,
-        Action<Task>? PhysicalCompletionObserver = null);
+        Action<Task>? PhysicalCompletionObserver = null)
+    {
+        public OwnedHandshakeWrite? FileOfferWrite { get; init; }
+    }
 
     private sealed class LifecyclePreSendValidationException : Exception
     {

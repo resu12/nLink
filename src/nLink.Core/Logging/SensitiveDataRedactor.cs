@@ -53,7 +53,7 @@ public static partial class SensitiveDataRedactor
         redacted = ProtectFallbackBootstrapProofKinds(
             redacted,
             protectedFallbackBootstrapProofKinds);
-        var protectedEventValues = new List<string>();
+        var protectedEventValues = new Dictionary<string, string>(StringComparer.Ordinal);
         redacted = ProtectStructuredEventValues(redacted, protectedEventValues);
         redacted = SecretKeyValueRegex().Replace(redacted, "[redacted]");
         redacted = ChatPlaintextKeyValueRegex().Replace(redacted, "[redacted]");
@@ -111,7 +111,7 @@ public static partial class SensitiveDataRedactor
     [GeneratedRegex(@"(?<![A-Za-z0-9])(?:[A-Fa-f0-9]{32,}|(?=[A-Za-z0-9+/_-]{40,}={0,2}(?![A-Za-z0-9]))(?=[A-Za-z0-9+/_-]*[0-9+/-])[A-Za-z0-9+/_-]{40,}={0,2})(?![A-Za-z0-9])", RegexOptions.CultureInvariant)]
     private static partial Regex LongSecretTokenRegex();
 
-    [GeneratedRegex(@"\bevent=(?<value>[A-Za-z0-9._/-]+)", RegexOptions.CultureInvariant)]
+    [GeneratedRegex(@"\bevent=[A-Za-z0-9._/-]+", RegexOptions.CultureInvariant)]
     private static partial Regex EventKeyValueRegex();
 
     [GeneratedRegex(@"\b(?<key>authority_id|predecessor_authority_id|successor_authority_id|requested_predecessor_authority_id|release_authority_id|retained_predecessor_authority_id|current_authority_id|current_successor_authority_id|receive_recovery_operation_authority_id|recovery_liveness_lease_authority_id|retry_authority_id)=(?<value>fta[0-9]+-[A-Za-z0-9._/:-]+)", RegexOptions.CultureInvariant)]
@@ -234,30 +234,25 @@ public static partial class SensitiveDataRedactor
     [GeneratedRegex(@"(?<prefix>(?:^|[\s|,;]))(?<key>[A-Za-z_][A-Za-z0-9._/-]{1,127})(?<separator>\s*[:=])", RegexOptions.CultureInvariant)]
     private static partial Regex StructuredKeyRegex();
 
-    private static string ProtectStructuredEventValues(string text, List<string> protectedEventValues)
+    private static string ProtectStructuredEventValues(string text, Dictionary<string, string> protectedEventValues)
     {
         return EventKeyValueRegex().Replace(text, match =>
         {
-            var placeholder = $"EVP{protectedEventValues.Count}";
-            protectedEventValues.Add(match.Groups["value"].Value);
-            return $"event={placeholder}";
+            var placeholder = $"event=EVP{protectedEventValues.Count}";
+            protectedEventValues.Add(placeholder, match.Value);
+            return placeholder;
         });
     }
 
-    private static string RestoreStructuredEventValues(string text, List<string> protectedEventValues)
+    private static string RestoreStructuredEventValues(string text, Dictionary<string, string> protectedEventValues)
     {
         if (protectedEventValues.Count == 0)
         {
             return text;
         }
 
-        var restored = text;
-        for (var i = 0; i < protectedEventValues.Count; i++)
-        {
-            restored = restored.Replace($"event=EVP{i}", $"event={protectedEventValues[i]}", StringComparison.Ordinal);
-        }
-
-        return restored;
+        // Match whole fields once: EVP1 is not EVP10, and a restored label may itself be EVP1.
+        return EventKeyValueRegex().Replace(text, match => protectedEventValues.GetValueOrDefault(match.Value, match.Value));
     }
 
     private static string ProtectStructuredAuthorityIdValues(

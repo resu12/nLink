@@ -362,8 +362,104 @@ public sealed class FileTransferSecurityGuardTests
         }
     }
 
+    [WindowsTheory]
+    [InlineData(false, 244, 288)]
+    [InlineData(true, 248, 292)]
+    public async Task OpenReceiveWriteStream_DeepDirectory_OnlyPartialPathExceeds260(
+        bool destinationExists, int expectedFinalLength, int expectedPartLength)
+    {
+        const string fileName = "report.txt";
+        var payload = "received bytes"u8.ToArray();
+        var sentinel = "original bytes"u8.ToArray();
+        var now = DateTimeOffset.FromUnixTimeMilliseconds(1_760_200_000_000);
+        var guard = new SessionFileTransferGuard(() => now);
+        var state = CreateApprovedSecurityState(now, CapabilityGrant.FileTransfer);
+        var grant = CreateGrant(state, now, CapabilityGrant.FileTransfer);
+        var tempRoot = CreateTempRoot();
+        try
+        {
+            // Size the directory, not the filename, so the requested path is exactly 244 characters.
+            var padding = 244 - Path.Combine(tempRoot, "x", fileName).Length + 1;
+            Assert.True(padding is > 0 and <= 255, "Setup: TEMP cannot accommodate the deep receive directory.");
+            var directory = Directory.CreateDirectory(Path.Combine(tempRoot, new string('d', padding))).FullName;
+            var requested = Path.Combine(directory, fileName);
+            Assert.Equal(244, requested.Length);
+            if (destinationExists)
+                await File.WriteAllBytesAsync(requested, sentinel);
+
+            var result = guard.OpenReceiveWriteStream(true, state, grant,
+                new FileTransferDescriptor(state.SessionId!.Value, state.HelperAddress!.Value, fileName, payload.Length),
+                new FileTransferStoragePolicy(directory, AllowOverwrite: false));
+            Assert.True(result.IsAllowed, result.Access.Message);
+            var destination = Path.Combine(directory, destinationExists ? "report (1).txt" : fileName);
+            await using (var handle = Assert.IsType<FileTransferWriteHandle>(result.Handle))
+            {
+                var plan = handle.Plan;
+                Assert.Equal(destination, plan.FinalPath);
+                Assert.Equal(expectedFinalLength, plan.FinalPath.Length);
+                Assert.Equal(expectedPartLength, plan.TempPath.Length);
+                Assert.Equal(plan.TempPath, Assert.Single(Directory.GetFiles(directory, "*.part")));
+                await handle.Stream.WriteAsync(payload);
+                await handle.FinalizeAsync(CancellationToken.None);
+            }
+
+            Assert.Equal(payload, await File.ReadAllBytesAsync(destination));
+            if (destinationExists)
+                Assert.Equal(sentinel, await File.ReadAllBytesAsync(requested));
+            Assert.Empty(Directory.GetFiles(directory, "*.part"));
+        }
+        finally
+        {
+            CleanupTempRoot(tempRoot);
+        }
+    }
+
+    private sealed class WindowsTheoryAttribute : TheoryAttribute
+    {
+        public WindowsTheoryAttribute()
+        {
+            if (!OperatingSystem.IsWindows())
+                Skip = "Exercises the native Windows receive-file path.";
+        }
+    }
+
+    [Theory]
+    [InlineData("../outside.txt", "safe.txt")]
+    [InlineData("safe.txt", "../outside.txt")]
+    public void SaveAs_RequiresSafeOfferedAndSelectedNames(string offered, string selected)
+    {
+        var now = DateTimeOffset.UtcNow;
+        var state = CreateApprovedSecurityState(now, CapabilityGrant.FileTransfer);
+        var root = CreateTempRoot();
+        try
+        {
+            var result = new SessionFileTransferGuard(() => now).OpenReceiveWriteStream(true, state,
+                CreateGrant(state, now, CapabilityGrant.FileTransfer),
+                new FileTransferDescriptor(state.SessionId!.Value, state.HelperAddress!.Value, offered, 5),
+                new FileTransferStoragePolicy(root) { ReceiverSelectedFileName = selected });
+            Assert.False(result.IsAllowed);
+            Assert.Equal(FileTransferValidationFailure.PathTraversalDetected, result.Access.Failure);
+            Assert.Empty(Directory.EnumerateFileSystemEntries(root));
+        }
+        finally { CleanupTempRoot(root); }
+    }
+
     [Fact]
-    public async Task FinalizeAsync_PreservesTempArtifact_WhenFinalPathAppearsBeforeMove()
+    public void SaveAs_CanPlanFileDirectlyUnderVolumeRoot()
+    {
+        var now = DateTimeOffset.UtcNow;
+        var state = CreateApprovedSecurityState(now, CapabilityGrant.FileTransfer);
+        var result = new SessionFileTransferGuard(() => now).ValidateReceiveMetadata(true, state,
+            CreateGrant(state, now, CapabilityGrant.FileTransfer),
+            new FileTransferDescriptor(state.SessionId!.Value, state.HelperAddress!.Value, "source.txt", 5),
+            new FileTransferStoragePolicy(Path.GetPathRoot(Path.GetTempPath())!) { ReceiverSelectedFileName = $"nlink-{Guid.NewGuid():N}.txt" });
+        Assert.True(result.IsAllowed, result.Message); // validate only; don't write at the volume root
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("receiver-choice.txt")]
+    public async Task FinalizeAsync_PreservesTempArtifact_WhenFinalPathAppearsBeforeMove(string? selected)
     {
         var nowUtc = DateTimeOffset.FromUnixTimeMilliseconds(1_760_200_000_000);
         var guard = new SessionFileTransferGuard(() => nowUtc);
@@ -382,7 +478,7 @@ public sealed class FileTransferSecurityGuardTests
                     state.HelperAddress!.Value,
                     "late-collision.txt",
                     5),
-                storagePolicy: new FileTransferStoragePolicy(tempRoot));
+                storagePolicy: new FileTransferStoragePolicy(tempRoot) { ReceiverSelectedFileName = selected });
 
             Assert.True(result.IsAllowed);
             Assert.NotNull(result.Plan);
@@ -394,7 +490,8 @@ public sealed class FileTransferSecurityGuardTests
 
             var ex = await Assert.ThrowsAsync<IOException>(() => handle.FinalizeAsync(CancellationToken.None));
             Assert.Contains("already exists", ex.Message, StringComparison.OrdinalIgnoreCase);
-            Assert.True(File.Exists(result.Plan.FinalPath));
+            Assert.Equal(Path.Combine(tempRoot, selected ?? "late-collision.txt"), result.Plan.FinalPath);
+            Assert.Equal("existing", File.ReadAllText(result.Plan.FinalPath));
             Assert.True(File.Exists(result.Plan.TempPath));
         }
         finally

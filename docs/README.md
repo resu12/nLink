@@ -1,6 +1,6 @@
 # nLink Docs
 
-Start here for current repo guidance. [0.7.0 hotfix revision 1](https://github.com/resu12/nLink/releases/tag/v0.7.0-hotfix.1) is published from `d235dcf1` with CI #103's exact artifacts. The original 0.7.0 release remains unchanged. [Hotfix revision 2](releases/0.7.0-hotfix.2.md) is an unreleased candidate; source-branch features and local builds are not published-release claims.
+For Windows downloads, use [0.7.0 hotfix revision 2](https://github.com/resu12/nLink/releases/tag/v0.7.0-hotfix.2). This branch documents the **unreleased 0.7.1 candidate**. See [what changed](../CHANGELOG.md#071---unreleased) and [which local installer was checked](ReleaseRunbook.md#071-local-review-build).
 
 ## Current Operator Guides
 
@@ -10,7 +10,7 @@ Start here for current repo guidance. [0.7.0 hotfix revision 1](https://github.c
 - [`docs/screenshare-operability.md`](screenshare-operability.md): screenshare-specific operator model and `ScreenShare-Ops.ps1` entry point.
 - [`docs/file-transfer-implementation.md`](file-transfer-implementation.md): current route-aware single-file transfer protocol, V4 regular/Tuna routes, controlled V6 fallback, lifecycle safety, and diagnostics design.
 - [`docs/file-transfer-operability.md`](file-transfer-operability.md): start here for file transfer/Tuna usage, support capture, operator triage, and the distinction between correctness and performance.
-- [`docs/nkn-tuna-implementation.md`](nkn-tuna-implementation.md): experimental NKN Tuna wallet, sidecar, session binding, runtime unlock, caps, and fallback design.
+- [`docs/nkn-tuna-implementation.md`](nkn-tuna-implementation.md): NKN Tuna wallet, sidecar, session binding, runtime unlock, caps, and fallback design.
 - [`docs/file-transfer-soak.md`](file-transfer-soak.md): targeted local/live commands and the strict seven-scenario Phase 5 release gate.
 - [`docs/file-transfer-stabilization-protocol.md`](file-transfer-stabilization-protocol.md): coordinator-authority invariants and bounded remediation rules.
 - [`docs/screenshare-soak.md`](screenshare-soak.md): technical reference for local screenshare soak output and retained Track B evidence.
@@ -19,7 +19,7 @@ Start here for current repo guidance. [0.7.0 hotfix revision 1](https://github.c
 ## Release And Validation
 
 - [Published hotfix-1 notes](releases/0.7.0-hotfix.1.md) and [original 0.7.0 notes](releases/0.7.0.md).
-- [Hotfix-2 candidate notes](releases/0.7.0-hotfix.2.md) and [release-body draft](releases/0.7.0-hotfix.2-github.md).
+- [Published hotfix-2 record](ReleaseRunbook.md#published-070-hotfix-revision-2-2026-11-17) and [historical hotfix-2 review notes](releases/0.7.0-hotfix.2.md).
 - [README screenshot provenance](images/README.md): captured version, privacy masks and pending replacements.
 - [`docs/ReleaseRunbook.md`](ReleaseRunbook.md): canonical release process, published package provenance, and historical candidate evidence.
 - [`docs/build-test-lock-avoidance.md`](build-test-lock-avoidance.md): Windows-safe build/test command shapes for avoiding generated-output locks during repeated manual runs.

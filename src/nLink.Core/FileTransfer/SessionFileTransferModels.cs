@@ -234,6 +234,9 @@ public sealed record FileTransferTransferSnapshot(
     string? RouteToken = null,
     int? ProtocolVersion = null)
 {
+    // Receiver-local identity; never serialized into an offer or chosen by a peer.
+    internal Guid InboundOfferToken { get; init; }
+
     internal FileTransferReceiveRecoveryObservationSnapshot?
         ReceiveRecoveryObservation { get; init; }
 

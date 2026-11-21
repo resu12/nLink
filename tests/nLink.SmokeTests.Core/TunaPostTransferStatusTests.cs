@@ -29,7 +29,9 @@ public sealed class TunaPostTransferStatusTests
         Assert.True(Present(starting).IsConnecting);
 
         transfer = transfer with { RouteToken = "file_tuna_v4", ProtocolVersion = 4 };
-        Assert.True(Project(transfer, Scope).IsActive);
+        var pending = Project(transfer, Scope);
+        Assert.False(pending.IsActive);
+        Assert.True(Present(pending).IsConnecting);
 
         var finished = Project(transfer with { State = terminal }, Scope);
         Assert.False(finished.IsActive);
@@ -51,7 +53,7 @@ public sealed class TunaPostTransferStatusTests
     {
         var projection = Project(Transfer() with { State = FileTransferTransferState.Completed }, Scope);
         var presentation = TunaStatusPresentationMapper.FromState(
-            projection.IsActive, projection.StatusReason, runtimeStatus, unlockOn);
+            projection.IsActive, projection.StatusReason, runtimeStatus, unlockOn, projection.FileUsesRegularNkn);
         Assert.False(projection.IsActive);
         Assert.True(presentation.IsIdle);
         Assert.False(presentation.IsConnecting);
@@ -83,10 +85,11 @@ public sealed class TunaPostTransferStatusTests
         var snapshot = new SessionFileTransferSnapshot(
             Transfer() with { State = FileTransferTransferState.Completed },
             Transfer(FileTransferDirection.Inbound) with { TransferId = "new-transfer" });
-        var projection = TunaHeaderStateProjector.FromSnapshot(snapshot, false, Pending, Scope);
+        var projection = TunaHeaderStateProjector.FromSnapshot(snapshot, "NKN", false, Pending, Scope);
         Assert.False(projection.IsActive);
         Assert.Equal("file_transfer_tuna_idle", projection.StatusReason);
         Assert.False(Present(projection).IsConnecting);
+        Assert.True(projection.FileUsesRegularNkn);
     }
 
     [Theory]
@@ -124,9 +127,10 @@ public sealed class TunaPostTransferStatusTests
         Assert.Equal("file_transfer_tuna_idle", ProjectRuntime(runtime, latest).StatusReason);
         Assert.False(Present(ProjectRuntime(runtime, latest)).IsConnecting);
 
-        // Settlement never overrides a new coordinator-projected v4 Tuna route.
+        // The replacement's file route does not confirm a new session connection.
         ObserveSnapshot(runtime, Pair(replacement with { RouteToken = "file_tuna_v4" }));
-        Assert.True(ProjectRuntime(runtime, latest).IsActive);
+        Assert.False(ProjectRuntime(runtime, latest).IsActive);
+        Assert.Equal("file_transfer_tuna_idle", ProjectRuntime(runtime, latest).StatusReason);
         ObserveSnapshot(runtime, Pair(replacement with { State = FileTransferTransferState.Completed }));
         other = other with { State = FileTransferTransferState.Completed };
         ObserveSnapshot(runtime, Pair(replacement with { State = FileTransferTransferState.Completed }));
@@ -201,11 +205,100 @@ public sealed class TunaPostTransferStatusTests
     public void IndependentSessionState_WinsOverOldFileCompletion(string reason, bool active, bool connecting)
     {
         var projection = TunaHeaderStateProjector.FromSnapshot(
-            new(Transfer() with { State = FileTransferTransferState.Completed }, null), active, reason, Scope);
+            new(Transfer() with { State = FileTransferTransferState.Completed }, null), "NKN", active, reason, Scope);
         Assert.Equal(active, projection.IsActive);
         Assert.Equal(reason, projection.StatusReason);
         Assert.Equal(connecting, Present(projection).IsConnecting);
         Assert.False(Present(projection).IsIdle);
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void ReadyTooltip_DoesNotAttributeAStaleOrMixedFileRoute(bool localPayer)
+    {
+        var regular = Transfer();
+        var tuna = Transfer(FileTransferDirection.Inbound) with { TransferId = "second", RouteToken = "file_tuna_v4" };
+        var payerText = localPayer ? "This computer is paying as the Tuna listener." : "The other computer is paying.";
+        var reason = localPayer ? "paid_listener_active_file_regular_nkn_fallback" : "free_dialer_active_file_regular_nkn_fallback";
+        foreach (var snapshot in new SessionFileTransferSnapshot[]
+                 { new(null, null), new(regular with { State = FileTransferTransferState.Completed }, null), new(regular, tuna) })
+        {
+            var projection = TunaHeaderStateProjector.FromSnapshot(snapshot, "NKN", true, reason);
+            Assert.False(projection.FileUsesRegularNkn);
+            var presentation = TunaStatusPresentationMapper.FromState(projection.IsActive, projection.StatusReason, "inactive", false, projection.FileUsesRegularNkn);
+            Assert.Equal("Tuna is ready. " + payerText, presentation.Text);
+            Assert.Equal(localPayer, presentation.IsLocalPayer);
+            Assert.False(presentation.IsConnecting);
+        }
+    }
+
+    [Theory]
+    [InlineData(FileTransferTransferState.PendingDecision, true)]
+    [InlineData(FileTransferTransferState.Receiving, false)]
+    public void RegularFileTooltip_OnlyConsidersStartedFiles(FileTransferTransferState otherState, bool expected)
+    {
+        var other = Transfer(FileTransferDirection.Inbound) with { State = otherState, TransferId = "other", RouteToken = "file_tuna_v4" };
+        var projection = TunaHeaderStateProjector.FromSnapshot(new(Transfer(), other), "NKN", true, "paid_listener_active");
+        Assert.Equal(expected, projection.FileUsesRegularNkn);
+    }
+
+    [Theory]
+    [InlineData(FileTransferDirection.Outbound)]
+    [InlineData(FileTransferDirection.Inbound)]
+    public void FileRouteTooltip_RegularTupleNeedsNknTransport(FileTransferDirection direction)
+    {
+        var transfer = Transfer(direction);
+        SessionFileTransferSnapshot snapshot = direction == FileTransferDirection.Outbound ? new(transfer, null) : new(null, transfer);
+        var nkn = TunaHeaderStateProjector.FromSnapshot(snapshot, "NKN", false, "transport_without_acceleration");
+        var local = TunaHeaderStateProjector.FromSnapshot(snapshot, "DevLocal", false, "transport_without_acceleration");
+        var detached = TunaHeaderStateProjector.FromSnapshot(snapshot, "(none)", false, "transport_unwired");
+        Assert.True(nkn.FileUsesRegularNkn);
+        Assert.False(local.FileUsesRegularNkn);
+        Assert.False(detached.FileUsesRegularNkn);
+        Assert.False(local.IsActive);
+        Assert.Contains("This file uses regular NKN.", Present(nkn, "locked").Text);
+        Assert.Equal("Tuna is unavailable on this local connection.", Present(local, "locked").Text);
+        Assert.Equal("No active connection.", Present(detached, "inactive").Text);
+    }
+
+    [Fact]
+    public void DetachedHeader_IgnoresLastTunaRouteAndPayer()
+    {
+        var staleFile = Transfer() with { RouteToken = "file_tuna_v4", ProtocolVersion = 4 };
+        var detached = TunaHeaderStateProjector.FromSnapshot(new(staleFile, null), "(none)", true, "paid_listener_active");
+        var tip = Present(detached, "listener_ready");
+        Assert.False(detached.IsActive);
+        Assert.False(detached.FileUsesRegularNkn);
+        Assert.Equal("No active connection.", tip.Text);
+        Assert.False(tip.IsConnecting);
+        Assert.False(tip.IsLocalPayer);
+    }
+
+    [Theory]
+    [InlineData("header_switch_off", "inactive", "Tuna was turned off for this session.")]
+    [InlineData("inactive", "locked", "Tuna wallet is locked.")]
+    public void FileRouteTooltip_StatesRouteOnce(string reason, string runtime, string expectedReason)
+    {
+        foreach (var hasFile in new[] { false, true })
+        {
+            var status = TunaStatusPresentationMapper.FromState(false, reason, runtime, false, hasFile);
+            var route = hasFile ? "This file uses regular NKN." : "Regular NKN is being used.";
+            Assert.Equal(expectedReason + " " + route, status.Text);
+            Assert.False(status.IsConnecting);
+            Assert.False(status.IsLocalPayer);
+        }
+    }
+
+    [Theory]
+    [InlineData("cap_reached", "Tuna cap reached.", false)]
+    [InlineData("provider_paths_degraded", "Tuna relay paths are degraded. Tuna is retrying.", true)]
+    [InlineData("listener_start_timeout", "Tuna listener startup timed out. Retrying if possible.", true)]
+    public void FileRouteTooltip_PreservesReasonAlongsideCurrentRoute(string reason, string expectedReason, bool connecting)
+    {
+        var status = TunaStatusPresentationMapper.FromState(false, reason, "inactive", true, fileUsesRegularNkn: true);
+        Assert.Equal(expectedReason + " This file uses regular NKN.", status.Text);
+        Assert.Equal(connecting, status.IsConnecting);
     }
 
     [Theory]
@@ -294,10 +387,10 @@ public sealed class TunaPostTransferStatusTests
     private static TunaHeaderStateProjection Project(FileTransferTransferSnapshot transfer,
         TransportAccelerationPendingFileTransfer? scope)
         => TunaHeaderStateProjector.FromSnapshot(transfer.Direction == FileTransferDirection.Outbound
-            ? new(transfer, null) : new(null, transfer), false, Pending, scope);
+            ? new(transfer, null) : new(null, transfer), "NKN", false, Pending, scope);
 
     private static TunaStatusPresentation Present(TunaHeaderStateProjection projection, string runtime = "listener_ready")
-        => TunaStatusPresentationMapper.FromState(projection.IsActive, projection.StatusReason, runtime, true);
+        => TunaStatusPresentationMapper.FromState(projection.IsActive, projection.StatusReason, runtime, true, projection.FileUsesRegularNkn);
 
     private static SessionRuntime CreateRuntime(ScriptedSignalingTransport transport)
     {
@@ -318,7 +411,7 @@ public sealed class TunaPostTransferStatusTests
     private static TunaHeaderStateProjection ProjectRuntime(SessionRuntime runtime, SessionFileTransferSnapshot snapshot)
     {
         var status = runtime.TransportAccelerationPresentation;
-        return TunaHeaderStateProjector.FromSnapshot(snapshot, status.IsActive, status.Reason, status.PendingFileTransfer);
+        return TunaHeaderStateProjector.FromSnapshot(snapshot, "NKN", status.IsActive, status.Reason, status.PendingFileTransfer);
     }
 
     private static FileTransferTransferSnapshot Transfer(FileTransferDirection direction = FileTransferDirection.Outbound)

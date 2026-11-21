@@ -5,12 +5,12 @@ This document describes the current nLink file-transfer implementation. It is an
 ## Current Status
 
 - Scope: single-file transfer only.
-- Not supported yet: folders, drag-and-drop, and resume after app restart.
-- Consent boundary: receiving a file requires explicit accept or decline.
+- In 0.7.1, a single local Explorer file dropped on chat uses the ordinary send-offer path. Folders, multi-file drops, and resume after app restart are not supported.
+- Consent boundary: the receiver must accept the individual offer before file data can be received. Declining does not authorize delivery.
 - Safety cap: file transfers are capped at `25 GiB` by the app release policy.
-- Destination: received files are saved to the Windows Downloads folder by default, with a numbered suffix when the target name already exists.
+- Destination: **Accept** saves to Windows Downloads, adding a numbered suffix for collisions. **Save as…** in 0.7.1 accepts only after a destination is chosen and the offer is still eligible; a chosen existing file is not overwritten.
 - Protocols: production uses protocol `4` for regular NKN and active file Tuna, and protocol `6` only for controlled post-Tuna fallback. Protocol `5` is obsolete and rejected.
-- Transport boundary: normal NKN remains the default. Experimental Tuna can carry only `MsgType.FileTransferDataFrame` on the bulk lane after session-bound Tuna negotiation succeeds.
+- Transport boundary: normal NKN remains the default. Tuna can carry only `MsgType.FileTransferDataFrame` on the bulk lane after session-bound Tuna negotiation succeeds.
 
 File-transfer control stays on current NKN. Offer, accept, decline, session-open, cancel, error, and complete control messages are not accelerated by Tuna.
 
@@ -125,6 +125,12 @@ Control messages use the secure nLink session control path:
 - V6 heartbeat and recovery proof messages when the selected route is V6
 
 `offer.v2`, `accept.v1`, and `session_open.v2` may carry `fileTransferRoute`. Missing route tokens remain compatible when local context can infer the route; invalid or protocol-mismatched route tokens are rejected as transport-incompatible.
+
+#### Offer retries in the 0.7.1 candidate
+
+NKN retries keep the same `offerInstanceId`. An authenticated retry must match the original offer, not just the transfer ID or filename. It can repeat a recorded **Accept** while the receiver is still waiting for session-open, or a recorded **Decline** for up to two minutes. Neither reply opens a new prompt, authorizes another offer, or changes the coordinator’s route decision.
+
+The receiver records **Decline** and frees the incoming slot before writing the reply. A matching sender **Cancel** suppresses an unsent Decline without changing the receiver’s decision; it cannot recall a write already submitted. For an older sender that omits `offerInstanceId`, nLink uses the original local offer to free the slot even if the write fails. It does not replay the decision for a duplicate without an identifier.
 
 ### Data Frames
 
@@ -290,11 +296,11 @@ publication still require their original deadlines and Coordinator authority.
 
 - Single-file transfers only.
 - No folder transfer yet.
-- No drag-and-drop yet.
+- No multi-item drops; screen-sharing displays are not drop targets.
 - No resume after app restart.
 - Default file-size cap is `25 GiB`.
 - Live throughput depends on NKN, Tuna provider health, and network delivery.
-- Tuna remains experimental and optional. Current NKN remains the default path when Tuna is inactive.
+- Tuna is optional. Current NKN remains the default path when Tuna is inactive.
 
 ## Validation
 

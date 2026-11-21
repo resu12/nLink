@@ -277,6 +277,7 @@ public abstract class SessionFileTransferServiceTestBase : CoreSmokeTestsBase
             RuntimeUnlockProbeResultTuples { get; } = [];
         public ConcurrentQueue<string> RuntimeUnlockRouteCommitResults { get; } = [];
         internal RuntimeUnlockRouteCommitSnapshot? RuntimeUnlockRouteCommitSnapshot { get; set; }
+        internal Action? AfterRuntimeUnlockProbeAcked { get; set; }
         internal FileTransferInitialTunaReadinessEvidence? InitialTunaReadinessEvidence { get; set; }
 
         internal void SeedInitialTunaReadinessEvidenceForTests(
@@ -1076,6 +1077,7 @@ public abstract class SessionFileTransferServiceTestBase : CoreSmokeTestsBase
                         ? RuntimeUnlockTransactionState.RouteCommitPending.ToString()
                         : RuntimeUnlockTransactionState.Failed.ToString(),
                 };
+                if (acked) AfterRuntimeUnlockProbeAcked?.Invoke();
             }
 
             return true;

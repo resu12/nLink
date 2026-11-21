@@ -40,7 +40,13 @@ namespace NLink.Tools
                     if (bytes == null || bytes.Length < 1 || bytes.Length > maximumBytes || current == null || !current()) return false;
                     // CREATE_NEW, GENERIC_READ/WRITE + DELETE; deny other writes
                     // and deletion. Rename this exact open file, never a path reopen.
-                    string temporary = destination + "." + Guid.NewGuid().ToString("N") + ".tmp";
+                    // Prefix before adding the suffix: the native temporary path can exceed MAX_PATH.
+                    string temporary = Path.GetFullPath(destination);
+                    if (!temporary.StartsWith(@"\\?\", StringComparison.Ordinal))
+                        temporary = temporary.StartsWith(@"\\", StringComparison.Ordinal)
+                            ? @"\\?\UNC\" + temporary.Substring(2)
+                            : @"\\?\" + temporary;
+                    temporary += "." + Guid.NewGuid().ToString("N") + ".tmp";
                     created = CreateFile(temporary, 0xc0010000, 1, IntPtr.Zero, 1, 0x08000080, IntPtr.Zero);
                     if (created.IsInvalid) return false;
                     using (var output = new FileStream(created, FileAccess.ReadWrite, 32768))

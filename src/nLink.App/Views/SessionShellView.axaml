@@ -39,6 +39,7 @@
                                      RoleText="{Binding #Root.RoleText}"
                                      TunaActive="{Binding #Root.TunaActive}"
                                      TunaStatusReason="{Binding #Root.TunaStatusReason}"
+                                     FileUsesRegularNkn="{Binding #Root.FileUsesRegularNkn}"
                                      HorizontalAlignment="Stretch"/>
         </Border>
 

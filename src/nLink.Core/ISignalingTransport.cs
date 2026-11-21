@@ -111,6 +111,9 @@ public interface ITransportAccelerationStatus
     string TransportAccelerationStatusReason { get; }
 
     TransportAccelerationPendingFileTransfer? PendingAccelerationFileTransfer => null;
+
+    // For transports whose status callbacks can arrive out of publication order.
+    TransportAccelerationStateChangedEventArgs? PublishedAccelerationStatus => null;
 }
 
 public interface ITransportAccelerationControl

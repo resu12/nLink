@@ -284,7 +284,7 @@ public sealed class Beta3SessionShellLayoutSmokeTests : Beta3DefaultUiSmokeTestB
                 SetPrivateField(header, "tunaUnlockMessageUntilUtc", DateTimeOffset.UtcNow.AddSeconds(-1));
 
                 header.TunaActive = true;
-                Assert.Contains("active", header.TunaUnlockTip);
+                Assert.Contains("ready", header.TunaUnlockTip);
                 Assert.False(timer.IsEnabled);
                 Assert.Equal(1d, header.TunaPulseScale);
                 header.TunaActive = false;
@@ -319,6 +319,111 @@ public sealed class Beta3SessionShellLayoutSmokeTests : Beta3DefaultUiSmokeTestB
             }
 
             return true;
+        }, CancellationToken.None);
+    }
+
+    [Theory]
+    [InlineData("replacement")]
+    [InlineData("empty")]
+    [InlineData("expired-empty")]
+    [InlineData("same-funded")]
+    [InlineData("error")]
+    public async Task SessionHeader_TooltipOpeningRechecksSharedWallet(string change)
+    {
+        await fixture.Session.Dispatch(async () =>
+        {
+            var root = Directory.CreateTempSubdirectory("nlink-wallet-hover-");
+            var header = new SessionHeaderView { RoleText = "Helper" };
+            var window = new Window { Content = header };
+            try
+            {
+                window.Show();
+                await FlushUiAsync();
+                var prefs = new JsonTunaRuntimePreferenceStore(() => Path.Combine(root.FullName, "prefs.json"));
+                prefs.Save(new TunaRuntimePreferenceState { Enabled = true });
+                var path = Path.Combine(root.FullName, "link.json");
+                var store = new JsonTunaWalletLinkStore(() => path);
+                var peer = new JsonTunaWalletLinkStore(() => path);
+                var runtime = new TunaRuntimePilotService(prefs,
+                    new JsonTunaUsageAccountingStore(() => Path.Combine(root.FullName, "usage.json")), store, new TunaWalletSidecarVerifier());
+                var wallet = TunaWalletLinkState.Linked(Path.Combine(root.FullName, "wallet"), DateTimeOffset.UtcNow)
+                    .WithValidationResult(TunaWalletValidationResult.Ok("wallet", "payer-a", "1"), DateTimeOffset.UtcNow);
+                Assert.True(await store.SaveAsync(wallet));
+                runtime.UnlockForNextSession(wallet, "fixture".ToCharArray());
+                SetPrivateField(header, "subscribedTunaRuntime", runtime);
+                var message = change == "error" ? "Fixture error." : "Fixture unlock succeeded.";
+                InvokePrivate(header, "SetTunaUnlockResult", new TunaRuntimeUnlockResult(change != "error", runtime.RuntimeStatus,
+                    message, false, TimeSpan.Zero), wallet);
+                InvokePrivate(header, "ApplyTunaUnlockToggleState", true, true, true, "", runtime.RuntimeStatus);
+                var toggle = Assert.IsType<Button>(FindFirstVisibleControlByAutomationId(window, "SessionHeader.TunaUnlockToggle"));
+                Assert.Equal(message, ToolTip.GetTip(toggle));
+
+                var updated = change == "replacement"
+                    ? TunaWalletLinkState.Linked(wallet.WalletPath!, DateTimeOffset.UtcNow)
+                    : wallet;
+                updated = updated.WithValidationResult(TunaWalletValidationResult.Ok("wallet",
+                    change == "replacement" ? "payer-b" : "payer-a", change is "same-funded" or "replacement" ? "2" : "0"), DateTimeOffset.UtcNow);
+                Assert.True(await peer.SaveAsync(updated));
+                if (change == "expired-empty")
+                    SetPrivateField(header, "tunaUnlockMessageUntilUtc", DateTimeOffset.UtcNow.AddSeconds(-1));
+                Assert.Equal(message, ToolTip.GetTip(toggle)); // Peer write sent no local UI notification.
+                toggle.RaiseEvent(new Avalonia.Interactivity.CancelRoutedEventArgs(ToolTip.ToolTipOpeningEvent, toggle));
+
+                if (change is "error" or "same-funded") Assert.Equal(message, ToolTip.GetTip(toggle));
+                else
+                {
+                    var tip = Assert.IsType<string>(ToolTip.GetTip(toggle));
+                    Assert.NotEqual(message, tip);
+                    Assert.DoesNotContain("unlocked", tip, StringComparison.OrdinalIgnoreCase);
+                }
+                Assert.True(updated.IsSameValidationAs(await peer.LoadAsync()));
+            }
+            finally { window.Close(); root.Delete(recursive: true); }
+            return true;
+        }, CancellationToken.None);
+    }
+
+    [Theory]
+    [InlineData("lock")]
+    [InlineData("disable")]
+    [InlineData("replacement")]
+    [InlineData("refreshed-empty")]
+    public async Task SessionHeader_DropsCachedUnlockSuccessWhenOwnerChanges(string change)
+    {
+        await fixture.Session.Dispatch(() =>
+        {
+            var root = Directory.CreateTempSubdirectory("nlink-wallet-tip-");
+            try
+            {
+                var prefs = new JsonTunaRuntimePreferenceStore(() => Path.Combine(root.FullName, "preferences.json"));
+                prefs.Save(new TunaRuntimePreferenceState { Enabled = true });
+                var runtime = new TunaRuntimePilotService(prefs,
+                    new JsonTunaUsageAccountingStore(() => Path.Combine(root.FullName, "usage.json")),
+                    new JsonTunaWalletLinkStore(() => Path.Combine(root.FullName, "link.json")), new TunaWalletSidecarVerifier());
+                var wallet = TunaWalletLinkState.Linked(Path.Combine(root.FullName, "wallet"), DateTimeOffset.UtcNow)
+                    .WithValidationResult(TunaWalletValidationResult.Ok("wallet", "payer-a", "1"), DateTimeOffset.UtcNow);
+                runtime.UnlockForNextSession(wallet, "fixture".ToCharArray());
+                var header = new SessionHeaderView();
+                SetPrivateField(header, "subscribedTunaRuntime", runtime);
+                var result = new TunaRuntimeUnlockResult(true, runtime.RuntimeStatus, "Fixture unlock succeeded.", false, TimeSpan.Zero);
+                InvokePrivate(header, "SetTunaUnlockResult", result, wallet);
+                InvokePrivate(header, "ApplyTunaUnlockToggleState", true, true, true, "", runtime.RuntimeStatus);
+                Assert.Equal(result.Message, header.TunaUnlockTip);
+
+                if (change == "disable") runtime.SavePreferences(new TunaRuntimePreferenceState { Enabled = false });
+                else if (change == "lock") runtime.ClearSessionUnlock();
+                else if (change == "refreshed-empty") InvokePrivate(header, "GetPendingTunaUnlockMessage",
+                    wallet.WithValidationResult(TunaWalletValidationResult.Ok("wallet", "payer-a", "0"), DateTimeOffset.UtcNow));
+                else runtime.UnlockForNextSession(wallet.WithValidationResult(
+                    TunaWalletValidationResult.Ok("wallet", "payer-b", "1"), DateTimeOffset.UtcNow), "replacement".ToCharArray());
+                InvokePrivate(header, "ApplyTunaUnlockToggleState", true, true, change == "replacement", "", runtime.RuntimeStatus);
+                Assert.NotEqual(result.Message, header.TunaUnlockTip);
+                InvokePrivate(header, "SetTunaUnlockResult", result with { Success = false, Message = "Fixture error." }, wallet);
+                InvokePrivate(header, "UpdateTunaVisualState");
+                Assert.Equal("Fixture error.", header.TunaUnlockTip);
+            }
+            finally { root.Delete(recursive: true); }
+            return Task.FromResult(true);
         }, CancellationToken.None);
     }
 
@@ -366,7 +471,7 @@ public sealed class Beta3SessionShellLayoutSmokeTests : Beta3DefaultUiSmokeTestB
                 }
 
                 header.TunaActive = true;
-                Assert.Contains("active", header.TunaPictogramTip);
+                Assert.Contains("ready", header.TunaPictogramTip);
                 Assert.False(timer.IsEnabled);
                 Assert.Equal(1d, header.TunaPulseScale);
             }
@@ -407,7 +512,7 @@ public sealed class Beta3SessionShellLayoutSmokeTests : Beta3DefaultUiSmokeTestB
                 // An independently active session/Screen route wins when the file ends.
                 header.TunaStatusReason = "file_transfer_tuna_idle";
                 Assert.True(header.TunaActive);
-                Assert.Contains("active", header.TunaPictogramTip);
+                Assert.Contains("ready", header.TunaPictogramTip);
                 Assert.Equal(activeColor, ((ISolidColorBrush)header.TunaPictogramBrush).Color);
                 Assert.True(header.TunaGlowOpacity > 0d);
                 Assert.False(timer.IsEnabled);
@@ -458,6 +563,109 @@ public sealed class Beta3SessionShellLayoutSmokeTests : Beta3DefaultUiSmokeTestB
     }
 
     [Theory]
+    [InlineData("Helper", false, "locked")]
+    [InlineData("Helpee", true, "listener_ready")]
+    [Trait("Category", "Smoke")]
+    public async Task SessionHeader_DetachedShowsNoConnectionOnBothTips(string role, bool unlockOn, string runtimeStatus)
+    {
+        await fixture.Session.Dispatch(async () =>
+        {
+            EnsureAppServices();
+            var header = new SessionHeaderView { RoleText = role };
+            var window = new Window { Content = header };
+            window.Show();
+            try
+            {
+                await FlushUiAsync();
+                InvokePrivate(header, "ApplyTunaUnlockToggleState", true, true, unlockOn, "", runtimeStatus);
+                var fish = Assert.Single(header.GetVisualDescendants().OfType<Viewbox>());
+                var toggle = Assert.IsType<Button>(FindFirstVisibleControlByAutomationId(window, "SessionHeader.TunaUnlockToggle"));
+                var detached = TunaHeaderStateProjector.FromSnapshot(new(null, null), "(none)", false, "transport_unwired");
+                header.TunaActive = detached.IsActive;
+                header.TunaStatusReason = detached.StatusReason;
+                header.FileUsesRegularNkn = detached.FileUsesRegularNkn;
+                Assert.Equal("No active connection.", ToolTip.GetTip(fish));
+                Assert.Equal("No active connection.", ToolTip.GetTip(toggle));
+                Assert.Equal(0d, header.TunaGlowOpacity);
+            }
+            finally
+            {
+                window.Close();
+            }
+            return true;
+        }, CancellationToken.None);
+    }
+
+    [Theory]
+    [InlineData("Helper", true, "header_switch_off")]
+    [InlineData("Helpee", false, "remote_header_switch_off")]
+    [InlineData("Helper", false, "post_tuna_fallback_route_active")]
+    [InlineData("Helpee", true, "post_tuna_fallback_route_active")]
+    public async Task SessionHeader_SwitchOffGraysBothPeersDespitePausedTunaRoute(string role, bool localPayer, string stoppedReason)
+    {
+        await fixture.Session.Dispatch(() =>
+        {
+            EnsureAppServices();
+            var sender = role == "Helper";
+            var file = new FileTransferTransferSnapshot("session", "file",
+                sender ? FileTransferDirection.Outbound : FileTransferDirection.Inbound,
+                sender ? FileTransferTransferState.Sending : FileTransferTransferState.Receiving,
+                "file.bin", 1024, null, 0, 0, 1, 1024, null, null,
+                RouteToken: "file_tuna_v4", ProtocolVersion: 4, IsPaused: sender, IsPeerPaused: !sender);
+            var snapshot = sender ? new SessionFileTransferSnapshot(file, null) : new SessionFileTransferSnapshot(null, file);
+            var header = new SessionHeaderView { RoleText = role };
+            void Show(bool active, string reason)
+            {
+                var state = TunaHeaderStateProjector.FromSnapshot(snapshot, "NKN", active, reason);
+                header.TunaActive = state.IsActive;
+                header.TunaStatusReason = state.StatusReason;
+                header.FileUsesRegularNkn = state.FileUsesRegularNkn;
+            }
+            void CheckPendingReconnect(bool paused)
+            {
+                Show(false, "runtime_unlock_pending_route_commit");
+                Assert.False(header.TunaActive);
+                Assert.Equal("Negotiating Tuna acceleration.", header.TunaPictogramTip);
+                var current = sender ? snapshot.Outbound! : snapshot.Inbound!;
+                Assert.Equal(("file_tuna_v4", 4, paused && sender, paused && !sender),
+                    (current.RouteToken, current.ProtocolVersion, current.IsPaused, current.IsPeerPaused));
+            }
+
+            var readyReason = localPayer ? "paid_listener_active" : "free_dialer_active";
+            var readyColor = localPayer ? Color.FromRgb(255, 211, 91) : Color.FromRgb(125, 220, 255);
+            var gray = Color.FromRgb(111, 122, 136);
+            Show(true, readyReason);
+            Assert.Equal(readyColor, ((ISolidColorBrush)header.TunaPictogramBrush).Color);
+            SetPrivateField(header, "tunaRuntimeStatus", localPayer ? "locked" : "inactive");
+            Show(false, stoppedReason);
+            Assert.Equal(gray, ((ISolidColorBrush)header.TunaPictogramBrush).Color);
+            Assert.False(header.TunaActive);
+            Assert.Equal(0d, header.TunaGlowOpacity);
+            Assert.DoesNotContain("ready", header.TunaPictogramTip);
+            var retained = sender ? snapshot.Outbound! : snapshot.Inbound!;
+            Assert.Equal(("file_tuna_v4", 4, sender, !sender),
+                (retained.RouteToken, retained.ProtocolVersion, retained.IsPaused, retained.IsPeerPaused));
+
+            SetPrivateField(header, "tunaUnlockToggleOn", localPayer);
+            SetPrivateField(header, "tunaRuntimeStatus", localPayer ? "waiting_for_approved_session" : "inactive");
+            Show(false, "post_tuna_fallback_route_active");
+            Assert.Equal(gray, ((ISolidColorBrush)header.TunaPictogramBrush).Color);
+            Assert.DoesNotContain("ready", header.TunaPictogramTip);
+            CheckPendingReconnect(paused: true);
+            var resumed = file with { IsPaused = false, IsPeerPaused = false };
+            snapshot = sender ? new(resumed, null) : new(null, resumed);
+            Show(false, "post_tuna_fallback_route_active");
+            Assert.Equal(gray, ((ISolidColorBrush)header.TunaPictogramBrush).Color);
+            Assert.DoesNotContain("ready", header.TunaPictogramTip);
+            CheckPendingReconnect(paused: false);
+            Show(true, readyReason);
+            Assert.Equal(readyColor, ((ISolidColorBrush)header.TunaPictogramBrush).Color);
+            Assert.Contains("Tuna is ready.", header.TunaPictogramTip);
+            return Task.FromResult(true);
+        }, CancellationToken.None);
+    }
+
+    [Theory]
     [InlineData(true, FileTransferDirection.Outbound, "regular_nkn_v4_fast", 4)]
     [InlineData(true, FileTransferDirection.Inbound, "regular_nkn_v4_fast", 4)]
     [InlineData(false, FileTransferDirection.Outbound, "regular_nkn_v4_fast", 4)]
@@ -466,9 +674,11 @@ public sealed class Beta3SessionShellLayoutSmokeTests : Beta3DefaultUiSmokeTestB
     [InlineData(true, FileTransferDirection.Inbound, "post_tuna_fallback_v6", 6)]
     [InlineData(false, FileTransferDirection.Outbound, "post_tuna_fallback_v6", 6)]
     [InlineData(false, FileTransferDirection.Inbound, "post_tuna_fallback_v6", 6)]
+    [InlineData(true, FileTransferDirection.Outbound, "post_tuna_fallback_v6", 6, false)]
+    [InlineData(false, FileTransferDirection.Inbound, "post_tuna_fallback_v6", 6, false)]
     [Trait("Category", "Smoke")]
     public async Task SessionHeader_TunaSessionColorAndTooltipSurviveFilePauseAndCancel(
-        bool localPayer, FileTransferDirection direction, string route, int protocol)
+        bool localPayer, FileTransferDirection direction, string route, int protocol, bool sessionReady = true)
     {
         await fixture.Session.Dispatch(async () =>
         {
@@ -478,10 +688,9 @@ public sealed class Beta3SessionShellLayoutSmokeTests : Beta3DefaultUiSmokeTestB
             SetPrivateField(header, "tunaRuntimeStatus", localPayer ? "listener_ready" : "dialer_ready");
             var timer = Assert.IsType<DispatcherTimer>(typeof(SessionHeaderView)
                 .GetField("tunaPulseTimer", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(header));
-            var reason = localPayer ? "paid_listener_active" : "free_dialer_active";
-            var expectedTip = localPayer
-                ? "Tuna is active. This computer is paying as the Tuna listener."
-                : "Tuna is active and the other computer is paying.";
+            var reason = sessionReady ? (localPayer ? "paid_listener_active" : "free_dialer_active") : "post_tuna_fallback_route_active";
+            var payerTip = localPayer ? "This computer is paying as the Tuna listener." : "The other computer is paying.";
+            var negotiatingTip = localPayer ? "Waiting for the other side to connect to Tuna." : "Negotiating Tuna acceleration.";
             var transfer = new FileTransferTransferSnapshot(
                 "session", "transfer", direction,
                 direction == FileTransferDirection.Outbound ? FileTransferTransferState.Sending : FileTransferTransferState.Receiving,
@@ -489,25 +698,31 @@ public sealed class Beta3SessionShellLayoutSmokeTests : Beta3DefaultUiSmokeTestB
                 RouteToken: route, ProtocolVersion: protocol);
             try
             {
-                foreach (var item in new FileTransferTransferSnapshot?[]
+                foreach (var (item, usesRegularFile) in new (FileTransferTransferSnapshot?, bool)[]
                 {
-                    null, transfer, transfer with { IsPaused = true }, transfer with { IsPeerPaused = true },
-                    transfer with { State = FileTransferTransferState.Canceled }, null,
+                    (transfer with { State = direction == FileTransferDirection.Outbound
+                        ? FileTransferTransferState.AwaitingAcceptance : FileTransferTransferState.PendingDecision }, false),
+                    (transfer with { State = FileTransferTransferState.AwaitingStart }, false),
+                    (transfer, true), (transfer with { IsPaused = true }, true), (transfer with { IsPeerPaused = true }, true),
+                    (transfer with { State = FileTransferTransferState.Canceled }, false), (null, false),
                 })
                 {
                     var snapshot = direction == FileTransferDirection.Outbound
                         ? new SessionFileTransferSnapshot(item, null) : new SessionFileTransferSnapshot(null, item);
-                    var projection = TunaHeaderStateProjector.FromSnapshot(snapshot, true, reason);
+                    var projection = TunaHeaderStateProjector.FromSnapshot(snapshot, "NKN", sessionReady, reason);
                     header.TunaActive = projection.IsActive;
                     header.TunaStatusReason = projection.StatusReason;
-                    Assert.True(header.TunaActive);
-                    Assert.Equal(expectedTip, header.TunaPictogramTip);
+                    header.FileUsesRegularNkn = projection.FileUsesRegularNkn;
+                    Assert.Equal(sessionReady, header.TunaActive);
+                    var fileTip = usesRegularFile ? " This file uses regular NKN." : "";
+                    var expectedTip = sessionReady ? $"Tuna is ready.{fileTip} {payerTip}" : negotiatingTip + fileTip;
+                    Assert.Equal(!sessionReady && localPayer ? expectedTip + " " + payerTip : expectedTip, header.TunaPictogramTip);
                     Assert.Equal(expectedTip, header.TunaUnlockTip);
-                    Assert.Equal(localPayer ? Color.FromRgb(255, 211, 91) : Color.FromRgb(125, 220, 255),
+                    Assert.Equal(localPayer ? Color.FromRgb(255, 211, 91) : sessionReady ? Color.FromRgb(125, 220, 255) : Color.FromRgb(111, 122, 136),
                         ((ISolidColorBrush)header.TunaPictogramBrush).Color);
-                    Assert.Equal(1d, header.TunaPictogramOpacity);
-                    Assert.True(header.TunaGlowOpacity > 0d);
-                    Assert.False(timer.IsEnabled);
+                    Assert.Equal(sessionReady || localPayer ? 1d : 0.58d, header.TunaPictogramOpacity);
+                    Assert.Equal(sessionReady || localPayer, header.TunaGlowOpacity > 0d);
+                    Assert.Equal(!sessionReady && localPayer, timer.IsEnabled);
                     Assert.Equal(1d, header.TunaPulseScale);
                     Assert.Equal(route, transfer.RouteToken);
                     Assert.Equal(protocol, transfer.ProtocolVersion);

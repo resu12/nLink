@@ -433,8 +433,7 @@ public sealed partial class SessionRuntime
                 return false;
             }
 
-            await HandleSessionLivenessTimeoutAsync(sessionIdSnapshot, generation, silence).ConfigureAwait(false);
-            return true;
+            return await HandleSessionLivenessTimeoutAsync(sessionIdSnapshot, generation).ConfigureAwait(false);
         }
 
         var urgentHeartbeat = false;
@@ -2403,10 +2402,9 @@ public sealed partial class SessionRuntime
         return true;
     }
 
-    private async Task HandleSessionLivenessTimeoutAsync(
+    private async Task<bool> HandleSessionLivenessTimeoutAsync(
         string sessionIdSnapshot,
-        long generation,
-        TimeSpan silence)
+        long generation)
     {
         await lifecycleGate.WaitAsync().ConfigureAwait(false);
         try
@@ -2415,12 +2413,27 @@ public sealed partial class SessionRuntime
                 resetInProgress ||
                 remoteSessionEndHandling ||
                 lastDisconnectWasRemoteEnd ||
-                generation != sessionLivenessGeneration ||
                 state != SessionRuntimeState.Connected ||
                 transportState != TransportState.Connected ||
                 !string.Equals(GetApprovedSessionIdForLiveness(), sessionIdSnapshot, StringComparison.Ordinal))
             {
-                return;
+                return true;
+            }
+
+            TimeSpan silence;
+            lock (sessionLivenessGate)
+            {
+                if (generation != sessionLivenessGeneration || sessionLivenessCts is null)
+                {
+                    return true;
+                }
+
+                // A peer proof can arrive while the timeout is waiting for the lifecycle gate.
+                silence = nowProvider() - sessionLivenessLastPeerProofUtc;
+                if (silence < watchdogOptions.SessionLivenessTimeout)
+                {
+                    return false;
+                }
             }
 
             LocalOperationalLog.Error(
@@ -2444,6 +2457,7 @@ public sealed partial class SessionRuntime
             SetState(SessionRuntimeState.Failed, "Connection lost.");
             QueueTerminalizeAndDetachFileTransferTransportForPeerDisconnected("session_liveness_timeout");
             Disconnected?.Invoke(this, EventArgs.Empty);
+            return true;
         }
         finally
         {

@@ -1,6 +1,26 @@
 # Changelog
 
-## [0.7.0 hotfix revision 2] - Unreleased
+## [0.7.1] - Unreleased
+
+Changes since the published 0.7.0 hotfix revision 2:
+
+- **File transfer:** Helper and Helpee can drop one local file from Windows Explorer into chat instead of using the file picker. The same session permission and receiver approval are required.
+- Incoming offers now have **Save as…** to choose a destination without overwriting existing files. **Accept** still saves to Downloads, and canceling the picker leaves the offer pending.
+- **File-offer reliability:** A retry of the same NKN offer can recover a lost reply without prompting twice. A delayed reply cannot answer a replacement offer, and a failed **Decline** reply to an older peer no longer blocks the next file.
+- **File-transfer recovery:** Canceling a file no longer leaves a stale Tuna fallback hint that can cause an offer in the opposite direction to be declined. An established fallback still applies. If a data channel fills or is replaced, a delayed completion cannot finish the next offer, and cleanup cannot disable the replacement channel.
+- **Tuna handoff:** Turning off Tuna and canceling a file no longer leaves the return transfer waiting on the old file’s pause. When enabling Tuna mid-session, a waiting file gets one handoff only after its own channel is released, the matching handshake is acknowledged, and the file-transfer coordinator confirms the route. A late ACK from an older attempt cannot switch the new file.
+- **Tuna with files in both directions:** Re-enabling Tuna can reconnect the session even when one file has fallen back to regular NKN and the reverse transfer is unfinished. Neither file changes route or loses its user pause. If the handshake and bridge recovery both hold a file channel, it reopens only after both finish. A second request to reopen it cannot release it early or put it back on hold, and the other file does not inherit the pause.
+- **Tuna retries:** A fallback retry applies only to the file authorized by the file-transfer coordinator. An offer without a file ID cannot start a retry for the reverse transfer. If the paying listener is replaced after a probe starts but before it is sent, the old probe is discarded rather than sent through the replacement. The next probe must receive its own matching acknowledgment.
+- **Tuna retry confirmation:** The final acknowledgment checks the coordinator’s current receipt for the exact file and direction at the point of sending, including on replay. If the receipt is invalidated after the first acknowledgment, pending replay copies are not sent. The reverse file’s route and both files’ user pauses are unchanged.
+- **Tuna commit confirmation:** After fallback, nLink matches the peer’s offer to the local coordinator commit even when the offer numbers differ or the commit happens before the initiator starts waiting for a reply. Each copy is checked again before the sidecar write starts. A canceled or expired copy is not written; a duplicate received while a reply is pending triggers a retry only if no copy was written and the same commit is still current.
+- **Session UI:** Both peers now show “Tuna is ready” only after the transport confirms the session connection. Neither a delayed notification nor a file’s old Tuna route can restore “ready” after switch-off, even if the file is resumed. The tooltip distinguishes a ready session from a file using regular NKN, does not label local transfers as NKN, and does not claim a route or payer after disconnect. File routes and user pauses are unchanged.
+- **Tuna and wallet:** A funded payer can unlock Tuna in an approved session without reconnecting. Only the selected, permitted lanes are offered; stale answers and retries cannot reactivate a withdrawn offer. Wallet changes in another instance invalidate stale unlock results. Concurrent streams share the listener’s byte cap, and bridge shutdown has a time limit.
+- **Connection reliability:** A heartbeat received while the watchdog waits for the session lock prevents a false disconnect. A silent peer still times out.
+- **Diagnostics:** Refresh the timestamped session snapshot before copying it. Saved screen-share test results are labeled separately. Exported log tails hide receive directories even when their names contain commas or semicolons, and multi-event reports retain the original event labels in order.
+- **Tests and tooling:** Added Windows regressions for receiving files into deep folders, including when a file already exists; the receiver itself is unchanged. The evidence writer now handles long temporary paths, and the analyzer scans startup-isolation evidence only when needed.
+- **Beta Readiness:** [Case 10323 remains unpassed](docs/ReleaseRunbook.md#071-beta-readiness-decision-2026-11-19). Its unresolved risk is accepted for 0.7.1 only.
+
+## [0.7.0 hotfix revision 2] - 2026-11-17
 
 ### Fixed
 
@@ -17,9 +37,8 @@
 
 ### Release identity
 
-- App version remains `0.7.0`; proposed separate tag: `v0.7.0-hotfix.2`. Both published releases, their assets and checksums remain unchanged.
-- [Hotfix revision 2 review metadata](docs/releases/0.7.0-hotfix.2.md) records the scope and remaining release gates. This candidate is not yet published or live-validated.
-- The latest local unsigned portable/installer is built from `ba507366`. Packaging checks passed; the consolidated focused lifecycle/authentication selection passed 172/172 before packaging. Earlier failures remain historical, and no CI, live-session or installer-lifecycle qualification is claimed for these bytes.
+- [Published as `v0.7.0-hotfix.2`](https://github.com/resu12/nLink/releases/tag/v0.7.0-hotfix.2) from `36557e07` with CI #108’s portable, installer and checksums under a release-specific unsigned exception. The app version remains `0.7.0`; the original release and hotfix 1 are unchanged.
+- The [earlier local review record](docs/releases/0.7.0-hotfix.2.md) covers different bytes (`ba507366`), including its 172 passing focused regressions. Those results are not a new live or installer-upgrade qualification.
 
 ## [0.7.0 hotfix revision 1] - 2026-11-15
 

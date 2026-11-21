@@ -142,7 +142,7 @@ public sealed partial class NknAccelerationTransportTests
             using var hostPressure = new RealNknClientAdapter(hostIdentity, options);
             using var helperPressure = new RealNknClientAdapter(helperIdentity, options);
             using INknTunaAccelerationSession hostLane = !startsOnTuna
-                ? new RetryableTunaAccelerationSession(true, 0, supportedLanes: NknAccelerationLaneKind.File)
+                ? new RetryableTunaAccelerationSession(true, 0, supportedLanes: NknAccelerationLaneKind.File) { TrackListenerLeaseForTests = true }
                 : new PreparationHandshakeLane(allowRuntimeRestart: cycle);
             using INknTunaAccelerationSession helperLane = !startsOnTuna
                 ? new RetryableTunaAccelerationSession(false, 0, supportedLanes: NknAccelerationLaneKind.File)

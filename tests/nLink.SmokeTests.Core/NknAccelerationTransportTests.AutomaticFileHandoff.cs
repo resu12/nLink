@@ -8,6 +8,72 @@ namespace NLink.SmokeTests;
 
 public sealed partial class NknAccelerationTransportTests
 {
+    private static void InstallPayerProbeOwnerForTests(NknSignalingTransport transport, RuntimeUnlockTransactionSnapshot tx)
+    {
+        SetPrivateField(transport, "runtimeUnlockTransactionState", tx with { TransferId = null });
+        SetPrivateField(transport, "runtimeUnlockTunaPathLeaseState", new RuntimeUnlockTunaPathLeaseSnapshot(
+            tx.SessionId, tx.TransferId, tx.TransactionGeneration, tx.OfferGeneration, tx.TunaPathLeaseGeneration,
+            tx.TunaPathLeaseListenerRunId, 11, tx.TunaPathLeaseState, tx.CreatedUtcMs, tx.UpdatedUtcMs, tx.DeadlineUtcMs, null, null));
+    }
+
+    private static void StartPayerProbeForBulkTest(NknSignalingTransport transport, FileTransferRuntimeUnlockPreCommitProbeFrame frame)
+    {
+        const string runId = "listener-bulk-test";
+        InstallPayerProbeOwnerForTests(transport, RuntimeUnlockTransactionSnapshot.Idle with
+        {
+            SessionId = frame.SessionId, TransferId = frame.TransferId, State = RuntimeUnlockTransactionState.AnswerReceived,
+            TransactionGeneration = frame.TransactionGeneration, OfferGeneration = frame.OfferGeneration,
+            AnswerReceived = true, PeerReceived = true, ObservedSend = true,
+            TunaPathLeaseGeneration = frame.TunaPathLeaseGeneration, TunaPathLeaseState = RuntimeUnlockTunaPathLeaseState.ListenerReady,
+            TunaPathLeaseCurrent = true, TunaPathLeaseListenerRunId = runId,
+        });
+        Assert.True(((IRuntimeUnlockRouteCommitProofProvider)transport).NotifyRuntimeUnlockPathProbeStarted(
+            frame.SessionId, frame.TransferId, 0, frame.ProbeId!, FileTransferTransportKind.Tuna, "precommit_probe_sent",
+            expectedLocalTransactionGeneration: frame.TransactionGeneration, expectedLocalOfferGeneration: frame.OfferGeneration,
+            expectedLocalTunaPathLeaseGeneration: frame.TunaPathLeaseGeneration, expectedLocalTunaPathLeaseListenerRunId: runId,
+            expectedLocalPathProbeState: RuntimeUnlockPathProbeState.None));
+    }
+
+    private static (RetryableTunaAccelerationSession, System.Collections.Concurrent.ConcurrentQueue<NknBridgeChannel>)
+        CreateRecordingProbeListener(string peer)
+    {
+        var sent = new System.Collections.Concurrent.ConcurrentQueue<NknBridgeChannel>();
+        var lane = new RetryableTunaAccelerationSession(true, 0) { TrackListenerLeaseForTests = true };
+        lane.MarkCoordinatorScopedListenerAvailableForTests(peer);
+        lane.ForwardBytesForTests = (channel, _, _) => { sent.Enqueue(channel); return Task.FromResult(true); };
+        return (lane, sent);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    [Trait("FileTransferInfraSuite", "AutomaticFileHandoff")]
+    public void PayerProbe_DelayedFileACannotReplaceFileBLaunch(bool sameOfferGeneration)
+    {
+        var fixture = CreateRuntimeUnlockResponderWaitingFixtureForTests("payer-replacement");
+        using var transport = fixture.Transport;
+        var a = fixture.Transaction with { TransferId = "file-A", TunaPathLeaseListenerRunId = "listener-start-1" };
+        var b = a with { TransferId = "file-B", OfferGeneration = a.OfferGeneration + (sameOfferGeneration ? 0 : 1),
+            TunaPathLeaseGeneration = a.TunaPathLeaseGeneration + 1, TunaPathLeaseListenerRunId = "listener-start-2" };
+        InstallPayerProbeOwnerForTests(transport, a);
+        object?[] args = [a, null, null];
+        Assert.True((bool)typeof(NknSignalingTransport).GetMethod("TryResolveRuntimeUnlockPreCommitProbeLaunchRole",
+            System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!.Invoke(transport, args)!);
+        Assert.Equal("Initiator", args[2]!.ToString());
+        void Dispatch(RuntimeUnlockTransactionSnapshot tx) => InvokePrivateMethod(transport,
+            "RequestRuntimeUnlockPreCommitProbeLaunchWithRole", tx.SessionId, NknAccelerationLaneKind.File, "payer_test", tx, args[2], null);
+
+        InstallPayerProbeOwnerForTests(transport, b);
+        Dispatch(b);
+        var launch = Assert.IsType<RuntimeUnlockRouteCommitSnapshot>(GetPrivateField(transport, "runtimeUnlockPreCommitProbeLaunchSnapshot"));
+        Assert.Equal((b.TransferId, b.TunaPathLeaseGeneration), (launch.TransferId, launch.TunaPathLeaseGeneration));
+        SetPrivateField(transport, "runtimeUnlockPreCommitProbeStartedSnapshot", launch);
+        Dispatch(a);
+        Assert.Same(launch, GetPrivateField(transport, "runtimeUnlockPreCommitProbeLaunchSnapshot"));
+        Assert.Same(launch, GetPrivateField(transport, "runtimeUnlockPreCommitProbeStartedSnapshot"));
+        Assert.Equal(launch.LaunchGeneration, GetPrivateField(transport, "runtimeUnlockPreCommitProbeLaunchGeneration"));
+    }
+
     [Theory]
     [InlineData("exact")]
     [InlineData("expired")]

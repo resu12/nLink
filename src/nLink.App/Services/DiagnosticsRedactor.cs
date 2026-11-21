@@ -18,6 +18,9 @@ internal static partial class DiagnosticsRedactor
         redacted = PemPrivateKeyBlockRegex().Replace(redacted, Redacted);
         redacted = DiagnosticsSecretKeyValueRegex().Replace(redacted, m => m.Groups["prefix"].Value + Redacted);
         redacted = WalletSeedPhraseRegex().Replace(redacted, m => m.Groups["prefix"].Value + Redacted);
+        // Operational destination paths are unquoted. Commas and semicolons can be part of
+        // the directory, so an exported log cannot safely recover the next field on that line.
+        redacted = UnquotedDestinationPathRegex().Replace(redacted, "${prefix}" + Redacted);
         redacted = DiagnosticsPrivacyMetadataRegex().Replace(redacted, m => m.Groups["prefix"].Value + Redacted);
 
         // Preserve broad existing protections (chat payloads, generic tokens, etc.).
@@ -36,6 +39,9 @@ internal static partial class DiagnosticsRedactor
 
     [GeneratedRegex(@"(?<prefix>\bwallet\s+seed\b\s*[:=]\s*)(?:""[^""]*""|'[^']*'|[^\r\n,;]+)", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
     private static partial Regex WalletSeedPhraseRegex();
+
+    [GeneratedRegex(@"(?<prefix>\b(?:saved_path|final_path|temp_path)=[ \t]*)(?:[A-Z]:[\\/]|[\\/])[^\r\n]*", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
+    private static partial Regex UnquotedDestinationPathRegex();
 
     [GeneratedRegex(@"(?<prefix>""?\b(?:last_bridge_message_source|session_id|expected_session_id|helper_identity|helper|target|source|expected_source|peer_id|reply_to|expected_reply_to|msg_id|run_id|local_path|file_path|saved_path|key_path|bridge_script_path|bridge_manifest_path|sidecar_path|tuna_sidecar_path|tuna_sidecar_manifest_path|wallet_path|tuna_wallet_path|walletPath|tunaWalletPath|wallet_address|tuna_wallet_address|walletAddress|tunaWalletAddress)\b""?\s*[:=]\s*)(?:""[^""]*""|'[^']*'|[^\r\n,;]+)", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
     private static partial Regex DiagnosticsPrivacyMetadataRegex();

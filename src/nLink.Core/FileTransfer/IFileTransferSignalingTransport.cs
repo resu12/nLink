@@ -358,11 +358,15 @@ public sealed record FileTransferTerminalNotification(
     int ProtocolVersion,
     FileTransferTransferState TerminalState,
     string? ErrorCode,
-    string? Reason);
+    string? Reason)
+{
+    public Guid? OfferInstanceId { get; init; }
+}
 
 public interface IFileTransferTerminalObserver
 {
     void ObserveFileTransferTerminal(FileTransferTerminalNotification notification);
+    Action<FileTransferTerminalNotification> CaptureTerminalObserver() => ObserveFileTransferTerminal;
 }
 
 public sealed record FileTransferRegularV4FrontierRepairAuthority(
@@ -2887,6 +2891,11 @@ public interface IFileTransferSignalingTransport
     event EventHandler<FileTransferFallbackTailYieldProofReceivedEventArgs>? FileTransferFallbackTailYieldProofReceived;
 
     Task SendFileTransferOfferAsync(FileTransferOfferV2 message, CancellationToken ct);
+    async Task<bool> TrySendFileTransferOfferAsync(FileTransferOfferV2 message, CancellationToken ct)
+    {
+        await SendFileTransferOfferAsync(message, ct).ConfigureAwait(false);
+        return true;
+    }
     Task SendFileTransferAcceptAsync(FileTransferAcceptV1 message, CancellationToken ct);
     Task SendFileTransferDeclineAsync(FileTransferDeclineV1 message, CancellationToken ct);
     Task SendFileTransferSessionOpenAsync(FileTransferSessionOpenV2 message, CancellationToken ct);
@@ -3074,6 +3083,10 @@ public interface IFileTransferRuntimeUnlockPreCommitProbeAckAuthorizer
 
 public interface IFileTransferRuntimeUnlockTunaProbeSender
 {
+    // Both sides of paired confirmation complete only after a guarded physical write.
+    Task<bool> TryWritePairedCommitConfirmationAsync(FileTransferRuntimeUnlockPreCommitProbeAckFrame reply,
+        Func<Func<Task>, Task?> startIfCurrent, CancellationToken ct) => Task.FromResult(false);
+
     Task SendRuntimeUnlockTunaPreCommitProbeAsync(
         FileTransferRuntimeUnlockPreCommitProbeFrame probe,
         CancellationToken ct);
@@ -3132,6 +3145,9 @@ public sealed class FileTransferDataSessionAvailabilityChangedEventArgs : EventA
     public FileTransferTransportKind TargetTransport { get; }
 
     internal RuntimeUnlockRouteCommitSnapshot? RuntimeUnlockPreCommitProbeSnapshot { get; }
+    // Veto only: an ordinary transport notification queued before reset cannot authorize work in Core.
+    internal Func<bool>? OrdinaryTunaHandoffIsCurrent { get; init; }
+    internal Task<bool>? OrdinaryTunaFinalAck { get; init; }
 
     internal RuntimeUnlockResponderPeerProbeRouteTransitionObservation?
         RuntimeUnlockResponderPeerProbeRouteTransitionObservation =>
@@ -3143,8 +3159,20 @@ public sealed class FileTransferDataSessionAvailabilityChangedEventArgs : EventA
     internal PostTunaFallbackAvailabilityProofEvidence? PostTunaFallbackProofBoundary { get; }
 }
 
+internal sealed record BoundFileOfferReadiness(FileTransferSessionPreparationAttachment? Attachment,
+    FileTransferSessionPreparationSecurityEpoch? Epoch,
+    Func<CancellationToken, Task<FileTransferInitialTunaReadinessEvidence?>> ObserveAsync,
+    Func<bool> TryConsume);
+
 public sealed class FileTransferOfferReceivedEventArgs : EventArgs
 {
+    // A duplicate of an installed offer may have advanced past Offered, but must still be the same offer.
+    internal Func<bool, bool>? IsCurrentOffer { get; init; }
+    internal Func<FileTransferAcceptV1, CancellationToken, CancellationToken, Task<bool>>? AcceptIfCurrentAsync { get; init; }
+    internal Func<FileTransferDeclineV1, CancellationToken, Task>? DeclineIfCurrentAsync { get; init; }
+    internal Func<FileTransferErrorV1, CancellationToken, Task<bool>>? ErrorIfCurrentAsync { get; init; }
+    internal BoundFileOfferReadiness? FinalAckReadiness { get; init; }
+
     public FileTransferOfferReceivedEventArgs(FileTransferOfferV2 message, string? peerId)
     {
         Message = message ?? throw new ArgumentNullException(nameof(message));

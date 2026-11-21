@@ -110,6 +110,7 @@ public sealed partial class NknSignalingTransport
 
     private bool IsPreparationLaneWorkCurrent(PreparationLaneWork work)
         => work.Execution.AllowsPreparation &&
+            (!work.Execution.Permit.LocalIsPayer || (ResolveConfiguredAccelerationLanes() & NknAccelerationLaneKind.File) != 0) &&
             IsSessionPreparationInputLifetimeCurrent(work.Attachment, work.Epoch) &&
             work.Attachment.Authority.IsCurrent(work.Attachment, work.Epoch, work.Execution.Permit);
 

@@ -16,6 +16,10 @@ public sealed record FileTransferOfferV2
     [JsonPropertyName("transferId")]
     public string TransferId { get; init; } = string.Empty;
 
+    [JsonPropertyName("offerInstanceId")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public Guid? OfferInstanceId { get; init; }
+
     [JsonPropertyName("fileName")]
     public string FileName { get; init; } = string.Empty;
 

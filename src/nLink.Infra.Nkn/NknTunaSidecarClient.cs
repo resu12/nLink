@@ -129,7 +129,13 @@ internal sealed class NknTunaSidecarClient : INknAccelerationLane
         return await statusReady.Task.ConfigureAwait(false);
     }
 
-    public async Task<bool> TrySendAsync(NknBridgeChannel lane, byte[] envelopeBytes, CancellationToken ct)
+    public Task<bool> TrySendAsync(NknBridgeChannel lane, byte[] envelopeBytes, CancellationToken ct)
+        => TrySendAsync(lane, envelopeBytes, ct, null);
+
+    public Task<bool> TryWritePairedCommitConfirmationAsync(byte[] bytes, long expiresUtcTicks, Func<Func<Task>, Task?> startIfCurrent, CancellationToken ct)
+        => TrySendAsync(NknBridgeChannel.Bulk, bytes, ct, new GuardedReply(startIfCurrent, ct, expiresUtcTicks));
+
+    private async Task<bool> TrySendAsync(NknBridgeChannel lane, byte[] envelopeBytes, CancellationToken ct, GuardedReply? reply)
     {
         if (envelopeBytes is null)
         {
@@ -162,7 +168,7 @@ internal sealed class NknTunaSidecarClient : INknAccelerationLane
             sidecarLane,
             checked((ulong)Interlocked.Increment(ref nextSequence)),
             DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
-            envelopeBytes.AsSpan().ToArray());
+            envelopeBytes.AsSpan().ToArray(), Reply: reply);
         if (sidecarLane == NknTunaSidecarLane.Bulk)
         {
             frame = frame with { Trace = deliveryTrace?.Select("app_to_tuna", frame.Sequence, frame.Payload) };
@@ -194,7 +200,9 @@ internal sealed class NknTunaSidecarClient : INknAccelerationLane
 
         IncrementAccepted(sidecarLane);
         frame.Trace?.Record("queue_accepted");
-        return true;
+        if (reply is null) return true;
+        using var cancel = ct.Register(reply.RejectBeforeWrite);
+        return await reply.Completion.Task.ConfigureAwait(false);
     }
 
     private void LogTrySendRejected(NknBridgeChannel lane, int payloadBytes, string reason, long rejectedCount)
@@ -291,23 +299,21 @@ internal sealed class NknTunaSidecarClient : INknAccelerationLane
             var activeStream = stream ?? throw new InvalidOperationException("sidecar_stream_missing");
             await foreach (var frame in outbound.Reader.ReadAllAsync(ct).ConfigureAwait(false))
             {
-                await SendIdleWarmupIfNeededAsync(activeStream, frame, ct).ConfigureAwait(false);
-                frame.Trace?.Record("ipc_write_entered");
                 try
                 {
-                    await NknTunaSidecarFrameProtocol.WriteFrameAsync(
-                        activeStream,
-                        NknTunaSidecarFrameType.Data,
-                        frame.Lane,
-                        frame.Sequence,
-                        frame.TimestampUtcMs,
-                        frame.Payload,
-                        ct)
-                    .ConfigureAwait(false);
+                    await SendIdleWarmupIfNeededAsync(activeStream, frame, ct).ConfigureAwait(false);
+                    Task Write() => NknTunaSidecarFrameProtocol.WriteFrameAsync(activeStream,
+                        NknTunaSidecarFrameType.Data, frame.Lane, frame.Sequence, frame.TimestampUtcMs, frame.Payload, ct).AsTask();
+                    frame.Trace?.Record("ipc_write_entered");
+                    var write = frame.Reply is { } reply ? reply.Start(Write) : Write();
+                    if (write is null) continue;
+                    await write.ConfigureAwait(false);
+                    frame.Reply?.Completion.TrySetResult(true);
                     frame.Trace?.Record("ipc_write_completed");
                 }
                 catch (Exception ex)
                 {
+                    frame.Reply?.Completion.TrySetResult(false);
                     frame.Trace?.Record(ex is OperationCanceledException ? "ipc_write_canceled" : "ipc_write_failed");
                     throw;
                 }
@@ -333,6 +339,8 @@ internal sealed class NknTunaSidecarClient : INknAccelerationLane
         }
         finally
         {
+            outbound.Writer.TryComplete();
+            while (outbound.Reader.TryRead(out var abandoned)) abandoned.Reply?.RejectBeforeWrite();
             trace?.End("app_to_tuna", "write_loop_ended");
         }
     }
@@ -708,10 +716,40 @@ internal sealed class NknTunaSidecarClient : INknAccelerationLane
             _ => "control",
         };
 
+    private sealed class GuardedReply(Func<Func<Task>, Task?> startIfCurrent, CancellationToken requested, long expiresUtcTicks)
+    {
+        private int claimed;
+        internal TaskCompletionSource<bool> Completion { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        internal void RejectBeforeWrite()
+        {
+            if (Interlocked.Exchange(ref claimed, 1) == 0) Completion.TrySetResult(false);
+        }
+        internal Task? Start(Func<Task> write)
+        {
+            if (Interlocked.Exchange(ref claimed, 1) != 0) return null;
+            Task? started;
+            try
+            {
+                started = requested.IsCancellationRequested ? null : startIfCurrent(() =>
+                {
+                    // The coordinator and lane locks can outlast either deadline.
+                    requested.ThrowIfCancellationRequested();
+                    if (DateTime.UtcNow.Ticks >= expiresUtcTicks)
+                        throw new OperationCanceledException("Tuna confirmation write authority expired.");
+                    return write();
+                });
+            }
+            catch (OperationCanceledException) { started = null; }
+            if (started is null) Completion.TrySetResult(false);
+            return started;
+        }
+    }
+
     private readonly record struct OutboundFrame(
         NknTunaSidecarLane Lane,
         ulong Sequence,
         long TimestampUtcMs,
         byte[] Payload,
-        NknTunaDeliveryTrace.Frame? Trace = null);
+        NknTunaDeliveryTrace.Frame? Trace = null,
+        GuardedReply? Reply = null);
 }

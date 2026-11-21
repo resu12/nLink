@@ -5,10 +5,19 @@ internal sealed partial class NknTunaAccelerationLane
     private sealed record LaneStartOperation(long Generation, bool Preparation = false, string? ExecutionIdentity = null)
     {
         public CancellationTokenRegistration Revocation;
+        public object? DialOfferOwner;
+        public bool ConditionalRearm;
+        public NknListenerVacancy? ExpectedVacancy, FailedVacancy;
+        public (string Peer, string Endpoint)? DialTarget;
     }
     private long startGeneration;
+    private NknListenerVacancy? lastFailedRearmVacancy;
     private LaneStartOperation? pendingLaneStart;
     private LaneStartOperation? currentClientStart;
+    private (string Peer, string Endpoint)? currentDialTarget;
+    private object? pendingDialClaim;
+    private NknTunaLaneLease? claimedDialLease;
+    private object? heldDialCleanupOwner;
     private readonly List<(NknTunaSidecarClient Client, NknTunaListenerAdoptionSnapshot? Listener)> retiredListenerClients = new();
 
     private bool IsPreparationOwnedUnsafe()
@@ -44,6 +53,7 @@ internal sealed partial class NknTunaAccelerationLane
             if (disposed || ct.IsCancellationRequested || client is not null || dialerProcessOwner is not null ||
                 pendingLaneStart is not null || dialerStartTask is not null) return null;
             operation = pendingLaneStart = new(++startGeneration, Preparation: true, request.ExecutionIdentity);
+            if (!request.LocalIsPayer) operation.DialTarget = (request.ExpectedRemotePeer, request.RemoteTunaAddress!);
         }
 
         bool connected;
@@ -79,8 +89,18 @@ internal sealed partial class NknTunaAccelerationLane
     private LaneStartOperation BeginLaneStartUnsafe()
         => pendingLaneStart = new(++startGeneration);
 
+    private LaneStartOperation BeginDialStartUnsafe(string endpoint, string peer)
+    {
+        var start = BeginLaneStartUnsafe();
+        start.DialTarget = (peer, endpoint);
+        return start;
+    }
+
     private void RetireLaneStartUnsafe()
     {
+        pendingDialClaim = null;
+        claimedDialLease = null;
+        heldDialCleanupOwner = null;
         pendingLaneStart?.Revocation.Unregister();
         currentClientStart?.Revocation.Unregister();
         ++startGeneration;
@@ -100,6 +120,15 @@ internal sealed partial class NknTunaAccelerationLane
         if (cleanupRetiredListeners) CleanupRetiredListenerClients();
     }
 
+    public (string? Address, NknTunaLaneLease? Lease) CaptureListenerOffer()
+    {
+        lock (gate)
+        {
+            if (clientRole != ClientRole.Listener || CaptureCurrentLaneLease() is not { } lease) return default;
+            return (client?.LocalTunaAddress, lease);
+        }
+    }
+
     public NknTunaLaneLease? CaptureCurrentLaneLease()
     {
         lock (gate)
@@ -113,14 +142,81 @@ internal sealed partial class NknTunaAccelerationLane
         }
     }
 
-    public bool TryStopCurrentLaneLease(NknTunaLaneLease lease, string reason)
+    public bool TryPublishForListenerLease(NknTunaLaneLease lease, Action publish)
     {
+        lock (gate)
+        {
+            if (clientRole != ClientRole.Listener || CaptureCurrentLaneLease() != lease) return false;
+            if (lease.Listener is { } physical) return listenerSupervisor?.TryUseExactListener(physical, publish) == true;
+            publish();
+            return true;
+        }
+    }
+
+    public bool TryStopCurrentLaneLease(NknTunaLaneLease lease, string reason)
+        => TryStopOwnedLane(lease, null, reason);
+
+    public bool TryStopOfferDialer(object owner, string reason)
+        => TryStopOwnedLane(null, owner, reason);
+
+    public Action? DetachPaidListenerForStop(NknTunaLaneLease lease, string reason)
+        => TryDetachOwnedLane(lease, null, reason, listenerOnly: true, out var cleanup) ? cleanup : null;
+
+    public bool IsCurrentOfferDial(object owner)
+    {
+        lock (gate) return ReferenceEquals(pendingDialClaim, owner) && claimedDialLease is { } lease &&
+            lease == CaptureCurrentLaneLease();
+    }
+
+    public ValueTask? TryBeginOfferDialWrite(object owner, Func<ValueTask?> write)
+    {
+        lock (gate) return IsCurrentOfferDial(owner) ? write() : null;
+    }
+
+    public bool TryCommitOfferDialer(object owner, bool retainUntilProbe, Func<bool, bool> publish)
+    {
+        lock (gate)
+        {
+            if (!IsCurrentOfferDial(owner)) return false;
+            var ownsDial = ReferenceEquals(currentClientStart?.DialOfferOwner, owner);
+            // Commit the transport evidence while the exact client cannot be replaced.
+            if (!publish(ownsDial)) return false;
+            pendingDialClaim = null;
+            if (ownsDial)
+            {
+                currentClientStart!.DialOfferOwner = null;
+                if (retainUntilProbe) heldDialCleanupOwner = owner;
+            }
+            if (heldDialCleanupOwner is null) claimedDialLease = null;
+            return true;
+        }
+    }
+
+    private bool TryStopOwnedLane(NknTunaLaneLease? lease, object? dialOfferOwner, string reason)
+    {
+        if (!TryDetachOwnedLane(lease, dialOfferOwner, reason, listenerOnly: false, out var cleanup)) return false;
+        cleanup!();
+        return true;
+    }
+
+    private bool TryDetachOwnedLane(NknTunaLaneLease? lease, object? dialOfferOwner, string reason,
+        bool listenerOnly, out Action? cleanup)
+    {
+        cleanup = null;
         Action<string>? stopListener = null;
         NknTunaSidecarClient retiredClient;
         NknTunaSidecarProcessOwner? retiredDialer;
         lock (gate)
         {
-            if (disposed || pendingLaneStart is not null || lease.LaneInstanceId != laneInstanceId ||
+            if (listenerOnly && clientRole != ClientRole.Listener) return false;
+            if (dialOfferOwner is not null)
+            {
+                if (clientRole != ClientRole.Dialer) return false;
+                if (ReferenceEquals(heldDialCleanupOwner, dialOfferOwner)) lease = claimedDialLease;
+                else if (ReferenceEquals(currentClientStart?.DialOfferOwner, dialOfferOwner)) lease = CaptureCurrentLaneLease();
+                else return false;
+            }
+            if (lease is null || disposed || pendingLaneStart is not null || lease.LaneInstanceId != laneInstanceId ||
                 lease.StartGeneration != startGeneration || lease.ClientGeneration != clientGeneration ||
                 !ReferenceEquals(lease.Client, client) || !ReferenceEquals(lease.DialerOwner, clientDialerProcessOwner)) return false;
             if (clientRole == ClientRole.Listener && listenerSupervisor is not null &&
@@ -146,10 +242,13 @@ internal sealed partial class NknTunaAccelerationLane
         // Only detached instances are touched here; successor installation is
         // allowed while disposal/process shutdown runs. No StateChanged or
         // generic supervisor stop is emitted by stale-cleanup handling.
-        retiredClient.Dispose();
-        retiredDialer?.Stop(reason);
-        stopListener?.Invoke(reason);
-        CleanupRetiredListenerClients();
+        cleanup = () =>
+        {
+            retiredClient.Dispose();
+            retiredDialer?.Stop(reason);
+            stopListener?.Invoke(reason);
+            CleanupRetiredListenerClients();
+        };
         return true;
     }
 
@@ -163,6 +262,9 @@ internal sealed partial class NknTunaAccelerationLane
             var current = CaptureCurrentLaneLease();
             if (current is null || current != lease) return false;
             clientGeneration++;
+            pendingDialClaim = null;
+            claimedDialLease = null;
+            heldDialCleanupOwner = null;
             currentClientStart?.Revocation.Unregister();
             currentClientStart = null;
             retained = lease with { ClientGeneration = clientGeneration };
@@ -217,9 +319,17 @@ internal sealed partial class NknTunaAccelerationLane
         {
             // A successor may have reused this physical listener. An old
             // completion cannot infer ownership from a fresh supervisor read.
-            if (!operation.Preparation || operation.Generation != startGeneration || clientRole == ClientRole.Listener) return;
+            if (operation.ConditionalRearm)
+            {
+                if (clientRole == ClientRole.Listener && clientListenerLease == snapshot &&
+                    !ReferenceEquals(currentClientStart, operation)) return;
+            }
+            else if (!operation.Preparation || operation.Generation != startGeneration || clientRole == ClientRole.Listener) return;
             if (snapshot is not null && listenerSupervisor is not null)
-                listenerSupervisor.TryDetachCurrentListener(snapshot, out stop);
+            {
+                if (operation.ConditionalRearm) listenerSupervisor.TryDetachForRearm(snapshot, out stop, out operation.FailedVacancy);
+                else listenerSupervisor.TryDetachCurrentListener(snapshot, out stop);
+            }
         }
         stop?.Invoke(reason);
     }

@@ -2334,14 +2334,14 @@ public sealed partial class NknSignalingTransport
         }
     }
 
-    private async Task SendEnvelopeAsync(string destination, Envelope envelope, CancellationToken ct)
+    private Task<bool> SendEnvelopeAsync(string destination, Envelope envelope, CancellationToken ct)
     {
         var bytes = EnvelopeCodec.Serialize(envelope);
-        await SendEnvelopeAsync(destination, envelope, bytes, ct).ConfigureAwait(false);
+        return SendEnvelopeAsync(destination, envelope, bytes, ct);
     }
 
     private async Task<bool> SendEnvelopeAsync(string destination, Envelope envelope, byte[] bytes, CancellationToken ct,
-        IdleSessionOfferBinding? idleAnswer = null)
+        IdleSessionOfferBinding? idleAnswer = null, OwnedHandshakeWrite? admitOfferResponse = null)
     {
         var logBootstrapGate = false;
         QueuedScreenShareEnvelopeMetadata? bootstrapMetadata = null;
@@ -2376,9 +2376,21 @@ public sealed partial class NknSignalingTransport
             try
             {
                 // Recheck after the outbound gate: queued ACKs may outlive their handshake.
+                if (!CanSendAccelerationHandshakeEnvelope(envelope)) return false;
                 if (idleAnswer is not null && !IsIdleSessionAcceptedAnswerCurrent(idleAnswer)) return false;
-                NknRuntimeDiagnostics.IncrementMessagesSent();
-                await client.SendAsync(destination, bytes, ct).ConfigureAwait(false);
+                if (admitOfferResponse is not null)
+                {
+                    if (!await SendOfferResponseCopyAsync(destination, bytes, NknBridgeChannel.Control, admitOfferResponse, ct).ConfigureAwait(false)) return false;
+                }
+                else if (SendOwnedHandshakeIfBound(destination, envelope, bytes, NknBridgeChannel.Control, false, ct) is { } owned)
+                {
+                    if (!await owned.ConfigureAwait(false)) return false;
+                }
+                else
+                {
+                    NknRuntimeDiagnostics.IncrementMessagesSent();
+                    await client.SendAsync(destination, bytes, ct).ConfigureAwait(false);
+                }
                 RecordTunaFallbackNknControlSent(envelope.Type);
             }
             finally
@@ -2406,19 +2418,38 @@ public sealed partial class NknSignalingTransport
         }
     }
 
-    private async Task SendBulkEnvelopeAsync(string destination, Envelope envelope, CancellationToken ct)
+    private async Task<bool> SendOfferResponseCopyAsync(string destination, byte[] bytes, NknBridgeChannel channel,
+        OwnedHandshakeWrite admission, CancellationToken ct)
     {
-        var bytes = EnvelopeCodec.Serialize(envelope);
-        await SendBulkEnvelopeAsync(destination, envelope, bytes, ct).ConfigureAwait(false);
+        if (client is IOwnedHandshakeClient bridge)
+        {
+            if (!await bridge.SendOwnedHandshakeAsync(destination, bytes, channel, false, admission, ct).ConfigureAwait(false)) return false;
+        }
+        else
+        {
+            if (admission(() => new ValueTask(channel == NknBridgeChannel.Bulk ? client.SendBulkAsync(destination, bytes, ct)
+                    : client.SendAsync(destination, bytes, ct))) is not { } write) return false;
+            await write.ConfigureAwait(false);
+        }
+        NknRuntimeDiagnostics.IncrementMessagesSent();
+        return true;
     }
 
-    private async Task<bool> SendBulkEnvelopeAsync(
+    private enum BulkSendResult { Skipped, RegularNkn, Accelerated }
+
+    private Task<BulkSendResult> SendBulkEnvelopeAsync(string destination, Envelope envelope, CancellationToken ct)
+    {
+        var bytes = EnvelopeCodec.Serialize(envelope);
+        return SendBulkEnvelopeAsync(destination, envelope, bytes, ct);
+    }
+
+    private async Task<BulkSendResult> SendBulkEnvelopeAsync(
         string destination,
         Envelope envelope,
         byte[] bytes,
         CancellationToken ct,
         bool allowAcceleration = true,
-        bool allowAccelerationDuringRegularNknFallback = false)
+        bool allowAccelerationDuringRegularNknFallback = false, OwnedHandshakeWrite? admitOfferResponse = null)
     {
 
         try
@@ -2441,11 +2472,23 @@ public sealed partial class NknSignalingTransport
                     Log($"Bulk envelope sent via Tuna acceleration (type={envelope.Type}, payload_len={envelope.Payload.Length}, msg_id={envelope.MessageId})");
                 }
 
-                return true;
+                return BulkSendResult.Accelerated;
             }
 
-            NknRuntimeDiagnostics.IncrementMessagesSent();
-            await client.SendBulkAsync(destination, bytes, ct).ConfigureAwait(false);
+            if (!CanSendAccelerationHandshakeEnvelope(envelope)) return BulkSendResult.Skipped;
+            if (admitOfferResponse is not null)
+            {
+                if (!await SendOfferResponseCopyAsync(destination, bytes, NknBridgeChannel.Bulk, admitOfferResponse, ct).ConfigureAwait(false)) return BulkSendResult.Skipped;
+            }
+            else if (SendOwnedHandshakeIfBound(destination, envelope, bytes, NknBridgeChannel.Bulk, false, ct) is { } owned)
+            {
+                if (!await owned.ConfigureAwait(false)) return BulkSendResult.Skipped;
+            }
+            else
+            {
+                NknRuntimeDiagnostics.IncrementMessagesSent();
+                await client.SendBulkAsync(destination, bytes, ct).ConfigureAwait(false);
+            }
             if (envelope.Type == MsgType.FileTransferDataFrame)
             {
                 RecordTunaFallbackNknFrameSent(envelope.Type, NknBridgeChannel.Bulk, bytes.Length);
@@ -2455,7 +2498,7 @@ public sealed partial class NknSignalingTransport
                 Log($"Bulk envelope sent (type={envelope.Type}, payload_len={envelope.Payload.Length}, msg_id={envelope.MessageId})");
             }
 
-            return false;
+            return BulkSendResult.RegularNkn;
         }
         catch (Exception ex)
         {
@@ -2465,7 +2508,7 @@ public sealed partial class NknSignalingTransport
         }
     }
 
-    private async Task SendEnvelopeWithAckRetryAsync(
+    private async Task<bool> SendEnvelopeWithAckRetryAsync(
         string destination,
         Envelope envelope,
         CancellationToken ct,
@@ -2489,7 +2532,7 @@ public sealed partial class NknSignalingTransport
             {
                 ct.ThrowIfCancellationRequested();
 
-                await SendEnvelopeAsync(destination, envelope, ct);
+                if (!await SendEnvelopeAsync(destination, envelope, ct).ConfigureAwait(false)) return false;
 
                 try
                 {
@@ -2497,11 +2540,11 @@ public sealed partial class NknSignalingTransport
                     if (outcome == AckWaitOutcome.Superseded)
                     {
                         Log($"Ack wait superseded (msg_id={envelope.MessageId}, type={envelope.Type}, reason={pendingAck.CompletionReason ?? "superseded"})");
-                        return;
+                        return false;
                     }
 
                     Log($"Ack received (msg_id={envelope.MessageId}, type={envelope.Type}, attempt={attempt + 1})");
-                    return;
+                    return true;
                 }
                 catch (TimeoutException)
                 {
@@ -2524,6 +2567,7 @@ public sealed partial class NknSignalingTransport
                     await Task.Delay(delay, ct);
                 }
             }
+            return false;
         }
         finally
         {
@@ -3810,6 +3854,7 @@ public sealed partial class NknSignalingTransport
         bool IsLowPriorityScreenShareCursorState)
     {
         public IdleSessionOfferBinding? IdleAnswer { get; init; }
+        public OwnedHandshakeWrite? FileOfferWrite { get; init; }
     }
 
     private sealed class JoinRequestPayload

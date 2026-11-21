@@ -16,6 +16,11 @@ internal enum TunaWalletLinkStatus
 
 internal sealed class TunaWalletLinkState
 {
+    public Guid? LinkId { get; init; }
+
+    // Legacy or never-validated links have no revision until their next validation.
+    public Guid? ValidationRevision { get; init; }
+
     public string? WalletPath { get; init; }
 
     public DateTimeOffset? LinkedUtc { get; init; }
@@ -23,6 +28,12 @@ internal sealed class TunaWalletLinkState
     public DateTimeOffset? LastVerifiedUtc { get; init; }
 
     public string? WalletAddress { get; init; }
+
+    // A failed check has no verified balance or display address, but unlink must still identify its owner.
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? PreviousVerifiedPayer { get; init; }
+
+    private string? PayerIdentity => Status == TunaWalletLinkStatus.ValidationFailed ? PreviousVerifiedPayer : WalletAddress;
 
     public string? BalanceNkn { get; init; }
 
@@ -53,9 +64,22 @@ internal sealed class TunaWalletLinkState
 
     public static TunaWalletLinkState Unlinked { get; } = new();
 
+    internal bool IsSameLinkAs(TunaWalletLinkState other)
+        => IsLinked && LinkId == other.LinkId && LinkedUtc == other.LinkedUtc &&
+           string.Equals(WalletPath, other.WalletPath, StringComparison.Ordinal);
+
+    internal bool IsSamePayerLinkAs(TunaWalletLinkState other)
+        => IsSameLinkAs(other) && string.Equals(PayerIdentity, other.PayerIdentity, StringComparison.Ordinal);
+
+    internal bool IsSameValidationAs(TunaWalletLinkState other)
+        => IsSamePayerLinkAs(other) && ValidationRevision == other.ValidationRevision &&
+           Status == other.Status && LastVerifiedUtc == other.LastVerifiedUtc &&
+           BalanceNkn == other.BalanceNkn && LastFailureReason == other.LastFailureReason;
+
     public static TunaWalletLinkState Linked(string walletPath, DateTimeOffset linkedUtc)
         => new()
         {
+            LinkId = Guid.NewGuid(),
             WalletPath = Path.GetFullPath(walletPath),
             LinkedUtc = linkedUtc,
             Status = TunaWalletLinkStatus.LinkedUnverified,
@@ -69,8 +93,11 @@ internal sealed class TunaWalletLinkState
         {
             return new TunaWalletLinkState
             {
+                LinkId = LinkId,
+                ValidationRevision = Guid.NewGuid(),
                 WalletPath = WalletPath,
                 LinkedUtc = LinkedUtc,
+                PreviousVerifiedPayer = PayerIdentity,
                 Status = TunaWalletLinkStatus.ValidationFailed,
                 LastFailureReason = string.IsNullOrWhiteSpace(result.Reason) ? "validation_failed" : result.Reason,
             };
@@ -79,6 +106,8 @@ internal sealed class TunaWalletLinkState
         var balance = string.IsNullOrWhiteSpace(result.BalanceNkn) ? "0" : result.BalanceNkn.Trim();
         return new TunaWalletLinkState
         {
+            LinkId = LinkId,
+            ValidationRevision = Guid.NewGuid(),
             WalletPath = WalletPath,
             LinkedUtc = LinkedUtc,
             LastVerifiedUtc = verifiedUtc,

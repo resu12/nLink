@@ -17,8 +17,13 @@ internal sealed class NknTunaAccelerationOptions
 
     public string? ListenerEndpoint { get; private init; }
 
-    public NknAccelerationLaneKind Lanes { get; private init; } =
+    private NknAccelerationLaneKind ConfiguredLanes { get; init; } =
         NknAccelerationLaneKind.File | NknAccelerationLaneKind.Screen;
+    private Func<NknAccelerationLaneKind>? RuntimeLaneLimit { get; init; }
+    internal bool UsesRuntimeLanePreferences => RuntimeLaneLimit is not null;
+
+    public NknAccelerationLaneKind Lanes =>
+        RuntimeLaneLimit is null ? ConfiguredLanes : ConfiguredLanes & RuntimeLaneLimit();
 
     public int QueueCapacity { get; private init; } = 1024;
 
@@ -37,7 +42,8 @@ internal sealed class NknTunaAccelerationOptions
     public static NknTunaAccelerationOptions CreateRuntimePilot(
         string sidecarExePath,
         NknAccelerationLaneKind lanes,
-        bool canOfferListener = true)
+        bool canOfferListener = true,
+        Func<NknAccelerationLaneKind>? runtimeLaneLimit = null)
     {
         if (string.IsNullOrWhiteSpace(sidecarExePath))
         {
@@ -54,9 +60,10 @@ internal sealed class NknTunaAccelerationOptions
         {
             Enabled = true,
             SidecarExePath = normalizedPath,
-            Lanes = lanes == NknAccelerationLaneKind.None
+            ConfiguredLanes = lanes == NknAccelerationLaneKind.None
                 ? NknAccelerationLaneKind.File | NknAccelerationLaneKind.Screen
                 : lanes,
+            RuntimeLaneLimit = runtimeLaneLimit,
             CanOfferListener = canOfferListener,
         };
     }
@@ -78,7 +85,8 @@ internal sealed class NknTunaAccelerationOptions
             Enabled = Enabled,
             SidecarExePath = SidecarExePath,
             ListenerEndpoint = ListenerEndpoint,
-            Lanes = Lanes,
+            ConfiguredLanes = ConfiguredLanes,
+            RuntimeLaneLimit = RuntimeLaneLimit,
             QueueCapacity = QueueCapacity,
             ConnectTimeoutMs = ConnectTimeoutMs,
             DialerReadyTimeoutMs = DialerReadyTimeoutMs,
@@ -115,7 +123,7 @@ internal sealed class NknTunaAccelerationOptions
             Enabled = isEnabled,
             SidecarExePath = NormalizePathOrNull(sidecarExe),
             ListenerEndpoint = string.IsNullOrWhiteSpace(listenerEndpoint) ? null : listenerEndpoint.Trim(),
-            Lanes = ParseLanes(lanes),
+            ConfiguredLanes = ParseLanes(lanes),
             CanOfferListener = isEnabled && !string.IsNullOrWhiteSpace(listenerEndpoint),
         };
     }
