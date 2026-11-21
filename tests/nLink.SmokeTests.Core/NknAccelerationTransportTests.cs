@@ -39328,6 +39328,18 @@ public sealed partial class NknAccelerationTransportTests : CoreSmokeTestsBase, 
                 ? forward(lane, envelopeBytes.AsSpan().ToArray(), ct)
                 : Task.FromResult(false);
 
+        public async Task<bool> TryWritePairedCommitConfirmationAsync(byte[] bytes, long expiresUtcTicks, Func<Func<Task>, Task?> startIfCurrent, CancellationToken ct)
+        {
+            bool sent = false;
+            async Task Write()
+            {
+                if (!ct.IsCancellationRequested && DateTime.UtcNow.Ticks < expiresUtcTicks)
+                    sent = await TrySendAsync(NknBridgeChannel.Bulk, bytes, ct);
+            }
+            if (startIfCurrent(Write) is { } writing) await writing;
+            return sent;
+        }
+
         public async Task StopAsync(string reason, CancellationToken ct)
         {
             Interlocked.Increment(ref stopCalls);
