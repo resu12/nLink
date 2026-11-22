@@ -8,28 +8,28 @@ Powered by NKN. Official website: https://nkn.org/
 
 Minimal `.NET 8` / Avalonia desktop app for Windows with deterministic smoke tests.
 
-## Download 0.7.0 hotfix revision 2
+## Download 0.7.1
 
-[Download 0.7.0 hotfix revision 2](https://github.com/resu12/nLink/releases/tag/v0.7.0-hotfix.2), released **17 November 2026** from `36557e07` with CI #108's exact validated artifacts. The app still reports **0.7.0**: use the release tag and its own `SHA256SUMS.txt` to distinguish packages.
+[nLink 0.7.1 release notes](https://github.com/resu12/nLink/releases/tag/v0.7.1). The app and installer are unsigned; live Tuna verification is incomplete.
 
-- [Windows x64 installer (recommended)](https://github.com/resu12/nLink/releases/download/v0.7.0-hotfix.2/nLink-Setup-win-x64-0.7.0.exe)
-- [Windows x64 portable ZIP](https://github.com/resu12/nLink/releases/download/v0.7.0-hotfix.2/nLink-Portable-win-x64-0.7.0.zip)
-- [SHA256SUMS.txt](https://github.com/resu12/nLink/releases/download/v0.7.0-hotfix.2/SHA256SUMS.txt)
+- [Windows x64 installer (recommended)](https://github.com/resu12/nLink/releases/download/v0.7.1/nLink-Setup-win-x64-0.7.1.exe)
+- [Windows x64 portable ZIP](https://github.com/resu12/nLink/releases/download/v0.7.1/nLink-Portable-win-x64-0.7.1.zip)
+- [SHA256SUMS.txt](https://github.com/resu12/nLink/releases/download/v0.7.1/SHA256SUMS.txt)
 
-## What's new in the 0.7.1 candidate
+## What's new in 0.7.1
 
-0.7.1 is available for local review, not as a published download. Either peer can drop one Explorer file into chat, and the receiver can choose where to save it. You can enable Tuna during an approved session without reconnecting; **Tuna is ready** describes the connection, not the route a file is using. See the [changelog](CHANGELOG.md#071---unreleased) and [local installer record](docs/ReleaseRunbook.md#071-local-review-build).
+Drop a single Explorer file into chat, choose where to save it, or enable Tuna without reconnecting. **Tuna is ready** describes the session connection, not the route a file is using.
 
 ## Quick Start (Windows)
 
-1. Download the Installer (recommended) or Portable ZIP from [hotfix 2's release page](https://github.com/resu12/nLink/releases/tag/v0.7.0-hotfix.2). A source-branch version is not necessarily a published release.
+1. Download the installer (recommended) or portable ZIP from the [0.7.1 release page](https://github.com/resu12/nLink/releases/tag/v0.7.1).
 2. Helper opens nLink, clicks `I want to help someone`, and waits for the full helper address beginning with `nlinkh1.` before copying it. Do not copy the brief short bootstrap address shown by older builds.
 3. Helpee opens nLink, clicks `I need help`, enters the provided helper address, and clicks `Request help`.
 4. Helper receives the incoming help request and clicks `Accept`.
 5. Both sides compare the session verification symbols, then Helpee clicks `Allow`.
 6. Chat opens on both sides.
 7. If `Transfer files` is allowed for the session, either side can click `Send file`.
-   In the 0.7.1 candidate, either side can also drop one local file from Windows Explorer into chat. When sharing a screen, drop it in the chat panel, not on the shared display. The receiver can choose **Accept** for Downloads, **Save as…** to pick a folder and filename, or **Decline**. Canceling the picker leaves the offer pending. If the chosen name is already in use, choose another name; nLink won’t replace the existing file.
+   Either side can also drop one local file from Windows Explorer into chat. When sharing a screen, drop it in the chat panel, not on the shared display. The receiver can choose **Accept** for Downloads, **Save as…** to pick a folder and filename, or **Decline**. Canceling the picker leaves the offer pending. If the chosen name is already in use, choose another name; nLink won’t replace the existing file.
 
 Home:
 
@@ -73,7 +73,7 @@ Notes:
 - Chat UX keeps `Enter` to send, `Shift+Enter` for a new line, stable pane sizing in chat-only and screen-sharing layouts, and message entry remains available during screen sharing.
 - Each offer contains one file. Hotfix 2 uses the file picker; 0.7.1 also accepts a single file dropped onto chat. Neither supports folders, multi-file drops, or resuming after restart.
 - Route defaults are explicit: regular NKN uses `regular_nkn_v4_fast` / protocol `4`, active file Tuna uses `file_tuna_v4` / protocol `4`, and controlled post-Tuna fallback uses `post_tuna_fallback_v6` / protocol `6` for the affected transfer. `diagnostic_regular_nkn_v6` is unsafe developer/test opt-in only; active `file_tuna_v6` is invalid.
-- The receiver decides separately for each file. In the 0.7.1 candidate, if NKN retries the same offer after a reply is lost, the receiver doesn’t need to answer twice. A new offer still needs its own approval. File-transfer messages are protected by nLink’s session envelope and source/session checks.
+- The receiver decides separately for each file. If NKN retries the same offer after a reply is lost, the receiver doesn’t need to answer twice. A new offer still needs its own approval. File-transfer messages are protected by nLink’s session envelope and source/session checks.
 - The bundled NKN bridge/runtime remains a trust boundary; transport encryption does not replace nLink's application checks.
 - Active file transfers can be paused, resumed, or canceled from either side when file transfer is allowed.
 - In 0.7.1, if you turn off Tuna, cancel a file, and the other person sends one back, the return file needs its own approval. Once accepted, it can start on regular NKN without inheriting the canceled file’s pause or waiting for Tuna to reconnect.
