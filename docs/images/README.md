@@ -2,7 +2,7 @@
 
 ## Gallery
 
-The user supplied these five screenshots on 16 November 2026 for the README during hotfix-2 review. The root README now shows only the home image; the other views remain here. The browser tabs in the screen-sharing image were blurred after the initial import. The original supplied files were left untouched.
+The user supplied these five screenshots on 16 November 2026 for the README during hotfix-2 review. The root README shows all five views using the images below. The browser tabs in the screen-sharing image were blurred after the initial import. The original supplied files were left untouched.
 
 | README image | Supplied file | View |
 | --- | --- | --- |
