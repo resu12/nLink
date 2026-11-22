@@ -5,14 +5,14 @@ This is the operator entry point for file transfer and Tuna. For runtime archite
 ## Using File Transfer And Tuna
 
 - Complete normal session approval and verification, and allow `Transfer files` before sending. The receiver must explicitly accept each file.
-- In the 0.7.1 candidate, use **Send file** or drop exactly one local Explorer file onto **chat**, including during screen sharing. Both paths make the same offer. A folder or multi-item drop makes no offer.
+- Use **Send file** or drop exactly one local Explorer file onto **chat**, including during screen sharing. Both paths make the same offer. A folder or multi-item drop makes no offer.
 - **Accept** saves to Downloads, adding a numbered suffix if needed. In 0.7.1, **Save as…** lets the receiver choose another folder or name. Canceling the picker leaves the offer pending; an occupied name is not overwritten.
 - Either side can pause, resume, or cancel an active transfer. Resume after app restart and folder transfers are not supported. The default size cap is `25 GiB`.
 - Progress displays accepted/receiver-confirmed bytes, with presentation-only smoothing. A queued send is not delivery, and the displays need not be identical at every instant. A full bar alone is not final SHA verification or terminal completion.
 - Tuna is optional and default-off. Link/validate a wallet in `Options -> Wallet`; this does not spend NKN or activate transport. Paid runtime use needs explicit enablement and a session-only unlock. Review price, volume, and duration caps first.
 - The selected listener pays; the other peer dials without paying. When both sides unlock, helpee has priority. Payment telemetry is best-effort: no reported payment event does not prove free traffic.
-- Tuna startup text and fish pulsing indicate an unlocked connection attempt. Gray means inactive, light blue identifies the non-paying side, and yellow the selected payer. Readiness or a colored icon is not authenticated file-delivery proof.
-- Switching Tuna off preserves the approved session and regular NKN control. An active Tuna V4 transfer live-transitions to V6 fallback on that same transfer; explicit reactivation can return it to Tuna V4. After successful final fallback completion, the next transfer resolves from current transport state.
+- Gray means Tuna is inactive or unavailable; a pulse indicates negotiation. Yellow identifies the selected payer and light blue the non-paying side. **Tuna is ready** means the current session connection is confirmed; the tooltip can still say that the file uses regular NKN.
+- Switching Tuna off preserves the approved session and regular NKN control. An active Tuna V4 file is designed to transition to V6 fallback on the same transfer. Reconnecting Tuna does not change either file's route or clear a user pause; returning a fallback file to Tuna requires separate coordinator authorization for that file and direction.
 
 For an end-user problem, collect Diagnostics from both peers first; do not ask users to run paid matrices. See [supportability.md](supportability.md).
 
@@ -118,7 +118,7 @@ Historical references (not proof of the current live-route contract):
 
 ## Current Release Qualification
 
-Use the [runbook's current candidate evidence](ReleaseRunbook.md#current-qualification-update-2026-10-15) rather than historical benchmarks as the current reference. The October 15 seven-scenario Phase 5 gate on `cf8ea296` passed strict correctness; authenticated-delivery closeout also passed. It covers regular V4, authenticated Tuna V4, switch-off on either peer, helper-to-helpee payer handoff, the 256 MiB regular/Tuna/fallback/reactivation cycle, and a subsequent Tuna transfer. Separate performance FAIL/WARN results remain recorded.
+Use the [published 0.7.1 validation record](ReleaseRunbook.md#published-071-2026-11-22) for the exact released package. Live Tuna delivery and controlled fallback were not verified on that portable. The [October 15 Phase 5 correctness pass](ReleaseRunbook.md#historical-qualification-update-2026-10-15) covers its own payload only; its separate performance FAIL/WARN results remain recorded.
 
 The route cycle requires `regular_nkn_v4_fast -> file_tuna_v4 -> post_tuna_fallback_v6 -> file_tuna_v4 -> post_tuna_fallback_v6`, including the second coordinator publication and authenticated Tuna delivery at both activations. SHA OK or fallback completion alone is insufficient. Evidence is reusable only when the covered source, contracts, and packaged hashes remain applicable; it does not prove all network conditions or a throughput guarantee.
 

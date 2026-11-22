@@ -2,23 +2,19 @@
 
 ## Reporting a security issue
 
-Please report security issues privately to:
-
-- `security@yourdomain`
-
-Do not open a public GitHub issue for a security problem.
+Share security reports only through a verified private channel to a maintainer. This repository does not currently list a private contact or have GitHub private vulnerability reporting enabled. If you cannot reach a maintainer privately, do not post the details in a public issue or discussion.
 
 ## What to include
 
 Please include:
 
-- nLink version/tag (for example `v0.2.0-beta.1`)
+- nLink version/tag (for example `v0.7.1`)
 - OS version (Windows version/build)
 - Install type (`Installer` or `Portable`)
 - Steps to reproduce
 - What happened / what you expected
-- `Diagnostics -> Copy diagnostics` output
+- Reviewed diagnostics, if relevant; remove secrets and identifying details before sharing
 
 ## Supported versions
 
-- Latest pre-release only
+Use the [latest published release](https://github.com/resu12/nLink/releases/latest) when checking whether an issue still affects nLink. This page does not promise fixes for older releases.

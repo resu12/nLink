@@ -8,7 +8,7 @@ assignees: ''
 
 ## Version
 
-Example: `v0.7.0`
+Example: `v0.7.1`
 
 ## Install type
 
@@ -56,7 +56,7 @@ What happened instead?
 
 ## Diagnostics paste
 
-Open `Diagnostics` -> `Copy diagnostics` and paste here. See `docs/supportability.md` for what to collect.
+Under **Options → Diagnostics**, refresh **Session snapshot**, then select **Copy diagnostics** and review the output before pasting. See the [support guide](../../docs/supportability.md).
 
 ## Hang Report
 

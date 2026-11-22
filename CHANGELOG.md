@@ -1,6 +1,8 @@
 # Changelog
 
-## [0.7.1] - Unreleased
+## [0.7.1] - 2026-11-22
+
+[Release notes and downloads](https://github.com/resu12/nLink/releases/tag/v0.7.1) · [Validation record](docs/ReleaseRunbook.md#published-071-2026-11-22)
 
 Changes since the published 0.7.0 hotfix revision 2:
 

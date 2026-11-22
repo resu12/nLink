@@ -356,7 +356,9 @@ The session header shows a small Tuna pictogram next to the role label:
 - light blue means Tuna is connecting or active on the non-paying dialing side,
 - yellow means this computer is selected as the paid Tuna listener side. The tooltip also explains that this computer pays for Tuna traffic while active.
 
-The icon must stay gray and non-pulsing while the wallet is locked. When both sides are unlocked, helpee priority can briefly change the helper from yellow listener-starting state to blue dialer state as the helper yields to the helpee-paid listener.
+The local wallet must be unlocked to pay, but the free dialer can show blue with its own switch off when the peer pays. When both sides unlock, Helpee priority can change the Helper from a yellow listener-starting state to a blue dialer state.
+
+**Tuna is ready** requires confirmation of the current session transport on each peer. After switch-off, the old file route cannot keep the fish colored or restore readiness during reconnect, even if the file is resumed. A ready session can coexist with a file using regular NKN; the tooltip can report both. File routes and user pauses are separate from header state.
 
 The session header switch is placed next to the pictogram because it controls the session-only wallet unlock for Tuna.
 

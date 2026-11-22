@@ -22,6 +22,7 @@ The RC guardrail workflow blocks pull requests that change:
 
 Ignored during matching:
 
+- `artifacts/**`
 - `**/bin/**`
 - `**/obj/**`
 

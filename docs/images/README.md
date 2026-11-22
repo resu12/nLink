@@ -1,18 +1,18 @@
 # README screenshot provenance
 
-## Current gallery
+## Gallery
 
-The user supplied these five screenshots on 16 November 2026 for the README during hotfix-2 review. They are copied byte-for-byte; the original Desktop files are untouched. No GUI session, capture helper or image editing was needed.
+The user supplied these five screenshots on 16 November 2026 for the README during hotfix-2 review. The root README now shows only the home image; the other views remain here. The browser tabs in the screen-sharing image were blurred after the initial import. The original supplied files were left untouched.
 
 | README image | Supplied file | View |
 | --- | --- | --- |
-| `home-2026-11-16.png` | `nlink.png` | Home |
-| `helper-2026-11-16.png` | `helper.png` | Helper preparing its address; Copy/Share disabled and QR placeholder |
-| `helpee-2026-11-16.png` | `helpee.png` | Empty helper-address entry |
-| `screenshare-2026-11-16.png` | `acreensharing.png` | Active Helpee screen preview with chat |
-| `file-transfer-2026-11-16.png` | `filetransfer.png` | Transfer in progress with Pause/Cancel |
+| [Home](home-2026-11-16.png) | `nlink.png` | Home |
+| [Helper](helper-2026-11-16.png) | `helper.png` | Helper preparing its address; Copy/Share disabled and QR placeholder |
+| [Helpee](helpee-2026-11-16.png) | `helpee.png` | Empty helper-address entry |
+| [Screen sharing](screenshare-2026-11-16.png) | `acreensharing.png` | Active Helpee screen preview with chat |
+| [File transfer](file-transfer-2026-11-16.png) | `filetransfer.png` | Transfer in progress with Pause/Cancel |
 
-The date identifies receipt of the images, not an independently verified capture time. The exact executable/commit was not supplied with them. They illustrate the UI and do not establish transfer completion, Tuna payload routing, throughput, remote-control operation or a CI/release pass. The screen-sharing image includes the user's shared desktop and a canceled transfer card; those pixels are retained as supplied. The helper image contains no ready address or QR code to mask.
+The date identifies receipt of the images, not an independently verified capture time. The exact executable/commit was not supplied with them. They illustrate the UI and do not establish transfer completion, Tuna payload routing, throughput, remote-control operation or a CI/release pass. The helper image contains no ready address or QR code to mask.
 
 ## Preserved earlier captures
 

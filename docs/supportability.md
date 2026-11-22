@@ -12,7 +12,7 @@ Redaction is best-effort. The receiving peer can see the full saved path locally
 
 ## What To Include In Issues
 
-- nLink version, for example `v0.7.0`.
+- nLink version, for example `v0.7.1`.
 - Install type: Installer or Portable.
 - Your role: Helper, Helpee, or both.
 - Area affected: Connection, chat, file transfer, screen share, remote control, install/update, options, or diagnostics.

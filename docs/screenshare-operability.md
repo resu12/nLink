@@ -31,7 +31,7 @@ For the runtime architecture and current H.264 media pipeline, see `docs/screens
 - For low-FPS, cursor-tail, or catch-up reports, read `low-fps-catch-up-summary.txt` after the quality summary; it classifies whether reduced/catch-up behavior is external-delivery driven, helper recovery/visibility driven, helper apply cadence limited, sender capture/encode budget limited, sender policy hysteresis, or absent.
 - For external delivery/topology work, run live soaks with `-ExternalTopologyProfile` on `NknSoak`, then read `external-topology-summary.txt` and use `ExternalTopologyAudit` to compare named artifacts.
 - The promoted default keeps control at 4 subclients, bulk at 2 subclients, and media at 8 subclients; `MediaFanout8` remains as an explicit operator profile for confirmation runs.
-- For support/debug capture, start with `Options -> Diagnostics -> Copy diagnostics`; the copied text includes a compact `Screenshare evidence` block when an analyzed artifact exists.
+- For support/debug capture, refresh **Session snapshot** before using `Options -> Diagnostics -> Copy diagnostics`. The compact `Screenshare evidence` block can include a previous analyzed run, not a verdict on the live session. In reports, distinguish the Helpee preview from a changing image on the Helper.
 - For hangs or freezes, use `Options -> Diagnostics -> Save Hang Report`; the report folder includes `screenshare-evidence.txt` with the same summary.
 - Attach a full `artifacts\soak\<timestamp>` directory only when the diagnostics evidence points to one or support asks for the raw artifact.
 - Do not manually extend the retained Track B analyzer chain during normal screenshare work.

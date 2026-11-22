@@ -126,7 +126,7 @@ Control messages use the secure nLink session control path:
 
 `offer.v2`, `accept.v1`, and `session_open.v2` may carry `fileTransferRoute`. Missing route tokens remain compatible when local context can infer the route; invalid or protocol-mismatched route tokens are rejected as transport-incompatible.
 
-#### Offer retries in the 0.7.1 candidate
+#### Offer retries
 
 NKN retries keep the same `offerInstanceId`. An authenticated retry must match the original offer, not just the transfer ID or filename. It can repeat a recorded **Accept** while the receiver is still waiting for session-open, or a recorded **Decline** for up to two minutes. Neither reply opens a new prompt, authorizes another offer, or changes the coordinator’s route decision.
 

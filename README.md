@@ -33,4 +33,6 @@ Drop a file from Windows Explorer into chat, choose where to save an incoming fi
 
 [Docs index](docs/README.md) · [Release runbook](docs/ReleaseRunbook.md) · [MIT license](LICENSE)
 
+For maintainers: [test lanes](docs/test-lanes.md) (`tools\Test-Lanes.ps1`), [screenshare evidence](docs/screenshare-operability.md) (`tools\ScreenShare-Ops.ps1`), and the [RC checklist](docs/release/rc-validation-checklist.md).
+
 Created by Codex/GPT.

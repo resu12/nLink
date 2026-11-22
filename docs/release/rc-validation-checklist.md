@@ -1,6 +1,6 @@
 # RC Validation Checklist
 
-This is a sign-off template; an unchecked box is not a test result. For 0.7.1, use [published hotfix 2](../ReleaseRunbook.md#published-070-hotfix-revision-2-2026-11-17) as the upgrade baseline and retain the [0.7.1-only Beta Readiness decision](../ReleaseRunbook.md#071-beta-readiness-decision-2026-11-19). Record results for the selected artifacts. Neither a successful local build nor green CI proves live GUI or upgrade behavior.
+This is a sign-off template; an unchecked box is not a test result. Use the previous supported public installer as the upgrade baseline and record results for the selected artifacts. Neither a successful local build nor green CI proves live GUI or upgrade behavior. See the [published 0.7.1 record](../ReleaseRunbook.md#published-071-2026-11-22) for its upgrade baseline, actual outcomes, and release-specific decisions; they do not carry forward.
 
 ## Build & Packaging
 

@@ -1,6 +1,6 @@
 # nLink Docs
 
-For Windows downloads, use [0.7.0 hotfix revision 2](https://github.com/resu12/nLink/releases/tag/v0.7.0-hotfix.2). This branch documents the **unreleased 0.7.1 candidate**. See [what changed](../CHANGELOG.md#071---unreleased) and [which local installer was checked](ReleaseRunbook.md#071-local-review-build).
+Start with the [Windows Quick Start](../README.md#quick-start) and [0.7.1 downloads](https://github.com/resu12/nLink/releases/tag/v0.7.1). See [what changed](../CHANGELOG.md#071---2026-11-22), [known issues](KnownIssues.md), and the [published artifact and validation record](ReleaseRunbook.md#published-071-2026-11-22).
 
 ## Current Operator Guides
 
@@ -20,7 +20,7 @@ For Windows downloads, use [0.7.0 hotfix revision 2](https://github.com/resu12/n
 
 - [Published hotfix-1 notes](releases/0.7.0-hotfix.1.md) and [original 0.7.0 notes](releases/0.7.0.md).
 - [Published hotfix-2 record](ReleaseRunbook.md#published-070-hotfix-revision-2-2026-11-17) and [historical hotfix-2 review notes](releases/0.7.0-hotfix.2.md).
-- [README screenshot provenance](images/README.md): captured version, privacy masks and pending replacements.
+- [Screenshot gallery and provenance](images/README.md): the image used in the README, additional UI views, and privacy edits.
 - [`docs/ReleaseRunbook.md`](ReleaseRunbook.md): canonical release process, published package provenance, and historical candidate evidence.
 - [`docs/build-test-lock-avoidance.md`](build-test-lock-avoidance.md): Windows-safe build/test command shapes for avoiding generated-output locks during repeated manual runs.
 - [`docs/release/rc-validation-checklist.md`](release/rc-validation-checklist.md): active RC validation checklist.
@@ -41,4 +41,4 @@ For Windows downloads, use [0.7.0 hotfix revision 2](https://github.com/resu12/n
 - `docs/releases/**`: published release records plus explicitly marked candidate drafts. Old release notes are not current operating instructions.
 - [Historical archive](archive/README.md): file-transfer investigations and design notes, retained evidence summaries, and superseded screenshots. These are separated from current operator guidance; their original outcomes and limitations remain unchanged.
 - [`docs/tuna-poc-runbook.md`](tuna-poc-runbook.md): standalone synthetic benchmark, not authenticated nLink payload or release qualification.
-- `docs/images/**`: current README screenshots and provenance. Superseded captures are in [the image archive](archive/images/).
+- `docs/images/**`: UI screenshots and provenance. Older captures are in [the image archive](archive/images/).

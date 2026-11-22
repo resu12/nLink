@@ -4,6 +4,19 @@ This runbook describes the version-neutral steps to ship `v<version>` from a cle
 
 It is the canonical release process; use [rc-validation-checklist.md](release/rc-validation-checklist.md) for sign-off. A successful build, source checkpoint, or operator-analyzer PASS does not by itself qualify a release. Do not tag or publish before mandatory security/route proofs, payload provenance, packaging checks, and CI sign-off are established.
 
+## Published 0.7.1 (2026-11-22)
+
+[`v0.7.1`](https://github.com/resu12/nLink/releases/tag/v0.7.1) points to `aab123d0157ce93da6b564c8044c57180f810bdc`. Publication used the exact [CI #124](https://github.com/resu12/nLink/actions/runs/44951180233) portable, installer, and checksum file without a rebuild. All ten CI jobs passed, including installer smoke. The portable and installer matched the published checksum file. The unsigned exception covers these 0.7.1 artifacts only and is not an Authenticode pass.
+
+| Published file | SHA-256 |
+| --- | --- |
+| `nLink-Portable-win-x64-0.7.1.zip` | `d3e8143b92e59fb2726d34d5f5d88025ac5b5fa25ec603ebea576877148c38c9` |
+| `nLink-Setup-win-x64-0.7.1.exe` | `3f08330e6968a2955dca52562b3a94727783e0e0cd7fe9047064ef02900b99d3` |
+
+- **Upgrade:** The isolated offline upgrade from published hotfix 2 passed. It does not qualify live sessions or all user settings migrations.
+- **Live file transfer:** The 64 MiB regular NKN test passed correctness with an external-transport warning; performance failed its separate gate. The active-Tuna attempt timed out before file offer/unlock, and the follow-up stopped at bridge preflight. Authenticated Tuna payload delivery and controlled fallback were not verified on the selected portable. The release owner directed publication without further testing; these outcomes are not passes.
+- **Beta Readiness:** [Case 10323 remains unpassed](#071-beta-readiness-decision-2026-11-19). Its disposition is separate from the live-test limitations above.
+
 ## 0.7.1 local review build
 
 On 20 November 2026, the Windows x64 installer was built from `833a3396800740eb57a03b8ae3f0b34571155590`. This is a local candidate, not a public release or a CI artifact.
@@ -12,7 +25,7 @@ On 20 November 2026, the Windows x64 installer was built from `833a3396800740eb5
 | --- | ---: | --- |
 | `nLink-Setup-win-x64-0.7.1.exe` | 87,999,704 | `80E370C152B867C7157501BE1CB6E8C7B72F37733063C734F971DAFB3D10F013` |
 
-The installer and staged app both report `0.7.1`. The package manifest passed, and all 14 portable ZIP files matched installer staging by SHA-256. The installer is unsigned and was not run. These checks do not qualify an upgrade from hotfix 2 or a live session. Before publication, use the [RC checklist](release/rc-validation-checklist.md) for the selected CI artifacts and sign them or obtain a 0.7.1-specific unsigned exception.
+The installer and staged app both reported `0.7.1`. The package manifest passed, and all 14 portable ZIP files matched installer staging by SHA-256. This local installer was unsigned and was not run. These build checks did not qualify an upgrade or a live session. The published CI package and its validation are recorded separately above.
 
 ## 0.7.1 Beta Readiness decision (2026-11-19)
 
@@ -110,7 +123,7 @@ dotnet build-server shutdown
 
 Optional GUI smoke requires an interactive Windows desktop. Live NKN/GUI scenarios additionally need escalated execution outside a restricted sandbox and successful live preflights:
 
-The Phase 5 matrix includes `helper-to-helpee-payer-handoff-128mb`: establish Helper-paid Tuna, switch Helper off, enable Helpee-paid Tuna during the same transfer, then switch Helpee off and finish on fallback. Its required published route sequence is `file_tuna_v4 -> post_tuna_fallback_v6 -> file_tuna_v4 -> post_tuna_fallback_v6`; payload must be observed in both Tuna phases, with SHA integrity and both terminal GUIs. The October 15 campaign provides current exact-payload evidence; it is not automatically inherited by later builds. For a future targeted fix, after focused checks and a fresh portable rebuild, select only it with `Run-FileTransferRouteAcceptance.ps1 -MatrixMode phase5-analyzer-gui-acceptance -ScenarioName helper-to-helpee-payer-handoff-128mb -StrictCampaignPreflight`, supplying the fresh executable/sidecar paths and existing test-wallet inputs. Do not bypass the clean-checkpoint, isolation, or live-network preflights.
+The Phase 5 matrix includes `helper-to-helpee-payer-handoff-128mb`: establish Helper-paid Tuna, switch Helper off, enable Helpee-paid Tuna during the same transfer, then switch Helpee off and finish on fallback. Its required published route sequence is `file_tuna_v4 -> post_tuna_fallback_v6 -> file_tuna_v4 -> post_tuna_fallback_v6`; payload must be observed in both Tuna phases, with SHA integrity and both terminal GUIs. The October 15 campaign provides historical evidence for that exact payload, not for 0.7.1 or later builds. For a future targeted fix, after focused checks and a fresh portable rebuild, select only it with `Run-FileTransferRouteAcceptance.ps1 -MatrixMode phase5-analyzer-gui-acceptance -ScenarioName helper-to-helpee-payer-handoff-128mb -StrictCampaignPreflight`, supplying the fresh executable/sidecar paths and existing test-wallet inputs. Do not bypass the clean-checkpoint, isolation, or live-network preflights.
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\tools\Test-Lanes.ps1 -Lane GuiSmoke -Configuration Release

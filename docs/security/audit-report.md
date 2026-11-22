@@ -1,5 +1,7 @@
 # Security Audit Report
 
+This is a retained audit record, not a new audit of the latest public release. For the latest release and its validation scope, see the [release runbook](../ReleaseRunbook.md).
+
 ## Post-Handshake Security Contract
 
 This section defines the intended security boundary for session traffic after the invite and handshake complete.
@@ -133,7 +135,7 @@ Recommended action:
 
 #### Resolved: Bridge build no longer commits or ships a `node_modules` dependency tree
 
-The bridge dependency-tree packaging issue is corrected in the current release state:
+The audit recorded these corrections to the bridge dependency-tree packaging:
 
 - `tools/nkn-bridge/node_modules` is ignored and not tracked
 - `tools/nkn-bridge/.nlink-bundle` is ignored and not tracked
