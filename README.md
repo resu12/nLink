@@ -7,7 +7,6 @@ nLink is a Windows x64 app for helping family and friends with chat, screen shar
 - [Windows x64 installer (recommended)](https://github.com/resu12/nLink/releases/download/v0.7.1/nLink-Setup-win-x64-0.7.1.exe)
 - [Windows x64 portable ZIP](https://github.com/resu12/nLink/releases/download/v0.7.1/nLink-Portable-win-x64-0.7.1.zip)
 - [SHA256SUMS.txt](https://github.com/resu12/nLink/releases/download/v0.7.1/SHA256SUMS.txt)
-- [0.7.1 release notes](https://github.com/resu12/nLink/releases/tag/v0.7.1)
 
 The portable ZIP is self-contained. Extract it and keep its files together; you don't need to install .NET, Node.js, or Go to run it.
 
@@ -45,8 +44,6 @@ The portable ZIP is self-contained. Extract it and keep its files together; you 
 ### File transfer
 
 ![File transfer in progress with Pause and Cancel controls](docs/images/file-transfer-2026-11-16.png)
-
-See the [screenshot gallery notes](docs/images/README.md) for capture details.
 
 ## Usage notes
 
