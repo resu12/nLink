@@ -557,6 +557,12 @@ public sealed partial class NknAccelerationTransportTests
                 if (secondStop)
                 {
                     Assert.NotEmpty((Array)capture.Invoke(helper, ["header_switch_off"])!);
+                    if (initialTunaCase is null && !holdPhysicalSend)
+                    {
+                        // The reactivated V4 lane is still blocked. End the synthetic
+                        // loss before the final fallback can send, not after observing it.
+                        Volatile.Write(ref holdCycleTail, 0);
+                    }
                     await helper.StopAccelerationAsync("header_switch_off", timeout.Token);
                     Assert.Contains(stopEvaluations, evaluation => evaluation.Direction == FileTransferDirection.Inbound &&
                         evaluation.InitiationKind == FileTransferBootstrapInitiationKind.LocalRuntimeDisable &&
