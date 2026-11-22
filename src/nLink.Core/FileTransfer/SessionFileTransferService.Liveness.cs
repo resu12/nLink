@@ -1569,16 +1569,25 @@ public sealed partial class SessionFileTransferService
                 FileTransferRouteResolver.RegularNknV4FastToken,
                 StringComparison.Ordinal) ||
             request.ProtocolVersion != FileTransferProtocol.ProtocolVersionV4 ||
-            transport is not IFileTransferRouteStatus routeStatus ||
-            (!routeStatus.IsFileTunaActiveForRouteSelection &&
-             !routeStatus.IsPostTunaFileFallbackActiveForRouteSelection))
+            transport is not IFileTransferRouteStatus routeStatus)
         {
             return false;
         }
 
+        var tunaActive = routeStatus.IsFileTunaActiveForRouteSelection;
+        var fallbackActive = routeStatus.IsPostTunaFileFallbackActiveForRouteSelection;
+        if (!tunaActive && (!fallbackActive ||
+            (request.Observation is { RoutePublicationGeneration: > 0 } && !routeStatus.IsPostTunaFileFallbackActiveForNewOffer)))
+        {
+            // The caller validated the observation against this transfer's current regular-v4
+            // publication under the same lock. A canceled predecessor's hint cannot supersede
+            // it. Actual recovery still requires the coordinator's authorization below.
+            return false;
+        }
+
         var currentSelection = FileTransferRouteResolver.Resolve(new FileTransferRouteResolverInput(
-            routeStatus.IsFileTunaActiveForRouteSelection,
-            routeStatus.IsPostTunaFileFallbackActiveForRouteSelection,
+            tunaActive,
+            fallbackActive,
             routeStatus.IsDiagnosticRegularNknV6RouteEnabled,
             FileTransferTransportHandoffKind.None,
             transport is IFileTransferTransportProfileProvider profile

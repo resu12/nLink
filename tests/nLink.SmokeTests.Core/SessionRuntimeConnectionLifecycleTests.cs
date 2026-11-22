@@ -1372,6 +1372,62 @@ public sealed class SessionRuntimeConnectionLifecycleTests : SessionRuntimeConne
     }
 
     [Fact]
+    public async Task SessionRuntime_SessionLivenessTimeout_HeartbeatDuringLifecycleGateWaitKeepsWatchdogAlive()
+    {
+        var delay = new ControlledDelayScheduler();
+        var now = DateTimeOffset.UtcNow;
+        var heartbeatSent = new TaskCompletionSource<SessionHeartbeatMessage>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var scripted = new ScriptedSignalingTransport(onSendSessionHeartbeatAsync: (message, _) =>
+        {
+            heartbeatSent.TrySetResult(message);
+            return Task.CompletedTask;
+        });
+        var options = SessionRuntimeWatchdogOptions.Default with
+        {
+            SessionLivenessHeartbeatInterval = TimeSpan.FromSeconds(1),
+            SessionLivenessSuspectTimeout = TimeSpan.FromSeconds(3),
+            SessionLivenessTimeout = TimeSpan.FromSeconds(9),
+        };
+        using var runtime = new SessionRuntime(() => scripted, options, delay.DelayAsync, nowProvider: () => now);
+        runtime.SetRoleForTests(SessionRuntimeRole.Helper);
+        SetPrivateField(runtime, "transport", scripted);
+        InvokePrivateMethod(runtime, "WireTransport", scripted);
+        var security = CreateApprovedSecurityState(new PeerAddress("scripted.helpee.liveness"), new PeerAddress(scripted.LocalPeerAddress));
+        scripted.SetSessionSecurityStateForTests(security);
+        InvokePrivateMethod(runtime, "OnTransportApproved", scripted, EventArgs.Empty);
+        await WaitUntilAsync(() => delay.PendingCount > 0, TimeSpan.FromSeconds(2));
+
+        var sessionId = security.SessionId!.Value.Value;
+        var generation = Assert.IsType<long>(GetPrivateField(runtime, "sessionLivenessGeneration"));
+        var gate = Assert.IsType<SemaphoreSlim>(GetPrivateField(runtime, "lifecycleGate"));
+        Assert.True(await gate.WaitAsync(TimeSpan.FromSeconds(2)));
+        try
+        {
+            // SemaphoreSlim has no public async waiter count. Observe the .NET 8 queue
+            // so the proof is injected after the real timeout tick is blocked, not just scheduled.
+            Assert.Null(GetPrivateField(gate, "m_asyncHead"));
+            now += options.SessionLivenessTimeout;
+            delay.CompleteLatest();
+            await WaitUntilAsync(() => GetPrivateField(gate, "m_asyncHead") is Task, TimeSpan.FromSeconds(2));
+            scripted.InjectSessionLivenessProof(sessionId, generation, sequence: 7);
+        }
+        finally
+        {
+            gate.Release();
+        }
+
+        await WaitUntilAsync(() => delay.PendingCount > 0, TimeSpan.FromSeconds(2));
+        Assert.Equal(SessionRuntimeState.Connected, runtime.State);
+        Assert.False(heartbeatSent.Task.IsCompleted);
+        delay.CompleteLatest();
+        var nextHeartbeat = await heartbeatSent.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        Assert.Equal(sessionId, nextHeartbeat.SessionId);
+        Assert.Equal(generation, nextHeartbeat.Generation);
+        Assert.Equal(generation, Assert.IsType<long>(GetPrivateField(runtime, "sessionLivenessGeneration")));
+        Assert.Equal(SessionRuntimeState.Connected, runtime.State);
+    }
+
+    [Fact]
     public async Task SessionRuntime_SessionLivenessTimeout_TransitionsToConnectionLost()
     {
         var delay = new ControlledDelayScheduler();

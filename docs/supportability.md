@@ -5,11 +5,10 @@ Use this guide when collecting evidence for a bug report, RC issue, or support h
 ## First Evidence To Collect
 
 1. Open `Options` in the app.
-2. Go to the `Diagnostics` tab and click `Copy diagnostics`.
-3. Paste the copied text into the issue or support thread.
-4. If the app is frozen or intermittently hangs, click `Save Hang Report` and attach the generated folder or ZIP when requested.
+2. Go to **Diagnostics**. In 0.7.1, click **Refresh** under **Session snapshot** while the problem is visible. The UTC time tells support when the state was sampled; copying later does not refresh it.
+3. Click **Copy diagnostics**, review the text, then share it with the issue. For intermittent hangs, choose **Save Hang Report** while the app is responsive.
 
-Diagnostics and hang reports are best-effort redacted. Review them before sharing outside the project.
+Redaction is best-effort. The receiving peer can see the full saved path locally. In 0.7.1, the copied diagnostics may retain the filename but mask its directory; the exported log tail also redacts destination paths. The original local log is not rewritten. Check filenames and other identifying details before sharing.
 
 ## What To Include In Issues
 
@@ -24,7 +23,7 @@ Diagnostics and hang reports are best-effort redacted. Review them before sharin
 
 ## Screenshare Evidence
 
-For screenshare issues, start with the normal diagnostics paste. If a screenshare artifact has already been analyzed, Options -> Diagnostics includes a `Screenshare evidence` block with the latest operator verdict.
+For a screen-share issue, say whether the Helpee saw a preview and whether the **Helper** saw a changing image. In 0.7.1, **Previous screen-share test run** shows the last saved test artifact if available. Its verdict is not a measurement of this session.
 
 Use `tools\ScreenShare-Ops.ps1` only when new screenshare evidence is needed:
 
@@ -41,6 +40,7 @@ Start with Diagnostics from both peers and a description of the visible transfer
 
 - Roles, direction, approximate file size, nLink version, and Installer versus Portable.
 - Whether Tuna was enabled/unlocked and whether either peer switched it off or on (including accidental keyboard interaction), with approximate local times.
+- The exact tooltip if the route is in question. In 0.7.1, **Tuna is ready. This file uses regular NKN.** means the session has Tuna available but the file is on regular NKN. A colored fish alone does not show where the bytes went.
 - Sender/receiver terminal states, any error text, and whether pause/cancel/session end was requested. A full progress bar is not proof of successful SHA verification.
 - A screenshot of both cards if progress appears persistently divergent. The displays smooth accepted/receiver-confirmed progress; brief ACK-related differences are expected, but stuck or contradictory terminal states need investigation.
 

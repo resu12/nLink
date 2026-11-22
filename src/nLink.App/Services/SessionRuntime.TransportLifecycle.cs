@@ -167,10 +167,9 @@ public sealed partial class SessionRuntime
             if (nextTransport is ITransportAccelerationStatus accelerationTransport)
             {
                 accelerationTransport.TransportAccelerationStateChanged += owner.OnTransportAccelerationStateChanged;
-                owner.SetTransportAccelerationActive(
-                    accelerationTransport.IsTransportAccelerationActive,
-                    accelerationTransport.TransportAccelerationStatusReason,
-                    accelerationTransport.PendingAccelerationFileTransfer);
+                owner.ApplyTransportAccelerationStatus(nextTransport, accelerationTransport.PublishedAccelerationStatus ??
+                    new(accelerationTransport.IsTransportAccelerationActive, accelerationTransport.TransportAccelerationStatusReason,
+                        accelerationTransport.PendingAccelerationFileTransfer), recoverScreenOnStop: false);
             }
             else
             {

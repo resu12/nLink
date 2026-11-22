@@ -1,6 +1,10 @@
 using System.Collections;
 using System.Reflection;
+using System.Text.Json;
+using NLink.App.Services;
+using NLink.Core;
 using NLink.Core.FileTransfer;
+using NLink.Core.SessionSecurity;
 using NLink.Infra.Nkn;
 
 namespace NLink.SmokeTests;
@@ -88,9 +92,29 @@ public sealed partial class NknAccelerationTransportTests
         => RunPreparedInitialTunaFallbackAsync(false, true, stopMode: 2, writeSource: source,
             sidecarFailureReason: "listener_terminal_tuna_write_failed");
 
+    [Fact]
+    public Task DuplexUnlock_ReconnectsSessionWithoutMovingFallbackOrReverseFile()
+        => RunPreparedInitialTunaFallbackAsync(helperPays: true, payerSends: true, stopMode: 0, duplexUnlock: true);
+
+    [Fact]
+    public Task DuplexUnlock_HeaderIgnoresReadyDeliveredAfterStop()
+        => RunPreparedInitialTunaFallbackAsync(helperPays: true, payerSends: true, stopMode: 0,
+            duplexUnlock: true, stopBeforeHeaderDelivery: true);
+
+    [Theory]
+    [InlineData(false, "accepted")]
+    [InlineData(true, "accepted")]
+    [InlineData(false, "replaced")]
+    [InlineData(false, "rejected")]
+    [InlineData(false, "before_first_write")]
+    public Task DuplexUnlock_ReverseCompletesBeforeAnswer_OnlyOriginalSessionCanReconnect(bool payerSends, string outcome)
+        => RunPreparedInitialTunaFallbackAsync(helperPays: true, payerSends: payerSends, stopMode: 0,
+            duplexUnlock: true, completedReverse: outcome);
+
     private Task RunPreparedInitialTunaFallbackAsync(bool helperPays, bool payerSends, int stopMode = -1,
         string? writeSource = null, bool pendingCallbacks = false, bool resetBeforeStop = false,
-        string? sidecarFailureReason = null, bool dialerFailsFirst = false, bool? peerDownBeforeLocalFailure = null)
+        string? sidecarFailureReason = null, bool dialerFailsFirst = false, bool? peerDownBeforeLocalFailure = null,
+        bool duplexUnlock = false, bool stopBeforeHeaderDelivery = false, string? completedReverse = null)
         => WithPublicPreparationPairAsync(helperPays, async pair =>
         {
             pair.PayerLane.FilePeer = pair.DialerLane;
@@ -249,6 +273,211 @@ public sealed partial class NknAccelerationTransportTests
                     AssertJoinedBootstrapFallbackPublished(sender, outbound, receiver, inbound);
                     AssertInitialFallbackSourcePreserved(sender, outbound);
                     AssertInitialFallbackSourcePreserved(receiver, inbound);
+                    if (duplexUnlock)
+                    {
+                        // The bootstrap gate belongs only to the first file.
+                        SessionFileTransferService.BootstrapFeedbackBeforeSubmissionForTests = prior;
+                        Assert.True((await sender.PauseTransferAsync("prepared-admission", "user_requested", pair.Token))?.IsPaused);
+                        await OfferPausedFileAsync(receiver, sender, "reverse-file", pair.Token);
+                        await WaitUntilAsync(() => receiver.Snapshot.Inbound?.IsPeerPaused == true &&
+                            sender.Snapshot.Inbound?.IsPeerPaused == true, TimeSpan.FromSeconds(3));
+                        FileTransferTransferSnapshot[] Files() => [sender.Snapshot.Outbound!, receiver.Snapshot.Inbound!,
+                            receiver.Snapshot.Outbound!, sender.Snapshot.Inbound!];
+                        var before = Files();
+                        Assert.All(before.Take(2), file => Assert.Equal((FileTransferRouteResolver.PostTunaFallbackV6Token, 6),
+                            (file.RouteToken, file.ProtocolVersion)));
+                        Assert.All(before.Skip(2), file => Assert.Equal("reverse-file", file.TransferId));
+                        var session = before[0].SessionId;
+                        Assert.Equal("AwaitingRetryAuthority", ContextProperty(InvokePrivateMethod(payerSends ? pair.Payer : pair.Dialer,
+                            "CaptureRuntimeUnlockPostFallbackSchedulingBoundary", session)!, "Kind")!.ToString());
+                        Assert.False(pair.Payer.IsTransportAccelerationActive);
+                        Assert.False(pair.Dialer.IsTransportAccelerationActive);
+                        var handoffs = 0;
+                        pair.Payer.OrdinaryFileHandoffBeforeDispatchForTests = pair.Dialer.OrdinaryFileHandoffBeforeDispatchForTests =
+                            () => Interlocked.Increment(ref handoffs);
+                        if (completedReverse is not null)
+                        {
+                            var writer = Assert.IsType<WriterGatePeer>(pair.PayerClient);
+                            var enteredWriter = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+                            var releaseWriter = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+                            var deniedWrite = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+                            var offerWrites = 0;
+                            writer.BeforeOwnedWrite = async (kind, _) =>
+                            {
+                                if (kind != MsgType.TransportAccelerationOffer || completedReverse != "before_first_write") return;
+                                enteredWriter.TrySetResult();
+                                await releaseWriter.Task.WaitAsync(pair.Token);
+                            };
+                            writer.AfterOwnedWrite = frame =>
+                            {
+                                if (frame.Type == MsgType.TransportAccelerationOffer) Interlocked.Increment(ref offerWrites);
+                                return Task.CompletedTask;
+                            };
+                            writer.OwnedWriteRejected = frame =>
+                            {
+                                if (frame.Type == MsgType.TransportAccelerationOffer) deniedWrite.TrySetResult();
+                            };
+                            pair.DialerLane.RejectOfferDialForTests = completedReverse == "rejected";
+                            var held = new TaskCompletionSource<Envelope>(TaskCreationOptions.RunContinuationsAsynchronously);
+                            pair.DialerClient.ShouldDeliverSendAsync = (_, bytes, _) =>
+                            {
+                                if (!EnvelopeCodec.TryDeserialize(bytes, out var frame) || frame.Type != MsgType.TransportAccelerationAnswer)
+                                    return Task.FromResult(true);
+                                held.TrySetResult(frame);
+                                return Task.FromResult(false);
+                            };
+                            await pair.Payer.RequestAccelerationNegotiationAsync("runtime_unlock", pair.Token);
+                            try
+                            {
+                                await (completedReverse == "before_first_write" ? enteredWriter.Task : held.Task).WaitAsync(TimeSpan.FromSeconds(4));
+                                await receiver.ResumeTransferAsync("reverse-file", "user_requested", pair.Token);
+                                await WaitUntilAsync(() => receiver.Snapshot.Outbound?.State == FileTransferTransferState.Completed &&
+                                    sender.Snapshot.Inbound?.State == FileTransferTransferState.Completed, TimeSpan.FromSeconds(6));
+                            }
+                            finally { releaseWriter.TrySetResult(); }
+                            if (completedReverse == "before_first_write")
+                            {
+                                await Task.WhenAny(deniedWrite.Task, held.Task).WaitAsync(pair.Token);
+                                await WaitUntilAsync(() => GetPrivateField(pair.Payer, "outboundAccelerationOfferNonce") is null || held.Task.IsCompleted,
+                                    TimeSpan.FromSeconds(3));
+                                Assert.True(deniedWrite.Task.IsCompletedSuccessfully);
+                                Assert.Equal(0, Volatile.Read(ref offerWrites));
+                                Assert.False(held.Task.IsCompleted);
+                                Assert.Null(GetPrivateField(pair.Payer, "outboundAccelerationOfferNonce"));
+                                Assert.False(pair.Payer.IsTransportAccelerationActive);
+                                Assert.False(pair.Dialer.IsTransportAccelerationActive);
+                                AssertOriginalFallbackUntouched();
+                                return;
+                            }
+                            var answer = await held.Task;
+                            if (completedReverse == "replaced") await OfferPausedFileAsync(receiver, sender, "replacement", pair.Token);
+                            var key = (byte[])InvokePrivateMethod(pair.Payer, "GetControlSessionSharedKeyOrThrow")!;
+                            var expected = JsonSerializer.Deserialize<TransportAccelerationAnswerPayload>(
+                                SessionSecureEnvelopeCodec.Decrypt(key, answer.Payload).Plaintext)!;
+                            var acks = 0;
+                            pair.PayerClient.BeforeSendAsync = (_, bytes, _) =>
+                            {
+                                if (EnvelopeCodec.TryDeserialize(bytes, out var frame) && frame.Type == MsgType.TransportAccelerationAnswerAck)
+                                {
+                                    var ack = JsonSerializer.Deserialize<TransportAccelerationAnswerAckPayload>(
+                                        SessionSecureEnvelopeCodec.Decrypt(key, frame.Payload).Plaintext)!;
+                                    if (ack.Accepted && (ack.SessionId, ack.Nonce, ack.PayerDecisionId) ==
+                                        (expected.SessionId, expected.Nonce, expected.PayerDecisionId)) Interlocked.Increment(ref acks);
+                                }
+                                return Task.CompletedTask;
+                            };
+                            if (completedReverse == "rejected")
+                            {
+                                var wrong = JsonSerializer.Deserialize<TransportAccelerationAnswerPayload>(
+                                    SessionSecureEnvelopeCodec.Decrypt(key, answer.Payload).Plaintext)!;
+                                wrong.PayerDecisionId++;
+                                var mismatched = answer with { MessageId = Guid.NewGuid().ToString("N"),
+                                    Payload = (byte[])InvokePrivateMethod(pair.Dialer, "CreateSecureControlPayload", answer.Type,
+                                        wrong.Nonce, JsonSerializer.SerializeToUtf8Bytes(wrong))! };
+                                InvokePrivateMethod(pair.Payer, "HandleTransportAccelerationAnswer", pair.DialerClient.Address, mismatched);
+                                Assert.Equal(expected.Nonce, GetPrivateField(pair.Payer, "outboundAccelerationOfferNonce"));
+                                Assert.Equal(0, Volatile.Read(ref acks));
+                            }
+                            var priorRetry = pair.Payer.IdleSessionUnlockRetryForTests;
+                            InvokePrivateMethod(pair.Payer, "HandleTransportAccelerationAnswer", pair.DialerClient.Address, answer);
+                            if (completedReverse == "rejected")
+                            {
+                                Assert.False(expected.Accepted);
+                                Assert.Equal("sidecar_unavailable", expected.RejectReason);
+                                Assert.Null(GetPrivateField(pair.Payer, "outboundAccelerationOfferNonce"));
+                                Assert.Same(priorRetry, pair.Payer.IdleSessionUnlockRetryForTests);
+                                Assert.Equal(0, Volatile.Read(ref acks));
+                                Assert.False(pair.Payer.IsTransportAccelerationActive);
+                                Assert.False(pair.Dialer.IsTransportAccelerationActive);
+                            }
+                            else if (completedReverse == "replaced")
+                            {
+                                Assert.Null(GetPrivateField(pair.Payer, "acceptedIdleSessionAnswer"));
+                                Assert.Equal(0, Volatile.Read(ref acks));
+                                Assert.False(pair.Payer.IsTransportAccelerationActive);
+                                Assert.False(pair.Dialer.IsTransportAccelerationActive);
+                                Assert.True(receiver.Snapshot.Outbound!.IsPaused);
+                            }
+                            else
+                            {
+                                await WaitUntilAsync(() => pair.Payer.IsTransportAccelerationActive && pair.Dialer.IsTransportAccelerationActive,
+                                    TimeSpan.FromSeconds(3));
+                                Assert.True(Volatile.Read(ref acks) > 0);
+                            }
+                            AssertOriginalFallbackUntouched();
+                            return;
+                            void AssertOriginalFallbackUntouched()
+                            {
+                                Assert.Equal(0, Volatile.Read(ref handoffs));
+                                foreach (var (old, current) in before.Take(2).Zip(Files()))
+                                    Assert.Equal((old.TransferId, old.RouteToken, old.ProtocolVersion, old.IsPaused, old.IsPeerPaused),
+                                        (current.TransferId, current.RouteToken, current.ProtocolVersion, current.IsPaused, current.IsPeerPaused));
+                            }
+                        }
+                        var atAck = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+                        var releaseAck = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+                        var delayedReady = new TaskCompletionSource<TransportAccelerationStateChangedEventArgs>(TaskCreationOptions.RunContinuationsAsynchronously);
+                        void HoldReady(object? _, TransportAccelerationStateChangedEventArgs e)
+                        {
+                            if (e.IsActive) delayedReady.TrySetResult(e);
+                        }
+                        if (stopBeforeHeaderDelivery) pair.Payer.TransportAccelerationStateChanged += HoldReady;
+                        pair.Payer.IdleSessionBeforeAnswerAckForTests = () => { atAck.TrySetResult(); return releaseAck.Task; };
+                        try
+                        {
+                            await pair.Payer.RequestAccelerationNegotiationAsync("runtime_unlock", pair.Token);
+                            await atAck.Task.WaitAsync(TimeSpan.FromSeconds(5));
+                            Assert.False(pair.Payer.IsTransportAccelerationActive);
+                            Assert.False(pair.Dialer.IsTransportAccelerationActive);
+                        }
+                        finally { releaseAck.TrySetResult(); }
+                        await WaitUntilAsync(() => pair.Payer.IsTransportAccelerationActive && pair.Dialer.IsTransportAccelerationActive &&
+                            pair.Payer.TransportAccelerationStatusReason == "paid_listener_active_file_regular_nkn_fallback" &&
+                            pair.Dialer.TransportAccelerationStatusReason == "free_dialer_active_file_regular_nkn_fallback", TimeSpan.FromSeconds(5));
+                        if (stopBeforeHeaderDelivery)
+                        {
+                            var ready = await delayedReady.Task.WaitAsync(TimeSpan.FromSeconds(3));
+                            pair.Payer.TransportAccelerationStateChanged -= HoldReady;
+                            Assert.Equal("paid_listener_active_file_regular_nkn_fallback", ready.Reason);
+                            using var header = new SessionRuntime(() => pair.Payer);
+                            SetPrivateField(header, "transport", pair.Payer);
+                            var deliver = typeof(SessionRuntime).GetMethod("OnTransportAccelerationStateChanged",
+                                BindingFlags.NonPublic | BindingFlags.Instance)!
+                                .CreateDelegate<EventHandler<TransportAccelerationStateChangedEventArgs>>(header);
+                            var unavailable = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+                            void DeliverStop(object? source, TransportAccelerationStateChangedEventArgs e)
+                            {
+                                deliver(source, e);
+                                if (!e.IsActive) unavailable.TrySetResult();
+                            }
+                            pair.Payer.TransportAccelerationStateChanged += DeliverStop;
+                            try
+                            {
+                                await pair.Payer.StopAccelerationAsync("header_switch_off", pair.Token);
+                                await unavailable.Task.WaitAsync(TimeSpan.FromSeconds(3));
+                                var stopped = header.TransportAccelerationPresentation;
+                                Assert.False(stopped.IsActive);
+                                Assert.False(pair.Payer.IsTransportAccelerationActive);
+                                deliver(pair.Payer, ready);
+                                Assert.Same(stopped, header.TransportAccelerationPresentation);
+                                Assert.False(TunaHeaderStateProjector.FromSnapshot(sender.Snapshot, "NKN",
+                                    header.IsTransportAccelerationActive, header.TransportAccelerationStatusReason).IsActive);
+                            }
+                            finally
+                            {
+                                pair.Payer.TransportAccelerationStateChanged -= DeliverStop;
+                                SetPrivateField(header, "transport", null);
+                            }
+                        }
+                        Assert.Equal(0, Volatile.Read(ref handoffs));
+                        foreach (var (old, current) in before.Zip(Files()))
+                        {
+                            Assert.False(current.IsTerminal);
+                            Assert.Equal((old.TransferId, old.RouteToken, old.ProtocolVersion, old.IsPaused, old.IsPeerPaused),
+                                (current.TransferId, current.RouteToken, current.ProtocolVersion, current.IsPaused, current.IsPeerPaused));
+                        }
+                        return;
+                    }
                     callbacks?.AssertRetiredByExactDispositionAndStaleDrainIsInert();
                     AssertRejectedInitialStop(sender, payerSends ? pair.Payer : pair.Dialer, outbound, senderStop);
                     AssertRejectedInitialStop(receiver, payerSends ? pair.Dialer : pair.Payer, inbound, receiverStop);
@@ -299,7 +528,7 @@ public sealed partial class NknAccelerationTransportTests
                 SessionFileTransferService.BootstrapFeedbackBeforeSubmissionForTests = prior;
                 await sender.CancelTransferAsync("prepared-admission", "test_complete", pair.Token);
             }
-        });
+        }, allowRuntimeRestart: duplexUnlock, gatePayerWrites: completedReverse is not null);
 
     private static void AssertInitialStopCapture(SessionFileTransferService service,
         NknSignalingTransport transport, string contextName)

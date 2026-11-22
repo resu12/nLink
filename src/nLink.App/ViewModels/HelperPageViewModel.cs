@@ -29,7 +29,7 @@ using NLink.Infra.Nkn;
 
 namespace NLink.App.ViewModels;
 
-public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanelBindings, IWindowCloseAware
+public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatFileTransferActions, IWindowCloseAware
 {
     private static readonly TimeSpan DefaultConnectFailureCooldown = TimeSpan.FromSeconds(2);
     private static readonly TimeSpan DefaultApprovalTimeout = SessionApprovalTimeouts.DefaultHumanDecisionTimeout;
@@ -84,6 +84,7 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
     private string statusText = string.Empty;
     private string connectionState = "Idle";
     private bool isTunaActive;
+    private bool fileUsesRegularNkn;
     private string tunaStatusReason = "inactive";
     private string chatDraft = string.Empty;
     private string failureTitle = string.Empty;
@@ -734,6 +735,12 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
     {
         get => isTunaActive;
         private set => SetProperty(ref isTunaActive, value);
+    }
+
+    public bool FileUsesRegularNkn
+    {
+        get => fileUsesRegularNkn;
+        private set => SetProperty(ref fileUsesRegularNkn, value);
     }
 
     public string TunaStatusReason
@@ -2136,10 +2143,23 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
     private void RequestSendFileWindow()
     {
         LogSendFileActionUi("file_transfer_send_ui_requested", "(entry)");
+        if (TryAuthorizeFileSelection())
+        {
+            SendFileRequested?.Invoke(this, EventArgs.Empty);
+        }
+    }
+
+    SessionId? IChatFileTransferActions.FileSendSessionId => sessionRuntime.CurrentSessionGrant?.SessionId;
+    bool IChatFileTransferActions.TryAuthorizeFileSelection() => TryAuthorizeFileSelection();
+    Task<FileTransferTransferSnapshot?> IChatFileTransferActions.AcceptIncomingAsAsync(string sessionId, string transferId, Guid offerToken, string path)
+        => sessionRuntime.AcceptIncomingAsAsync(sessionId, transferId, offerToken, path);
+
+    private bool TryAuthorizeFileSelection()
+    {
         if (!CanExecuteSendFileAction())
         {
             LogSendFileActionUi("file_transfer_send_ui_ignored", "can_execute_false");
-            return;
+            return false;
         }
 
         if (!sessionRuntime.TryAuthorizeFileTransferSend())
@@ -2148,10 +2168,10 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
             CanSendFiles = false;
             OnPropertyChanged(nameof(CanSendFileAction));
             SendFileCommand.NotifyCanExecuteChanged();
-            return;
+            return false;
         }
 
-        SendFileRequested?.Invoke(this, EventArgs.Empty);
+        return true;
     }
 
     private bool CanExecuteSendFileAction()
@@ -2166,7 +2186,7 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
             "file_transfer_accept_ui_requested",
             normalizedTransferId,
             includeDecline: false);
-        if (!CanAcceptIncomingFile(normalizedTransferId))
+        if (InboundFileTransfer is not { } displayed || !CanAcceptIncomingFile(normalizedTransferId))
         {
             LogFileTransferActionUi(
                 "file_transfer_accept_ui_ignored",
@@ -2175,7 +2195,7 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
             return;
         }
 
-        await sessionRuntime.AcceptIncomingAsync(normalizedTransferId!, CancellationToken.None).ConfigureAwait(false);
+        await sessionRuntime.AcceptIncomingForOfferAsync((displayed.SessionId, displayed.InboundOfferToken), normalizedTransferId!, CancellationToken.None).ConfigureAwait(false);
     }
 
     private bool CanAcceptIncomingFile(string? transferId)
@@ -2193,12 +2213,12 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
             "file_transfer_decline_ui_requested",
             normalizedTransferId,
             includeDecline: true);
-        if (!CanDeclineIncomingFile(normalizedTransferId))
+        if (InboundFileTransfer is not { } displayed || !CanDeclineIncomingFile(normalizedTransferId))
         {
             return;
         }
 
-        await sessionRuntime.DeclineIncomingAsync(normalizedTransferId!, uiCt: CancellationToken.None).ConfigureAwait(false);
+        await sessionRuntime.DeclineIncomingForOfferAsync((displayed.SessionId, displayed.InboundOfferToken), normalizedTransferId!, null, CancellationToken.None).ConfigureAwait(false);
     }
 
     private bool CanDeclineIncomingFile(string? transferId)
@@ -3108,11 +3128,13 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
         var status = sessionRuntime.TransportAccelerationPresentation;
         var projection = TunaHeaderStateProjector.FromSnapshot(
             sessionRuntime.FileTransferSnapshot,
+            sessionRuntime.GetCurrentTransportKind(),
             status.IsActive,
             status.Reason,
             status.PendingFileTransfer);
         IsTunaActive = projection.IsActive;
         TunaStatusReason = projection.StatusReason;
+        FileUsesRegularNkn = projection.FileUsesRegularNkn;
     }
 
     private void OnHelperListenerBootstrapSnapshotChanged(object? sender, EventArgs e)

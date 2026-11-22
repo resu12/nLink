@@ -23,6 +23,41 @@ public sealed partial class NknAccelerationTransportTests
         => await RunJoinedFallbackRetryAsync(withStalledRepair: false);
 
     [Fact]
+    [Trait("FileTransferInfraSuite", "RuntimeUnlockResponderPeerProbe")]
+    [Trait("FileTransferRuntimeSuite", "CrossPeerFallbackOverlap")]
+    public Task JoinedFallbackRetry_BindsAuthorizedFileWithUnfinishedReverseTransfer()
+        => RunJoinedFallbackRetryAsync(withStalledRepair: false, productionRedaction: true, withReverseFile: true);
+
+    [Fact]
+    [Trait("FileTransferInfraSuite", "RuntimeUnlockResponderPeerProbe")]
+    public Task JoinedFallbackRetry_DuplexConfirmsExactOfferBeforeAnswerAndPreservesUserPauses()
+        => RunJoinedFallbackRetryAsync(false, productionRedaction: true, withReverseFile: true, delayMatchingAnswer: true);
+
+    [Fact]
+    [Trait("FileTransferInfraSuite", "RuntimeUnlockResponderPeerProbe")]
+    public Task JoinedFallbackRetry_InvalidatedReceiptAtFinalAckWriterSendsNothing()
+        => RunJoinedFallbackRetryAsync(false, productionRedaction: true, withReverseFile: true, delayMatchingAnswer: true,
+            invalidateReceiptAtWriter: true);
+
+    [Fact]
+    [Trait("FileTransferInfraSuite", "RuntimeUnlockResponderPeerProbe")]
+    public Task JoinedFallbackRetry_ReceiptInvalidatedAtReplayWriterDoesNotResendDeliveredAck()
+        => RunJoinedFallbackRetryAsync(false, productionRedaction: true, withReverseFile: true, delayMatchingAnswer: true,
+            invalidateReceiptAtReplayWriter: true);
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    [Trait("FileTransferInfraSuite", "RuntimeUnlockResponderPeerProbe")]
+    public Task JoinedFallbackRetry_StalePayerStartSendsNothingAndSuccessorAckMatches(bool successorStarted)
+        => RunJoinedFallbackRetryAsync(false, productionRedaction: true, withReverseFile: true, stalePayerAfterStart: successorStarted);
+
+    [Fact]
+    [Trait("FileTransferInfraSuite", "RuntimeUnlockResponderPeerProbe")]
+    public Task JoinedFallbackRetry_PhysicalListenerReplacedAfterProbeStartSendsNothingAndSuccessorAckMatches()
+        => RunJoinedFallbackRetryAsync(false, productionRedaction: true, withReverseFile: true, replaceProbeListener: true);
+
+    [Fact]
     [Trait("FileTransferInfraSuite", "PostFallbackDialFailureHandoff")]
     public Task JoinedFallbackRetry_DialFailureBeforeProbeAllowsFreshCoordinatorOwnedActivation()
         => RunJoinedFallbackRetryAsync(false, dialFailureBeforeProbe: true);
@@ -145,7 +180,8 @@ public sealed partial class NknAccelerationTransportTests
         string? failureControl = null, bool continueAfterEof = false, bool withRecentProgress = false,
         bool delayReceiverSnapshots = false, bool notifyResponderFromPeer = false,
         string? responderFailureControl = null, bool dialFailureBeforeProbe = false, bool productionRedaction = false,
-        bool payerHandoff = false)
+        bool payerHandoff = false, bool withReverseFile = false, bool? stalePayerAfterStart = null, bool replaceProbeListener = false,
+        bool delayMatchingAnswer = false, bool invalidateReceiptAtWriter = false, bool invalidateReceiptAtReplayWriter = false)
     {
         // Initial fallback contexts are an explicit fixture baseline. There is
         // no file-I/O/live acceptance claim. After the baseline, all authority,
@@ -158,7 +194,19 @@ public sealed partial class NknAccelerationTransportTests
         Action? releaseReceiverSnapshots = null;
         var releasePayload = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var releaseOffer = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseAnswer = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var ackAtWriter = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseAckWriter = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseOriginalWriteResults = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var completedAckWrites = new ConcurrentQueue<Envelope>();
+        var replayAtWriter = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseReplayWriter = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releasePayerProbe = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var deniedReplayCopies = new ConcurrentQueue<Envelope>();
+        const int ackCopiesPerRound = 3; // Control queue, priority control, control-to-bulk copy.
+        var replayWriterArrivals = 0;
         var releaseInitialData = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var openingReverse = withReverseFile;
         var offerQueued = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var answerSent = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var answerAckSent = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -178,10 +226,39 @@ public sealed partial class NknAccelerationTransportTests
         Task[] pumps = [];
         try
         {
-            var hostClient = new FakeNknClient("host.joined-retry-continuation.address");
+            var hostClient = delayMatchingAnswer
+                ? new WriterGatePeer("host.joined-retry-continuation.address")
+                : new FakeNknClient("host.joined-retry-continuation.address");
+            if (hostClient is WriterGatePeer writer)
+            {
+                if (invalidateReceiptAtReplayWriter)
+                {
+                    // The real sender schedules replay on first success. Finish the physical
+                    // writes, but withhold their results until the peer confirms this exact ACK.
+                    writer.AfterOwnedWrite = e =>
+                    {
+                        if (e.Type != MsgType.TransportAccelerationAnswerAck) return Task.CompletedTask;
+                        completedAckWrites.Enqueue(e);
+                        return releaseOriginalWriteResults.Task.WaitAsync(timeout.Token);
+                    };
+                    writer.OwnedWriteRejected = e => { if (e.Type == MsgType.TransportAccelerationAnswerAck) deniedReplayCopies.Enqueue(e); };
+                }
+                writer.BeforeOwnedWrite = (type, _) =>
+                {
+                    if (type != MsgType.TransportAccelerationAnswerAck) return Task.CompletedTask;
+                    if (invalidateReceiptAtReplayWriter && releaseOriginalWriteResults.Task.IsCompleted)
+                    {
+                        if (Interlocked.Increment(ref replayWriterArrivals) == ackCopiesPerRound) replayAtWriter.TrySetResult();
+                        return releaseReplayWriter.Task.WaitAsync(timeout.Token);
+                    }
+                    ackAtWriter.TrySetResult();
+                    return releaseAckWriter.Task.WaitAsync(timeout.Token);
+                };
+            }
             var helperClient = new FakeNknClient("helper.joined-retry-continuation.address");
             var hostLane = new RetryableTunaAccelerationSession(true, 0, supportedLanes: NknAccelerationLaneKind.File);
             hostLane.StrictPayerHandoffForTests = payerHandoff;
+            hostLane.TrackListenerLeaseForTests = true;
             var helperLane = new RetryableTunaAccelerationSession(false, 0, supportedLanes: NknAccelerationLaneKind.File,
                 dialAttemptOutcomes: dialFailureBeforeProbe ? [firstDial, nextDial] : null);
             var forwarded = new ConcurrentQueue<(string Sender, NknBridgeChannel Lane, byte[] Bytes)>();
@@ -193,11 +270,11 @@ public sealed partial class NknAccelerationTransportTests
             hostClient.BeforeSendAsync = async (_, bytes, ct) =>
             {
                 if (!EnvelopeCodec.TryDeserialize(bytes, out var envelope)) { return; }
-                if (envelope.Type == MsgType.FileTransferDataFrame) { await releaseInitialData.Task.WaitAsync(ct); }
+                if (envelope.Type == MsgType.FileTransferDataFrame && !Volatile.Read(ref openingReverse)) { await releaseInitialData.Task.WaitAsync(ct); }
                 if (envelope.Type == MsgType.TransportAccelerationOffer)
                 {
                     offers.Enqueue(envelope);
-                    if (offerQueued.TrySetResult()) { await releaseOffer.Task.WaitAsync(ct); }
+                    if (offerQueued.TrySetResult() || delayMatchingAnswer) { await releaseOffer.Task.WaitAsync(ct); }
                 }
                 if (envelope.Type == MsgType.TransportAccelerationAnswerAck)
                 {
@@ -208,11 +285,12 @@ public sealed partial class NknAccelerationTransportTests
             helperClient.BeforeSendAsync = async (_, bytes, ct) =>
             {
                 if (!EnvelopeCodec.TryDeserialize(bytes, out var envelope)) { return; }
-                if (envelope.Type == MsgType.FileTransferDataFrame) { await releaseInitialData.Task.WaitAsync(ct); }
+                if (envelope.Type == MsgType.FileTransferDataFrame && !Volatile.Read(ref openingReverse)) { await releaseInitialData.Task.WaitAsync(ct); }
                 if (envelope.Type == MsgType.TransportAccelerationAnswer)
                 {
                     answers.Enqueue(envelope);
                     answerSent.TrySetResult();
+                    if (delayMatchingAnswer) { await releaseAnswer.Task.WaitAsync(ct); }
                 }
             };
             var options = NknTransportOptions.Load();
@@ -310,6 +388,26 @@ public sealed partial class NknAccelerationTransportTests
             }
             var senderData = await host.OpenFileTransferDataSessionAsync(sessionId, transferId, timeout.Token);
             var receiverData = await helper.OpenFileTransferDataSessionAsync(sessionId, transferId, timeout.Token);
+            IFileTransferDataSession? reverseData = null;
+            Task? staleStartCheck = null;
+            if (invalidateReceiptAtReplayWriter)
+            {
+                // Keep the next Core handoff from completing the retry before its scheduled ACK replay.
+                senderData.AvailabilityChanged += (_, change) =>
+                {
+                    if (change.RuntimeUnlockPreCommitProbeSnapshot is { LaunchGeneration: > 0 })
+                        releasePayerProbe.Task.Wait(timeout.Token);
+                };
+            }
+            if (stalePayerAfterStart == false)
+            {
+                // Subscribe before Core: B has its launch, but has not started the probe.
+                senderData.AvailabilityChanged += (_, change) =>
+                {
+                    if (change.RuntimeUnlockPreCommitProbeSnapshot is { LaunchGeneration: > 0 } launch)
+                        staleStartCheck ??= CheckStalePayerAsync(launch, RuntimeUnlockPathProbeState.None);
+                };
+            }
             // Retry-only EOF cases begin quiescent, with no unresolved frontier gap.
             // Stalled-repair cases retain their original sparse progress baseline.
             outbound = await SessionFileTransferV4SenderTests.CreateJoinedNknFallbackContextForTestAsync(
@@ -318,6 +416,41 @@ public sealed partial class NknAccelerationTransportTests
             inbound = await SessionFileTransferV4SenderTests.CreateJoinedNknFallbackContextForTestAsync(
                 receiver, receiverData, sessionId, transferId, FileTransferDirection.Inbound, withStalledRepair, withRecentProgress,
                 withoutFrontierGap: continueAfterEof || dialFailureBeforeProbe);
+            if (withReverseFile)
+            {
+                var reservations = 0;
+                SessionFileTransferService.OutboundRegularV4PhysicalSendPreReservationBarrierForTests = (id, _) =>
+                    id == "reverse-regular" && Interlocked.Increment(ref reservations) > 1 ? releasePayload.Task : Task.CompletedTask;
+                var bytes = new byte[2 * 1024 * 1024];
+                Assert.NotNull(await receiver.TryStartSendAsync(new("reverse.bin", bytes.Length, "reverse-regular"),
+                    _ => Task.FromResult<Stream>(new MemoryStream(bytes, writable: false)), timeout.Token));
+                await WaitUntilAsync(() => sender.Snapshot.Inbound?.State == FileTransferTransferState.PendingDecision, TimeSpan.FromSeconds(3));
+                Assert.NotNull(await sender.AcceptIncomingTransferAsync("reverse-regular", (_, _) =>
+                    Task.FromResult<Stream>(new MemoryStream()), timeout.Token));
+                await WaitUntilAsync(() => sender.Snapshot.Inbound?.BytesTransferred > 0, TimeSpan.FromSeconds(5));
+                Assert.True((await receiver.PauseTransferAsync("reverse-regular", "user_requested", timeout.Token))?.IsPaused);
+                await WaitUntilAsync(() => sender.Snapshot.Inbound is { IsPeerPaused: true, RouteToken: "regular_nkn_v4_fast" } &&
+                    receiver.Snapshot.Outbound is { IsPaused: true, RouteToken: "regular_nkn_v4_fast" }, TimeSpan.FromSeconds(3));
+                Volatile.Write(ref openingReverse, false);
+                if (stalePayerAfterStart.HasValue || replaceProbeListener)
+                    reverseData = await host.OpenFileTransferDataSessionAsync(sessionId, "reverse-regular", timeout.Token);
+
+                // With two publications but no paired release yet, an exact file ID
+                // must reach the right coordinator, not manufacture a retry grant.
+                var earlyOffer = CreateOfferPayload(sessionId, "duplexearly0011223344556677", supportedLanes: ["file"], payerDecisionId: 1);
+                earlyOffer.Trigger = "fallback_paired_tail_yield";
+                earlyOffer.PairedRetryTransferId = transferId;
+                RuntimeUnlockPostFallbackPairedRetryOfferBindingRequestedEventArgs? earlyBinding = null;
+                void ObserveBinding(object? _, RuntimeUnlockPostFallbackPairedRetryOfferBindingRequestedEventArgs args) => earlyBinding = args;
+                var bridge = (IRuntimeUnlockRetryDispatchAuthorityBridge)helper;
+                bridge.RuntimeUnlockPostFallbackPairedRetryOfferBindingRequested += ObserveBinding;
+                Assert.False(CanBindPeerOffer(earlyOffer, "duplex-before-paired-release"));
+                bridge.RuntimeUnlockPostFallbackPairedRetryOfferBindingRequested -= ObserveBinding;
+                Assert.NotNull(earlyBinding);
+                Assert.Equal((transferId, FileTransferDirection.Inbound),
+                    (earlyBinding.Request.PublicationAuthority.TransferId, earlyBinding.Request.PublicationAuthority.Direction));
+                Assert.False(earlyBinding.Decision.Accepted);
+            }
             if (payerHandoff)
             {
                 // Exercise the former payer's real stop after the declared
@@ -352,6 +485,8 @@ public sealed partial class NknAccelerationTransportTests
                 (Service: receiver, Context: inbound, Direction: FileTransferDirection.Inbound,
                     Publication: Assert.IsType<RoutePublicationToken>(receiverInitial.CurrentRoutePublicationToken), State: receiverInitial, Data: receiverData),
             };
+            if (replaceProbeListener)
+                await RejectAcceptedProbeAfterPhysicalReplacementAsync();
             var logStart = GetOperationalLogLength();
             var initialHighest = continueAfterEof || dialFailureBeforeProbe ? 99 : 255;
             var senderYield = SessionFileTransferV4SenderTests.IssueJoinedNknYieldForTest(sender, outbound, FileTransferDirection.Outbound, initialHighest);
@@ -411,6 +546,16 @@ public sealed partial class NknAccelerationTransportTests
             Assert.Equal((sessionId, installedOfferNonce), (offer.SessionId, offer.Nonce));
             Assert.True(offer.PayerDecisionId > 0);
             Assert.Equal(installedOfferNonce, secureOffer.Metadata.RequestId);
+            if (withReverseFile)
+            {
+                Assert.Equal(installed.Authority.TransferId, offer.PairedRetryTransferId);
+                foreach (var wrongId in new string?[] { "reverse-regular", null })
+                {
+                    offer.PairedRetryTransferId = wrongId;
+                    Assert.False(CanBindPeerOffer(offer, offerEnvelope.MessageId));
+                }
+                offer.PairedRetryTransferId = installed.Authority.TransferId;
+            }
 
             var probes = new ConcurrentQueue<(string Recipient, FileTransferReceivedDataFrame Delivery)>();
             var acks = new ConcurrentQueue<(string Recipient, FileTransferReceivedDataFrame Delivery)>();
@@ -418,8 +563,58 @@ public sealed partial class NknAccelerationTransportTests
             ((IFileTransferRuntimeUnlockAuthorityFrameReceiver)senderData).RuntimeUnlockAuthorityFrameReceived += (_, args) => acks.Enqueue(("host", args.ReceivedFrame));
             ((IFileTransferRuntimeUnlockAuthorityFrameReceiver)receiverData).RuntimeUnlockAuthorityFrameReceived += (_, args) => acks.Enqueue(("helper", args.ReceivedFrame));
             pumps = [Pump(sender, senderData, FileTransferDirection.Outbound), Pump(receiver, receiverData, FileTransferDirection.Inbound)];
+            Envelope? staleAnswer = null;
+            if (delayMatchingAnswer)
+            {
+                Assert.True((await sender.PauseTransferAsync(transferId, "user_requested", timeout.Token))?.IsPaused);
+                AssertDuplexPauses();
+                // Reserve the old answer's real secure sequence before the peer constructs
+                // its current answer; testing a stale nonce must not manufacture a replay.
+                var stale = CreateAnswerPayload(sessionId, "dd11223344556677889900aabbccddee", true,
+                    ["file"], payerDecisionId: offer.PayerDecisionId);
+                Assert.NotEqual(installedOfferNonce, stale.Nonce);
+                staleAnswer = offerEnvelope with { Type = MsgType.TransportAccelerationAnswer, MessageId = Guid.NewGuid().ToString("N"),
+                    Payload = Assert.IsType<byte[]>(InvokePrivateMethod(helper, "CreateSecureControlPayload",
+                        MsgType.TransportAccelerationAnswer, stale.Nonce, JsonSerializer.SerializeToUtf8Bytes(stale))) };
+            }
             releaseOffer.TrySetResult();
             releaseInitialData.TrySetResult();
+            if (delayMatchingAnswer)
+            {
+                // No answer can provide the delivery proof: require the peer-visible
+                // confirmation of this installed retry, not a successful local write.
+                await WaitUntilAsync(() =>
+                {
+                    var log = ReadOperationalLogTail(logStart);
+                    Assert.DoesNotContain("event=runtime_unlock_control_plane_observed_send_skipped;", log);
+                    return log.Contains("event=runtime_unlock_control_plane_observed_send_succeeded;", StringComparison.Ordinal);
+                }, TimeSpan.FromSeconds(5));
+                await answerSent.Task.WaitAsync(timeout.Token);
+                InvokeNknIncomingMessage(host, helperClient, new NknIncomingMessage(helperClient.Address,
+                    EnvelopeCodec.Serialize(staleAnswer!), isTopic: false, topic: null, channel: NknBridgeChannel.Control));
+                await WaitUntilAsync(() => ReadOperationalLogTail(logStart).Contains(
+                    "message_type=transport_acceleration_answer; reason=nonce_mismatch", StringComparison.Ordinal), TimeSpan.FromSeconds(3));
+                Assert.Empty(answerAcks);
+                AssertDuplexPauses();
+                releaseAnswer.TrySetResult();
+                await ackAtWriter.Task.WaitAsync(timeout.Token);
+                Assert.Empty(answerAcks);
+                Assert.Equal(installed.InstallReceipt, GetLastCommittedRuntimeUnlockRetryDispatchInstallReceipt(host));
+                if (invalidateReceiptAtWriter)
+                {
+                    SessionFileTransferV4SenderTests.InvalidateJoinedRetryForTest(sender, outbound);
+                    Assert.Null(GetLastCommittedRuntimeUnlockRetryDispatchInstallReceipt(host));
+                }
+                releaseAckWriter.TrySetResult();
+                if (invalidateReceiptAtWriter)
+                {
+                    await WaitUntilAsync(() => !answerAcks.IsEmpty || ReadOperationalLogTail(logStart).Contains(
+                        "event=runtime_unlock_answer_ack_probe_barrier_rejected;", StringComparison.Ordinal), TimeSpan.FromSeconds(5));
+                    Assert.Empty(answerAcks);
+                    AssertDuplexPauses();
+                    return;
+                }
+            }
             if (dialFailureBeforeProbe)
             {
                 try
@@ -495,6 +690,51 @@ public sealed partial class NknAccelerationTransportTests
             Assert.Equal(installedOfferNonce, secureAck.Metadata.RequestId);
             Assert.NotEqual(offerEnvelope.MessageId, answerEnvelope.MessageId);
             Assert.NotEqual(answerEnvelope.MessageId, ackEnvelope.MessageId);
+            if (delayMatchingAnswer)
+            {
+                await WaitUntilAsync(() => ReadOperationalLogTail(logStart).Contains(
+                    "event=tuna_acceleration_answer_ack_received;", StringComparison.Ordinal), TimeSpan.FromSeconds(3));
+                if (invalidateReceiptAtReplayWriter)
+                {
+                    await WaitUntilAsync(() => completedAckWrites.Count >= ackCopiesPerRound, TimeSpan.FromSeconds(3));
+                    Assert.Equal(ackCopiesPerRound, completedAckWrites.Count);
+                    Assert.Equal(ackEnvelope.MessageId, ExactMessage(completedAckWrites).MessageId);
+                    // The persisted log redacts hex IDs. Join its semantic event to the
+                    // peer's unredacted acceptance record for the very same generation.
+                    var accepted = GetPrivateField(helper, "runtimeUnlockResponderAnswerProbeConvergence");
+                    Assert.NotNull(accepted);
+                    Assert.Equal(ackEnvelope.MessageId, accepted.GetType().GetProperty("AckMessageId")!.GetValue(accepted));
+                    var generation = Assert.IsType<long>(accepted.GetType().GetProperty("PendingAnswerAckGeneration")!.GetValue(accepted));
+                    var loggedId = NLink.Core.Logging.SensitiveDataRedactor.Redact(ackEnvelope.MessageId);
+                    Assert.Contains(ReadOperationalLogTail(logStart).Split('\n'), line =>
+                        line.Contains("event=tuna_acceleration_answer_ack_received;", StringComparison.Ordinal) &&
+                        line.Contains($"payer_decision_id={answerAck.PayerDecisionId}; ack_message_id={loggedId};", StringComparison.Ordinal) &&
+                        line.Contains($"pending_answer_ack_generation={generation};", StringComparison.Ordinal));
+                    const string replayStarted = "event=tuna_acceleration_control_priority_started; purpose=answer_ack_replay;";
+                    Assert.DoesNotContain(replayStarted, ReadOperationalLogTail(logStart));
+                    releaseOriginalWriteResults.TrySetResult();
+                    await replayAtWriter.Task.WaitAsync(TimeSpan.FromSeconds(8), timeout.Token);
+                    Assert.Contains(replayStarted, ReadOperationalLogTail(logStart));
+                    Assert.Equal(ackCopiesPerRound, answerAcks.Count);
+                    Assert.Equal(ackEnvelope.MessageId, ExactMessage(answerAcks).MessageId);
+                    Assert.Empty(deniedReplayCopies);
+                    Assert.Equal(installed.InstallReceipt, GetLastCommittedRuntimeUnlockRetryDispatchInstallReceipt(host));
+                    SessionFileTransferV4SenderTests.InvalidateJoinedRetryForTest(sender, outbound);
+                    Assert.Null(GetLastCommittedRuntimeUnlockRetryDispatchInstallReceipt(host));
+                    releaseReplayWriter.TrySetResult();
+                    await WaitUntilAsync(() => deniedReplayCopies.Count == ackCopiesPerRound || answerAcks.Count > ackCopiesPerRound,
+                        TimeSpan.FromSeconds(3));
+                    Assert.Equal(ackCopiesPerRound, answerAcks.Count);
+                    Assert.Equal(ackCopiesPerRound, completedAckWrites.Count);
+                    Assert.Equal(ackCopiesPerRound, Volatile.Read(ref replayWriterArrivals));
+                    Assert.Equal(ackCopiesPerRound, deniedReplayCopies.Count);
+                    var denied = ExactMessage(deniedReplayCopies);
+                    Assert.Equal(ackEnvelope.MessageId, denied.MessageId);
+                    Assert.Equal(ackEnvelope.Payload, denied.Payload);
+                }
+                AssertDuplexPauses();
+                return;
+            }
             if (sidecarFailureReason is not null)
             {
                 var responderFailures = new ConcurrentQueue<RuntimeUnlockPostFallbackPreCommitProbeFailureObservedEventArgs>();
@@ -622,6 +862,17 @@ public sealed partial class NknAccelerationTransportTests
             Assert.NotEqual(default, probeDelivery.ReceivedUtc);
             Assert.All(matchingAcks, value => Assert.Equal(FileTransferTransportKind.Tuna, value.TransportKind));
             var decodedForwarded = forwarded.Select(value => (value.Sender, value.Lane, Frame: DecodeData(value))).ToArray();
+            if (replaceProbeListener)
+                Assert.Equal(probe, Assert.Single(decodedForwarded.Where(v => v.Sender == "host" &&
+                    v.Frame is FileTransferRuntimeUnlockPreCommitProbeFrame)).Frame);
+            if (stalePayerAfterStart.HasValue)
+            {
+                Assert.NotNull(staleStartCheck);
+                await staleStartCheck!;
+                Assert.DoesNotContain(decodedForwarded, v => v.Frame is FileTransferRuntimeUnlockPreCommitProbeFrame
+                    { ProbeId: "stale-payer-A" });
+                Assert.Single(decodedForwarded.Where(v => v.Sender == "host" && v.Frame is FileTransferRuntimeUnlockPreCommitProbeFrame));
+            }
             Assert.Contains(decodedForwarded, value => value.Sender == "host" && value.Lane == NknBridgeChannel.Bulk && Equals(value.Frame, probe));
             Assert.All(matchingAcks, delivery =>
             {
@@ -798,6 +1049,24 @@ public sealed partial class NknAccelerationTransportTests
                 await SessionFileTransferV4SenderTests.AssertJoinedRecentProgressSupersededForTestAsync(
                     receiver, inbound, recentWake, logStart);
             }
+            if (withReverseFile)
+            {
+                Assert.True(host.IsAccelerationAvailableForTests);
+                Assert.True(helper.IsAccelerationAvailableForTests);
+                Assert.True(sender.Snapshot.Inbound is { TransferId: "reverse-regular", IsTerminal: false, IsPeerPaused: true, RouteToken: "regular_nkn_v4_fast", ProtocolVersion: 4 });
+                Assert.True(receiver.Snapshot.Outbound is { TransferId: "reverse-regular", IsTerminal: false, IsPaused: true, RouteToken: "regular_nkn_v4_fast", ProtocolVersion: 4 });
+            }
+
+            void AssertDuplexPauses()
+            {
+                Assert.True(sender.Snapshot.Outbound is { IsPaused: true, IsTerminal: false } file && file.TransferId == transferId);
+                Assert.True(receiver.Snapshot.Outbound is { TransferId: "reverse-regular", IsPaused: true, IsTerminal: false, RouteToken: "regular_nkn_v4_fast", ProtocolVersion: 4 });
+                Assert.True(sender.Snapshot.Inbound is { TransferId: "reverse-regular", IsPeerPaused: true, IsTerminal: false, RouteToken: "regular_nkn_v4_fast", ProtocolVersion: 4 });
+            }
+
+            bool CanBindPeerOffer(TransportAccelerationOfferPayload candidate, string messageId) =>
+                Assert.IsType<bool>(InvokePrivateMethod(helper, "TryCaptureInboundPostFallbackPairedRetryOfferScope",
+                    hostClient.Address, candidate, messageId, null));
 
             FileTransferDataFrame? DecodeData((string Sender, NknBridgeChannel Lane, byte[] Bytes) captured)
             {
@@ -815,6 +1084,86 @@ public sealed partial class NknAccelerationTransportTests
                     (payerHandoff && FileTransferDataFrameCodec.TryDeserializeLegacyV4(secure.Plaintext, out frame)));
                 Assert.Equal((sessionId, transferId), (frame!.SessionId, frame.TransferId));
                 return frame;
+            }
+
+            async Task RejectAcceptedProbeAfterPhysicalReplacementAsync()
+            {
+                var provider = (IRuntimeUnlockRouteCommitProofProvider)host;
+                var a = new FileTransferRuntimeUnlockPreCommitProbeFrame
+                {
+                    SessionId = sessionId, TransferId = reverseData!.TransferId, ProbeId = "accepted-before-replacement-A",
+                    TransactionGeneration = 1, OfferGeneration = 1, TunaPathLeaseGeneration = 1,
+                    TargetTransport = "tuna", TargetRoute = FileTransferRouteResolver.FileTunaV4Token,
+                    TargetProtocolVersion = 4, HandoffKind = "normal_to_tuna_activation",
+                    SentUnixTimeMilliseconds = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+                };
+                hostLane.MarkCoordinatorScopedListenerAvailableForTests(helperClient.Address);
+                var original = Assert.IsType<NknTunaLaneLease>(hostLane.CaptureCurrentLaneLease());
+                StartPayerProbeForBulkTest(host, a);
+                Assert.True(provider.TryGetRuntimeUnlockRouteCommitProof(sessionId, a.TransferId, out var started));
+                Assert.Equal((a.ProbeId, "Started"), (started.PathProbeId, started.PathProbeState));
+
+                // Replace the IPC client without publishing a new logical transaction or lease.
+                hostLane.MarkCoordinatorScopedListenerAvailableForTests(helperClient.Address);
+                var replacement = Assert.IsType<NknTunaLaneLease>(hostLane.CaptureCurrentLaneLease());
+                Assert.Equal(original.LaneInstanceId, replacement.LaneInstanceId);
+                Assert.True(replacement.ClientGeneration > original.ClientGeneration);
+                Assert.NotEqual(original.Listener!.ProcessRunId, replacement.Listener!.ProcessRunId);
+                Assert.NotSame(original.Client, replacement.Client);
+                original.Client.Dispose();
+                Assert.True(provider.TryGetRuntimeUnlockRouteCommitProof(sessionId, a.TransferId, out var stillStarted));
+                Assert.Equal(started, stillStarted);
+                NknTunaLaneLease? offeredLease = null;
+                var submissions = 0;
+                var forward = hostLane.ForwardBytesForTests;
+                hostLane.BeforeListenerPublishForTests = expected => offeredLease = expected;
+                hostLane.ForwardBytesForTests = (_, _, _) => { ++submissions; return Task.FromResult(true); };
+                try
+                {
+                    await Assert.ThrowsAsync<FileTransferRequiredTunaBulkUnavailableException>(() =>
+                        ((IFileTransferRuntimeUnlockTunaProbeSender)reverseData).SendRuntimeUnlockTunaPreCommitProbeAsync(a, timeout.Token));
+                    Assert.Equal(original, offeredLease);
+                    Assert.Equal(0, submissions);
+                }
+                finally
+                {
+                    hostLane.BeforeListenerPublishForTests = null;
+                    hostLane.ForwardBytesForTests = forward;
+                }
+                Assert.True(provider.NotifyRuntimeUnlockPathProbeResult(sessionId, a.TransferId, 0, a.ProbeId!,
+                    FileTransferTransportKind.Tuna, false, "precommit_probe_send_failed",
+                    expectedLocalTransactionGeneration: a.TransactionGeneration, expectedLocalOfferGeneration: a.OfferGeneration,
+                    expectedLocalTunaPathLeaseGeneration: a.TunaPathLeaseGeneration, expectedLocalTunaPathLeaseListenerRunId: started.TunaPathLeaseListenerRunId,
+                    expectedLocalPathProbeState: RuntimeUnlockPathProbeState.Started));
+            }
+
+            async Task CheckStalePayerAsync(RuntimeUnlockRouteCommitSnapshot launch, RuntimeUnlockPathProbeState expectedState)
+            {
+                var provider = (IRuntimeUnlockRouteCommitProofProvider)host;
+                Assert.True(provider.TryGetRuntimeUnlockRouteCommitProof(sessionId, transferId, out var before));
+                Assert.Equal(expectedState.ToString(), before.PathProbeState);
+                Assert.Equal(launch.LaunchGeneration, before.LaunchGeneration);
+                var stale = new FileTransferRuntimeUnlockPreCommitProbeFrame
+                {
+                    SessionId = sessionId, TransferId = reverseData!.TransferId, ProbeId = "stale-payer-A",
+                    TransactionGeneration = before.TransactionGeneration, OfferGeneration = before.OfferGeneration,
+                    TunaPathLeaseGeneration = before.TunaPathLeaseGeneration, TargetTransport = "tuna",
+                    TargetRoute = FileTransferRouteResolver.FileTunaV4Token, TargetProtocolVersion = 4,
+                    HandoffKind = "normal_to_tuna_activation", SentUnixTimeMilliseconds = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+                };
+                // Reuse every generation: only A's file distinguishes it from B here.
+                Assert.False(await SessionFileTransferService.TrySendAuthorizedPreCommitProbeAsync(provider,
+                    (IFileTransferRuntimeUnlockTunaProbeSender)reverseData, FileTransferDirection.Inbound,
+                    stale, before with { TransferId = stale.TransferId }, timeout.Token));
+                // Same file and generations, but a replaced listener run must also fail.
+                Assert.False(await SessionFileTransferService.TrySendAuthorizedPreCommitProbeAsync(provider,
+                    (IFileTransferRuntimeUnlockTunaProbeSender)senderData, FileTransferDirection.Outbound,
+                    stale with { TransferId = transferId }, before with { TunaPathLeaseListenerRunId = "retired-listener-A" }, timeout.Token));
+                Assert.True(provider.TryGetRuntimeUnlockRouteCommitProof(sessionId, transferId, out var after));
+                Assert.Equal(before, after);
+                // A frame already queued before replacement must fail at submission too.
+                await Assert.ThrowsAsync<FileTransferRequiredTunaBulkUnavailableException>(() =>
+                    reverseData.SendAsync(stale with { ProbeId = before.PathProbeId ?? stale.ProbeId }, timeout.Token));
             }
 
             async Task<bool> Forward(string source, RetryableTunaAccelerationSession target,
@@ -863,6 +1212,11 @@ public sealed partial class NknAccelerationTransportTests
                             (scope.SessionId, scope.TransferId, scope.TransactionGeneration, scope.OfferGeneration, scope.TunaPathLeaseGeneration, scope.PathProbeId));
                         Assert.True(scope.TunaPathLeaseRequired && scope.TunaPathLeaseCurrent);
                         senderProbeScopes.Enqueue(scope);
+                        if (stalePayerAfterStart == true)
+                        {
+                            staleStartCheck = CheckStalePayerAsync(scope, RuntimeUnlockPathProbeState.Started);
+                            await staleStartCheck;
+                        }
                         if (sidecarFailureReason is not null)
                         {
                             if (probeHeld.TrySetResult() && continueAfterEof)
@@ -890,6 +1244,11 @@ public sealed partial class NknAccelerationTransportTests
         {
             releaseReceiverSnapshots?.Invoke();
             releaseOffer.TrySetResult();
+            releaseAnswer.TrySetResult();
+            releaseAckWriter.TrySetResult();
+            releaseOriginalWriteResults.TrySetResult();
+            releaseReplayWriter.TrySetResult();
+            releasePayerProbe.TrySetResult();
             releaseReceiverHandoff.TrySetResult();
             if (outbound is not null) { SessionFileTransferV4SenderTests.CancelJoinedNknContextForTest(outbound); }
             if (inbound is not null) { SessionFileTransferV4SenderTests.CancelJoinedNknContextForTest(inbound); }
@@ -1139,4 +1498,12 @@ public sealed partial class SessionFileTransferV4SenderTests
         lock (GetServiceGate(service)) { return CreateCoordinatorStateForTest(context); }
     }
     internal static void CancelJoinedNknContextForTest(object context) => TryCancelContextLifetime(context);
+    internal static void InvalidateJoinedRetryForTest(SessionFileTransferService service, object outbound)
+    {
+        var invalidate = typeof(SessionFileTransferService).GetMethod("TryInvalidateRuntimeUnlockRetryLifecycleForScopeReplacementLocked",
+            BindingFlags.Instance | BindingFlags.NonPublic, null,
+            [outbound.GetType(), typeof(string), typeof(RuntimeUnlockRetryLifecycleScopeInvalidationDecision?)], null)!;
+        lock (GetServiceGate(service))
+            Assert.True((bool)invalidate.Invoke(service, [outbound, "retry_dispatch_runtime_scope_replaced", null])!);
+    }
 }

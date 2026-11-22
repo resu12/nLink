@@ -30,6 +30,7 @@ $validLanes = @(
     "FileTransferAnalyzerRuntimeUnlock",
     "FileTransferAnalyzerV4Transport",
     "FileTransferEvidenceIntegrity",
+    "FileTransferAcceptanceScenarios",
     "FileTransferAcceptanceFake",
     "Smoke",
     "NonGui",
@@ -314,7 +315,7 @@ function Invoke-TestLane {
                 -Filter "FileTransferEvidenceSuite=OperationalLogIntegrity" `
                 -ResultSuffix "evidence-integrity"
         }
-        "FileTransferAcceptanceFake" {
+        "FileTransferAcceptanceScenarios" {
             $coreProject = Get-DomainProjectPath -RepoRoot $RepoRoot -ProjectName "nLink.SmokeTests.Core"
             Invoke-DotnetTest `
                 -Target $coreProject `
@@ -327,6 +328,9 @@ function Invoke-TestLane {
                 -Target $coreProject `
                 -Filter "FullyQualifiedName~FileTransferSoakRunnerTests" `
                 -ResultSuffix "soak"
+        }
+        "FileTransferAcceptanceFake" {
+            Invoke-TestLane -RepoRoot $RepoRoot -Name "FileTransferAcceptanceScenarios"
             Invoke-TestLane -RepoRoot $RepoRoot -Name "FileTransferEvidenceIntegrity"
         }
         "Smoke" {

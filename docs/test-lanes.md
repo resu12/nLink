@@ -59,7 +59,8 @@ powershell -ExecutionPolicy Bypass -File .\tools\Test-Lanes.ps1 -Lane GuiSmoke -
 | `FileTransferAnalyzerRuntimeUnlock` | `OpsSuite=RetainedRuntimeUnlock` | Runtime-unlock and retry proof-chain analyzer shard. |
 | `FileTransferAnalyzerV4Transport` | `OpsSuite=RetainedV4Transport` | V4 transport and efficiency analyzer shard. |
 | `FileTransferEvidenceIntegrity` | `FileTransferEvidenceSuite=OperationalLogIntegrity` | Operational-log integrity and evidence-provenance contracts. |
-| `FileTransferAcceptanceFake` | File-transfer script, fake acceptance, provenance, and harness `OpsSuite` filters | Deterministic wrapper and artifact-contract coverage without GUI/network execution. |
+| `FileTransferAcceptanceScenarios` | File-transfer script, fake acceptance, harness and soak-runner tests | CI runs this separately from evidence integrity to fit the hosted runner time limit. |
+| `FileTransferAcceptanceFake` | `FileTransferAcceptanceScenarios` and `FileTransferEvidenceIntegrity` | Local aggregate for the same deterministic coverage CI requires before packaging. |
 | `Smoke` | Non-Core domain-project filter `Category=Smoke` | Release smoke compatibility lane; deterministic Core coverage is owned by explicit contract lanes. |
 | `NonGui` | `Core`, `ScreenShare`, `RemoteControl`, and `Contracts` lanes | Beta readiness non-Gui domain gate. |
 | `GuiSmoke` | Gui project filter `Category=GuiSmoke` | Interactive Windows GUI smoke; the script sets `NLINK_RUN_GUI_SMOKE=1`. |

@@ -191,12 +191,12 @@ public sealed partial class NknAccelerationTransportTests
             pair.AssertNoFileEffects();
         });
 
-    private static async Task WithPreparationHandshakePairAsync(bool helperPays, Func<PreparationHandshakePair, Task> test)
+    private static async Task WithPreparationHandshakePairAsync(bool helperPays, Func<PreparationHandshakePair, Task> test, bool useWriterGatePeer = false)
     {
         FakeNknClient.ResetNetwork();
         try
         {
-            using var pair = new PreparationHandshakePair(helperPays);
+            using var pair = new PreparationHandshakePair(helperPays, useWriterGatePeer: useWriterGatePeer);
             await pair.Approve();
             await test(pair);
         }
@@ -272,21 +272,25 @@ public sealed partial class NknAccelerationTransportTests
         private readonly List<PreparationHandshakeBarrier> barriers = [];
         public CancellationToken Token => lifetime.Token;
         public readonly SessionFileTransferService PayerService = new(), DialerService = new();
-        public readonly PreparationHandshakeLane PayerLane = new(), DialerLane = new();
+        public readonly PreparationHandshakeLane PayerLane, DialerLane;
         public readonly FakeNknClient PayerClient, DialerClient;
         public readonly NknSignalingTransport Payer, Dialer;
         public readonly ConcurrentQueue<MsgType> Sent = new();
         public readonly ConcurrentQueue<string> Liveness = new();
         public FileTransferSessionPreparationPermit Permit = null!;
 
-        public PreparationHandshakePair(bool helperPays)
+        public PreparationHandshakePair(bool helperPays, NknTunaAccelerationOptions? payerOptions = null, bool useWriterGatePeer = false, bool allowRuntimeRestart = false, bool gatePayerWrites = false)
         {
+            PayerLane = new(allowRuntimeRestart);
+            DialerLane = new(allowRuntimeRestart, canListen: !allowRuntimeRestart);
             var id = Guid.NewGuid().ToString("N");
-            PayerClient = new($"payer.preparation-handshake.{id}.address");
-            DialerClient = new($"dialer.preparation-handshake.{id}.address");
+            var payerAddress = $"payer.preparation-handshake.{id}.address";
+            PayerClient = gatePayerWrites ? new WriterGatePeer(payerAddress) : new FakeNknClient(payerAddress);
+            var dialerAddress = $"dialer.preparation-handshake.{id}.address";
+            DialerClient = useWriterGatePeer ? new WriterGatePeer(dialerAddress) : new FakeNknClient(dialerAddress);
             var options = NknTransportOptions.Load();
             Payer = new(PayerClient, options, new NknIdentity("preparation-payer", PayerClient.Address),
-                NknTunaAccelerationOptions.Disabled, PayerLane);
+                payerOptions ?? NknTunaAccelerationOptions.Disabled, PayerLane);
             Dialer = new(DialerClient, options, new NknIdentity("preparation-dialer", DialerClient.Address),
                 NknTunaAccelerationOptions.Disabled, DialerLane);
             host = helperPays ? Dialer : Payer;
@@ -417,6 +421,7 @@ public sealed partial class NknAccelerationTransportTests
         public NknTunaLanePreparationRequest? Request;
         public int Starts, ExactStops, GlobalStops, OrdinaryStarts;
         public Func<CancellationToken, Task<bool>>? OrdinaryStartForTests;
+        public bool RejectOfferDialForTests;
         public int Retains, Activations;
         public bool IsAvailable => Current is not null || runtime?.IsAvailable == true;
         public bool CanListen = true;
@@ -461,6 +466,17 @@ public sealed partial class NknAccelerationTransportTests
                 bridgeIngressObservedUtcMs: DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()));
             return true;
         }
+        public async Task<bool> TryWritePairedCommitConfirmationAsync(byte[] bytes, long expiresUtcTicks, Func<Func<Task>, Task?> start, CancellationToken ct)
+        {
+            bool sent = false;
+            async Task Write()
+            {
+                if (!ct.IsCancellationRequested && DateTime.UtcNow.Ticks < expiresUtcTicks)
+                    sent = await TrySendAsync(NknBridgeChannel.Bulk, bytes, ct);
+            }
+            if (start(Write) is { } writing) await writing;
+            return sent;
+        }
         public Task<bool> EnsureListenerSidecarConnectedAsync(string peer, CancellationToken ct)
         {
             Interlocked.Increment(ref OrdinaryStarts);
@@ -502,6 +518,18 @@ public sealed partial class NknAccelerationTransportTests
             Interlocked.Increment(ref OrdinaryStarts);
             return runtime.StartDialerSidecarAsync(tuna, peer, ct);
         }
+        public Task<bool> StartOfferDialerAsync(string tuna, string peer, object owner, CancellationToken ct)
+        {
+            if (runtime is null) throw new InvalidOperationException("ordinary_dialer_forbidden");
+            Assert.Null(Current);
+            Interlocked.Increment(ref OrdinaryStarts);
+            return RejectOfferDialForTests ? Task.FromResult(false) : runtime.StartOfferDialerAsync(tuna, peer, owner, ct);
+        }
+        public bool IsCurrentOfferDial(object owner) => Current is null && runtime?.IsCurrentOfferDial(owner) == true;
+        public bool TryCommitOfferDialer(object owner, bool retainUntilProbe, Func<bool, bool> publish)
+            => Current is null && runtime?.TryCommitOfferDialer(owner, retainUntilProbe, publish) == true;
+        public bool TryStopOfferDialer(object owner, string reason)
+            => Current is null && runtime?.TryStopOfferDialer(owner, reason) == true;
         public Task StopAsync(string reason, CancellationToken ct)
         {
             GlobalStops++; Current = null; failureOrigin = null;

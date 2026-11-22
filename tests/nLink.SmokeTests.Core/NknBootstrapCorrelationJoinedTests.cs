@@ -62,7 +62,7 @@ public sealed partial class NknAccelerationTransportTests
             // Never connected; transport lifecycle owns registration, Core authorizes pressure commands.
             using var hostPressure = new RealNknClientAdapter(hostIdentity, options);
             using var helperPressure = new RealNknClientAdapter(helperIdentity, options);
-            var hostLane = new RetryableTunaAccelerationSession(true, 0, supportedLanes: NknAccelerationLaneKind.File);
+            var hostLane = new RetryableTunaAccelerationSession(true, 0, supportedLanes: NknAccelerationLaneKind.File) { TrackListenerLeaseForTests = true };
             var helperLane = new RetryableTunaAccelerationSession(false, 0, supportedLanes: NknAccelerationLaneKind.File);
             hostLane.ForwardBytesForTests = (lane, bytes, ct) => Forward(helperLane, lane, bytes, ct);
             helperLane.ForwardBytesForTests = (lane, bytes, ct) => Forward(hostLane, lane, bytes, ct);
@@ -258,8 +258,20 @@ public sealed partial class NknAccelerationTransportTests
             .PersistentState.FileTransferRouteTransition.BootstrapAgreement!;
         Assert.True(senderAgreement.IsEnabled);
         Assert.True(receiverAgreement.IsEnabled);
-        Assert.Equal(senderAgreement.Offer, receiverAgreement.Offer);
-        Assert.Equal(senderAgreement.Accept, receiverAgreement.Accept);
+        // NKN sends a wire instance ID and translates the accept back to the sender's service ID.
+        object owner;
+        lock (GetPrivateField(host, "controlSecureStateGate")!)
+        {
+            var states = Assert.IsAssignableFrom<System.Collections.IDictionary>(GetPrivateField(host, "fileTransferStates"));
+            owner = states[senderAgreement.Offer.TransferId]!;
+        }
+        var serviceId = Assert.IsType<Guid>(owner.GetType().GetProperty("ServiceOfferId")!.GetValue(owner));
+        var wireId = Assert.IsType<Guid>(owner.GetType().GetProperty("WireOfferId")!.GetValue(owner));
+        Assert.Equal(serviceId, senderAgreement.Offer.OfferInstanceId);
+        Assert.Equal(senderAgreement.Offer with { OfferInstanceId = wireId }, receiverAgreement.Offer);
+        var localAccept = Assert.IsType<FileTransferAcceptV1>(receiverAgreement.Accept);
+        Assert.Null(localAccept.OfferInstanceId); // The offer-bound transport stamps this on send.
+        Assert.Equal(localAccept with { OfferInstanceId = serviceId }, senderAgreement.Accept);
         Assert.Equal(sessionId, senderAgreement.Offer.SessionId);
         Assert.False(senderAgreement.ReceiverSessionOpenValidated);
         Assert.True(receiverAgreement.ReceiverSessionOpenValidated);

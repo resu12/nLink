@@ -1,11 +1,13 @@
 # File-Transfer Operability
 
-This is the operator entry point for file transfer and experimental Tuna. For runtime architecture, use [file-transfer-implementation.md](file-transfer-implementation.md); for wallet, payer, and spending details, use [nkn-tuna-implementation.md](nkn-tuna-implementation.md).
+This is the operator entry point for file transfer and Tuna. For runtime architecture, use [file-transfer-implementation.md](file-transfer-implementation.md); for wallet, payer, and spending details, use [nkn-tuna-implementation.md](nkn-tuna-implementation.md).
 
 ## Using File Transfer And Tuna
 
 - Complete normal session approval and verification, and allow `Transfer files` before sending. The receiver must explicitly accept each file.
-- Either side can pause, resume, or cancel the active transfer. Resume after app restart, folders, and drag-and-drop are not supported. The default cap is `25 GiB`; received files go to Downloads with collision-safe numbered names.
+- In the 0.7.1 candidate, use **Send file** or drop exactly one local Explorer file onto **chat**, including during screen sharing. Both paths make the same offer. A folder or multi-item drop makes no offer.
+- **Accept** saves to Downloads, adding a numbered suffix if needed. In 0.7.1, **Save as…** lets the receiver choose another folder or name. Canceling the picker leaves the offer pending; an occupied name is not overwritten.
+- Either side can pause, resume, or cancel an active transfer. Resume after app restart and folder transfers are not supported. The default size cap is `25 GiB`.
 - Progress displays accepted/receiver-confirmed bytes, with presentation-only smoothing. A queued send is not delivery, and the displays need not be identical at every instant. A full bar alone is not final SHA verification or terminal completion.
 - Tuna is optional and default-off. Link/validate a wallet in `Options -> Wallet`; this does not spend NKN or activate transport. Paid runtime use needs explicit enablement and a session-only unlock. Review price, volume, and duration caps first.
 - The selected listener pays; the other peer dials without paying. When both sides unlock, helpee has priority. Payment telemetry is best-effort: no reported payment event does not prove free traffic.
@@ -13,6 +15,8 @@ This is the operator entry point for file transfer and experimental Tuna. For ru
 - Switching Tuna off preserves the approved session and regular NKN control. An active Tuna V4 transfer live-transitions to V6 fallback on that same transfer; explicit reactivation can return it to Tuna V4. After successful final fallback completion, the next transfer resolves from current transport state.
 
 For an end-user problem, collect Diagnostics from both peers first; do not ask users to run paid matrices. See [supportability.md](supportability.md).
+
+**Receiver shows Declined; sender is still waiting (0.7.1):** these are two different observations. The receiver made a decision, but the sender may not have received it. With an updated sender, a retry of the exact offer can recover the reply automatically. An older sender may keep waiting because its offer has no identifier that makes replay safe. The sender can cancel the pending offer; there is no need to accept the file or switch Tuna routes to clear it.
 
 ## Retained Analysis And Focused Checks
 

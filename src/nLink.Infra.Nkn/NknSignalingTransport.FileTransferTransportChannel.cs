@@ -23,74 +23,95 @@ public sealed partial class NknSignalingTransport : IFileTransferControlPlanePhy
     private static readonly TimeSpan TunaActivationPauseCancellationRecoveryWindow = TimeSpan.FromSeconds(10);
 
     public async Task SendFileTransferOfferAsync(FileTransferOfferV2 message, CancellationToken ct)
+        => _ = await SendOfferCoreAsync(message, ct, serviceOwnsLifetime: false).ConfigureAwait(false);
+
+    public Task<bool> TrySendFileTransferOfferAsync(FileTransferOfferV2 message, CancellationToken ct)
+        => SendOfferCoreAsync(message, ct, serviceOwnsLifetime: true);
+
+    private async Task<bool> SendOfferCoreAsync(FileTransferOfferV2 message, CancellationToken ct, bool serviceOwnsLifetime)
     {
         ArgumentNullException.ThrowIfNull(message);
         ThrowIfDisposed();
+        var logicalOffer = message;
         message = EnsureFileTransferSessionId(message);
 
-        if (ct.IsCancellationRequested)
-        {
-            await Task.FromCanceled(ct);
-            return;
-        }
-
+        ct.ThrowIfCancellationRequested();
         ObserveFileTransferRouteHintEvidence(
             message.TransferId,
             message.FileTransferRoute,
             message.PreferredDataProtocolVersion ?? 0,
             "send_offer");
 
-        await SendFileTransferEnvelopeAsync(
+        var submission = fileOfferSubmissions.GetValue(logicalOffer, _ => new());
+        return await SendFileTransferEnvelopeAsync(
                 MsgType.FileTransferOffer,
                 message.TransferId,
-                FileTransferPayloadCodec.Serialize(message),
-                ct)
+                FileTransferPayloadCodec.Serialize(message with { OfferInstanceId = submission.WireId }),
+                ct, submission: submission, serviceOfferId: message.OfferInstanceId, serviceOwnsLifetime: serviceOwnsLifetime)
             .ConfigureAwait(false);
     }
 
     public async Task SendFileTransferAcceptAsync(FileTransferAcceptV1 message, CancellationToken ct)
+        => await SendFileTransferAcceptCoreAsync(message, ct, null).ConfigureAwait(false);
+
+    private async Task<bool> SendFileTransferAcceptCoreAsync(FileTransferAcceptV1 message, CancellationToken ct, Func<bool>? ownsInboundOffer,
+        CancellationToken consentLifetime = default)
     {
         ArgumentNullException.ThrowIfNull(message);
         ThrowIfDisposed();
         message = EnsureFileTransferSessionId(message);
 
-        if (ct.IsCancellationRequested)
-        {
-            await Task.FromCanceled(ct);
-            return;
-        }
+        ct.ThrowIfCancellationRequested();
+        if (ownsInboundOffer is null) ObserveHint();
 
-        ObserveFileTransferRouteHintEvidence(
-            message.TransferId,
-            message.FileTransferRoute,
-            message.AcceptedDataProtocolVersion ?? 0,
-            "send_accept");
-
-        await SendFileTransferEnvelopeAsync(
+        var sent = await SendFileTransferEnvelopeAsync(
                 MsgType.FileTransferAccept,
                 message.TransferId,
                 FileTransferPayloadCodec.Serialize(message),
-                ct)
+                ct, ownsInboundOffer, accept: message, consentLifetime: consentLifetime)
             .ConfigureAwait(false);
+        if (sent && ownsInboundOffer is not null) ObserveHint();
+        return sent;
+
+        void ObserveHint() => ObserveFileTransferRouteHintEvidence(message.TransferId, message.FileTransferRoute,
+            message.AcceptedDataProtocolVersion ?? 0, "send_accept");
     }
 
-    public async Task SendFileTransferDeclineAsync(FileTransferDeclineV1 message, CancellationToken ct)
+    public Task SendFileTransferDeclineAsync(FileTransferDeclineV1 message, CancellationToken ct)
+        => SendFileTransferDeclineCoreAsync(message, ct, null);
+
+    private async Task SendFileTransferDeclineCoreAsync(FileTransferDeclineV1 message, CancellationToken ct, Func<bool>? ownsInboundOffer)
     {
         ArgumentNullException.ThrowIfNull(message);
         ThrowIfDisposed();
         message = EnsureFileTransferSessionId(message);
 
-        if (ct.IsCancellationRequested)
+        // A bound receipt represents an already-final local decision. Cancellation can stop its
+        // first write, but must not erase the decision when the same authenticated offer retries.
+        if (ownsInboundOffer is null) ct.ThrowIfCancellationRequested();
+        bool recordedDecline = false;
+        if (ownsInboundOffer is not null || message.OfferInstanceId.HasValue)
         {
-            await Task.FromCanceled(ct);
-            return;
-        }
+            lock (controlSecureStateGate)
+            {
+                if (ownsInboundOffer?.Invoke() == false) return;
+                if (!TryGetNextFileTransferState(MsgType.FileTransferDecline, message.TransferId, inbound: false, out var declined, out var reason))
+                    throw new InvalidOperationException($"File-transfer state rejected decline: {reason}.");
+                if (declined.InboundOffer is not { } original || original.OfferInstanceId != message.OfferInstanceId ||
+                    original.SessionId != message.SessionId) return;
 
+                CommitFileTransferStateLocked(message.TransferId, declined);
+                fileTransferTerminalTombstones[message.TransferId] = fileTransferTerminalTombstones[message.TransferId] with { DeclineMessage = message };
+                ownsInboundOffer = BindRecordedDeclineLocked(message);
+                recordedDecline = true;
+            }
+        }
+        ct.ThrowIfCancellationRequested();
         await SendFileTransferEnvelopeAsync(
                 MsgType.FileTransferDecline,
                 message.TransferId,
                 FileTransferPayloadCodec.Serialize(message),
-                ct)
+                ct, ownsInboundOffer, recordedDecline: recordedDecline)
             .ConfigureAwait(false);
     }
 
@@ -149,11 +170,12 @@ public sealed partial class NknSignalingTransport : IFileTransferControlPlanePhy
             return;
         }
 
+        if (!CaptureTerminalOwner(message.TransferId, message.OfferInstanceId, true, out var wireId, out var owns)) return;
         await SendFileTransferCancelEnvelopeAsync(
                 message.TransferId,
-                FileTransferPayloadCodec.Serialize(message),
+                FileTransferPayloadCodec.Serialize(message with { OfferInstanceId = wireId }),
                 message.Reason,
-                ct)
+                ct, owns)
             .ConfigureAwait(false);
     }
 
@@ -169,11 +191,12 @@ public sealed partial class NknSignalingTransport : IFileTransferControlPlanePhy
             return;
         }
 
+        if (!CaptureTerminalOwner(message.TransferId, message.OfferInstanceId, false, out var wireId, out var owns)) return;
         await SendFileTransferRedundantLifecycleEnvelopeAsync(
                 MsgType.FileTransferError,
                 message.TransferId,
-                FileTransferPayloadCodec.Serialize(message),
-                ct)
+                FileTransferPayloadCodec.Serialize(message with { OfferInstanceId = wireId }),
+                ct, owns)
             .ConfigureAwait(false);
     }
 
@@ -189,12 +212,10 @@ public sealed partial class NknSignalingTransport : IFileTransferControlPlanePhy
             return;
         }
 
-        await SendFileTransferRedundantLifecycleEnvelopeAsync(
-                MsgType.FileTransferComplete,
-                message.TransferId,
-                FileTransferPayloadCodec.Serialize(message),
-                ct)
-            .ConfigureAwait(false);
+        if (!CaptureTerminalOwner(message.TransferId, message.OfferInstanceId, false, out var wireId, out var owns, requireOwnerOnReuse: true) ||
+            !await SendFileTransferRedundantLifecycleEnvelopeAsync(MsgType.FileTransferComplete, message.TransferId,
+                FileTransferPayloadCodec.Serialize(message with { OfferInstanceId = wireId }), ct, owns).ConfigureAwait(false))
+            throw new InvalidOperationException("File-transfer completion no longer belongs to the current offer.");
     }
 
     public async Task SendFileTransferPauseControlAsync(FileTransferPauseControlV6 message, CancellationToken ct)
@@ -567,32 +588,46 @@ public sealed partial class NknSignalingTransport : IFileTransferControlPlanePhy
 
         if (createdSession)
         {
-            ApplyActiveTunaActivationPauseToNewFileTransferDataSession(session!, "local_open");
+            session!.InitializeActivationPause("local_open");
         }
 
-        RecheckPendingStartupTransferActivation();
-
-        return Task.FromResult<IFileTransferDataSession>(session!);
+        return FinishOpenAsync(session!, ct);
     }
+
+    private async Task<IFileTransferDataSession> FinishOpenAsync(TransportFileTransferDataSession session, CancellationToken ct)
+    {
+        // A concurrent caller may find a locally or remotely registered channel before its owner applies the pause.
+        await session.OpenFinished.WaitAsync(ct).ConfigureAwait(false);
+        ObjectDisposedException.ThrowIf(session.IsDisposed, session);
+        RecheckPendingStartupTransferActivation();
+        return session;
+    }
+
+    internal Action<IFileTransferDataSession>? NewChannelRegisteredForTests { get; set; }
 
     private void ApplyActiveTunaActivationPauseToNewFileTransferDataSession(
         TransportFileTransferDataSession session,
-        string trigger)
+        string trigger, bool ordinaryOnly = false)
     {
-        if (!session.IsAvailable ||
-            !TryGetActiveFileTransferTunaActivationPauseForCurrentSession(out var pausedSessionId) ||
-            !string.Equals(pausedSessionId, session.SessionId, StringComparison.Ordinal))
-        {
-            return;
-        }
-
+        long expectedGeneration;
         long receiverPauseGeneration;
+        long? expectedAdmissionGeneration;
         lock (accelerationGate)
         {
+            if (!TryGetActiveFileTransferTunaActivationPauseForCurrentSession(out var pausedSessionId) ||
+                pausedSessionId != session.SessionId)
+                return;
+            expectedGeneration = fileTransferTunaActivationPauseGeneration;
+            if (ordinaryOnly && expectedGeneration != ordinaryNegotiationPauseGeneration) return;
             receiverPauseGeneration = fileTransferTunaActivationPauseSessionId == session.SessionId
-                ? fileTransferTunaActivationPauseGeneration : 0;
+                ? expectedGeneration : 0;
+            lock (activationPausePublicationGate)
+                if (!CanPublishFileActivationPause(session, expectedGeneration, initializingChannel: true)) return;
+            expectedAdmissionGeneration = GetFileTransferRouteTransitionPauseAuthorityUnsafe()?.SessionId == session.SessionId ||
+                IsInitialReceiverBarrierPauseBoundUnsafe(session.SessionId) ? null : fileActivationPauseNegotiationGeneration;
         }
 
+        NewChannelPauseCapturedForTests?.Invoke();
         LocalOperationalLog.Info(
             "NKN.Tuna",
             $"event=filetransfer_data_session_opened_during_tuna_activation_pause; transfer_id={SanitizeLogToken(session.TransferId)}; session_id={SanitizeLogToken(session.SessionId)}; reason=tuna_activation_negotiating; trigger={SanitizeLogToken(trigger)}");
@@ -602,7 +637,40 @@ public sealed partial class NknSignalingTransport : IFileTransferControlPlanePhy
             requiresResumeRequest: false,
             handoffKind: FileTransferTransportHandoffKind.None,
             targetTransport: FileTransferTransportKind.RegularNkn,
-            receiverBarrierPauseGeneration: receiverPauseGeneration);
+            receiverBarrierPauseGeneration: receiverPauseGeneration,
+            expectedPauseGeneration: expectedGeneration, expectedAdmissionGeneration: expectedAdmissionGeneration,
+            initializingChannel: true);
+    }
+
+    // Read under activationPausePublicationGate, including when retaining a retiring channel's pause.
+    private bool IsSessionNegotiationPauseCurrent(string sessionId)
+    {
+        var shadow = fileTransferRouteTransitionExecutionShadow;
+        return shadow.Current?.Command.Authority.SessionId != sessionId &&
+               shadow.RetainedPredecessor?.Command.Authority.SessionId != sessionId &&
+               shadow.PendingAvailabilityDisposition?.Authority.SessionId != sessionId &&
+               fileTransferTunaActivationPauseSessionId == sessionId && fileActivationPauseNegotiationGeneration == fileActivationResetGeneration;
+    }
+
+    private bool CanPublishFileActivationPause(TransportFileTransferDataSession session, long generation, bool initializingChannel)
+    {
+        if (session.IsDisposed) return false;
+        var shadow = fileTransferRouteTransitionExecutionShadow;
+        var current = shadow.Current?.Command.Authority;
+        var predecessor = shadow.RetainedPredecessor?.Command.Authority;
+        var receiverOwned = IsInitialReceiverBarrierPauseBoundUnsafe(session.SessionId);
+        if (IsSessionNegotiationPauseCurrent(session.SessionId) &&
+            (generation != ordinaryNegotiationPauseGeneration || !HasDuplexFileOffers(session.SessionId) ||
+             (initializingChannel && session.OfferOwner is { End: FileOfferEnd.Live } offer &&
+              offer.RetainedOrdinaryPauseGeneration == generation && fileFallbackOffers.Any(o => ReferenceEquals(o.Owner, offer)))))
+            return true; // Still negotiating for the session, not merely retaining an owned pause after reset.
+
+        // A pending disposition can release its own channel. It is not a new pause grant.
+        return Matches(current) || Matches(predecessor) ||
+            (receiverOwned && session.OwnedReceiverBarrierPauseGeneration == generation);
+        bool Matches(FileTransferRouteTransitionAuthority? authority) =>
+            authority is { } owner && owner.SessionId == session.SessionId && owner.TransferId == session.TransferId &&
+            owner.DataSessionProviderGeneration == session.Generation;
     }
 
     public int ResolveSafeOutboundChunkSize(FileTransferChunkBudgetRequest request)
@@ -663,12 +731,16 @@ public sealed partial class NknSignalingTransport : IFileTransferControlPlanePhy
             ? value.ToString().ToLowerInvariant()
             : "(none)";
 
-    private async Task SendFileTransferEnvelopeAsync(
+    private async Task<bool> SendFileTransferEnvelopeAsync(
         MsgType messageType,
         string transferId,
         byte[] plaintextPayload,
-        CancellationToken ct)
+        CancellationToken ct,
+        Func<bool>? ownsInboundOffer = null, FileOfferSubmission? submission = null, Guid? serviceOfferId = null,
+        FileTransferAcceptV1? accept = null, bool serviceOwnsLifetime = false,
+        CancellationToken consentLifetime = default, bool recordedDecline = false)
     {
+        if (ownsInboundOffer?.Invoke() == false) return false;
         var normalizedTransferId = NormalizeRequiredFileTransferId(transferId);
 
         if (!TryGetCurrentEnvelopeCode(out var envelopeCode))
@@ -688,7 +760,7 @@ public sealed partial class NknSignalingTransport : IFileTransferControlPlanePhy
             throw new InvalidOperationException("Remote endpoint is not known yet.");
         }
 
-        if (!TryValidateAndTrackFileTransferMessage(messageType, normalizedTransferId, inbound: false, applyStateChange: false, out var failureReason))
+        if (!recordedDecline && submission is null && !TryValidateAndTrackFileTransferMessage(messageType, normalizedTransferId, inbound: false, applyStateChange: false, out var failureReason))
         {
             NknRuntimeDiagnostics.SetLastError($"{MapSecureFileTransferMessageType(messageType)}_{failureReason}");
             Log($"SendFileTransfer{messageType}Async failed (reason={failureReason}, transfer_id={normalizedTransferId})");
@@ -696,18 +768,126 @@ public sealed partial class NknSignalingTransport : IFileTransferControlPlanePhy
         }
 
         var terminalContentOwner = CaptureTerminalContentOwner(normalizedTransferId);
+        var epoch = sessionPreparationLifecycle.Current;
+        var attachment = sessionPreparationLifecycle.Attachment;
         var securePayload = CreateSecureFileTransferPayload(messageType, normalizedTransferId, plaintextPayload);
         var envelope = CreateEnvelope(envelopeCode, messageType, securePayload, replyTo: null);
+        if (submission is not null)
+        {
+            var attempt = 0;
+            ValueTask? BeginOffer(Func<ValueTask> write)
+            {
+                lock (controlSecureStateGate)
+                {
+                    if (!ReferenceEquals(epoch, sessionPreparationLifecycle.Current) ||
+                        !ReferenceEquals(attachment, sessionPreparationLifecycle.Attachment)) return null;
+                    if (submission.Installed)
+                    {
+                        if (!fileTransferStates.TryGetValue(normalizedTransferId, out var owner) ||
+                            owner.WireOfferId != submission.WireId || owner.Phase != FileTransferTransportPhase.Offered) return null;
+                    }
+                    else
+                    {
+                        if (!TryGetNextFileTransferState(MsgType.FileTransferOffer, normalizedTransferId, false, out var offered, out var reason))
+                            throw new InvalidOperationException($"File-transfer offer rejected: {reason}.");
+                        CommitFileTransferStateLocked(normalizedTransferId, offered with { WireOfferId = submission.WireId,
+                            ServiceOfferId = serviceOfferId, RequireOfferId = !issuedFileOfferIds.Add(normalizedTransferId) });
+                        submission.Installed = true;
+                    }
+                    attempt = ++submission.Attempt;
+                    return write();
+                }
+            }
+            // The reply can arrive before the bridge completes. Never re-install Offered on completion.
+            try
+            {
+                return await SendEnvelopeAsync(destination, envelope, EnvelopeCodec.Serialize(envelope), ct, admitOfferResponse: BeginOffer).ConfigureAwait(false);
+            }
+            catch when (attempt != 0)
+            {
+                lock (controlSecureStateGate)
+                {
+                    if (!fileTransferStates.TryGetValue(normalizedTransferId, out var owner) ||
+                        owner.WireOfferId != submission.WireId || owner.Phase != FileTransferTransportPhase.Offered ||
+                        attempt != submission.Attempt)
+                        return false; // A reply, replacement, or later write already owns the outcome.
+                    // Service-backed reservations retire on the service's terminal decision, not a physical retry failure.
+                    if (!serviceOwnsLifetime && attempt == 1 && !ct.IsCancellationRequested)
+                        CommitFileTransferStateLocked(normalizedTransferId, owner with { Phase = FileTransferTransportPhase.Failed });
+                }
+                throw; // An attempt timeout leaves the same offer available to the service retry.
+            }
+        }
+        if (accept is not null)
+        {
+            FileTransferTransportState original;
+            lock (controlSecureStateGate)
+                if (!fileTransferStates.TryGetValue(normalizedTransferId, out original)) return false;
+            ValueTask? BeginAccept(Func<ValueTask> write)
+            {
+                lock (controlSecureStateGate)
+                {
+                    if (!ReferenceEquals(epoch, sessionPreparationLifecycle.Current) || !ReferenceEquals(attachment, sessionPreparationLifecycle.Attachment) ||
+                        consentLifetime.IsCancellationRequested || ownsInboundOffer?.Invoke() == false || !fileTransferStates.TryGetValue(normalizedTransferId, out var current) ||
+                        current != original || !TryGetNextFileTransferState(MsgType.FileTransferAccept, normalizedTransferId, false, out var accepted, out _))
+                        return null;
+                    // SessionOpen may arrive before the local write completes. Only reserve consent for this exact offer.
+                    SetFileTransferStateLocked(normalizedTransferId, accepted with { RecordedAccept = accept, ConsentLifetime = consentLifetime,
+                        AcceptReservation = new() });
+                    return write();
+                }
+            }
+            try
+            {
+                if (!await SendEnvelopeAsync(destination, envelope, EnvelopeCodec.Serialize(envelope), ct, admitOfferResponse: BeginAccept).ConfigureAwait(false))
+                    return false;
+            }
+            catch
+            {
+                lock (controlSecureStateGate)
+                {
+                    if (fileTransferStates.TryGetValue(normalizedTransferId, out var current) && ReferenceEquals(current.RecordedAccept, accept))
+                    {
+                        if (current.Phase != FileTransferTransportPhase.Accepted) return true; // Peer already advanced this offer.
+                        current.AcceptReservation!.RolledBack = true;
+                        SetFileTransferStateLocked(normalizedTransferId, original);
+                    }
+                }
+                throw;
+            }
+            lock (controlSecureStateGate)
+            {
+                if (!fileTransferStates.TryGetValue(normalizedTransferId, out var current) || !ReferenceEquals(current.RecordedAccept, accept)) return false;
+                if (current.Phase == FileTransferTransportPhase.Accepted)
+                    CommitFileTransferStateLocked(normalizedTransferId, current with { AcceptWriteCompleted = true });
+            }
+            LogFileTransferEnvelopeEvent("sent", MsgType.FileTransferAccept, normalizedTransferId, LocalPeerAddress);
+            return true;
+        }
         if (messageType == MsgType.FileTransferChunk)
         {
             await SendBulkEnvelopeAsync(destination, envelope, ct).ConfigureAwait(false);
+        }
+        else if (ownsInboundOffer is not null)
+        {
+            if (!await SendEnvelopeAsync(destination, envelope, EnvelopeCodec.Serialize(envelope), ct,
+                    admitOfferResponse: OfferWriteAdmission(ownsInboundOffer)).ConfigureAwait(false)) return false;
         }
         else
         {
             await SendEnvelopeAsync(destination, envelope, ct).ConfigureAwait(false);
         }
 
-        if (!TryValidateAndTrackFileTransferMessage(messageType, normalizedTransferId, inbound: false, applyStateChange: true, out _, terminalContentOwner))
+        bool tracked = recordedDecline;
+        if (!recordedDecline)
+        {
+            lock (controlSecureStateGate)
+            {
+                if (ownsInboundOffer?.Invoke() == false) return false;
+                tracked = TryValidateAndTrackFileTransferMessage(messageType, normalizedTransferId, inbound: false, applyStateChange: true, out _, terminalContentOwner);
+            }
+        }
+        if (!tracked)
         {
             LocalOperationalLog.Warn(
                 "SessionSecurity",
@@ -720,14 +900,57 @@ public sealed partial class NknSignalingTransport : IFileTransferControlPlanePhy
             normalizedTransferId,
             source: messageType == MsgType.FileTransferChunk ? client.BulkAddress : LocalPeerAddress);
         Log($"SendFileTransfer{messageType}Async sent (msg_id={envelope.MessageId}, transfer_id_len={normalizedTransferId.Length})");
+        return tracked;
     }
 
-    private async Task SendFileTransferRedundantLifecycleEnvelopeAsync(
+    private OwnedHandshakeWrite OfferWriteAdmission(Func<bool> ownsOffer) => begin =>
+    {
+        lock (controlSecureStateGate) return ownsOffer() ? begin() : null;
+    };
+
+    // A cancel may be repeated for its own tombstone, never for a new owner of the transfer ID.
+    private bool CaptureTerminalOwner(string transferId, Guid? requestedOwner, bool cancel,
+        out Guid? wireId, out Func<bool>? owns, bool requireOwnerOnReuse = false)
+    {
+        bool ReadOwner(out FileTransferTransportState state)
+        {
+            if (fileTransferStates.TryGetValue(transferId, out state)) return true;
+            if (cancel && IsRecentTerminalFileTransferLocked(transferId, out var phase) && phase == FileTransferTransportPhase.Canceled)
+            {
+                state = fileTransferTerminalTombstones[transferId].Owner;
+                return true;
+            }
+            return false;
+        }
+        lock (controlSecureStateGate)
+        {
+            wireId = null;
+            owns = null;
+            if (!ReadOwner(out var captured)) return !requireOwnerOnReuse && requestedOwner is null; // Existing cancel/error unknown-ID validation.
+            if (requestedOwner.HasValue && requestedOwner != captured.ServiceOfferId) return false;
+            if (requireOwnerOnReuse && captured.RequireOfferId && !requestedOwner.HasValue) return false;
+            wireId = captured.WireOfferId;
+            var epoch = sessionPreparationLifecycle.Current;
+            var attachment = sessionPreparationLifecycle.Attachment;
+            owns = () =>
+            {
+                lock (controlSecureStateGate)
+                    return ReferenceEquals(epoch, sessionPreparationLifecycle.Current) && ReferenceEquals(attachment, sessionPreparationLifecycle.Attachment) &&
+                        ReadOwner(out var current) && current.WireOfferId == captured.WireOfferId &&
+                        ReferenceEquals(current.InboundOffer, captured.InboundOffer);
+            };
+            return true;
+        }
+    }
+
+    private async Task<bool> SendFileTransferRedundantLifecycleEnvelopeAsync(
         MsgType messageType,
         string transferId,
         byte[] plaintextPayload,
-        CancellationToken ct)
+        CancellationToken ct, Func<bool>? ownsOffer = null)
     {
+        if (ownsOffer?.Invoke() == false) return false;
+        var admission = ownsOffer is null ? null : OfferWriteAdmission(ownsOffer);
         var normalizedTransferId = NormalizeRequiredFileTransferId(transferId);
         FileTransferCompleteV1? completedMessage = null;
         if (messageType == MsgType.FileTransferComplete &&
@@ -766,7 +989,7 @@ public sealed partial class NknSignalingTransport : IFileTransferControlPlanePhy
             controlEnvelope,
             useBulkLane: false,
             lane: "control",
-            ct);
+            ct, admission);
 
         Task<LifecycleCopySendResult>? bulkTask = null;
         if (!string.IsNullOrWhiteSpace(remoteBulkEndpoint))
@@ -783,7 +1006,7 @@ public sealed partial class NknSignalingTransport : IFileTransferControlPlanePhy
                 bulkEnvelope,
                 useBulkLane: true,
                 lane: "bulk",
-                ct);
+                ct, admission);
         }
 
         var controlResult = await controlTask.ConfigureAwait(false);
@@ -792,28 +1015,33 @@ public sealed partial class NknSignalingTransport : IFileTransferControlPlanePhy
             : await bulkTask.ConfigureAwait(false);
         if (!controlResult.Succeeded && !bulkResult.Succeeded)
         {
+            if (ownsOffer?.Invoke() == false) return false;
             LocalOperationalLog.Warn(
                 "SessionSecurity",
                 $"event=filetransfer_lifecycle_redundant_both_failed; transport=nkn; message_type={MapSecureFileTransferMessageType(messageType)}; transfer_id={normalizedTransferId}; control_error={controlResult.Error?.GetType().Name ?? "(none)"}; bulk_error={bulkResult.Error?.GetType().Name ?? "(none)"}");
             throw controlResult.Error ?? bulkResult.Error ?? new InvalidOperationException($"File-transfer lifecycle send failed on both lanes for '{messageType}'.");
         }
 
-        if (!TryValidateAndTrackFileTransferMessage(messageType, normalizedTransferId, inbound: false, applyStateChange: true, out _, terminalContentOwner))
+        bool tracked;
+        lock (controlSecureStateGate)
+        {
+            if (ownsOffer?.Invoke() == false) return false;
+            tracked = TryValidateAndTrackFileTransferMessage(messageType, normalizedTransferId, inbound: false, applyStateChange: true, out _, terminalContentOwner);
+            if (tracked && completedMessage is not null)
+                RememberFileTransferCompletedTombstoneMessage(normalizedTransferId, completedMessage);
+        }
+        if (!tracked)
         {
             LocalOperationalLog.Warn(
                 "SessionSecurity",
                 $"event=filetransfer_message_state_race; message_type={MapSecureFileTransferMessageType(messageType)}; transfer_id={normalizedTransferId}; source={LocalPeerAddress}");
         }
 
-        if (completedMessage is not null)
-        {
-            RememberFileTransferCompletedTombstoneMessage(normalizedTransferId, completedMessage);
-        }
-
         LogFileTransferEnvelopeEvent("sent", messageType, normalizedTransferId, source: LocalPeerAddress);
         LocalOperationalLog.Info(
             "SessionSecurity",
             $"event=filetransfer_lifecycle_redundant_sent; transport=nkn; message_type={MapSecureFileTransferMessageType(messageType)}; transfer_id={normalizedTransferId}; control_sent={(controlResult.Succeeded ? 1 : 0)}; bulk_sent={(bulkResult.Succeeded ? 1 : 0)}");
+        return tracked;
     }
 
     private async Task<LifecycleCopySendResult> SendFileTransferLifecycleCopyAsync(
@@ -822,10 +1050,18 @@ public sealed partial class NknSignalingTransport : IFileTransferControlPlanePhy
         Envelope envelope,
         bool useBulkLane,
         string lane,
-        CancellationToken ct)
+        CancellationToken ct, OwnedHandshakeWrite? admission = null)
     {
         try
         {
+            if (admission is not null)
+            {
+                var bytes = EnvelopeCodec.Serialize(envelope);
+                var sent = useBulkLane
+                    ? await SendBulkEnvelopeAsync(destination, envelope, bytes, ct, admitOfferResponse: admission).ConfigureAwait(false) != BulkSendResult.Skipped
+                    : await SendEnvelopeAsync(destination, envelope, bytes, ct, admitOfferResponse: admission).ConfigureAwait(false);
+                return new LifecycleCopySendResult(lane, sent, null);
+            }
             if (useBulkLane)
             {
                 await SendBulkEnvelopeAsync(destination, envelope, ct).ConfigureAwait(false);
@@ -850,7 +1086,7 @@ public sealed partial class NknSignalingTransport : IFileTransferControlPlanePhy
         string transferId,
         byte[] plaintextPayload,
         string? reason,
-        CancellationToken ct)
+        CancellationToken ct, Func<bool>? owns)
     {
         var normalizedTransferId = NormalizeRequiredFileTransferId(transferId);
 
@@ -903,7 +1139,7 @@ public sealed partial class NknSignalingTransport : IFileTransferControlPlanePhy
                     AcceptancePolicy: LifecycleDeliveryAcceptancePolicy.PeerVisibleRequired,
                     UseControlAckRetry: false,
                     PeerCopyAttempts: isSessionEndCancel ? 2 : 1,
-                    ThrowOnFailure: false),
+                    ThrowOnFailure: false) { FileOfferWrite = owns is null ? null : OfferWriteAdmission(owns) },
                 new LifecycleEnvelopeSet(controlEnvelope, bulkEnvelope),
                 ct)
             .ConfigureAwait(false);
@@ -913,6 +1149,7 @@ public sealed partial class NknSignalingTransport : IFileTransferControlPlanePhy
         var bulkSent = result.BulkCopy && string.Equals(result.BulkCopyLane, "bulk_copy", StringComparison.Ordinal);
         var bulkRetry = result.BulkCopy && !string.Equals(result.BulkCopyLane, "bulk_copy", StringComparison.Ordinal);
 
+        if (owns?.Invoke() == false) return;
         if (!result.AcceptedAny)
         {
             LocalOperationalLog.Warn(
@@ -921,7 +1158,13 @@ public sealed partial class NknSignalingTransport : IFileTransferControlPlanePhy
             throw new InvalidOperationException("File-transfer cancel send failed on all peer-visible lifecycle lanes.");
         }
 
-        if (!TryValidateAndTrackFileTransferMessage(MsgType.FileTransferCancel, normalizedTransferId, inbound: false, applyStateChange: true, out _, terminalContentOwner))
+        bool tracked;
+        lock (controlSecureStateGate)
+        {
+            if (owns?.Invoke() == false) return;
+            tracked = TryValidateAndTrackFileTransferMessage(MsgType.FileTransferCancel, normalizedTransferId, inbound: false, applyStateChange: true, out _, terminalContentOwner);
+        }
+        if (!tracked)
         {
             LocalOperationalLog.Warn(
                 "SessionSecurity",
@@ -974,7 +1217,7 @@ public sealed partial class NknSignalingTransport : IFileTransferControlPlanePhy
         long OfferGeneration,
         long TunaPathLeaseGeneration,
         string ProbeId,
-        long ExpiresUtcTicks)
+        long ExpiresUtcTicks, Func<Func<Task>, Task?>? StartCommitReplyWrite = null)
     {
         public bool Matches(FileTransferRuntimeUnlockPreCommitProbeAckFrame ack)
             => string.Equals(SessionId, ack.SessionId, StringComparison.Ordinal) &&
@@ -992,6 +1235,9 @@ public sealed partial class NknSignalingTransport : IFileTransferControlPlanePhy
         long OfferGeneration,
         long TunaPathLeaseGeneration,
         string ProbeId);
+
+    private static bool RequiresPaidProbeListener(long leaseGeneration, string? listenerRunId)
+        => leaseGeneration > 0 && listenerRunId?.StartsWith("peer-offer-dialer-", StringComparison.OrdinalIgnoreCase) != true;
 
     private async Task SendFileTransferEnvelopeRawAsync(
         MsgType messageType,
@@ -1178,7 +1424,7 @@ public sealed partial class NknSignalingTransport : IFileTransferControlPlanePhy
                             ct,
                             allowAcceleration: !forceRegularNknBulk && !suppressUncommittedRuntimeUnlockAcceleration,
                             allowAccelerationDuringRegularNknFallback: allowAccelerationDuringRegularNknFallback)
-                        .ConfigureAwait(false);
+                        .ConfigureAwait(false) == BulkSendResult.Accelerated;
                 }
             }
 
@@ -1296,7 +1542,32 @@ public sealed partial class NknSignalingTransport : IFileTransferControlPlanePhy
 
         try
         {
-            var sent = await laneClient.TrySendAsync(channel, envelopeBytes, ct).ConfigureAwait(false);
+            Task<bool>? submission = null;
+            lock (accelerationGate)
+            {
+                var current = runtimeUnlockTransactionState;
+                if (current.PathProbeState != RuntimeUnlockPathProbeState.Started || current.PathProbeId != authority.ProbeId ||
+                    current.PathProbeTransport != FileTransferTransportKind.Tuna ||
+                    !MatchesLocalPreCommitProbeOwnerLocked(authority.SessionId, authority.TransferId, authority.TransactionGeneration,
+                        authority.OfferGeneration, authority.TunaPathLeaseGeneration, current.TunaPathLeaseListenerRunId))
+                {
+                    return false;
+                }
+                if (RequiresPaidProbeListener(authority.TunaPathLeaseGeneration, current.TunaPathLeaseListenerRunId))
+                {
+                    if (payerProbeListener is not { } bound || bound.Probe != authority ||
+                        bound.ListenerRunId != current.TunaPathLeaseListenerRunId ||
+                        laneClient is not INknTunaAccelerationSession listener ||
+                        !listener.TryPublishForListenerLease(bound.Physical,
+                            () => submission = listener.TrySendAsync(channel, envelopeBytes, ct)))
+                        return false;
+                }
+                else
+                {
+                    submission = laneClient.TrySendAsync(channel, envelopeBytes, ct);
+                }
+            }
+            var sent = submission is not null && await submission.ConfigureAwait(false);
             if (sent)
             {
                 LocalOperationalLog.Info(
@@ -1413,7 +1684,9 @@ public sealed partial class NknSignalingTransport : IFileTransferControlPlanePhy
 
         try
         {
-            var sent = await laneClient.TrySendAsync(channel, envelopeBytes, ct).ConfigureAwait(false);
+            var sent = authority.StartCommitReplyWrite is { } start
+                ? await laneClient.TryWritePairedCommitConfirmationAsync(envelopeBytes, authority.ExpiresUtcTicks, start, ct).ConfigureAwait(false)
+                : await laneClient.TrySendAsync(channel, envelopeBytes, ct).ConfigureAwait(false);
             if (sent)
             {
                 LocalOperationalLog.Info(
@@ -1681,7 +1954,9 @@ public sealed partial class NknSignalingTransport : IFileTransferControlPlanePhy
         FileTransferTransportHandoffKind handoffKind = FileTransferTransportHandoffKind.None,
         FileTransferTransportKind targetTransport = FileTransferTransportKind.Unknown,
         PostTunaFallbackHandoffEvidence? postTunaFallbackHandoffEvidence = null,
-        PostTunaFallbackAvailabilityProofEvidence? postTunaFallbackProofBoundary = null)
+        PostTunaFallbackAvailabilityProofEvidence? postTunaFallbackProofBoundary = null,
+        (string SessionId, long Generation)? pausePublication = null,
+        long? releaseOfPauseGeneration = null)
     {
         var effectiveHandoffKind = ResolveFileTransferDataSessionAvailabilityHandoffKind(
             reason,
@@ -1791,6 +2066,7 @@ public sealed partial class NknSignalingTransport : IFileTransferControlPlanePhy
 
         foreach (var session in sessions)
         {
+            if (pausePublication is { } publication && publication.SessionId != session.SessionId) continue;
             var proofScopedFallbackBoundary =
                 (postTunaFallbackHandoffEvidence is { IsComplete: true } evidence &&
                  string.Equals(evidence.SessionId, session.SessionId, StringComparison.Ordinal) &&
@@ -1854,7 +2130,9 @@ public sealed partial class NknSignalingTransport : IFileTransferControlPlanePhy
                 targetTransport,
                 proofScopedFallbackBoundary ? postTunaFallbackHandoffEvidence : null,
                 proofScopedFallbackBoundary ? postTunaFallbackProofBoundary : null,
-                receiverBarrierPauseGeneration);
+                receiverBarrierPauseGeneration,
+                pausePublication?.Generation,
+                releaseOfPauseGeneration: releaseOfPauseGeneration);
         }
     }
 
@@ -1867,9 +2145,30 @@ public sealed partial class NknSignalingTransport : IFileTransferControlPlanePhy
                 return true;
             }
 
-            return fileTransferStates.Values.Any(static state =>
-                !state.IsTerminal &&
-                state.Phase is not FileTransferTransportPhase.Offered);
+            return fileFallbackOffers.Any(static offer => offer.Admitted);
+        }
+    }
+
+    private bool TryCaptureFileFallbackParticipants(string sessionId, out FileFallbackParticipant[]? owners)
+    {
+        lock (gate)
+        {
+            // One immutable offer snapshot while data-session membership is locked. A
+            // channel keeps its incarnation even if its wire ID has since been reused.
+            var participants = fileFallbackOffers.Where(o => o.Admitted && o.Owner.SessionId == sessionId)
+                .Select(o => new FileFallbackParticipant(o.Owner, o.Reservation)).ToHashSet();
+            foreach (var channel in fileTransferDataSessions.Values)
+            {
+                if (channel.IsDisposed || channel.SessionId != sessionId) continue;
+                if (channel.OfferOwner is not { } owner)
+                {
+                    owners = null; // Unbound channel: preserve fallback, never infer cancellation.
+                    return true;
+                }
+                participants.Add(new(owner, null));
+            }
+            owners = participants.ToArray();
+            return owners.Length != 0;
         }
     }
 
@@ -1922,12 +2221,13 @@ public sealed partial class NknSignalingTransport : IFileTransferControlPlanePhy
         return handoffKind;
     }
 
-    private void RequestFileTransferDataSessionsHandoff(
+    private bool RequestFileTransferDataSessionsHandoff(
         string reason,
         FileTransferTransportHandoffKind handoffKind,
         FileTransferTransportKind targetTransport,
         string? sessionId = null,
-        RuntimeUnlockRouteCommitSnapshot? runtimeUnlockPreCommitProbeSnapshot = null)
+        RuntimeUnlockRouteCommitSnapshot? runtimeUnlockPreCommitProbeSnapshot = null,
+        long? ordinaryGeneration = null)
     {
         TransportFileTransferDataSession[] sessions;
         int staleSessionCount;
@@ -1938,6 +2238,10 @@ public sealed partial class NknSignalingTransport : IFileTransferControlPlanePhy
             : sessionId.Trim();
         lock (gate)
         {
+            if (ordinaryGeneration is long source && (runtimeUnlockPreCommitProbeSnapshot is null
+                    ? !IsOrdinaryFileHandoffCurrent(source, normalizedSessionId)
+                    : source != Interlocked.Read(ref fileActivationHandoffResetGeneration)))
+                return false;
             var staleTransferIds = fileTransferDataSessions
                 .Where(static pair => pair.Value.IsDisposed)
                 .Select(static pair => pair.Key)
@@ -1949,22 +2253,24 @@ public sealed partial class NknSignalingTransport : IFileTransferControlPlanePhy
             }
 
             staleSessionCount = staleTransferIds.Length;
-            if (fileTransferDataSessions.Count == 0)
+            sessions = fileTransferDataSessions.Values.Where(session =>
+                (normalizedSessionId is null || session.SessionId == normalizedSessionId) &&
+                ProbeBelongsToChannel(runtimeUnlockPreCommitProbeSnapshot, session)).ToArray();
+            if (sessions.Length == 0)
             {
-                TryRecordPendingFileTransferV6HandoffLocked(
+                var recorded = TryRecordPendingFileTransferV6HandoffLocked(
                     normalizedSessionId,
                     normalizedReason,
                     handoffKind,
                     targetTransport,
                     "no_sessions",
-                    runtimeUnlockPreCommitProbeSnapshot);
+                    runtimeUnlockPreCommitProbeSnapshot, ordinaryGeneration);
                 LocalOperationalLog.Warn(
                     "NKN.Tuna",
                     $"event=filetransfer_data_session_handoff_no_sessions; reason={normalizedReason}; handoff_kind={FormatFileTransferTransportHandoffKindForLog(handoffKind)}; target_transport={FormatFileTransferTransportKindForLog(targetTransport)}; stale_session_count={staleSessionCount}");
-                return;
+                return recorded;
             }
 
-            sessions = fileTransferDataSessions.Values.ToArray();
             subscriberCount = sessions.Sum(static session => session.AvailabilitySubscriberCount);
             if (subscriberCount == 0)
             {
@@ -1974,7 +2280,7 @@ public sealed partial class NknSignalingTransport : IFileTransferControlPlanePhy
                     handoffKind,
                     targetTransport,
                     "no_subscribers",
-                    runtimeUnlockPreCommitProbeSnapshot);
+                    runtimeUnlockPreCommitProbeSnapshot, ordinaryGeneration);
             }
         }
 
@@ -1982,6 +2288,7 @@ public sealed partial class NknSignalingTransport : IFileTransferControlPlanePhy
             "NKN.Tuna",
             $"event=filetransfer_data_session_handoff_broadcast; session_count={sessions.Length}; stale_session_count={staleSessionCount}; subscriber_count={subscriberCount}; reason={normalizedReason}; handoff_kind={FormatFileTransferTransportHandoffKindForLog(handoffKind)}; target_transport={FormatFileTransferTransportKindForLog(targetTransport)}");
 
+        var published = false;
         foreach (var session in sessions)
         {
             TrackFileTransferRouteHintForHandoff(
@@ -1990,15 +2297,19 @@ public sealed partial class NknSignalingTransport : IFileTransferControlPlanePhy
                 targetTransport,
                 "handoff_broadcast",
                 normalizedReason);
-            session.RequestHandoff(
+            published |= session.TryPublishHandoff(
                 normalizedReason,
                 handoffKind,
                 targetTransport,
                 FilterRuntimeUnlockResponderObservationForSession(
                     runtimeUnlockPreCommitProbeSnapshot,
-                    session));
+                    session), ordinaryGeneration);
         }
+        return published;
     }
+
+    private static bool ProbeBelongsToChannel(RuntimeUnlockRouteCommitSnapshot? snapshot, TransportFileTransferDataSession channel)
+        => snapshot is null || (snapshot.SessionId == channel.SessionId && snapshot.TransferId == channel.TransferId);
 
     private static RuntimeUnlockRouteCommitSnapshot?
         FilterRuntimeUnlockResponderObservationForSession(
@@ -2038,10 +2349,13 @@ public sealed partial class NknSignalingTransport : IFileTransferControlPlanePhy
         FileTransferTransportHandoffKind handoffKind,
         FileTransferTransportKind targetTransport,
         string trigger,
-        RuntimeUnlockRouteCommitSnapshot? runtimeUnlockPreCommitProbeSnapshot = null)
+        RuntimeUnlockRouteCommitSnapshot? runtimeUnlockPreCommitProbeSnapshot = null,
+        long? ordinaryGeneration = null)
     {
         if (string.IsNullOrWhiteSpace(sessionId) ||
-            !ShouldPersistPendingFileTransferV6Handoff(handoffKind, targetTransport))
+            !ShouldPersistPendingFileTransferV6Handoff(handoffKind, targetTransport) ||
+            (runtimeUnlockPreCommitProbeSnapshot is null && (ordinaryGeneration is not long source || !IsOrdinaryFileHandoffCurrent(source, sessionId))) ||
+            (runtimeUnlockPreCommitProbeSnapshot is { } probe && (probe.SessionId != sessionId || string.IsNullOrEmpty(probe.TransferId))))
         {
             return false;
         }
@@ -2053,6 +2367,7 @@ public sealed partial class NknSignalingTransport : IFileTransferControlPlanePhy
             handoffKind,
             targetTransport,
             DateTimeOffset.UtcNow,
+            ordinaryGeneration,
             runtimeUnlockPreCommitProbeSnapshot);
         pendingFileTransferV6HandoffsBySession[normalizedSessionId] = intent;
         LocalOperationalLog.Info(
@@ -2067,7 +2382,8 @@ public sealed partial class NknSignalingTransport : IFileTransferControlPlanePhy
         FileTransferTransportHandoffKind handoffKind,
         FileTransferTransportKind targetTransport,
         string trigger,
-        RuntimeUnlockRouteCommitSnapshot? runtimeUnlockPreCommitProbeSnapshot = null)
+        RuntimeUnlockRouteCommitSnapshot? runtimeUnlockPreCommitProbeSnapshot = null,
+        long? ordinaryGeneration = null)
     {
         lock (gate)
         {
@@ -2077,7 +2393,7 @@ public sealed partial class NknSignalingTransport : IFileTransferControlPlanePhy
                 handoffKind,
                 targetTransport,
                 trigger,
-                runtimeUnlockPreCommitProbeSnapshot);
+                runtimeUnlockPreCommitProbeSnapshot, ordinaryGeneration);
         }
     }
 
@@ -2097,16 +2413,27 @@ public sealed partial class NknSignalingTransport : IFileTransferControlPlanePhy
             intent = candidate;
         }
 
+        // An ordinary answer is evidence about one negotiation, not a session-wide
+        // instruction for future files. Coordinator-issued probe snapshots have their own authority.
+        if (!ProbeBelongsToChannel(intent.RuntimeUnlockPreCommitProbeSnapshot, session)) return false;
+        if (intent.RuntimeUnlockPreCommitProbeSnapshot is null)
+        {
+            lock (accelerationGate)
+            {
+                if (intent.OrdinaryGeneration is not long source || !IsOrdinaryFileHandoffCurrent(source, session.SessionId) ||
+                    accelerationSessionId != session.SessionId ||
+                    (accelerationNegotiatedLanes & NknAccelerationLaneKind.File) == 0 ||
+                    accelerationUserStoppedSessionId == session.SessionId)
+                    return false;
+            }
+        }
+
+        if (!session.TryPublishHandoff(intent.Reason, intent.HandoffKind, intent.TargetTransport,
+                FilterRuntimeUnlockResponderObservationForSession(intent.RuntimeUnlockPreCommitProbeSnapshot, session),
+                intent.OrdinaryGeneration)) return false;
         LocalOperationalLog.Info(
             "NKN.Tuna",
             $"event=filetransfer_v6_pending_handoff_replayed; session_id={SanitizeLogToken(session.SessionId)}; transfer_id={SanitizeLogToken(session.TransferId)}; reason={intent.Reason}; trigger={SanitizeLogToken(trigger)}; handoff_kind={FormatFileTransferTransportHandoffKindForLog(intent.HandoffKind)}; target_transport={FormatFileTransferTransportKindForLog(intent.TargetTransport)}");
-        session.RequestHandoff(
-            intent.Reason,
-            intent.HandoffKind,
-            intent.TargetTransport,
-            FilterRuntimeUnlockResponderObservationForSession(
-                intent.RuntimeUnlockPreCommitProbeSnapshot,
-                session));
 
         return true;
     }
@@ -2156,7 +2483,17 @@ public sealed partial class NknSignalingTransport : IFileTransferControlPlanePhy
         return true;
     }
 
-    private bool TryRequestCurrentTunaActivationHandoffForFileTransferSession(TransportFileTransferDataSession session, string trigger)
+    private void DeliverWaitingOrdinaryHandoffs(string sessionId, long generation)
+    {
+        TransportFileTransferDataSession[] sessions;
+        lock (gate) sessions = fileTransferDataSessions.Values.Where(s => s.SessionId == sessionId).ToArray();
+        foreach (var session in sessions)
+            if (session.IsAvailable && session.HasWaitingOrdinarySubscriber(generation))
+                TryRequestCurrentTunaActivationHandoffForFileTransferSession(session, "runtime_unlock_committed", generation);
+    }
+
+    private bool TryRequestCurrentTunaActivationHandoffForFileTransferSession(TransportFileTransferDataSession session, string trigger,
+        long? waitingGeneration = null)
     {
         if (session.IsDisposed)
         {
@@ -2184,6 +2521,7 @@ public sealed partial class NknSignalingTransport : IFileTransferControlPlanePhy
             return false;
         }
 
+        long ordinaryGeneration;
         lock (accelerationGate)
         {
             if (accelerationLane?.IsAvailable != true ||
@@ -2196,6 +2534,9 @@ public sealed partial class NknSignalingTransport : IFileTransferControlPlanePhy
             {
                 return false;
             }
+            ordinaryGeneration = fileActivationHandoffResetGeneration;
+            if (!IsOrdinaryFileHandoffCurrent(ordinaryGeneration, session.SessionId) ||
+                (waitingGeneration.HasValue && waitingGeneration != ordinaryGeneration)) return false;
         }
 
         const string reason = "active_tuna_session_registered";
@@ -2207,11 +2548,10 @@ public sealed partial class NknSignalingTransport : IFileTransferControlPlanePhy
         LocalOperationalLog.Info(
             "NKN.Tuna",
             $"event=filetransfer_v6_active_tuna_handoff_synthesized; session_id={SanitizeLogToken(session.SessionId)}; transfer_id={SanitizeLogToken(session.TransferId)}; reason={reason}; trigger={SanitizeLogToken(trigger)}; handoff_kind={FormatFileTransferTransportHandoffKindForLog(FileTransferTransportHandoffKind.NormalToTunaActivation)}; target_transport={FormatFileTransferTransportKindForLog(FileTransferTransportKind.Tuna)}");
-        session.RequestHandoff(
+        return session.PublishHandoffToSubscribers(
             reason,
             FileTransferTransportHandoffKind.NormalToTunaActivation,
-            FileTransferTransportKind.Tuna);
-        return true;
+            FileTransferTransportKind.Tuna, null, ordinaryGeneration, waitingOnly: waitingGeneration.HasValue);
     }
 
     private void TryScheduleRuntimeUnlockPreCommitProbeStartTimeoutForFileTransferSession(
@@ -3754,11 +4094,12 @@ public sealed partial class NknSignalingTransport : IFileTransferControlPlanePhy
 
         if (!TryValidateFileTransferSecureMetadata("file_transfer_offer", securePayload.Metadata, message.TransferId, env.MessageId) ||
             !TryValidateFileTransferMessageSession("file_transfer_offer", message.SessionId, message.TransferId, env.MessageId, source) ||
-            !TryValidateFileTransferDispatchState("file_transfer_offer", MsgType.FileTransferOffer, message.TransferId, env.MessageId, source))
+            !TryTrackReceivedFileOffer(message, env.MessageId, source, out var offer, out var replay))
         {
             return;
         }
 
+        if (replay is not null) { replay(); return; }
         LogFileTransferEnvelopeEvent("received", MsgType.FileTransferOffer, message.TransferId, source);
         Log($"FileTransferOffer received (msg_id={env.MessageId}, transfer_id_len={message.TransferId.Length}, file_name_len={message.FileName.Length}, size_bytes={message.FileSizeBytes})");
         ObserveFileTransferRouteHintEvidence(
@@ -3766,7 +4107,106 @@ public sealed partial class NknSignalingTransport : IFileTransferControlPlanePhy
             message.FileTransferRoute,
             message.PreferredDataProtocolVersion ?? 0,
             "receive_offer");
-        FileTransferOfferReceived?.Invoke(this, new FileTransferOfferReceivedEventArgs(message, source));
+        FileTransferOfferReceived?.Invoke(this, offer);
+    }
+
+    private bool TryTrackReceivedFileOffer(FileTransferOfferV2 message, string messageId, string source,
+        out FileTransferOfferReceivedEventArgs offer, out Action? replay)
+    {
+        replay = null;
+        var epoch = sessionPreparationLifecycle.Current;
+        var attachment = sessionPreparationLifecycle.Attachment;
+        Guid? localId;
+        lock (controlSecureStateGate)
+        {
+            if (message.OfferInstanceId.HasValue && remoteEndpoint is { Length: > 0 } destination &&
+                fileTransferStates.TryGetValue(message.TransferId, out var existing) &&
+                existing is { InitiatedLocally: false, Phase: FileTransferTransportPhase.Accepted, AcceptWriteCompleted: true, RecordedAccept: { } accepted } &&
+                existing.InboundOffer == message)
+            {
+                bool StillAwaitingOpen()
+                {
+                    lock (controlSecureStateGate)
+                        return ReferenceEquals(epoch, sessionPreparationLifecycle.Current) && ReferenceEquals(attachment, sessionPreparationLifecycle.Attachment) &&
+                            fileTransferStates.TryGetValue(message.TransferId, out var current) && current.Phase == FileTransferTransportPhase.Accepted &&
+                            !current.ConsentLifetime.IsCancellationRequested &&
+                            ReferenceEquals(current.InboundOffer, existing.InboundOffer) && ReferenceEquals(current.RecordedAccept, accepted);
+                }
+                offer = null!;
+                replay = () => _ = ReplayRecordedOfferResponseAsync(destination, MsgType.FileTransferAccept, accepted.TransferId,
+                    FileTransferPayloadCodec.Serialize(accepted), StillAwaitingOpen);
+                return true;
+            }
+            if (message.OfferInstanceId.HasValue && remoteEndpoint is { Length: > 0 } declineDestination &&
+                IsRecentTerminalFileTransferLocked(message.TransferId, out var phase) && phase == FileTransferTransportPhase.Declined &&
+                fileTransferTerminalTombstones[message.TransferId] is { DeclineSendSuppressed: false, DeclineMessage: { } declined } terminal &&
+                terminal.Owner.InboundOffer == message)
+            {
+                var stillDeclined = BindRecordedDeclineLocked(declined);
+                offer = null!;
+                replay = () => _ = ReplayRecordedOfferResponseAsync(declineDestination, MsgType.FileTransferDecline, declined.TransferId,
+                    FileTransferPayloadCodec.Serialize(declined), stillDeclined);
+                return true;
+            }
+            if (!TryValidateFileTransferDispatchState("file_transfer_offer", MsgType.FileTransferOffer,
+                    message.TransferId, messageId, source, message))
+            {
+                offer = null!;
+                return false;
+            }
+            localId = fileTransferStates[message.TransferId].ServiceOfferId;
+        }
+        bool IsCurrentOffer(bool requireOffered)
+        {
+            lock (controlSecureStateGate)
+                return ReferenceEquals(epoch, sessionPreparationLifecycle.Current) &&
+                    ReferenceEquals(attachment, sessionPreparationLifecycle.Attachment) &&
+                    fileTransferStates.TryGetValue(message.TransferId, out var state) && !state.InitiatedLocally &&
+                    ReferenceEquals(state.InboundOffer, message) && (!requireOffered || state.Phase == FileTransferTransportPhase.Offered);
+        }
+        offer = new(message.OfferInstanceId == localId ? message : message with { OfferInstanceId = localId }, source) { IsCurrentOffer = IsCurrentOffer,
+            AcceptIfCurrentAsync = (accept, lifetime, ct) => accept.SessionId == message.SessionId && accept.TransferId == message.TransferId
+                ? SendFileTransferAcceptCoreAsync(accept with { OfferInstanceId = message.OfferInstanceId }, ct, () => IsCurrentOffer(requireOffered: true), lifetime) : Task.FromResult(false),
+            DeclineIfCurrentAsync = (decline, ct) => decline.SessionId == message.SessionId && decline.TransferId == message.TransferId
+                ? SendFileTransferDeclineCoreAsync(decline with { OfferInstanceId = message.OfferInstanceId }, ct, () => IsCurrentOffer(requireOffered: true)) : Task.CompletedTask,
+            ErrorIfCurrentAsync = (error, ct) => error.SessionId == message.SessionId && error.TransferId == message.TransferId
+                ? SendFileTransferRedundantLifecycleEnvelopeAsync(MsgType.FileTransferError, message.TransferId,
+                    FileTransferPayloadCodec.Serialize(error with { OfferInstanceId = message.OfferInstanceId }), ct, () => IsCurrentOffer(true))
+                : Task.FromResult(false),
+            FinalAckReadiness = CaptureFinalAckReadiness(message, () => IsCurrentOffer(requireOffered: true)) };
+        return true;
+    }
+
+    private Func<bool> BindRecordedDeclineLocked(FileTransferDeclineV1 decision)
+    {
+        var epoch = sessionPreparationLifecycle.Current;
+        var attachment = sessionPreparationLifecycle.Attachment;
+        return () =>
+        {
+            lock (controlSecureStateGate)
+                return ReferenceEquals(epoch, sessionPreparationLifecycle.Current) && ReferenceEquals(attachment, sessionPreparationLifecycle.Attachment) &&
+                    IsRecentTerminalFileTransferLocked(decision.TransferId, out var phase) && phase == FileTransferTransportPhase.Declined &&
+                    fileTransferTerminalTombstones[decision.TransferId] is { DeclineSendSuppressed: false } terminal &&
+                    ReferenceEquals(terminal.DeclineMessage, decision);
+        };
+    }
+
+    private async Task ReplayRecordedOfferResponseAsync(string destination, MsgType type, string transferId, byte[] response, Func<bool> stillCurrent)
+    {
+        try
+        {
+            if (!stillCurrent() || !TryGetCurrentEnvelopeCode(out var code)) return;
+            var payload = CreateSecureFileTransferPayload(type, transferId, response);
+            var envelope = CreateEnvelope(code, type, payload, replyTo: null);
+            using var timeout = new CancellationTokenSource(AckWaitTimeout);
+            if (await SendEnvelopeAsync(destination, envelope, EnvelopeCodec.Serialize(envelope), timeout.Token,
+                    admitOfferResponse: OfferWriteAdmission(stillCurrent)).ConfigureAwait(false))
+                LogFileTransferEnvelopeEvent("sent", type, transferId, LocalPeerAddress);
+        }
+        catch (Exception ex)
+        {
+            Log($"Recorded file-transfer response replay failed (message={type}, type={ex.GetType().Name}).");
+        }
     }
 
     private void HandleFileTransferAccept(string source, Envelope env)
@@ -3786,10 +4226,12 @@ public sealed partial class NknSignalingTransport : IFileTransferControlPlanePhy
 
         if (!TryValidateFileTransferSecureMetadata("file_transfer_accept", securePayload.Metadata, message.TransferId, env.MessageId) ||
             !TryValidateFileTransferMessageSession("file_transfer_accept", message.SessionId, message.TransferId, env.MessageId, source) ||
-            !TryValidateFileTransferDispatchState("file_transfer_accept", MsgType.FileTransferAccept, message.TransferId, env.MessageId, source))
+            !TryTrackReceivedFileOfferResponse(MsgType.FileTransferAccept, message.TransferId, env.MessageId, source,
+                message.OfferInstanceId, out var serviceOfferId))
         {
             return;
         }
+        message = message with { OfferInstanceId = serviceOfferId };
 
         LogFileTransferEnvelopeEvent("received", MsgType.FileTransferAccept, message.TransferId, source);
         Log($"FileTransferAccept received (msg_id={env.MessageId}, transfer_id_len={message.TransferId.Length})");
@@ -3818,10 +4260,12 @@ public sealed partial class NknSignalingTransport : IFileTransferControlPlanePhy
 
         if (!TryValidateFileTransferSecureMetadata("file_transfer_decline", securePayload.Metadata, message.TransferId, env.MessageId) ||
             !TryValidateFileTransferMessageSession("file_transfer_decline", message.SessionId, message.TransferId, env.MessageId, source) ||
-            !TryValidateFileTransferDispatchState("file_transfer_decline", MsgType.FileTransferDecline, message.TransferId, env.MessageId, source))
+            !TryTrackReceivedFileOfferResponse(MsgType.FileTransferDecline, message.TransferId, env.MessageId, source,
+                message.OfferInstanceId, out var serviceOfferId))
         {
             return;
         }
+        message = message with { OfferInstanceId = serviceOfferId };
 
         LogFileTransferEnvelopeEvent("received", MsgType.FileTransferDecline, message.TransferId, source);
         Log($"FileTransferDecline received (msg_id={env.MessageId}, transfer_id_len={message.TransferId.Length}, has_reason={message.Reason is not null})");
@@ -3845,10 +4289,11 @@ public sealed partial class NknSignalingTransport : IFileTransferControlPlanePhy
 
         if (!TryValidateFileTransferSecureMetadata("file_transfer_cancel", securePayload.Metadata, message.TransferId, env.MessageId) ||
             !TryValidateFileTransferMessageSession("file_transfer_cancel", message.SessionId, message.TransferId, env.MessageId, source) ||
-            !TryValidateFileTransferDispatchState("file_transfer_cancel", MsgType.FileTransferCancel, message.TransferId, env.MessageId, source))
+            !TryTrackReceivedFileOfferResponse(MsgType.FileTransferCancel, message.TransferId, env.MessageId, source, message.OfferInstanceId, out var serviceOfferId, message.SessionId))
         {
             return;
         }
+        message = message with { OfferInstanceId = serviceOfferId };
 
         LogFileTransferEnvelopeEvent("received", MsgType.FileTransferCancel, message.TransferId, source);
         RecordTunaFallbackNknControlReceived(MsgType.FileTransferCancel, message.SessionId, env.Payload.Length);
@@ -3873,10 +4318,12 @@ public sealed partial class NknSignalingTransport : IFileTransferControlPlanePhy
 
         if (!TryValidateFileTransferSecureMetadata("file_transfer_error", securePayload.Metadata, message.TransferId, env.MessageId) ||
             !TryValidateFileTransferMessageSession("file_transfer_error", message.SessionId, message.TransferId, env.MessageId, source) ||
-            !TryValidateFileTransferDispatchState("file_transfer_error", MsgType.FileTransferError, message.TransferId, env.MessageId, source))
+            !TryTrackReceivedFileOfferResponse(MsgType.FileTransferError, message.TransferId, env.MessageId, source,
+                message.OfferInstanceId, out var serviceOfferId))
         {
             return;
         }
+        message = message with { OfferInstanceId = serviceOfferId };
 
         LogFileTransferEnvelopeEvent("received", MsgType.FileTransferError, message.TransferId, source);
         RecordTunaFallbackNknControlReceived(MsgType.FileTransferError, message.SessionId, env.Payload.Length);
@@ -3901,11 +4348,12 @@ public sealed partial class NknSignalingTransport : IFileTransferControlPlanePhy
 
         if (!TryValidateFileTransferSecureMetadata("file_transfer_complete", securePayload.Metadata, message.TransferId, env.MessageId) ||
             !TryValidateFileTransferMessageSession("file_transfer_complete", message.SessionId, message.TransferId, env.MessageId, source) ||
-            !TryValidateFileTransferDispatchState("file_transfer_complete", MsgType.FileTransferComplete, message.TransferId, env.MessageId, source))
+            !TryTrackReceivedFileOfferResponse(MsgType.FileTransferComplete, message.TransferId, env.MessageId, source, message.OfferInstanceId, out var serviceOfferId))
         {
             return;
         }
 
+        message = message with { OfferInstanceId = serviceOfferId };
         LogFileTransferEnvelopeEvent("received", MsgType.FileTransferComplete, message.TransferId, source);
         RecordTunaFallbackNknControlReceived(MsgType.FileTransferComplete, message.SessionId, env.Payload.Length);
         Log($"FileTransferComplete received (msg_id={env.MessageId}, transfer_id_len={message.TransferId.Length}, size_bytes={message.FileSizeBytes})");
@@ -3979,7 +4427,7 @@ public sealed partial class NknSignalingTransport : IFileTransferControlPlanePhy
 
         if (!TryValidateFileTransferSecureMetadata("file_transfer_offer", securePayload.Metadata, message.TransferId, env.MessageId) ||
             !TryValidateFileTransferMessageSession("file_transfer_offer", message.SessionId, message.TransferId, env.MessageId, source) ||
-            !TryValidateFileTransferDispatchState("file_transfer_offer", MsgType.FileTransferOffer, message.TransferId, env.MessageId, source))
+            !TryTrackReceivedFileOffer(message, env.MessageId, source, out var offer, out var replay))
         {
             return false;
         }
@@ -3987,7 +4435,7 @@ public sealed partial class NknSignalingTransport : IFileTransferControlPlanePhy
         work = CreateInboundFileTransferDispatchWork(
             MsgType.FileTransferOffer,
             message.TransferId,
-            () =>
+            replay ?? (() =>
             {
                 LogFileTransferEnvelopeEvent("received", MsgType.FileTransferOffer, message.TransferId, source);
                 Log($"FileTransferOffer received (msg_id={env.MessageId}, transfer_id_len={message.TransferId.Length}, file_name_len={message.FileName.Length}, size_bytes={message.FileSizeBytes})");
@@ -3996,8 +4444,8 @@ public sealed partial class NknSignalingTransport : IFileTransferControlPlanePhy
                     message.FileTransferRoute,
                     message.PreferredDataProtocolVersion ?? 0,
                     "receive_offer");
-                FileTransferOfferReceived?.Invoke(this, new FileTransferOfferReceivedEventArgs(message, source));
-            });
+                FileTransferOfferReceived?.Invoke(this, offer);
+            }));
         return true;
     }
 
@@ -4019,10 +4467,12 @@ public sealed partial class NknSignalingTransport : IFileTransferControlPlanePhy
 
         if (!TryValidateFileTransferSecureMetadata("file_transfer_accept", securePayload.Metadata, message.TransferId, env.MessageId) ||
             !TryValidateFileTransferMessageSession("file_transfer_accept", message.SessionId, message.TransferId, env.MessageId, source) ||
-            !TryValidateFileTransferDispatchState("file_transfer_accept", MsgType.FileTransferAccept, message.TransferId, env.MessageId, source))
+            !TryTrackReceivedFileOfferResponse(MsgType.FileTransferAccept, message.TransferId, env.MessageId, source,
+                message.OfferInstanceId, out var serviceOfferId))
         {
             return false;
         }
+        message = message with { OfferInstanceId = serviceOfferId };
 
         work = CreateInboundFileTransferDispatchWork(
             MsgType.FileTransferAccept,
@@ -4059,10 +4509,12 @@ public sealed partial class NknSignalingTransport : IFileTransferControlPlanePhy
 
         if (!TryValidateFileTransferSecureMetadata("file_transfer_decline", securePayload.Metadata, message.TransferId, env.MessageId) ||
             !TryValidateFileTransferMessageSession("file_transfer_decline", message.SessionId, message.TransferId, env.MessageId, source) ||
-            !TryValidateFileTransferDispatchState("file_transfer_decline", MsgType.FileTransferDecline, message.TransferId, env.MessageId, source))
+            !TryTrackReceivedFileOfferResponse(MsgType.FileTransferDecline, message.TransferId, env.MessageId, source,
+                message.OfferInstanceId, out var serviceOfferId))
         {
             return false;
         }
+        message = message with { OfferInstanceId = serviceOfferId };
 
         work = CreateInboundFileTransferDispatchWork(
             MsgType.FileTransferDecline,
@@ -4165,10 +4617,11 @@ public sealed partial class NknSignalingTransport : IFileTransferControlPlanePhy
 
         if (!TryValidateFileTransferSecureMetadata("file_transfer_cancel", securePayload.Metadata, message.TransferId, env.MessageId) ||
             !TryValidateFileTransferMessageSession("file_transfer_cancel", message.SessionId, message.TransferId, env.MessageId, source, channel) ||
-            !TryValidateFileTransferDispatchState("file_transfer_cancel", MsgType.FileTransferCancel, message.TransferId, env.MessageId, source))
+            !TryTrackReceivedFileOfferResponse(MsgType.FileTransferCancel, message.TransferId, env.MessageId, source, message.OfferInstanceId, out var serviceOfferId, message.SessionId))
         {
             return false;
         }
+        message = message with { OfferInstanceId = serviceOfferId };
 
         work = CreateInboundFileTransferDispatchWork(
             MsgType.FileTransferCancel,
@@ -4201,10 +4654,12 @@ public sealed partial class NknSignalingTransport : IFileTransferControlPlanePhy
 
         if (!TryValidateFileTransferSecureMetadata("file_transfer_error", securePayload.Metadata, message.TransferId, env.MessageId) ||
             !TryValidateFileTransferMessageSession("file_transfer_error", message.SessionId, message.TransferId, env.MessageId, source, channel) ||
-            !TryValidateFileTransferDispatchState("file_transfer_error", MsgType.FileTransferError, message.TransferId, env.MessageId, source))
+            !TryTrackReceivedFileOfferResponse(MsgType.FileTransferError, message.TransferId, env.MessageId, source,
+                message.OfferInstanceId, out var serviceOfferId))
         {
             return false;
         }
+        message = message with { OfferInstanceId = serviceOfferId };
 
         work = CreateInboundFileTransferDispatchWork(
             MsgType.FileTransferError,
@@ -4237,11 +4692,12 @@ public sealed partial class NknSignalingTransport : IFileTransferControlPlanePhy
 
         if (!TryValidateFileTransferSecureMetadata("file_transfer_complete", securePayload.Metadata, message.TransferId, env.MessageId) ||
             !TryValidateFileTransferMessageSession("file_transfer_complete", message.SessionId, message.TransferId, env.MessageId, source, channel) ||
-            !TryValidateFileTransferDispatchState("file_transfer_complete", MsgType.FileTransferComplete, message.TransferId, env.MessageId, source))
+            !TryTrackReceivedFileOfferResponse(MsgType.FileTransferComplete, message.TransferId, env.MessageId, source, message.OfferInstanceId, out var serviceOfferId))
         {
             return false;
         }
 
+        message = message with { OfferInstanceId = serviceOfferId };
         work = CreateInboundFileTransferDispatchWork(
             MsgType.FileTransferComplete,
             message.TransferId,
@@ -4529,6 +4985,7 @@ public sealed partial class NknSignalingTransport : IFileTransferControlPlanePhy
         long dispatchGeneration, out InboundFileTransferDispatchWork work)
     {
         work = default;
+        TransportFileTransferDataSession? completionChannel = null;
         var yieldEvidence = CaptureYieldEvidence(frame, envelopeEvidence,
             channel == NknBridgeChannel.Bulk ? "bulk" : "control");
         // Bind and use share accelerationGate; publication capture and use share
@@ -4553,9 +5010,26 @@ public sealed partial class NknSignalingTransport : IFileTransferControlPlanePhy
             }
             if (ShouldRejectFileTransferPayloadReceive(frame, channel, receivedTransportKind, envelopeEvidence))
                 return false;
+            if (frame is FileTransferCompleteFrameV4)
+                fileTransferDataSessions.TryGetValue(frame.TransferId, out completionChannel);
         }
 
-        if (!TryValidateAndTrackFileTransferDataFrame(frame, inbound: true, applyStateChange: true, out var failureReason))
+        Guid? terminalOfferId = null;
+        string failureReason;
+        bool tracked;
+        if (frame is FileTransferCancelFrameV4 or FileTransferErrorFrameV4)
+        {
+            lock (controlSecureStateGate)
+            {
+                if (fileTransferStates.TryGetValue(frame.TransferId, out var owner)) terminalOfferId = owner.ServiceOfferId;
+                tracked = TryValidateAndTrackFileTransferDataFrame(frame, inbound: true, applyStateChange: true, out failureReason);
+            }
+        }
+        else if (frame is FileTransferCompleteFrameV4 completion)
+            tracked = TryTrackOwnedBinaryCompletion(completion, completionChannel, enqueue: null, out failureReason);
+        else
+            tracked = TryValidateAndTrackFileTransferDataFrame(frame, inbound: true, applyStateChange: true, out failureReason);
+        if (!tracked)
         {
             if (ShouldEchoCancelForLateFileTransferDataFrame(frame, failureReason))
             {
@@ -4585,7 +5059,7 @@ public sealed partial class NknSignalingTransport : IFileTransferControlPlanePhy
             return false;
         }
 
-        if (!IsBootstrapEvidenceOnlyDataFrame(frame))
+        if (completionChannel is null && !IsBootstrapEvidenceOnlyDataFrame(frame))
         {
             ObserveFileTransferReceiveRecoveryProof(
                 frame.SessionId,
@@ -4612,6 +5086,7 @@ public sealed partial class NknSignalingTransport : IFileTransferControlPlanePhy
                             {
                                 SessionId = cancelFrame.SessionId,
                                 TransferId = cancelFrame.TransferId,
+                                OfferInstanceId = terminalOfferId,
                                 Reason = cancelFrame.Reason,
                             },
                             source));
@@ -4637,6 +5112,7 @@ public sealed partial class NknSignalingTransport : IFileTransferControlPlanePhy
                             {
                                 SessionId = errorFrame.SessionId,
                                 TransferId = errorFrame.TransferId,
+                                OfferInstanceId = terminalOfferId,
                                 ErrorCode = errorFrame.ErrorCode ?? "remote_error",
                                 Message = errorFrame.Message,
                             },
@@ -4656,6 +5132,10 @@ public sealed partial class NknSignalingTransport : IFileTransferControlPlanePhy
             lock (accelerationGate)
             {
                 if (disposed || dispatchGeneration != Volatile.Read(ref inboundFileTransferDispatchGeneration))
+                    return;
+                if (completionChannel is not null &&
+                    (!fileTransferDataSessions.TryGetValue(frame.TransferId, out var currentChannel) ||
+                     !ReferenceEquals(currentChannel, completionChannel) || completionChannel.IsDisposed))
                     return;
                 if (GetInboundPayloadCutoverPauseUnsafe(frame) is { } binding)
                 {
@@ -4680,17 +5160,55 @@ public sealed partial class NknSignalingTransport : IFileTransferControlPlanePhy
                     frame, channel, receivedTransportKind, dispatchEvidence,
                     "dispatch_entered", hasRouteAuthority, routeHint);
             }
+            if (frame is FileTransferCompleteFrameV4 completion)
+            {
+                if (completionChannel is null || !completionChannel.TryDeliverOwnedCompletion(completion, channel, receivedTransportKind)) return;
+                ObserveFileTransferReceiveRecoveryProof(frame.SessionId, frame.TransferId, "file_transfer_data_frame", MapBridgeChannel(channel));
+            }
             if (receivedTransportKind != FileTransferTransportKind.Tuna && !IsBootstrapEvidenceOnlyDataFrame(frame))
             {
                 RecordTunaFallbackFileTransferDataFrameReceived(frame, channel, env.Payload.Length, frame.SessionId);
             }
             yieldEvidence?.WriteCopy("receive_dispatch", yieldEvidence.First);
-            DeliverFileTransferDataFrame(frame, channel, receivedTransportKind, source, yieldEvidence);
+            if (completionChannel is null)
+                DeliverFileTransferDataFrame(frame, channel, receivedTransportKind, source, yieldEvidence);
             LogFileTransferEnvelopeEvent("received", MsgType.FileTransferDataFrame, frame.TransferId, source, effectiveTransport);
         }
         work = CreateInboundFileTransferDispatchWork(MsgType.FileTransferDataFrame, frame.TransferId,
             DispatchFrame, usesDedicatedChunkDispatch);
         return true;
+    }
+
+    // Binary completions have no offer nonce. Validate at ingress, but retire the offer
+    // only when its own queue accepts the receipt, under the same ownership lock.
+    private bool TryTrackOwnedBinaryCompletion(FileTransferCompleteFrameV4 frame,
+        TransportFileTransferDataSession? channel, Func<bool>? enqueue, out string reason)
+    {
+        lock (controlSecureStateGate)
+        {
+            if (!fileTransferStates.TryGetValue(frame.TransferId, out var state))
+            {
+                reason = IsRecentTerminalFileTransferLocked(frame.TransferId, out var phase) && phase == FileTransferTransportPhase.Completed
+                    ? "transfer_already_terminal" : "completion_channel_not_current";
+                return false;
+            }
+            if (channel?.OfferOwner is not { } owner || channel.IsDisposed || channel.SessionId != frame.SessionId ||
+                !ReferenceEquals(state.OfferLifetime, owner))
+            {
+                reason = "completion_channel_not_current";
+                return false;
+            }
+            if (!TryGetNextFileTransferDataFrameState(frame, frame.TransferId, inbound: true, out var nextState, out reason))
+                return false;
+            if (enqueue is null) return true;
+            if (!enqueue())
+            {
+                reason = "completion_enqueue_rejected";
+                return false;
+            }
+            CommitFileTransferStateLocked(frame.TransferId, nextState, new FileTransferContentTerminalCapture(channel));
+            return true;
+        }
     }
 
     private static FileTransferTransportKind ResolveInboundFileTransferDataFrameTransportKind(NknBridgeChannel channel)
@@ -4741,14 +5259,44 @@ public sealed partial class NknSignalingTransport : IFileTransferControlPlanePhy
                 : null);
     }
 
+    private bool TryTrackReceivedFileOfferResponse(MsgType type, string transferId, string messageId, string source,
+        Guid? wireOfferId, out Guid? serviceOfferId, string? cancelSessionId = null)
+    {
+        serviceOfferId = null;
+        lock (controlSecureStateGate)
+        {
+            // The receiver already declined. A matching authenticated Cancel only revokes unsent replies.
+            if (type == MsgType.FileTransferCancel && fileTransferTerminalTombstones.TryGetValue(transferId, out var declined) &&
+                declined is { Phase: FileTransferTransportPhase.Declined, DeclineMessage: { } decision } &&
+                decision.SessionId == cancelSessionId && decision.OfferInstanceId == wireOfferId &&
+                (wireOfferId.HasValue || !declined.Owner.RequireOfferId) && IsRecentTerminalFileTransferLocked(transferId, out _))
+            {
+                fileTransferTerminalTombstones[transferId] = declined with { DeclineSendSuppressed = true };
+                return false; // Do not dispatch another terminal event or change the original decision.
+            }
+            if (fileTransferStates.TryGetValue(transferId, out var owner) ||
+                type == MsgType.FileTransferCancel && fileTransferTerminalTombstones.TryGetValue(transferId, out var tombstone) &&
+                (owner = tombstone.Owner).Phase == FileTransferTransportPhase.Canceled)
+            {
+                if ((type is MsgType.FileTransferAccept or MsgType.FileTransferDecline && !owner.InitiatedLocally) ||
+                    (wireOfferId.HasValue ? owner.WireOfferId != wireOfferId : owner.RequireOfferId))
+                    return false;
+                serviceOfferId = owner.ServiceOfferId;
+            }
+            return TryValidateFileTransferDispatchState(MapSecureFileTransferMessageType(type), type, transferId, messageId, source);
+        }
+    }
+
     private bool TryValidateFileTransferDispatchState(
         string messageType,
         MsgType transportMessageType,
         string transferId,
         string messageId,
-        string? source)
+        string? source,
+        FileTransferOfferV2? inboundOffer = null)
     {
-        if (TryValidateAndTrackFileTransferMessage(transportMessageType, transferId, inbound: true, applyStateChange: true, out var failureReason))
+        if (TryTrackFileTransferMessage(transportMessageType, transferId, inbound: true, applyStateChange: true,
+                out var failureReason, terminalContentOwner: null, inboundOffer))
         {
             return true;
         }
@@ -6460,7 +7008,10 @@ public sealed partial class NknSignalingTransport : IFileTransferControlPlanePhy
             inboundScreenShareReplayWindow.Reset();
             inboundFileTransferReplayWindow.Reset();
             ClearActiveFileTransferRuntimeTrackingLocked("control_session_key_reset");
+            issuedFileOfferIds.Clear();
+            receivedFileOfferInstances.Clear();
             fileTransferStates.Clear();
+            fileFallbackOffers = [];
             fileTransferTerminalTombstones.Clear();
             fileTransferCompleteEchoLastSent.Clear();
             InstallFileTransferSecurityContextLocked(sessionId, approvalBytes);
@@ -6500,7 +7051,10 @@ public sealed partial class NknSignalingTransport : IFileTransferControlPlanePhy
             inboundScreenShareReplayWindow.Reset();
             inboundFileTransferReplayWindow.Reset();
             ClearActiveFileTransferRuntimeTrackingLocked("control_secure_state_reset");
+            issuedFileOfferIds.Clear();
+            receivedFileOfferInstances.Clear();
             fileTransferStates.Clear();
+            fileFallbackOffers = [];
             fileTransferTerminalTombstones.Clear();
             fileTransferCompleteEchoLastSent.Clear();
         }
@@ -6547,6 +7101,10 @@ public sealed partial class NknSignalingTransport : IFileTransferControlPlanePhy
         bool applyStateChange,
         out string failureReason,
         FileTransferContentTerminalCapture? terminalContentOwner = null)
+        => TryTrackFileTransferMessage(messageType, transferId, inbound, applyStateChange, out failureReason, terminalContentOwner, null);
+
+    private bool TryTrackFileTransferMessage(MsgType messageType, string transferId, bool inbound, bool applyStateChange,
+        out string failureReason, FileTransferContentTerminalCapture? terminalContentOwner, FileTransferOfferV2? inboundOffer)
     {
         var normalizedTransferId = NormalizeRequiredFileTransferId(transferId);
 
@@ -6559,6 +7117,18 @@ public sealed partial class NknSignalingTransport : IFileTransferControlPlanePhy
 
             if (applyStateChange)
             {
+                if (inboundOffer is not null)
+                {
+                    var reused = !issuedFileOfferIds.Add(normalizedTransferId);
+                    if (reused && inboundOffer.OfferInstanceId is null) { failureReason = "ambiguous_legacy_offer"; return false; }
+                    if (inboundOffer.OfferInstanceId is { } wireId && !receivedFileOfferInstances.Add((normalizedTransferId, wireId)))
+                    {
+                        failureReason = "retired_offer_instance";
+                        return false;
+                    }
+                    nextState = nextState with { InboundOffer = inboundOffer, WireOfferId = inboundOffer.OfferInstanceId,
+                        ServiceOfferId = inboundOffer.OfferInstanceId ?? Guid.NewGuid(), RequireOfferId = reused };
+                }
                 CommitFileTransferStateLocked(normalizedTransferId, nextState, terminalContentOwner);
             }
 
@@ -6637,7 +7207,8 @@ public sealed partial class NknSignalingTransport : IFileTransferControlPlanePhy
                 return false;
             }
 
-            nextState = new FileTransferTransportState(initiatedLocally, FileTransferTransportPhase.Offered);
+            nextState = new FileTransferTransportState(initiatedLocally, FileTransferTransportPhase.Offered)
+                { OfferLifetime = new(currentSessionSecurityState.SessionId?.Value, transferId, initiatedLocally) };
             return true;
         }
 
@@ -6648,7 +7219,7 @@ public sealed partial class NknSignalingTransport : IFileTransferControlPlanePhy
                 terminalPhase == FileTransferTransportPhase.Canceled)
             {
                 NknRuntimeDiagnostics.IncrementFileTransferDuplicateCancelAcked();
-                nextState = new FileTransferTransportState(InitiatedLocally: !inbound, FileTransferTransportPhase.Canceled);
+                nextState = fileTransferTerminalTombstones[transferId].Owner;
                 return true;
             }
 
@@ -6881,6 +7452,13 @@ public sealed partial class NknSignalingTransport : IFileTransferControlPlanePhy
             return false;
         }
 
+        // These redundant frames have no offer nonce. Reused IDs require the correlated lifecycle copies.
+        if (currentState.RequireOfferId && frame is FileTransferCancelFrameV4 or FileTransferErrorFrameV4 or FileTransferCompleteFrameV4)
+        {
+            failureReason = "ambiguous_terminal_frame";
+            return false;
+        }
+
         if (frame is FileTransferCancelFrameV4)
         {
             if (currentState.Phase is not FileTransferTransportPhase.Accepted
@@ -7073,9 +7651,13 @@ public sealed partial class NknSignalingTransport : IFileTransferControlPlanePhy
             return;
         }
 
+        Guid? wireId;
+        Func<bool>? owns;
         var now = DateTimeOffset.UtcNow;
         lock (controlSecureStateGate)
         {
+            if (!IsRecentTerminalFileTransferLocked(normalizedTransferId, out var phase) || phase != FileTransferTransportPhase.Canceled ||
+                !CaptureTerminalOwner(normalizedTransferId, null, true, out wireId, out owns) || owns is null) return;
             if (fileTransferCancelEchoLastSent.TryGetValue(normalizedTransferId, out var lastSent) &&
                 now - lastSent < FileTransferCancelEchoMinInterval)
             {
@@ -7091,14 +7673,14 @@ public sealed partial class NknSignalingTransport : IFileTransferControlPlanePhy
                 try
                 {
                     using var timeout = new CancellationTokenSource(AckWaitTimeout);
-                    await SendFileTransferCancelAsync(
-                            new FileTransferCancelV1
+                    await SendFileTransferCancelEnvelopeAsync(normalizedTransferId,
+                            FileTransferPayloadCodec.Serialize(new FileTransferCancelV1
                             {
                                 SessionId = normalizedSessionId,
                                 TransferId = normalizedTransferId,
+                                OfferInstanceId = wireId,
                                 Reason = FileTransferResultCodes.CanceledLocal,
-                            },
-                            timeout.Token)
+                            }), FileTransferResultCodes.CanceledLocal, timeout.Token, owns)
                         .ConfigureAwait(false);
                     LocalOperationalLog.Info(
                         "SessionSecurity",
@@ -7313,6 +7895,8 @@ public sealed partial class NknSignalingTransport : IFileTransferControlPlanePhy
     {
         if (nextState.IsTerminal)
         {
+            if (nextState.OfferLifetime is { End: FileOfferEnd.Live } owner)
+                owner.End = nextState.Phase == FileTransferTransportPhase.Canceled ? FileOfferEnd.Canceled : FileOfferEnd.OtherTerminal;
             var diagnosticOwner = terminalContentOwner.HasValue ? terminalContentOwner.Value.Owner
                 : fileTransferContentEvidenceSlot?.Owner;
             if (diagnosticOwner?.TransferId == transferId) { RetireFileTransferContentEvidenceLocked(diagnosticOwner); }
@@ -7321,14 +7905,15 @@ public sealed partial class NknSignalingTransport : IFileTransferControlPlanePhy
                 nextState.Phase,
                 DateTimeOffset.UtcNow.UtcTicks,
                 null,
-                nextState.CorrelatedBootstrapSelected);
+                nextState.CorrelatedBootstrapSelected) { Owner = nextState };
             fileTransferStates.Remove(transferId);
+            PublishFileFallbackOffersLocked();
             UnregisterActiveFileTransferRuntime(transferId);
             return;
         }
 
         fileTransferTerminalTombstones.Remove(transferId);
-        fileTransferStates[transferId] = nextState;
+        SetFileTransferStateLocked(transferId, nextState);
         if (nextState.Phase is not FileTransferTransportPhase.Offered)
         {
             RegisterActiveFileTransferRuntime(transferId);
@@ -7593,7 +8178,7 @@ public sealed partial class NknSignalingTransport : IFileTransferControlPlanePhy
 
         if (createdSession)
         {
-            ApplyActiveTunaActivationPauseToNewFileTransferDataSession(session!, "remote_open");
+            session!.InitializeActivationPause("remote_open");
         }
 
         if (createdSession) RecheckPendingStartupTransferActivation();
@@ -7861,11 +8446,70 @@ public sealed partial class NknSignalingTransport : IFileTransferControlPlanePhy
         Failed = 7,
     }
 
+    // Written under controlSecureStateGate; read without nesting it inside gate.
+    private volatile (FileOfferLifetime Owner, bool Admitted, FileAcceptReservation? Reservation)[] fileFallbackOffers = [];
+
+    private void PublishFileFallbackOffersLocked()
+    {
+        var next = fileTransferStates.Values.Where(s => s.OfferLifetime is not null)
+            .Select(s => (s.OfferLifetime!, s.Phase != FileTransferTransportPhase.Offered, s.AcceptReservation)).ToArray();
+        lock (activationPausePublicationGate) fileFallbackOffers = next;
+    }
+
+    // A veto on unowned handshake work, not evidence that either file can change route.
+    private bool HasDuplexFileOffers(string sessionId)
+    {
+        bool outbound = false, inbound = false;
+        foreach (var (owner, _, _) in fileFallbackOffers)
+        {
+            if (owner.SessionId != sessionId || owner.End != FileOfferEnd.Live) continue;
+            if (owner.InitiatedLocally) outbound = true;
+            else inbound = true;
+            if (outbound && inbound) return true;
+        }
+        return false;
+    }
+
+    private void SetFileTransferStateLocked(string transferId, FileTransferTransportState next)
+    {
+        var changed = !fileTransferStates.TryGetValue(transferId, out var previous) ||
+            !ReferenceEquals(previous.OfferLifetime, next.OfferLifetime) ||
+            !ReferenceEquals(previous.AcceptReservation, next.AcceptReservation) ||
+            (previous.Phase == FileTransferTransportPhase.Offered) != (next.Phase == FileTransferTransportPhase.Offered);
+        fileTransferStates[transferId] = next;
+        if (changed) PublishFileFallbackOffersLocked();
+    }
+
+    private enum FileOfferEnd { Live, Canceled, OtherTerminal }
+
+    private sealed class FileAcceptReservation { public volatile bool RolledBack; }
+
+    private readonly record struct FileFallbackParticipant(FileOfferLifetime Owner, FileAcceptReservation? Reservation);
+
+    private sealed class FileOfferLifetime(string? sessionId, string transferId, bool initiatedLocally)
+    {
+        public string? SessionId { get; } = sessionId;
+        public string TransferId { get; } = transferId;
+        public bool InitiatedLocally { get; } = initiatedLocally;
+        public volatile FileOfferEnd End;
+        // Under activationPausePublicationGate. A replacement offer, even with the same ID, does not inherit this.
+        public long RetainedOrdinaryPauseGeneration { get; set; }
+    }
+
     private readonly record struct FileTransferTransportState(
         bool InitiatedLocally,
         FileTransferTransportPhase Phase,
         bool CorrelatedBootstrapSelected = false)
     {
+        public FileTransferOfferV2? InboundOffer { get; init; }
+        public FileOfferLifetime? OfferLifetime { get; init; }
+        public FileTransferAcceptV1? RecordedAccept { get; init; }
+        public FileAcceptReservation? AcceptReservation { get; init; }
+        public CancellationToken ConsentLifetime { get; init; }
+        public bool AcceptWriteCompleted { get; init; }
+        public Guid? WireOfferId { get; init; }
+        public Guid? ServiceOfferId { get; init; }
+        public bool RequireOfferId { get; init; }
         public string? BootstrapLocalIssuer { get; init; }
 
         public bool IsTerminal =>
@@ -7879,7 +8523,12 @@ public sealed partial class NknSignalingTransport : IFileTransferControlPlanePhy
         FileTransferTransportPhase Phase,
         long CompletedUtcTicks,
         FileTransferCompleteV1? CompleteMessage,
-        bool CorrelatedBootstrapSelected = false);
+        bool CorrelatedBootstrapSelected = false)
+    {
+        public FileTransferTransportState Owner { get; init; }
+        public FileTransferDeclineV1? DeclineMessage { get; init; }
+        public bool DeclineSendSuppressed { get; init; }
+    }
 
     private readonly record struct InboundFileTransferDispatchWork(
         long Generation,
@@ -7940,34 +8589,25 @@ public sealed partial class NknSignalingTransport : IFileTransferControlPlanePhy
         }
     }
 
+    // Caller holds gate. Release the registration before another generation can open this ID.
+    private void DetachFileTransferDataSessionLocked(TransportFileTransferDataSession session, bool requireLocalOpenForRemoteDelivery, string reason)
+    {
+        if (!fileTransferDataSessions.TryGetValue(session.TransferId, out var current) || !ReferenceEquals(current, session))
+            return;
+        if (requireLocalOpenForRemoteDelivery) fileTransferDataSessionRemoteOpenSuppressed.Add(session.TransferId);
+        fileTransferDataSessions.Remove(session.TransferId);
+        RemoveFileTransferRouteHintsForTransferUnsafe(session.TransferId, session.SessionId);
+        fileTransferPostTunaFallbackHandoffEvidence.Remove(session.TransferId);
+        LocalOperationalLog.Info(
+            "SessionSecurity",
+            $"event=filetransfer_data_session_removed; {FileTransferDiagnosticScopeEvidence.Format(session.SessionId, session.TransferId)}transport=nkn; transfer_id={session.TransferId}; session_id={session.SessionId}; reason={reason}");
+        ClearPendingFileTransferV6Handoffs($"data_session_removed_{reason}", session.SessionId);
+        UnregisterActiveFileTransferDataSession(session.TransferId);
+    }
+
     private void RemoveFileTransferDataSession(TransportFileTransferDataSession session, bool requireLocalOpenForRemoteDelivery = false, string reason = "disposed")
     {
-        var removed = false;
-        lock (gate)
-        {
-            if (requireLocalOpenForRemoteDelivery)
-            {
-                fileTransferDataSessionRemoteOpenSuppressed.Add(session.TransferId);
-            }
-
-            if (fileTransferDataSessions.TryGetValue(session.TransferId, out var current) &&
-                ReferenceEquals(current, session))
-            {
-                fileTransferDataSessions.Remove(session.TransferId);
-                RemoveFileTransferRouteHintsForTransferUnsafe(session.TransferId, session.SessionId);
-                fileTransferPostTunaFallbackHandoffEvidence.Remove(session.TransferId);
-                removed = true;
-                LocalOperationalLog.Info(
-                    "SessionSecurity",
-                    $"event=filetransfer_data_session_removed; {FileTransferDiagnosticScopeEvidence.Format(session.SessionId, session.TransferId)}transport=nkn; transfer_id={session.TransferId}; session_id={session.SessionId}; reason={reason}");
-            }
-        }
-
-        if (removed)
-        {
-            ClearPendingFileTransferV6Handoffs($"data_session_removed_{reason}", session.SessionId);
-        }
-
+        lock (gate) { DetachFileTransferDataSessionLocked(session, requireLocalOpenForRemoteDelivery, reason); }
         // Do not nest the route gate and security gate. Late removal of an old
         // owner must not retire a replacement owner's diagnostic scope.
         lock (controlSecureStateGate) { RetireFileTransferContentEvidenceLocked(session); }
@@ -7980,8 +8620,6 @@ public sealed partial class NknSignalingTransport : IFileTransferControlPlanePhy
                 initialReceiverBarriers.Remove(session.TransferId);
             }
         }
-
-        UnregisterActiveFileTransferDataSession(session.TransferId);
     }
 
     private static byte[] SerializeFileTransferDataFrameForWire(FileTransferDataFrame frame)
@@ -8056,8 +8694,18 @@ public sealed partial class NknSignalingTransport : IFileTransferControlPlanePhy
         private RuntimeUnlockPreCommitAckSendAuthority? preCommitAckSendAuthority;
         private long availabilityGeneration = 1;
         private long initialReceiverBarrierPauseGeneration;
+        // Protected by availabilityGate while the ordinary handshake is the visible hold.
+        private string? overlappingRecoveryReason;
+        private readonly TaskCompletionSource openFinished = new(TaskCreationOptions.RunContinuationsAsynchronously);
         private InitialActivationReceiverBarrierExecutionFence? initialReceiverBarrierExecution;
         private EventHandler<FileTransferDataSessionAvailabilityChangedEventArgs>? availabilityChanged;
+        // A release and the normal ACK broadcast may race. Claim once per waiting subscription.
+        private readonly Dictionary<EventHandler<FileTransferDataSessionAvailabilityChangedEventArgs>, (long Generation, bool Delivered)> ordinaryWaiters = new();
+
+        internal bool HasWaitingOrdinarySubscriber(long generation)
+        {
+            lock (owner.accelerationGate) return ordinaryWaiters.Values.Any(w => w.Generation == generation && !w.Delivered);
+        }
         private EventHandler<FileTransferRuntimeUnlockAuthorityFrameReceivedEventArgs>? runtimeUnlockAuthorityFrameReceived;
 
         public TransportFileTransferDataSession(
@@ -8070,8 +8718,12 @@ public sealed partial class NknSignalingTransport : IFileTransferControlPlanePhy
             SessionId = sessionId;
             TransferId = transferId;
             Generation = generation;
+            OfferOwner = owner.fileFallbackOffers.FirstOrDefault(o =>
+                o.Owner.SessionId == sessionId && o.Owner.TransferId == transferId).Owner;
             owner.RegisterActiveFileTransferDataSession(transferId);
         }
+
+        public FileOfferLifetime? OfferOwner { get; }
 
         public string SessionId { get; }
 
@@ -8084,6 +8736,23 @@ public sealed partial class NknSignalingTransport : IFileTransferControlPlanePhy
         public bool IsDisposed => Volatile.Read(ref disposed) != 0;
 
         public string CurrentAvailabilityReason => Volatile.Read(ref availabilityReason);
+
+        public Task OpenFinished => openFinished.Task;
+
+        public void InitializeActivationPause(string trigger)
+        {
+            try
+            {
+                owner.NewChannelRegisteredForTests?.Invoke(this);
+                owner.ApplyActiveTunaActivationPauseToNewFileTransferDataSession(this, trigger);
+                openFinished.TrySetResult();
+            }
+            catch
+            {
+                Dispose(); // Retire the failed channel and wake any concurrent opener.
+                throw;
+            }
+        }
 
         public int AvailabilitySubscriberCount
             => availabilityChanged?.GetInvocationList().Length ?? 0;
@@ -8194,6 +8863,21 @@ public sealed partial class NknSignalingTransport : IFileTransferControlPlanePhy
                 $"event=runtime_unlock_tuna_probe_ack_sent; transport=tuna; session_id={SanitizeLogToken(ack.SessionId)}; transfer_id={SanitizeLogToken(ack.TransferId)}; transaction_generation={ack.TransactionGeneration}; offer_generation={ack.OfferGeneration}; tuna_path_lease_generation={ack.TunaPathLeaseGeneration}; probe_id={SanitizeLogToken(ack.ProbeId ?? string.Empty)}; reason={SanitizeLogToken(ack.Reason ?? string.Empty)}; accepted={(ack.Accepted ? 1 : 0)}");
         }
 
+        public async Task<bool> TryWritePairedCommitConfirmationAsync(FileTransferRuntimeUnlockPreCommitProbeAckFrame reply,
+            Func<Func<Task>, Task?> startIfCurrent, CancellationToken ct)
+        {
+            ObjectDisposedException.ThrowIf(disposed != 0, this);
+            if (reply.SessionId != SessionId || reply.TransferId != TransferId || !reply.Accepted ||
+                reply.Reason is not ("precommit_probe_commit_confirmed" or "precommit_probe_commit_confirmed_reply") ||
+                !ShouldRequireTunaBulk(reply)) return false;
+            var expires = DateTimeOffset.UtcNow.Add(RuntimeUnlockPreCommitAckAuthorityTtl).UtcDateTime.Ticks;
+            var authority = new RuntimeUnlockPreCommitAckSendAuthority(SessionId, TransferId, reply.TransactionGeneration,
+                reply.OfferGeneration, reply.TunaPathLeaseGeneration, reply.ProbeId!, expires,
+                write => DateTime.UtcNow.Ticks < expires && !IsDisposed ? startIfCurrent(write) : null);
+            await SendAsyncCore(reply, ct, null, commitReply: authority).ConfigureAwait(false);
+            return true;
+        }
+
         public event EventHandler<FileTransferDataSessionAvailabilityChangedEventArgs>? AvailabilityChanged
         {
             add
@@ -8203,7 +8887,14 @@ public sealed partial class NknSignalingTransport : IFileTransferControlPlanePhy
                     return;
                 }
 
-                availabilityChanged += value;
+                lock (owner.accelerationGate)
+                {
+                    availabilityChanged += value;
+                    var held = owner.runtimeUnlockAckHoldGeneration;
+                    if (held == owner.fileActivationHandoffResetGeneration &&
+                        (SessionId == owner.accelerationSessionId || SessionId == owner.pendingAccelerationAnswerAckSessionId))
+                        ordinaryWaiters[value] = (held, false);
+                }
                 if (TryReplayTunaActivationPauseAvailability(value))
                 {
                     return;
@@ -8216,7 +8907,16 @@ public sealed partial class NknSignalingTransport : IFileTransferControlPlanePhy
 
                 owner.TryScheduleRuntimeUnlockPreCommitProbeStartTimeoutForFileTransferSession(this, "subscriber_added");
             }
-            remove => availabilityChanged -= value;
+            remove
+            {
+                if (value is null) return;
+                lock (owner.accelerationGate)
+                {
+                    availabilityChanged -= value;
+                    if (ordinaryWaiters.ContainsKey(value) && availabilityChanged?.GetInvocationList().Contains(value) != true)
+                        ordinaryWaiters.Remove(value);
+                }
+            }
         }
 
         public event EventHandler<FileTransferRuntimeUnlockAuthorityFrameReceivedEventArgs>? RuntimeUnlockAuthorityFrameReceived
@@ -8407,7 +9107,8 @@ public sealed partial class NknSignalingTransport : IFileTransferControlPlanePhy
             FileTransferDataFrame frame,
             CancellationToken ct,
             FileTransferDataPathSendAuthority? dataPathSendAuthority,
-            PhysicalSendCompletionTracker? physicalSendCompletion = null)
+            PhysicalSendCompletionTracker? physicalSendCompletion = null,
+            RuntimeUnlockPreCommitAckSendAuthority? commitReply = null)
         {
             var sendCt = ct;
             CancellationTokenSource? activationPauseLinkedCts = null;
@@ -8476,7 +9177,7 @@ public sealed partial class NknSignalingTransport : IFileTransferControlPlanePhy
                      IsFileTunaV4TargetTuna(authority) &&
                      IsFileTransferV4DataPathFrame(frame.Type, ResolveFileTransferDataPathBatchProfile(frame)));
                 var preCommitProbeAuthority = TryCreateRuntimeUnlockPreCommitProbeAuthority(frame);
-                var preCommitAckAuthority = TryConsumeRuntimeUnlockPreCommitAckAuthority(frame);
+                var preCommitAckAuthority = commitReply ?? TryConsumeRuntimeUnlockPreCommitAckAuthority(frame);
 
                 var singleSend = owner.SendFileTransferEnvelopeRawAsync(
                         MsgType.FileTransferDataFrame,
@@ -9451,6 +10152,33 @@ public sealed partial class NknSignalingTransport : IFileTransferControlPlanePhy
                 ? "control_bulk_escalated"
                 : "bulk_only";
 
+        public bool TryDeliverOwnedCompletion(FileTransferCompleteFrameV4 frame, NknBridgeChannel channel, FileTransferTransportKind transportKind)
+        {
+            int queuedFrames = 0;
+            long queuedBytes = 0;
+            bool Enqueue()
+            {
+                lock (queueGate)
+                {
+                    if (!TryReserveQueuedFrame(QueuedControlFrameEstimatedBytes, false, out queuedFrames, out queuedBytes))
+                        return false;
+                    var receipt = new FileTransferReceivedDataFrame(frame, transportKind, MapBridgeChannel(channel), DateTimeOffset.UtcNow);
+                    if (priorityFrames.Writer.TryWrite(new(receipt, QueuedControlFrameEstimatedBytes, true, false)))
+                        return true;
+                    ReleaseQueuedFrame(QueuedControlFrameEstimatedBytes, false);
+                    return false;
+                }
+            }
+            if (!owner.TryTrackOwnedBinaryCompletion(frame, this, Enqueue, out var reason))
+            {
+                // Overflow notifies subscribers. Never do that under the offer's state lock.
+                if (reason == "completion_enqueue_rejected") FailQueueOverflow(frame, channel, QueuedControlFrameEstimatedBytes);
+                return false;
+            }
+            TraceQueuedFrame(frame, channel, true, queuedFrames, queuedBytes);
+            return true;
+        }
+
         public void Deliver(
             FileTransferDataFrame frame,
             NknBridgeChannel channel,
@@ -9625,6 +10353,12 @@ public sealed partial class NknSignalingTransport : IFileTransferControlPlanePhy
                 owner.RaiseFileTransferFallbackTailYieldProofReceived(yieldFrame, peerId, yieldEvidence);
             }
 
+            TraceQueuedFrame(frame, channel, prioritized, queuedFramesAfter, queuedBytesAfter);
+        }
+
+        private static void TraceQueuedFrame(FileTransferDataFrame frame, NknBridgeChannel channel, bool prioritized,
+            int queuedFramesAfter, long queuedBytesAfter)
+        {
             if (FileTransferDiagnosticLogPolicy.TraceEnabled)
             {
                 LocalOperationalLog.Info(
@@ -9820,13 +10554,33 @@ public sealed partial class NknSignalingTransport : IFileTransferControlPlanePhy
             }
         }
 
+        private bool TryBeginRetirement(bool suppressRemoteOpen, string reason)
+        {
+            lock (owner.gate)
+            {
+                lock (queueGate)
+                {
+                    if (disposed != 0) return false;
+                    Volatile.Write(ref disposed, 1);
+                    openFinished.TrySetResult();
+                }
+                lock (owner.activationPausePublicationGate)
+                {
+                    var held = initialReceiverBarrierPauseGeneration;
+                    if (OfferOwner is { End: FileOfferEnd.Live } offer && held > 0 &&
+                        held == owner.fileTransferTunaActivationPauseGeneration && held == owner.ordinaryNegotiationPauseGeneration &&
+                        OwnedReceiverBarrierPauseGeneration != held && owner.IsSessionNegotiationPauseCurrent(SessionId) &&
+                        IsUnavailableForTunaActivationPause(out _))
+                        offer.RetainedOrdinaryPauseGeneration = held;
+                }
+                owner.DetachFileTransferDataSessionLocked(this, suppressRemoteOpen, reason);
+                return true;
+            }
+        }
+
         private void FailQueueOverflow(FileTransferDataFrame frame, NknBridgeChannel channel, long estimatedBytes)
         {
-            if (Interlocked.Exchange(ref disposed, 1) != 0)
-            {
-                return;
-            }
-
+            if (!TryBeginRetirement(suppressRemoteOpen: true, FileTransferResultCodes.ReceiverBufferExhausted)) return;
             int queuedFramesSnapshot;
             long queuedBytesSnapshot;
             lock (queueGate)
@@ -9883,7 +10637,11 @@ public sealed partial class NknSignalingTransport : IFileTransferControlPlanePhy
             FileTransferTransportKind targetTransport = FileTransferTransportKind.Unknown,
             PostTunaFallbackHandoffEvidence? postTunaFallbackHandoffEvidence = null,
             PostTunaFallbackAvailabilityProofEvidence? postTunaFallbackProofBoundary = null,
-            long receiverBarrierPauseGeneration = 0)
+            long receiverBarrierPauseGeneration = 0,
+            long? expectedPauseGeneration = null,
+            long? expectedAdmissionGeneration = null,
+            long? releaseOfPauseGeneration = null,
+            bool initializingChannel = false)
         {
             if (disposed != 0)
             {
@@ -9891,7 +10649,7 @@ public sealed partial class NknSignalingTransport : IFileTransferControlPlanePhy
             }
 
             var next = isAvailable ? 1 : 0;
-            var previousReason = Volatile.Read(ref availabilityReason);
+            string? previousReason;
             var normalizedReason = string.IsNullOrWhiteSpace(reason) ? "transport_state_changed" : reason.Trim();
             var activationBarrier = !isAvailable && IsTunaActivationNegotiationAvailabilityReason(normalizedReason);
             if (postTunaFallbackHandoffEvidence is { IsComplete: true } evidence &&
@@ -9937,29 +10695,76 @@ public sealed partial class NknSignalingTransport : IFileTransferControlPlanePhy
                 return;
             }
 
-            if (ShouldSuppressTransportLifecycleAvailabilityDuringTunaActivationPause(
-                    isAvailable,
-                    normalizedReason,
-                    requiresResumeRequest,
-                    handoffKind,
-                    targetTransport))
-            {
-                return;
-            }
+            // A plain recovery release can beat the open callback. Inherit the handshake
+            // before processing that release, using the same ownership checks as the opener.
+            if (!OpenFinished.IsCompleted && isAvailable && !requiresResumeRequest && handoffKind == FileTransferTransportHandoffKind.None &&
+                targetTransport == FileTransferTransportKind.RegularNkn && IsBridgeRecoveryHoldReason(CurrentAvailabilityReason) &&
+                string.Equals(normalizedReason, "transport_recovered", StringComparison.OrdinalIgnoreCase))
+                owner.ApplyActiveTunaActivationPauseToNewFileTransferDataSession(this, "recovered_during_open", ordinaryOnly: true);
 
             int previous;
             lock (availabilityGate)
             {
-                previous = Interlocked.Exchange(ref available, next);
+                previousReason = availabilityReason;
+                if (ShouldSuppressTransportLifecycleAvailabilityDuringTunaActivationPause(
+                        isAvailable, normalizedReason, requiresResumeRequest, handoffKind, targetTransport))
+                {
+                    if (initialReceiverBarrierPauseGeneration == Interlocked.Read(ref owner.ordinaryNegotiationPauseGeneration))
+                        overlappingRecoveryReason = isAvailable ? null : normalizedReason;
+                    return;
+                }
+
+                if (expectedPauseGeneration is long expected)
+                {
+                    lock (owner.activationPausePublicationGate)
+                    {
+                        if (owner.fileTransferTunaActivationPauseGeneration != expected ||
+                            (expectedAdmissionGeneration is long admission && owner.fileActivationResetGeneration != admission) ||
+                            (activationBarrier && !owner.CanPublishFileActivationPause(this, expected, initializingChannel))) return;
+                        // On open, only an ordinary handshake may share an existing bridge-recovery hold.
+                        if (initializingChannel && available == 0 &&
+                            (owner.ordinaryNegotiationPauseGeneration != expected || !IsBridgeRecoveryHoldReason(availabilityReason)))
+                            return;
+                        if (activationBarrier && owner.ordinaryNegotiationPauseGeneration == expected &&
+                            available == 0 && !IsTunaActivationNegotiationAvailabilityReason(availabilityReason))
+                        {
+                            // Recovery already owns a hold. Keep it while installing this handshake's pause.
+                            if (!IsBridgeRecoveryHoldReason(availabilityReason)) return;
+                            overlappingRecoveryReason = availabilityReason;
+                        }
+                        if (releaseOfPauseGeneration is long held &&
+                            (available != 0 || initialReceiverBarrierPauseGeneration != held ||
+                             !IsTunaActivationNegotiationAvailabilityReason(availabilityReason))) return;
+                        if (isAvailable) owner.ActivationPausePublishingForTests?.Invoke(false);
+                        if (isAvailable && overlappingRecoveryReason is { } recoveryReason)
+                        {
+                            // End the handshake pause, not the recovery hold on this channel.
+                            isAvailable = false;
+                            next = 0;
+                            reason = normalizedReason = recoveryReason;
+                        }
+                        previous = WriteAvailabilityLocked();
+                        if (initializingChannel && OfferOwner is { } offer && offer.RetainedOrdinaryPauseGeneration == expected)
+                            offer.RetainedOrdinaryPauseGeneration = 0;
+                    }
+                }
+                else previous = WriteAvailabilityLocked();
+                // Synchronous token callbacks may enter the transport. Never run them under the publication gate.
+                if (activationBarrier) CancelTunaActivationPauseSends();
+            }
+
+            int WriteAvailabilityLocked()
+            {
+                if (!activationBarrier) overlappingRecoveryReason = null;
+                var prior = Interlocked.Exchange(ref available, next);
                 Volatile.Write(ref availabilityReason, normalizedReason);
                 if (activationBarrier)
                 {
                     initialReceiverBarrierPauseGeneration = receiverBarrierPauseGeneration;
                     Volatile.Write(ref lastTunaActivationPauseReason, normalizedReason);
-                    CancelTunaActivationPauseSends();
                 }
 
-                if (isAvailable && previous == 0)
+                if (isAvailable && prior == 0)
                 {
                     if (IsTunaActivationNegotiationAvailabilityReason(previousReason))
                     {
@@ -9971,6 +10776,7 @@ public sealed partial class NknSignalingTransport : IFileTransferControlPlanePhy
                 }
 
                 availabilityGeneration = Math.Max(1, availabilityGeneration + 1);
+                return prior;
             }
 
             var explicitHandoff = requiresResumeRequest &&
@@ -10013,6 +10819,12 @@ public sealed partial class NknSignalingTransport : IFileTransferControlPlanePhy
                     requiresResumeRequest,
                     handoffKind,
                     targetTransport));
+            if (isAvailable && previous == 0)
+            {
+                var generation = Interlocked.Read(ref owner.fileActivationHandoffResetGeneration);
+                if (HasWaitingOrdinarySubscriber(generation))
+                    owner.TryRequestCurrentTunaActivationHandoffForFileTransferSession(this, "file_channel_released", generation);
+            }
         }
 
         private bool ShouldSuppressTransportLifecycleAvailabilityDuringTunaActivationPause(
@@ -10036,22 +10848,44 @@ public sealed partial class NknSignalingTransport : IFileTransferControlPlanePhy
         }
 
         private static bool IsTransportLifecycleAvailabilityReason(string? reason)
+            => IsBridgeRecoveryHoldReason(reason) ||
+               string.Equals(reason, "transport_recovered", StringComparison.OrdinalIgnoreCase);
+
+        private static bool IsBridgeRecoveryHoldReason(string? reason)
             => string.Equals(reason, "receive_stall_recovery", StringComparison.OrdinalIgnoreCase) ||
-               string.Equals(reason, "transport_recovered", StringComparison.OrdinalIgnoreCase) ||
                string.Equals(reason, "transport_recovered_unproven", StringComparison.OrdinalIgnoreCase);
 
-        public void RequestHandoff(
+        public bool TryPublishHandoff(
             string reason,
             FileTransferTransportHandoffKind handoffKind,
             FileTransferTransportKind targetTransport,
-            RuntimeUnlockRouteCommitSnapshot? runtimeUnlockPreCommitProbeSnapshot = null)
+            RuntimeUnlockRouteCommitSnapshot? runtimeUnlockPreCommitProbeSnapshot,
+            long? ordinaryGeneration)
+            => PublishHandoffToSubscribers(reason, handoffKind, targetTransport, runtimeUnlockPreCommitProbeSnapshot, ordinaryGeneration, false);
+
+        public bool PublishHandoffToSubscribers(string reason, FileTransferTransportHandoffKind handoffKind,
+            FileTransferTransportKind targetTransport, RuntimeUnlockRouteCommitSnapshot? runtimeUnlockPreCommitProbeSnapshot,
+            long? ordinaryGeneration, bool waitingOnly)
         {
             if (disposed != 0 ||
-                handoffKind == FileTransferTransportHandoffKind.None)
+                handoffKind == FileTransferTransportHandoffKind.None ||
+                !ProbeBelongsToChannel(runtimeUnlockPreCommitProbeSnapshot, this))
             {
-                return;
+                return false;
             }
 
+            Func<bool>? isCurrent = null;
+            Task<bool>? finalAck = null;
+            if (runtimeUnlockPreCommitProbeSnapshot is null && ShouldPersistPendingFileTransferV6Handoff(handoffKind, targetTransport))
+            {
+                if (ordinaryGeneration is not long generation) return false;
+                lock (owner.accelerationGate)
+                    if (owner.ordinaryFileFinalAck is { } ack && ack.Generation == generation) finalAck = ack.Result;
+                isCurrent = () => owner.IsOrdinaryFileHandoffCurrent(generation, SessionId) &&
+                    (finalAck?.IsCompletedSuccessfully != true || finalAck.Result);
+                owner.OrdinaryFileHandoffBeforeDispatchForTests?.Invoke();
+                if (!isCurrent()) return false;
+            }
             var handler = availabilityChanged;
             var subscriberCount = handler?.GetInvocationList().Length ?? 0;
             LocalOperationalLog.Info(
@@ -10060,28 +10894,56 @@ public sealed partial class NknSignalingTransport : IFileTransferControlPlanePhy
 
             if (handler is null)
             {
-                owner.TryRecordPendingFileTransferV6Handoff(
+                if (waitingOnly) return false;
+                var recorded = owner.TryRecordPendingFileTransferV6Handoff(
                     SessionId,
                     reason,
                     handoffKind,
                     targetTransport,
                     "session_no_subscribers",
-                    runtimeUnlockPreCommitProbeSnapshot);
+                    runtimeUnlockPreCommitProbeSnapshot, ordinaryGeneration);
                 LocalOperationalLog.Warn(
                     "NKN.Tuna",
                     $"event=filetransfer_data_session_handoff_no_subscribers; transfer_id={TransferId}; session_id={SessionId}; reason={SanitizeLogToken(reason)}; handoff_kind={FormatFileTransferTransportHandoffKindForLog(handoffKind)}; target_transport={FormatFileTransferTransportKindForLog(targetTransport)}");
-                return;
+                return recorded;
             }
 
-            handler.Invoke(
-                this,
-                new FileTransferDataSessionAvailabilityChangedEventArgs(
+            var args = new FileTransferDataSessionAvailabilityChangedEventArgs(
                     IsAvailable,
                     reason,
                     requiresResumeRequest: true,
                     handoffKind,
                     targetTransport,
-                    runtimeUnlockPreCommitProbeSnapshot));
+                    runtimeUnlockPreCommitProbeSnapshot) { OrdinaryTunaHandoffIsCurrent = isCurrent, OrdinaryTunaFinalAck = finalAck };
+            var delivered = false;
+            foreach (EventHandler<FileTransferDataSessionAvailabilityChangedEventArgs> subscriber in handler.GetInvocationList())
+            {
+                if (isCurrent?.Invoke() == false) return false;
+                if (isCurrent is not null && ordinaryGeneration is long source)
+                {
+                    lock (owner.accelerationGate)
+                    {
+                        if (IsDisposed || !isCurrent()) return false;
+                        if (!ReferenceEquals(handler, availabilityChanged) && availabilityChanged?.GetInvocationList().Contains(subscriber) != true)
+                            continue;
+                        if (ordinaryWaiters.TryGetValue(subscriber, out var waiter) && waiter.Generation == source)
+                        {
+                            if (waiter.Delivered)
+                            {
+                                delivered = true; // An overlapping broadcast is satisfied, not rejected.
+                                continue;
+                            }
+                            // ACK + commit permit the handoff, but do not release this channel's pause.
+                            if (!args.IsAvailable || !IsAvailable) continue;
+                            ordinaryWaiters[subscriber] = (source, true);
+                        }
+                        else if (waitingOnly) continue;
+                    }
+                }
+                subscriber(this, args);
+                delivered = true;
+            }
+            return delivered;
         }
 
         internal InitialActivationReceiverBarrierCloseReceipt ApplyInitialReceiverBarrierClose(
@@ -10101,6 +10963,7 @@ public sealed partial class NknSignalingTransport : IFileTransferControlPlanePhy
                 // Only this receiver is released. The session-wide pause and every
                 // other transfer remain untouched; Core accepts the receipt before
                 // resuming its state publisher. No generic availability callback.
+                lock (owner.activationPausePublicationGate) OwnedReceiverBarrierPauseGeneration = null;
                 available = 1;
                 availabilityReason = "initial_activation_receiver_barrier_closed";
                 availabilityGeneration++;
@@ -10109,15 +10972,16 @@ public sealed partial class NknSignalingTransport : IFileTransferControlPlanePhy
             }
         }
 
-        internal void RegisterInitialReceiverBarrierExecution(InitialActivationReceiverBarrierExecutionFence execution)
-            => Volatile.Write(ref initialReceiverBarrierExecution, execution);
+        internal long? OwnedReceiverBarrierPauseGeneration { get; private set; }
+        internal void RegisterInitialReceiverBarrierExecution(InitialActivationReceiverBarrierExecutionFence execution, long pauseGeneration)
+        {
+            OwnedReceiverBarrierPauseGeneration = pauseGeneration;
+            Volatile.Write(ref initialReceiverBarrierExecution, execution);
+        }
 
         public void Dispose()
         {
-            if (Interlocked.Exchange(ref disposed, 1) != 0)
-            {
-                return;
-            }
+            if (!TryBeginRetirement(suppressRemoteOpen: false, "disposed")) return;
 
             Volatile.Read(ref initialReceiverBarrierExecution)?.Invalidate();
 

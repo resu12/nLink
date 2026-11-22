@@ -2,7 +2,7 @@ using NLink.Infra.Nkn;
 
 namespace NLink.SmokeTests;
 
-internal sealed class FakeNknClient : INknClient, IAuthoritativeConnectedAddressSource, IRuntimeUnlockRetryPriorityNknClient
+internal class FakeNknClient : INknClient, IAuthoritativeConnectedAddressSource, IRuntimeUnlockRetryPriorityNknClient
 {
     private static readonly object Gate = new();
     private static readonly Dictionary<string, FakeNknClient> ClientsByAddress = new(StringComparer.Ordinal);

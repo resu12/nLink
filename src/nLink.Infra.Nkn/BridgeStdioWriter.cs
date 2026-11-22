@@ -35,7 +35,9 @@ internal sealed class BridgeStdioWriter : IDisposable
         }
     }
 
-    public async Task WriteBinaryFrameAsync(byte[] frameBytes, CancellationToken ct)
+    public Task WriteBinaryFrameAsync(byte[] frameBytes, CancellationToken ct) => WriteFrameAsync(frameBytes, ct, null);
+
+    private async Task<bool> WriteFrameAsync(byte[] frameBytes, CancellationToken ct, OwnedHandshakeWrite? admit)
     {
         ObjectDisposedException.ThrowIf(disposed, this);
         ArgumentNullException.ThrowIfNull(frameBytes);
@@ -43,8 +45,14 @@ internal sealed class BridgeStdioWriter : IDisposable
         await gate.WaitAsync(ct).ConfigureAwait(false);
         try
         {
-            await stream.WriteAsync(frameBytes, ct).ConfigureAwait(false);
+            if (admit is null) await stream.WriteAsync(frameBytes, ct).ConfigureAwait(false);
+            else
+            {
+                if (admit(() => stream.WriteAsync(frameBytes, ct)) is not { } write) return false;
+                await write.ConfigureAwait(false);
+            }
             await stream.FlushAsync(ct).ConfigureAwait(false);
+            return true;
         }
         finally
         {
@@ -52,10 +60,11 @@ internal sealed class BridgeStdioWriter : IDisposable
         }
     }
 
-    public async Task WriteSendFrameAsync(string destination, ReadOnlyMemory<byte> payload, NknBridgeChannel channel, CancellationToken ct)
+    public Task<bool> WriteSendFrameAsync(string destination, ReadOnlyMemory<byte> payload, NknBridgeChannel channel, CancellationToken ct,
+        OwnedHandshakeWrite? admit = null)
     {
         var frameBytes = BridgeBinaryProtocol.BuildSendFrame(destination, payload.Span, channel);
-        await WriteBinaryFrameAsync(frameBytes, ct).ConfigureAwait(false);
+        return WriteFrameAsync(frameBytes, ct, admit);
     }
 
     public void Dispose()

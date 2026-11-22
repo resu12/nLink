@@ -71,6 +71,12 @@ internal sealed class FileTransferSessionPreparationExecution
 
     internal void Retire() { lock (gate) RetireUnsafe(); }
 
+    internal void RetirePendingPreparation()
+    {
+        lock (gate)
+            if (readiness is null && admission is null) RetireUnsafe();
+    }
+
     // Core-state transitions only. Completion and deadline retirement must
     // linearize together; this never runs transport or cleanup callbacks.
     internal void ApplyStateTransition(Action coreStateOnly)

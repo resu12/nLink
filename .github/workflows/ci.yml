@@ -207,22 +207,77 @@ jobs:
             artifacts/ci-analyzer/progress.log
           if-no-files-found: warn
 
+  file_transfer_acceptance:
+    name: File transfer acceptance (${{ matrix.lane }})
+    needs: runtime_contracts
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        lane:
+          - FileTransferAcceptanceScenarios
+          - FileTransferEvidenceIntegrity
+    env:
+      NLINK_BRIDGE_RUNTIME_DIR: artifacts/bridge/win-x64
+      NLINK_ACCEPTANCE_LANE: ${{ matrix.lane }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET 8
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+
+      - name: Restore
+        run: dotnet restore tests/nLink.SmokeTests.Core/nLink.SmokeTests.Core.csproj
+
+      - name: Build acceptance test project (Release)
+        shell: powershell
+        run: |
+          $version = (Get-Content VERSION -Raw).Trim()
+          if ([string]::IsNullOrWhiteSpace($version)) {
+            throw "VERSION file is empty."
+          }
+          dotnet build tests/nLink.SmokeTests.Core/nLink.SmokeTests.Core.csproj -c Release --no-restore /p:NLinkVersion=$version
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Download verified bridge bundle
+        uses: actions/download-artifact@v4
+        with:
+          name: ci-bridge-bundle
+          path: artifacts/bridge/win-x64
+
+      - name: File-transfer fake acceptance tests
+        shell: powershell
+        run: .\tools\Test-Lanes.ps1 -Lane $env:NLINK_ACCEPTANCE_LANE -Configuration Release -NoBuild -Logger "trx;LogFilePrefix=filetransfer-acceptance-results"
+
+      - name: Upload file-transfer acceptance results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: filetransfer-acceptance-${{ matrix.lane }}
+          path: '**/filetransfer-acceptance-results*.trx'
+          if-no-files-found: warn
+
   smoke:
-    needs: [runtime_contracts, analyzer]
+    needs: [runtime_contracts, analyzer, file_transfer_acceptance]
     if: ${{ always() }}
     runs-on: windows-latest
     env:
       NLINK_BRIDGE_RUNTIME_DIR: artifacts/bridge/win-x64
 
     steps:
-      - name: Require runtime and every analyzer lane
+      - name: Require runtime, analyzer and file-transfer acceptance
         shell: powershell
         env:
           RUNTIME_RESULT: ${{ needs.runtime_contracts.result }}
           ANALYZER_RESULT: ${{ needs.analyzer.result }}
+          ACCEPTANCE_RESULT: ${{ needs.file_transfer_acceptance.result }}
         run: |
-          if ($env:RUNTIME_RESULT -ne 'success' -or $env:ANALYZER_RESULT -ne 'success') {
-            throw "Required qualification failed: runtime=$env:RUNTIME_RESULT; analyzers=$env:ANALYZER_RESULT"
+          if ($env:RUNTIME_RESULT -ne 'success' -or $env:ANALYZER_RESULT -ne 'success' -or $env:ACCEPTANCE_RESULT -ne 'success') {
+            throw "Required qualification failed: runtime=$env:RUNTIME_RESULT; analyzers=$env:ANALYZER_RESULT; acceptance=$env:ACCEPTANCE_RESULT"
           }
 
       - name: Checkout
@@ -266,10 +321,6 @@ jobs:
         with:
           name: ci-bridge-bundle
           path: artifacts/bridge/win-x64
-
-      - name: File-transfer fake acceptance tests
-        shell: powershell
-        run: .\tools\Test-Lanes.ps1 -Lane FileTransferAcceptanceFake -Configuration Release -NoBuild -Logger "trx;LogFilePrefix=filetransfer-acceptance-results"
 
       - name: Non-Core smoke compatibility tests
         shell: powershell
@@ -318,9 +369,7 @@ jobs:
         if: always()
         with:
           name: deterministic-test-results
-          path: |
-            **/filetransfer-acceptance-results*.trx
-            **/smoke-results*.trx
+          path: '**/smoke-results*.trx'
           if-no-files-found: ignore
 
       - name: Upload benchmark artifacts

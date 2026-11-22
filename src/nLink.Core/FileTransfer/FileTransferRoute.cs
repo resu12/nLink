@@ -6,6 +6,8 @@ public interface IFileTransferRouteStatus
 
     bool IsPostTunaFileFallbackActiveForRouteSelection { get; }
 
+    bool IsPostTunaFileFallbackActiveForNewOffer => IsPostTunaFileFallbackActiveForRouteSelection;
+
     bool IsDiagnosticRegularNknV6RouteEnabled { get; }
 }
 
@@ -81,7 +83,7 @@ internal readonly record struct FileTransferRouteResolverInput(
         HandoffKind: FileTransferTransportHandoffKind.None,
         TransportProfileKind: FileTransferTransportProfileKind.Default);
 
-    public static FileTransferRouteResolverInput FromTransport(IFileTransferSignalingTransport? transport)
+    public static FileTransferRouteResolverInput FromTransport(IFileTransferSignalingTransport? transport, bool forNewOffer = false)
     {
         var transportProfileKind = transport is IFileTransferTransportProfileProvider profileProvider
             ? profileProvider.FileTransferTransportProfileKind
@@ -91,7 +93,7 @@ internal readonly record struct FileTransferRouteResolverInput(
         {
             return new FileTransferRouteResolverInput(
                 routeStatus.IsFileTunaActiveForRouteSelection,
-                routeStatus.IsPostTunaFileFallbackActiveForRouteSelection,
+                forNewOffer ? routeStatus.IsPostTunaFileFallbackActiveForNewOffer : routeStatus.IsPostTunaFileFallbackActiveForRouteSelection,
                 routeStatus.IsDiagnosticRegularNknV6RouteEnabled,
                 FileTransferTransportHandoffKind.None,
                 transportProfileKind);

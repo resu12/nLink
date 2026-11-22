@@ -62,6 +62,7 @@
                 <views:SessionShellView RoleText="Helper"
                                         TunaActive="{Binding IsTunaActive}"
                                         TunaStatusReason="{Binding TunaStatusReason}"
+                                        FileUsesRegularNkn="{Binding FileUsesRegularNkn}"
                                         HorizontalAlignment="Stretch"
                                         VerticalAlignment="Stretch"
                                         ShowChatPaneRequested="{Binding ShowConnectedPanel}">

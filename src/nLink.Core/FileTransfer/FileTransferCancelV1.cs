@@ -16,6 +16,10 @@ public sealed record FileTransferCancelV1
     [JsonPropertyName("transferId")]
     public string TransferId { get; init; } = string.Empty;
 
+    [JsonPropertyName("offerInstanceId")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public Guid? OfferInstanceId { get; init; }
+
     [JsonPropertyName("reason")]
     public string? Reason { get; init; }
 }

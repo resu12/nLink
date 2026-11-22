@@ -486,6 +486,7 @@ public sealed partial class SessionFileTransferService :
     private RuntimeUnlockPostFallbackPreCommitProbeFailureObservation?
         lastInboundRuntimeUnlockPostFallbackProbeFailureObservation;
     private readonly object inboundLifecycleDispatchGate = new();
+    private readonly HashSet<WaitingFileOffer> waitingFileOffers = new(); // Protected by gate.
     private readonly object inboundControlDispatchGate = new();
     private readonly object inboundChunkDispatchGate = new();
     private readonly Func<string> transferIdFactory;
@@ -504,6 +505,8 @@ public sealed partial class SessionFileTransferService :
     private bool disposed;
 
     internal Func<string, string, Task>? InboundDispatchBeforeWorkAsyncForTests { get; set; }
+    internal Action<string, string>? InboundDispatchAfterWorkForTests { get; set; }
+    internal Action? InboundOfferWaitingForPeerTerminalForTests { get; set; }
     internal Action? BridgeRecoveryExecutionBeforeFinalDispatchForTests { get; set; }
 
     internal static TimeSpan? V4PeerSilenceTimeoutOverrideForTests { get; set; }
@@ -1031,6 +1034,7 @@ public sealed partial class SessionFileTransferService :
                     FileTransferDirection.Outbound,
                     outbound.SessionId,
                     outbound.TransferId,
+                    outbound.OfferInstanceId,
                     outbound.DataSession,
                     outbound.NegotiatedDataProtocolVersion,
                     outbound.V6TransportEpoch?.EpochId ?? outbound.LastRecoveredV6TransportEpoch);
@@ -1042,6 +1046,7 @@ public sealed partial class SessionFileTransferService :
                     FileTransferDirection.Inbound,
                     inbound.SessionId,
                     inbound.TransferId,
+                    inbound.OfferInstanceId,
                     inbound.DataSession,
                     inbound.NegotiatedDataProtocolVersion,
                     inbound.V6TransportEpoch?.EpochId ?? inbound.V6ReceiverTransportEpoch);
@@ -1083,7 +1088,7 @@ public sealed partial class SessionFileTransferService :
     {
         try
         {
-            var controlCancelTask = SendCancelAsync(notice.SessionId, notice.TransferId, reason, CancellationToken.None);
+            var controlCancelTask = SendCancelAsync(notice.SessionId, notice.TransferId, reason, CancellationToken.None, notice.OfferInstanceId);
             Task? dataCancelTask = null;
             if (notice.DataSession is not null)
             {
@@ -1365,6 +1370,7 @@ public sealed partial class SessionFileTransferService :
                 var correlationSupported = currentTransport is IFileTransferRouteTransitionBridge { SupportsFallbackBootstrapCorrelation: true };
                 offerMessage = new FileTransferOfferV2
                 {
+                    OfferInstanceId = context.OfferInstanceId,
                     SessionId = context.SessionId, TransferId = context.TransferId, FileName = context.FileName,
                     FileSizeBytes = context.FileSizeBytes, PreferredDataProtocolVersion = context.OfferedDataProtocolVersion,
                     FileTransferRoute = context.RouteSelection.TelemetryToken,
@@ -1410,6 +1416,7 @@ public sealed partial class SessionFileTransferService :
                     preparedPublication = publication;
                 }
                 if (nativeSender is not null && !nativeSender.BindContextLocked(this, context)) return null;
+                RetireIdleOfferWriteLocked();
                 outboundTransfer = context;
                 uninstalled = null;
             }
@@ -1572,8 +1579,7 @@ public sealed partial class SessionFileTransferService :
         timeoutCts.CancelAfter(timeout);
         try
         {
-            await currentTransport.SendFileTransferOfferAsync(offerMessage, timeoutCts.Token).ConfigureAwait(false);
-            return true;
+            return await currentTransport.TrySendFileTransferOfferAsync(offerMessage, timeoutCts.Token).ConfigureAwait(false);
         }
         catch (OperationCanceledException) when (!ct.IsCancellationRequested && timeoutCts.IsCancellationRequested)
         {
@@ -1683,7 +1689,14 @@ public sealed partial class SessionFileTransferService :
             .ConfigureAwait(false);
     }
 
-    public async Task<FileTransferTransferSnapshot?> AcceptIncomingTransferAsync(
+    public Task<FileTransferTransferSnapshot?> AcceptIncomingTransferAsync(
+        string transferId,
+        FileTransferWriteDestinationFactory openWriteDestinationAsync,
+        CancellationToken ct)
+        => AcceptIncomingTransferForOfferAsync(null, transferId, openWriteDestinationAsync, ct);
+
+    internal async Task<FileTransferTransferSnapshot?> AcceptIncomingTransferForOfferAsync(
+        (string SessionId, Guid Token)? expectedOffer,
         string transferId,
         FileTransferWriteDestinationFactory openWriteDestinationAsync,
         CancellationToken ct)
@@ -1699,7 +1712,9 @@ public sealed partial class SessionFileTransferService :
             if (context is null ||
                 context.IsTerminal ||
                 context.State != FileTransferTransferState.PendingDecision ||
+                !context.CanAnswerOffer ||
                 context.AcceptInProgress ||
+                (expectedOffer is { } expected && (context.SessionId != expected.SessionId || context.OfferToken != expected.Token)) ||
                 !string.Equals(context.TransferId, NormalizeTransferId(transferId), StringComparison.Ordinal))
             {
                 return null;
@@ -1714,10 +1729,10 @@ public sealed partial class SessionFileTransferService :
         {
             if (!ReferenceEquals(inboundTransfer, context) ||
                 context.IsTerminal ||
-                context.State != FileTransferTransferState.PendingDecision)
+                context.State != FileTransferTransferState.PendingDecision || !context.CanAnswerOffer)
             {
                 context.AcceptInProgress = false;
-                return CaptureCurrentInboundSnapshot();
+                return null;
             }
 
             var agreementState = CreateCoordinatorStateLocked(context);
@@ -1756,19 +1771,18 @@ public sealed partial class SessionFileTransferService :
 
         try
         {
-            var currentTransport = GetTransportOrThrow();
-            await currentTransport.SendFileTransferAcceptAsync(
-                acceptMessage,
-                ct).ConfigureAwait(false);
+            if (!await SendAcceptForOfferAsync(context, acceptMessage, ct).ConfigureAwait(false)) return null;
             if (context.NegotiatedDataProtocolVersion >= FileTransferProtocol.ProtocolVersionV6)
             {
                 StartInboundV6HeartbeatLoop(context, "accept_sent");
             }
-            return CaptureCurrentInboundSnapshot();
+            return CaptureCurrentInboundSnapshot(context);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            await TransitionInboundToTerminalAsync(
+            lock (gate)
+                if (!ReferenceEquals(inboundTransfer, context) || context.IsTerminal || !context.CanAnswerOffer) return null;
+            await TransitionInboundToTerminalWithFinalizationSourceAsync(
                 context,
                 FileTransferTransferState.Failed,
                 errorCode: InvalidStateErrorCode,
@@ -1776,15 +1790,19 @@ public sealed partial class SessionFileTransferService :
                 sendError: true,
                 errorMessage: "Could not send the accept response.",
                 cancelReason: null,
-                ct: CancellationToken.None).ConfigureAwait(false);
-            return CaptureCurrentInboundSnapshot();
+                ct: CancellationToken.None, requiredFeedbackOperation: null, failedOfferResponse: true).ConfigureAwait(false);
+            return CaptureCurrentInboundSnapshot(context);
         }
     }
 
-    public async Task<FileTransferTransferSnapshot?> DeclineIncomingTransferAsync(
+    public Task<FileTransferTransferSnapshot?> DeclineIncomingTransferAsync(
         string transferId,
         string? reason,
         CancellationToken ct)
+        => DeclineIncomingTransferForOfferAsync(null, transferId, reason, ct);
+
+    internal async Task<FileTransferTransferSnapshot?> DeclineIncomingTransferForOfferAsync(
+        (string SessionId, Guid Token)? expectedOffer, string transferId, string? reason, CancellationToken ct)
     {
         ObjectDisposedException.ThrowIf(disposed, this);
 
@@ -1795,6 +1813,8 @@ public sealed partial class SessionFileTransferService :
             if (context is null ||
                 context.IsTerminal ||
                 context.State != FileTransferTransferState.PendingDecision ||
+                !context.CanAnswerOffer ||
+                (expectedOffer is { } expected && (context.SessionId != expected.SessionId || context.OfferToken != expected.Token)) ||
                 !string.Equals(context.TransferId, NormalizeTransferId(transferId), StringComparison.Ordinal))
             {
                 return null;
@@ -1810,7 +1830,7 @@ public sealed partial class SessionFileTransferService :
                 errorMessage: null,
             cancelReason: NormalizeReason(reason) ?? DeclinedReason,
             ct: ct).ConfigureAwait(false);
-        return CaptureCurrentInboundSnapshot();
+        return CaptureCurrentInboundSnapshot(context);
     }
 
     public async Task<FileTransferTransferSnapshot?> CancelTransferAsync(
@@ -2662,10 +2682,70 @@ public sealed partial class SessionFileTransferService :
             ct: CancellationToken.None).ConfigureAwait(false);
     }
 
+    private sealed class WaitingFileOffer(object source, FileTransferOfferV2 offer, BoundFileOfferReadiness? binding) : IDisposable
+    {
+        private readonly CancellationTokenSource retirement = new();
+        public bool Matches(object? sender, string sessionId, string transferId, Guid? instance) =>
+            ReferenceEquals(source, sender) && offer.SessionId == sessionId && offer.TransferId == transferId &&
+            (!instance.HasValue || instance == offer.OfferInstanceId);
+        public CancellationToken Retirement => retirement.Token;
+        public bool HasBoundReadiness => binding is not null;
+        public bool IsCurrent => !retirement.IsCancellationRequested && (binding is null || binding.Attachment is { IsCurrent: true } attachment &&
+            binding.Epoch is { IsCurrent: true } epoch && epoch.SessionId == offer.SessionId &&
+            ReferenceEquals(attachment.Lifecycle.Attachment, attachment) && ReferenceEquals(attachment.Lifecycle.Current, epoch));
+        public Task<FileTransferInitialTunaReadinessEvidence?> ObserveAsync() => binding!.ObserveAsync(retirement.Token);
+        public bool TryConsume(FileTransferInitialTunaReadinessEvidence? evidence) =>
+            evidence is not null && IsCurrent && binding!.TryConsume();
+        public void Retire() => retirement.Cancel();
+        public void Dispose() => retirement.Dispose();
+    }
+
+    private void RetireWaitingFileOffersLocked()
+    {
+        foreach (var waiting in waitingFileOffers) waiting.Retire();
+    }
+
     private void OnFileTransferOfferReceived(object? sender, FileTransferOfferReceivedEventArgs e)
     {
-        var preparation = ReservePreparationOffer(sender, e.Message);
-        EnqueueInboundLifecycle("offer", () => HandleIncomingPreparedOfferAsync(e.Message, preparation));
+        var binding = e.FinalAckReadiness;
+        WaitingFileOffer? waiting = null;
+        PreparationAdmissionCapture? preparation;
+        long attachmentGeneration;
+        Task predecessorTerminal;
+        bool OwnsOfferLocked() =>
+            waiting?.IsCurrent != false && ReferenceEquals(sender, transport) && sessionPreparation.Attached && sessionPreparation.AttachmentGeneration == attachmentGeneration &&
+            (e.IsCurrentOffer?.Invoke(!IsInboundLifecycleMessageMatchLocked(e.Message.SessionId, e.Message.TransferId)) ?? true);
+        lock (gate)
+        {
+            if (disposed || sender is null || !ReferenceEquals(sender, transport)) return;
+            attachmentGeneration = sessionPreparation.AttachmentGeneration;
+            if (binding is not null && (!ReferenceEquals(binding.Attachment, preparationAttachment) || binding.Epoch is not { IsCurrent: true } epoch ||
+                !ReferenceEquals(epoch, preparationAttachment?.Lifecycle.Current))) return;
+            // A priority terminal may have been dispatched before Core even sees the offer.
+            if (!OwnsOfferLocked()) return;
+            predecessorTerminal = inboundTransfer?.PeerTerminalDispatch ?? Task.CompletedTask;
+            preparation = ReservePreparationOffer(sender, e.Message);
+            waiting = new(sender, e.Message, preparation is null ? binding : null);
+            waitingFileOffers.Add(waiting);
+        }
+        EnqueueInboundLifecycle("offer", async () =>
+        {
+            try
+            {
+                if (!predecessorTerminal.IsCompleted)
+                {
+                    InboundOfferWaitingForPeerTerminalForTests?.Invoke();
+                    await predecessorTerminal.WaitAsync(waiting.Retirement).ConfigureAwait(false);
+                }
+                await HandleIncomingPreparedOfferAsync(e.Message, preparation, waiting, OwnsOfferLocked, e).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) when (!waiting.IsCurrent) { }
+            finally
+            {
+                lock (gate) waitingFileOffers.Remove(waiting);
+                waiting.Dispose();
+            }
+        });
     }
 
     private void OnFileTransferAcceptReceived(object? sender, FileTransferAcceptReceivedEventArgs e)
@@ -2677,11 +2757,43 @@ public sealed partial class SessionFileTransferService :
     private void OnFileTransferSessionOpenReceived(object? sender, FileTransferSessionOpenReceivedEventArgs e)
         => EnqueueInboundLifecycle("session_open", () => HandleIncomingSessionOpenAsync(e.Message));
 
+    private void DispatchPeerTerminal(object? sender, string sessionId, string transferId, Guid? instance, string operation,
+        Func<OutboundTransferContext?, InboundTransferContext?, Task> handle)
+    {
+        lock (gate)
+        {
+            if (disposed || sender is null || !ReferenceEquals(sender, transport)) return;
+            bool retiredWaiting = false;
+            foreach (var waiting in waitingFileOffers)
+                if (waiting.Matches(sender, sessionId, transferId, instance)) { waiting.Retire(); retiredWaiting = true; }
+            if ((!instance.HasValue || retiredWaiting) && preparationAdmission is { } capture && ReferenceEquals(capture.Transport, sender) &&
+                capture.Admission.Direction == FileTransferDirection.Inbound && capture.Admission.Scope.SessionId == sessionId &&
+                capture.Admission.TransferId == transferId && !IsInboundLifecycleMessageMatchLocked(sessionId, transferId))
+                RetirePendingInboundPreparationLocked(capture);
+            var outbound = IsOutboundLifecycleMessageMatchLocked(sessionId, transferId) ? outboundTransfer : null;
+            var inbound = IsInboundLifecycleMessageMatchLocked(sessionId, transferId) ? inboundTransfer : null;
+            if (instance.HasValue && outbound?.OfferInstanceId != instance) outbound = null;
+            if (instance.HasValue && inbound?.OfferInstanceId != instance) inbound = null;
+            // The first terminal already owns this installed offer. A later notification may
+            // retire a queued same-ID successor above, but must not change the predecessor's outcome.
+            if (inbound?.PeerTerminalDispatch is not null) inbound = null;
+            var dispatch = RunHardPriorityInboundLifecycle(operation, () => handle(outbound, inbound));
+            if (inbound is not null && outbound is null)
+                inbound.PeerTerminalDispatch = dispatch;
+        }
+    }
+
     private void OnFileTransferCancelReceived(object? sender, FileTransferCancelReceivedEventArgs e)
-        => RunHardPriorityInboundLifecycle("cancel", () => HandleIncomingCancelAsync(e.Message));
+    {
+        DispatchPeerTerminal(sender, e.Message.SessionId, e.Message.TransferId, e.Message.OfferInstanceId, "cancel",
+            (outbound, inbound) => HandleIncomingCancelAsync(e.Message, outbound, inbound));
+    }
 
     private void OnFileTransferErrorReceived(object? sender, FileTransferErrorReceivedEventArgs e)
-        => RunHardPriorityInboundLifecycle("error", () => HandleIncomingErrorAsync(e.Message));
+    {
+        DispatchPeerTerminal(sender, e.Message.SessionId, e.Message.TransferId, e.Message.OfferInstanceId, "error",
+            (outbound, inbound) => HandleIncomingErrorAsync(e.Message, outbound, inbound));
+    }
 
     private void OnFileTransferCompleteReceived(object? sender, FileTransferCompleteReceivedEventArgs e)
         => RunHardPriorityInboundLifecycle("complete", () => HandleIncomingCompleteAsync(e.Message));
@@ -2716,12 +2828,8 @@ public sealed partial class SessionFileTransferService :
         RunHardPriorityInboundLifecycle("transport_disconnect", HandleTransportDisconnectedAsync);
     }
 
-    private void RunHardPriorityInboundLifecycle(string operation, Func<Task> work)
-    {
-        _ = Task.Run(
-            () => RunInboundDispatchAsync("lifecycle_priority", operation, work),
-            CancellationToken.None);
-    }
+    private Task RunHardPriorityInboundLifecycle(string operation, Func<Task> work)
+        => Task.Run(() => RunInboundDispatchAsync("lifecycle_priority", operation, work), CancellationToken.None);
 
     private void EnqueueInboundLifecycle(string operation, Func<Task> work)
     {
@@ -2801,6 +2909,7 @@ public sealed partial class SessionFileTransferService :
             }
 
             await work().ConfigureAwait(false);
+            InboundDispatchAfterWorkForTests?.Invoke(lane, operation);
         }
         catch (Exception ex)
         {
@@ -2959,10 +3068,21 @@ public sealed partial class SessionFileTransferService :
     private Task HandleIncomingOfferAsync(FileTransferOfferV2 message)
         => HandleIncomingPreparedOfferAsync(message, ReservePreparationOffer(transport, message));
 
-    private async Task HandleIncomingPreparedOfferAsync(FileTransferOfferV2 message, PreparationAdmissionCapture? preparation)
+    private async Task HandleIncomingPreparedOfferAsync(FileTransferOfferV2 message, PreparationAdmissionCapture? preparation,
+        WaitingFileOffer? waiting = null, Func<bool>? ownsOfferLocked = null,
+        FileTransferOfferReceivedEventArgs? receipt = null)
     {
         ArgumentNullException.ThrowIfNull(message);
 
+        IFileTransferSignalingTransport? currentTransport;
+        lock (gate)
+        {
+            if (disposed || ownsOfferLocked?.Invoke() == false || waiting?.IsCurrent == false ||
+                preparation is not null && !IsPreparationCaptureCurrentLocked(preparation)) return;
+            currentTransport = transport;
+        }
+        Task DeclineOfferAsync(string reason) => SendDeclineAsync(message.SessionId, message.TransferId, reason,
+            CancellationToken.None, receipt?.DeclineIfCurrentAsync ?? (currentTransport is null ? null : currentTransport.SendFileTransferDeclineAsync));
         if (!IsNegotiableDataProtocolVersion(message.PreferredDataProtocolVersion))
         {
             LogLegacyNegotiationRejected(
@@ -2972,23 +3092,11 @@ public sealed partial class SessionFileTransferService :
                 offeredVersion: message.PreferredDataProtocolVersion,
                 acceptedVersion: null,
                 reason: "offer_protocol_not_supported");
-            await SendDeclineAsync(message.SessionId, message.TransferId, TransportIncompatibleErrorCode, CancellationToken.None).ConfigureAwait(false);
+            await DeclineOfferAsync(TransportIncompatibleErrorCode).ConfigureAwait(false);
             return;
         }
 
-        IFileTransferSignalingTransport? currentTransport;
-        lock (gate)
-        {
-            if (preparation is not null && !IsPreparationCaptureCurrentLocked(preparation)) return;
-            currentTransport = transport;
-        }
-
         var routeInput = CreateInitialRouteResolverInputForNewTransfer(currentTransport);
-        var initialTunaEvidence = preparation is not null ? null : CaptureInitialTunaReadinessEvidence(
-            currentTransport,
-            message.SessionId,
-            message.TransferId,
-            FileTransferDirection.Inbound);
         if (!TryResolveIncomingOfferRouteSelection(message, routeInput, out var routeSelection, out var routeRejectReason))
         {
             LogLegacyNegotiationRejected(
@@ -2998,11 +3106,9 @@ public sealed partial class SessionFileTransferService :
                 offeredVersion: message.PreferredDataProtocolVersion,
                 acceptedVersion: null,
                 reason: routeRejectReason);
-            await SendDeclineAsync(message.SessionId, message.TransferId, TransportIncompatibleErrorCode, CancellationToken.None).ConfigureAwait(false);
+            await DeclineOfferAsync(TransportIncompatibleErrorCode).ConfigureAwait(false);
             return;
         }
-
-        if (preparation is not null) initialTunaEvidence = CapturePreparationAdmissionEvidence(preparation);
 
         InboundTransferContext? busyTransfer = null;
         InboundTransferContext? duplicateTransfer = null;
@@ -3010,6 +3116,7 @@ public sealed partial class SessionFileTransferService :
         SessionFileTransferSnapshot? snapshotToRaise = null;
         lock (gate)
         {
+            if (ownsOfferLocked?.Invoke() == false) return;
             if (inboundTransfer is { IsTerminal: false } existing && existing.TransferId == message.TransferId)
             {
                 var existingState = CreateCoordinatorStateLocked(existing);
@@ -3041,12 +3148,25 @@ public sealed partial class SessionFileTransferService :
             return;
         }
         CoordinatorSnapshotStreamEmitter incomingEmitter;
+        FileTransferInitialTunaReadinessEvidence? initialTunaEvidence = null;
+        if (routeSelection.Route == FileTransferRoute.FileTunaV4)
+            initialTunaEvidence = preparation is not null ? CapturePreparationAdmissionEvidence(preparation)
+                : waiting is { HasBoundReadiness: true } ? await waiting.ObserveAsync().ConfigureAwait(false)
+                : CaptureInitialTunaReadinessEvidence(currentTransport, message.SessionId, message.TransferId, FileTransferDirection.Inbound);
         lock (gate)
         {
-            if (disposed || preparation is not null && !IsPreparationCaptureCurrentLocked(preparation)) { return; }
+            if (disposed || ownsOfferLocked?.Invoke() == false || waiting?.IsCurrent == false ||
+                preparation is not null && !IsPreparationCaptureCurrentLocked(preparation)) return;
             incomingEmitter = CreateCoordinatorEmitter();
         }
-        var incoming = new InboundTransferContext(message, routeSelection, incomingEmitter);
+        var incoming = new InboundTransferContext(message, routeSelection, incomingEmitter)
+        {
+            OfferTransport = currentTransport,
+            IsCurrentOffer = receipt?.IsCurrentOffer,
+            AcceptIfCurrentAsync = receipt?.AcceptIfCurrentAsync,
+            DeclineIfCurrentAsync = receipt?.DeclineIfCurrentAsync,
+            ErrorIfCurrentAsync = receipt?.ErrorIfCurrentAsync
+        };
         var installed = false;
         RoutePublicationToken? preparedPublication = null;
         try
@@ -3097,19 +3217,25 @@ public sealed partial class SessionFileTransferService :
                     offeredVersion: message.PreferredDataProtocolVersion,
                     acceptedVersion: null,
                     reason: "offer_route_not_active");
-                await SendDeclineAsync(message.SessionId, message.TransferId, TransportIncompatibleErrorCode, CancellationToken.None).ConfigureAwait(false);
+                await DeclineOfferAsync(TransportIncompatibleErrorCode).ConfigureAwait(false);
                 return;
             }
 
             routeInput = CreateRouteInputForPublishedSelection(incoming.RouteSelection, routeInput.TransportProfileKind);
 
+            bool readinessLost = false;
             lock (gate)
             {
-                if (disposed || preparation is not null && !IsPreparationCaptureCurrentLocked(preparation))
+                if (disposed || waiting?.IsCurrent == false || preparation is not null && !IsPreparationCaptureCurrentLocked(preparation))
                 {
                     return;
                 }
 
+                if (ownsOfferLocked?.Invoke() == false)
+                {
+                    if (preparation is not null) RetirePendingInboundPreparationLocked(preparation);
+                    return;
+                }
                 if (inboundTransfer is not null && !inboundTransfer.IsTerminal)
                 {
                     if (string.Equals(inboundTransfer.TransferId, incoming.TransferId, StringComparison.Ordinal))
@@ -3137,6 +3263,10 @@ public sealed partial class SessionFileTransferService :
                         busyTransfer = inboundTransfer;
                     }
                 }
+                else if (waiting is { HasBoundReadiness: true } && !waiting.TryConsume(initialTunaEvidence))
+                {
+                    readinessLost = true;
+                }
                 else
                 {
                     if (RequiresPreparationAdmissionLocked(preparation, incoming.RouteSelection))
@@ -3146,12 +3276,18 @@ public sealed partial class SessionFileTransferService :
                             !AdoptPreparationAdmissionLocked(preparation, CreateCoordinatorStateLocked(incoming), incoming.LifetimeCts.Token)) return;
                         preparedPublication = publication;
                     }
+                    RetireIdleOfferWriteLocked();
                     inboundTransfer = incoming;
                     installed = true;
                     snapshotToRaise = CreateSnapshotLocked();
                 }
             }
 
+            if (readinessLost)
+            {
+                await DeclineOfferAsync(TransportIncompatibleErrorCode).ConfigureAwait(false);
+                return;
+            }
             if (snapshotToRaise is not null)
             {
                 if (!ActivatePreparationAdmission(preparation, preparedPublication is not null))
@@ -3159,7 +3295,7 @@ public sealed partial class SessionFileTransferService :
                     await TransitionInboundToTerminalAsync(incoming, FileTransferTransferState.Failed,
                         errorCode: InvalidStateErrorCode, statusMessage: "Prepared transport ownership changed before activation.",
                         sendError: false, errorMessage: null, cancelReason: null, ct: CancellationToken.None).ConfigureAwait(false);
-                    await SendDeclineAsync(message.SessionId, message.TransferId, TransportIncompatibleErrorCode, CancellationToken.None).ConfigureAwait(false);
+                    await DeclineOfferAsync(TransportIncompatibleErrorCode).ConfigureAwait(false);
                     return;
                 }
                 lock (gate)
@@ -3212,7 +3348,7 @@ public sealed partial class SessionFileTransferService :
 
             if (busyTransfer is not null)
             {
-                await SendDeclineAsync(message.SessionId, message.TransferId, BusyReason, CancellationToken.None).ConfigureAwait(false);
+                await DeclineOfferAsync(BusyReason).ConfigureAwait(false);
             }
         }
         finally
@@ -3221,7 +3357,21 @@ public sealed partial class SessionFileTransferService :
             // ownership to the service. Do not orphan their original streams.
             if (!installed) { incoming.DisposeResources(); }
             RetireUnadoptedPreparationAdmission(preparation);
+            if (preparation is not null && routeSelection.Route != FileTransferRoute.FileTunaV4)
+            {
+                // The coordinator still reserved its first admission; regular NKN does not need its ready lane.
+                lock (gate)
+                    if (preparationExecution is { } execution && ReferenceEquals(execution.Admission, preparation.Admission))
+                        execution.Retire();
+            }
         }
+    }
+
+    private async Task<bool> SendAcceptForOfferAsync(InboundTransferContext context, FileTransferAcceptV1 message, CancellationToken ct)
+    {
+        if (context.AcceptIfCurrentAsync is { } boundSend) return await boundSend(message, context.LifetimeToken, ct).ConfigureAwait(false);
+        await (context.OfferTransport ?? GetTransportOrThrow()).SendFileTransferAcceptAsync(message, ct).ConfigureAwait(false);
+        return true;
     }
 
     private async Task TryResendAcceptForDuplicateOfferAsync(InboundTransferContext context, string reason)
@@ -3231,6 +3381,7 @@ public sealed partial class SessionFileTransferService :
         {
             if (!ReferenceEquals(inboundTransfer, context) ||
                 context.IsTerminal ||
+                context.PeerTerminalDispatch is not null ||
                 context.State == FileTransferTransferState.PendingDecision)
             {
                 return;
@@ -3250,8 +3401,7 @@ public sealed partial class SessionFileTransferService :
 
         try
         {
-            var currentTransport = GetTransportOrThrow();
-            await currentTransport.SendFileTransferAcceptAsync(acceptMessage, CancellationToken.None).ConfigureAwait(false);
+            if (!await SendAcceptForOfferAsync(context, acceptMessage, CancellationToken.None).ConfigureAwait(false)) return;
             LocalOperationalLog.Info(
                 "FileTransferService",
                 $"event=filetransfer_accept_redundant_sent; direction=inbound; transfer_id={acceptMessage.TransferId}; session_id={acceptMessage.SessionId}; reason={FormatProtocolLogValue(reason)}; route={FormatProtocolLogValue(acceptMessage.FileTransferRoute)}; protocol_version={acceptMessage.AcceptedDataProtocolVersion}");
@@ -3278,6 +3428,7 @@ public sealed partial class SessionFileTransferService :
             context = outboundTransfer;
             if (context is null ||
                 context.IsTerminal ||
+                (message.OfferInstanceId is { } instance && instance != context.OfferInstanceId) ||
                 !string.Equals(context.TransferId, message.TransferId, StringComparison.Ordinal))
             {
                 return;
@@ -3382,6 +3533,7 @@ public sealed partial class SessionFileTransferService :
             context = outboundTransfer;
             if (context is null ||
                 context.IsTerminal ||
+                (message.OfferInstanceId is { } instance && instance != context.OfferInstanceId) ||
                 !string.Equals(context.TransferId, message.TransferId, StringComparison.Ordinal))
             {
                 return Task.CompletedTask;
@@ -3729,7 +3881,7 @@ public sealed partial class SessionFileTransferService :
 
     private void OnDataSessionAvailabilityChanged(object? sender, FileTransferDataSessionAvailabilityChangedEventArgs e)
     {
-        if (sender is not IFileTransferDataSession dataSession)
+        if (sender is not IFileTransferDataSession dataSession || e.OrdinaryTunaHandoffIsCurrent?.Invoke() == false)
         {
             return;
         }
@@ -3807,6 +3959,9 @@ public sealed partial class SessionFileTransferService :
         IFileTransferDataSession dataSession,
         FileTransferDataSessionAvailabilityChangedEventArgs availability)
     {
+        if (availability.OrdinaryTunaHandoffIsCurrent?.Invoke() == false) return;
+        if (availability.OrdinaryTunaFinalAck is { } ack &&
+            (!await ack.ConfigureAwait(false) || availability.OrdinaryTunaHandoffIsCurrent?.Invoke() == false)) return;
         if (availability.PostTunaFallbackProofBoundary is { IsComplete: true } fallbackBoundary)
         {
             SessionFileTransferSnapshot? fallbackSnapshot = null;
@@ -4074,6 +4229,8 @@ public sealed partial class SessionFileTransferService :
         bool inboundResumed = false;
         bool outboundActivationPauseStarted = false;
         bool inboundActivationPauseStarted = false;
+        FileTransferRouteRuntimeDescriptor outboundActivationPauseRoute = default;
+        FileTransferRouteRuntimeDescriptor inboundActivationPauseRoute = default;
         bool outboundActivationPauseResumed = false;
         bool inboundActivationPauseResumed = false;
         bool outboundNormalToTunaActivationResumed = false;
@@ -4093,6 +4250,7 @@ public sealed partial class SessionFileTransferService :
 
         lock (gate)
         {
+            if (availability.OrdinaryTunaHandoffIsCurrent?.Invoke() == false) return;
             var outboundPauseBlocked = IsTunaActivationNegotiationTransportPauseReason(outboundTransfer?.PullTransportPauseReason);
             var inboundPauseBlocked = IsTunaActivationNegotiationTransportPauseReason(inboundTransfer?.PullTransportPauseReason);
             if (effectiveIsAvailable &&
@@ -4237,6 +4395,7 @@ public sealed partial class SessionFileTransferService :
                         outboundPausedSessionId = outbound.SessionId;
                         outboundPaused = outbound;
                         outboundActivationPauseStarted = IsTunaActivationNegotiationTransportPauseReason(effectiveReason);
+                        outboundActivationPauseRoute = outbound.RouteRuntime;
                     }
 
                     if (TryStartOutboundV6TransportEpochWhileUnavailableLocked(
@@ -4364,6 +4523,7 @@ public sealed partial class SessionFileTransferService :
                         inboundPausedSessionId = inbound.SessionId;
                         inboundPaused = inbound;
                         inboundActivationPauseStarted = IsTunaActivationNegotiationTransportPauseReason(effectiveReason);
+                        inboundActivationPauseRoute = inbound.RouteRuntime;
                     }
 
                     if (TryStartInboundV6TransportEpochWhileUnavailableLocked(
@@ -4465,7 +4625,8 @@ public sealed partial class SessionFileTransferService :
                         outboundPaused,
                         paused: true,
                         effectiveReason,
-                        localTunaActivationBarrier: true);
+                        localTunaActivationBarrier: true,
+                        pauseSourceRoute: outboundActivationPauseRoute);
                 }
 
                 SignalOutboundSparseSenderPump(outboundPaused);
@@ -4481,7 +4642,8 @@ public sealed partial class SessionFileTransferService :
                     inboundPaused,
                     paused: true,
                     effectiveReason,
-                    localTunaActivationBarrier: true);
+                    localTunaActivationBarrier: true,
+                    pauseSourceRoute: inboundActivationPauseRoute);
             }
         }
 
@@ -4843,21 +5005,9 @@ public sealed partial class SessionFileTransferService :
            reason.Contains("control_receive_stalled", StringComparison.OrdinalIgnoreCase) &&
            reason.Contains("max_restarts", StringComparison.OrdinalIgnoreCase);
 
-    private Task HandleIncomingCancelAsync(FileTransferCancelV1 message)
+    private Task HandleIncomingCancelAsync(FileTransferCancelV1 message, OutboundTransferContext? outbound, InboundTransferContext? inbound)
     {
         ArgumentNullException.ThrowIfNull(message);
-
-        OutboundTransferContext? outbound;
-        InboundTransferContext? inbound;
-        lock (gate)
-        {
-            outbound = IsOutboundLifecycleMessageMatchLocked(message.SessionId, message.TransferId)
-                ? outboundTransfer
-                : null;
-            inbound = IsInboundLifecycleMessageMatchLocked(message.SessionId, message.TransferId)
-                ? inboundTransfer
-                : null;
-        }
 
         if (outbound is not null)
         {
@@ -4907,21 +5057,9 @@ public sealed partial class SessionFileTransferService :
         return Task.CompletedTask;
     }
 
-    private Task HandleIncomingErrorAsync(FileTransferErrorV1 message)
+    private Task HandleIncomingErrorAsync(FileTransferErrorV1 message, OutboundTransferContext? outbound, InboundTransferContext? inbound)
     {
         ArgumentNullException.ThrowIfNull(message);
-
-        OutboundTransferContext? outbound;
-        InboundTransferContext? inbound;
-        lock (gate)
-        {
-            outbound = IsOutboundLifecycleMessageMatchLocked(message.SessionId, message.TransferId)
-                ? outboundTransfer
-                : null;
-            inbound = IsInboundLifecycleMessageMatchLocked(message.SessionId, message.TransferId)
-                ? inboundTransfer
-                : null;
-        }
 
         if (outbound is not null)
         {
@@ -5064,6 +5202,7 @@ public sealed partial class SessionFileTransferService :
             context = outboundTransfer;
             completionEligible = context is not null &&
                 !context.IsTerminal &&
+                (message.OfferInstanceId is null || message.OfferInstanceId == context.OfferInstanceId) &&
                 string.Equals(context.TransferId, message.TransferId, StringComparison.Ordinal) &&
                 string.Equals(context.SessionId, message.SessionId, StringComparison.Ordinal) &&
                 (
@@ -5510,7 +5649,7 @@ public sealed partial class SessionFileTransferService :
             var currentTransport = GetTransportOrThrow();
             var completion = new FileTransferCompleteV1
             {
-                SessionId = sessionId, TransferId = transferId,
+                SessionId = sessionId, TransferId = transferId, OfferInstanceId = context.OfferInstanceId,
                 FileSizeBytes = fileSizeBytes, Sha256Base64 = computedHash,
             };
             Task sendingCompletion;
@@ -5965,7 +6104,7 @@ public sealed partial class SessionFileTransferService :
     private static FileTransferRouteResolverInput CreateInitialRouteResolverInputForNewTransfer(
         IFileTransferSignalingTransport? currentTransport)
     {
-        var input = FileTransferRouteResolverInput.FromTransport(currentTransport);
+        var input = FileTransferRouteResolverInput.FromTransport(currentTransport, forNewOffer: true);
         return input with { IsFileTunaActive = false };
     }
 
@@ -24529,6 +24668,7 @@ public sealed partial class SessionFileTransferService :
         FileTransferDirection Direction,
         string SessionId,
         string TransferId,
+        Guid? OfferInstanceId,
         IFileTransferDataSession? DataSession,
         int ProtocolVersion,
         long TransportEpoch);
@@ -24546,7 +24686,13 @@ public sealed partial class SessionFileTransferService :
         RuntimeUnlockPeerPreCommitAnswerAcceptanceStatus?
             AnswerAcceptanceStatus = null,
         FileTransferRuntimeUnlockPreCommitProbeAckFrame?
-            CompletedCommitConfirmation = null);
+            CompletedCommitConfirmation = null,
+        bool CommitReplyStarted = false)
+    {
+        // Accessed only under the service gate, on the exact claimed record.
+        public bool CommitReplyWritten { get; set; }
+        public bool DuplicateWaiting { get; set; }
+    }
 
     private sealed class RuntimeUnlockPostFallbackPairedAdmissionRecheck
     {
@@ -24680,6 +24826,7 @@ public sealed partial class SessionFileTransferService :
 
     private sealed class OutboundTransferContext
     {
+        public Guid OfferInstanceId { get; } = Guid.NewGuid();
         public string CoordinatorInstanceId { get; } =
             Guid.NewGuid().ToString("N");
 
@@ -24794,6 +24941,8 @@ public sealed partial class SessionFileTransferService :
         public DateTimeOffset? RuntimeUnlockActivationWindowGrantedUtc { get; set; }
 
         public RuntimeUnlockPeerPreCommitProbeState? RuntimeUnlockPendingPeerPreCommitProbe { get; set; }
+
+        public InitiatorCommitConfirmation? SentPairedConfirmation { get; set; }
 
         public RuntimeUnlockPeerPreCommitProbeRegistration? RuntimeUnlockPeerPreCommitProbeRegistration { get; set; }
 
@@ -25946,6 +26095,15 @@ public sealed partial class SessionFileTransferService :
 
     private sealed class InboundTransferContext
     {
+        // Published under the service gate at terminal receipt, before the next offer can observe this slot.
+        public Task? PeerTerminalDispatch { get; set; }
+        public IFileTransferSignalingTransport? OfferTransport { get; init; }
+        public Func<bool, bool>? IsCurrentOffer { get; init; }
+        public Func<FileTransferAcceptV1, CancellationToken, CancellationToken, Task<bool>>? AcceptIfCurrentAsync { get; init; }
+        public Func<FileTransferDeclineV1, CancellationToken, Task>? DeclineIfCurrentAsync { get; init; }
+        public Func<FileTransferErrorV1, CancellationToken, Task<bool>>? ErrorIfCurrentAsync { get; init; }
+        public bool CanAnswerOffer => PeerTerminalDispatch is null && (IsCurrentOffer?.Invoke(true) ?? true);
+
         // No live/default activation. Only the fresh offline fixture supplies this observer.
         public FileTransferCoordinator.FrontierPublicationObservation? FrontierPublicationObservation { get; set; }
         public FrontierBoundaryObservation? FrontierBoundaryObservation { get; set; }
@@ -25976,9 +26134,11 @@ public sealed partial class SessionFileTransferService :
         public InboundTransferContext(FileTransferOfferV2 offer, FileTransferRouteSelection routeSelection,
             CoordinatorSnapshotStreamEmitter emitter)
         {
+            LifetimeToken = LifetimeCts.Token;
             CoordinatorSnapshotEmitter = emitter;
             ArgumentNullException.ThrowIfNull(offer);
             SessionId = offer.SessionId;
+            OfferInstanceId = offer.OfferInstanceId;
             TransferId = offer.TransferId;
             FileName = offer.FileName;
             FileSizeBytes = offer.FileSizeBytes;
@@ -25990,6 +26150,7 @@ public sealed partial class SessionFileTransferService :
             StartCoordinatorSnapshotStreamLocked(this);
         }
 
+        public CancellationToken LifetimeToken { get; }
         public CancellationTokenSource LifetimeCts { get; } = new();
 
         public string SessionId { get; }
@@ -26960,6 +27121,9 @@ public sealed partial class SessionFileTransferService :
 
         public bool IsTerminal => ToSnapshot().IsTerminal;
 
+        public Guid OfferToken { get; } = Guid.NewGuid();
+        public Guid? OfferInstanceId { get; }
+
         public FileTransferIncomingOffer CreateOffer()
             => new(SessionId, TransferId, FileName, FileSizeBytes, Sha256Base64);
 
@@ -26995,6 +27159,7 @@ public sealed partial class SessionFileTransferService :
                 ProtocolVersion: NegotiatedDataProtocolVersion)
             {
                 IsPauseBlockedByTransport = IsTunaActivationNegotiationTransportPauseReason(PullTransportPauseReason),
+                InboundOfferToken = OfferToken,
                 PeerComparableProgressBytes = RouteRuntime.UsesV6RequestPump
                     ? Math.Clamp(BytesTransferred, 0L, Math.Max(0L, FileSizeBytes))
                     : ResolveInboundV4StateBytesCommittedLocked(this),

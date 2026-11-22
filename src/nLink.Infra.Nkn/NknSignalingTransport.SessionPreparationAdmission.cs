@@ -127,6 +127,7 @@ public sealed partial class NknSignalingTransport : IFileTransferSessionPreparat
                 if (!IsPreparationAdmissionResourceCurrent(work)) return false;
                 accelerationSessionId = authority.Admission.Scope.SessionId;
                 accelerationNegotiatedLanes = NknAccelerationLaneKind.File;
+                acknowledgedDuplexReconnect = false;
                 accelerationPreparationAdmission = work;
                 accepted = true;
             }

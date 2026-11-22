@@ -2,7 +2,7 @@
 
 This document describes the current nLink NKN Tuna integration: app sidecar, wallet linking, session-bound negotiation, runtime unlock, payer selection, spending caps, fallback, and test expectations. Start with [file-transfer-operability.md](file-transfer-operability.md) for usage and support triage. The standalone POC and historical benchmarks below are experimental references, not application release proof.
 
-Tuna remains experimental and default-off. The normal NKN bridge is still the canonical transport for discovery, approval, handshake, chat, remote control, control messages, and fallback.
+Tuna is off by default. The normal NKN bridge is still the canonical transport for discovery, approval, handshake, chat, remote control, control messages, and fallback.
 
 Related app-payload references:
 
@@ -378,7 +378,7 @@ Diagnostics copy/export redacts wallet paths, wallet addresses, passwords, seeds
 
 Historical Phase 3 benchmarks compared NKN and Tuna using synthetic file, screen, and reconnect profiles. Their approximately 1.8x file-transfer estimate is not a current application throughput claim or release gate.
 
-The October 7 candidate GUI matrix passed strict file-transfer correctness; its performance verdict remained **FAIL**, including repair-contaminated active-Tuna measurements and fallback warnings. See the [release runbook](ReleaseRunbook.md#070-candidate-evidence-2026-10-08) for exact payload provenance. Numeric baselines and limits are unchanged. Tuna remains experimental; promotion beyond that status would need separate evidence that:
+The October 7 candidate GUI matrix passed strict file-transfer correctness; its performance verdict remained **FAIL**, including repair-contaminated active-Tuna measurements and fallback warnings. See the [release runbook](ReleaseRunbook.md#070-candidate-evidence-2026-10-08) for exact payload provenance. Numeric baselines and limits are unchanged. Runtime promotion still requires separate evidence that:
 
 - file-transfer throughput remains materially better,
 - screen-share p95 latency does not materially regress,
@@ -496,7 +496,7 @@ Manual installed-app coverage should include:
 
 ## Go/No-Go Before Runtime Promotion
 
-Do not promote Tuna beyond experimental unless:
+Do not promote the Tuna runtime unless:
 
 - normal consumer flow remains unchanged when Tuna is off,
 - no paid listener starts before consent and verified session context,

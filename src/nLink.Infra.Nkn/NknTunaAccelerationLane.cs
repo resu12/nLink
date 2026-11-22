@@ -65,7 +65,7 @@ internal sealed partial class NknTunaAccelerationLane : INknTunaAccelerationSess
         {
             lock (gate)
             {
-                return client is null ? options.Lanes : client.SupportedLanes;
+                return client is null ? options.Lanes : client.SupportedLanes & options.Lanes;
             }
         }
     }
@@ -147,56 +147,100 @@ internal sealed partial class NknTunaAccelerationLane : INknTunaAccelerationSess
     public async Task<bool> EnsureListenerSidecarConnectedAsync(
         NknTunaListenerStartRequest request,
         CancellationToken ct)
+        => (await EnsureListenerAsync(request, null, ct).ConfigureAwait(false)).Connected;
+
+    public async Task<NknListenerRearm> RearmListenerAsync(NknListenerRearm expected, NknTunaListenerStartRequest request, CancellationToken ct)
+        => (await EnsureListenerAsync(request, expected, ct).ConfigureAwait(false)).Rearm;
+
+    public bool IsFailedListenerStartCurrent(long generation)
+    {
+        lock (gate) return !disposed && generation == startGeneration && pendingLaneStart is null &&
+            dialerStartTask is null && client?.IsAvailable != true && !IsPreparationOwnedUnsafe() &&
+            (listenerSupervisor is null || lastFailedRearmVacancy is { } idle && listenerSupervisor.IsCurrentVacancy(idle));
+    }
+
+    private async Task<(bool Connected, NknListenerRearm Rearm)> EnsureListenerAsync(
+        NknTunaListenerStartRequest request, NknListenerRearm? expected, CancellationToken ct)
     {
         if (!options.Enabled)
         {
-            return false;
+            return (false, default);
         }
 
         LaneStartOperation operation;
-        lock (gate)
-        {
-            if (disposed || ct.IsCancellationRequested || IsPreparationOwnedUnsafe()) return false;
-            if (clientRole == ClientRole.Dialer && client?.IsAvailable == true) return false;
-            if (client?.IsAvailable == true &&
-                clientRole == ClientRole.Listener &&
-                listenerRequest == request && currentFailureOrigin is null &&
-                (clientListenerLease is null || listenerSupervisor?.CaptureCurrentListenerAdoptionSnapshot() == clientListenerLease))
-            {
-                return true;
-            }
-            // Listener retries must not supersede an in-flight dialer or listener start.
-            if (pendingLaneStart is not null || dialerStartTask is not null) return false;
-            operation = BeginLaneStartUnsafe();
-            currentFailureOrigin = null;
-            if (clientRole == ClientRole.Listener)
-            {
-                // Retire the old IPC owner before the supervisor can stop its
-                // process. A queued shutdown callback must not reset the payer
-                // decision belonging to this replacement start.
-                var retiredListenerClient = client;
-                CaptureClientDiagnostics_NoLock(retiredListenerClient);
-                if (retiredListenerClient is not null)
-                {
-                    retiredListenerClients.Add((retiredListenerClient, clientListenerLease));
-                    retiredListenerClient.MessageReceived -= OnClientMessageReceived;
-                    retiredListenerClient.StateChanged -= OnClientStateChanged;
-                }
-                currentClientStart?.Revocation.Unregister();
-                currentClientStart = null;
-                client = null;
-                clientRole = ClientRole.None;
-                listenerRequest = null;
-                clientListenerLease = null;
-            }
-        }
-
+        Action<string>? stopPrevious = null;
         try
         {
-            lock (gate) { if (!IsLaneStartCurrentUnsafe(operation, ct)) return false; }
-            return await ConnectListenerAsync(request, operation, ct).ConfigureAwait(false);
+            lock (gate)
+            {
+                if (disposed || ct.IsCancellationRequested || IsPreparationOwnedUnsafe()) return (false, default);
+                if (expected is { } owner && !(owner.Lease is { } lease
+                    ? clientRole == ClientRole.Listener && CaptureCurrentLaneLease() == lease
+                    : owner.FailedGeneration is { } failed && IsFailedListenerStartCurrent(failed))) return (false, default);
+                if (clientRole == ClientRole.Dialer && client?.IsAvailable == true) return (false, default);
+                if (client?.IsAvailable == true &&
+                    clientRole == ClientRole.Listener &&
+                    listenerRequest == request && currentFailureOrigin is null &&
+                    (clientListenerLease is null || listenerSupervisor?.CaptureCurrentListenerAdoptionSnapshot() == clientListenerLease))
+                {
+                    return (true, expected.GetValueOrDefault());
+                }
+                // Listener retries must not supersede an in-flight dialer or listener start.
+                if (pendingLaneStart is not null || dialerStartTask is not null) return (false, default);
+                var vacant = expected?.FailedGeneration is not null ? lastFailedRearmVacancy : null;
+                if (expected?.Lease is { Listener: { } previous } previousLease)
+                {
+                    if (listenerSupervisor?.TryDetachForRearm(previous, out stopPrevious, out vacant, replacing: true) != true)
+                        return (false, default);
+                    // Accounting may synchronously retire the lane while the old process is detached.
+                    if (disposed || ct.IsCancellationRequested || startGeneration != previousLease.StartGeneration ||
+                        !ReferenceEquals(client, previousLease.Client)) return (false, default);
+                }
+                operation = BeginLaneStartUnsafe();
+                operation.ConditionalRearm = expected.HasValue;
+                operation.ExpectedVacancy = vacant;
+                lastFailedRearmVacancy = null;
+                currentFailureOrigin = null;
+                if (clientRole == ClientRole.Listener)
+                {
+                    // Retire the old IPC owner before the supervisor can stop its
+                    // process. A queued shutdown callback must not reset the payer
+                    // decision belonging to this replacement start.
+                    var retiredListenerClient = client;
+                    CaptureClientDiagnostics_NoLock(retiredListenerClient);
+                    if (retiredListenerClient is not null)
+                    {
+                        retiredListenerClients.Add((retiredListenerClient, clientListenerLease));
+                        retiredListenerClient.MessageReceived -= OnClientMessageReceived;
+                        retiredListenerClient.StateChanged -= OnClientStateChanged;
+                    }
+                    currentClientStart?.Revocation.Unregister();
+                    currentClientStart = null;
+                    client = null;
+                    clientRole = ClientRole.None;
+                    listenerRequest = null;
+                    clientListenerLease = null;
+                }
+            }
+        }
+        finally { stopPrevious?.Invoke("listener_rearm"); }
+
+        bool connected;
+        try
+        {
+            lock (gate) { if (!IsLaneStartCurrentUnsafe(operation, ct)) return (false, default); }
+            connected = await ConnectListenerAsync(request, operation, ct).ConfigureAwait(false);
         }
         finally { FinishLaneStart(operation); }
+        if (expected is null) return (connected, default);
+        lock (gate)
+        {
+            if (ct.IsCancellationRequested) return (false, default);
+            if (operation.Generation == startGeneration) lastFailedRearmVacancy = operation.FailedVacancy;
+            if (!connected && IsFailedListenerStartCurrent(operation.Generation))
+                return (false, new(null, operation.Generation));
+            return (connected, new(connected && ReferenceEquals(currentClientStart, operation) ? CaptureCurrentLaneLease() : null, null));
+        }
     }
 
     private async Task<bool> ConnectListenerAsync(NknTunaListenerStartRequest request,
@@ -206,9 +250,12 @@ internal sealed partial class NknTunaAccelerationLane : INknTunaAccelerationSess
         var endpoint = operation.Preparation ? null : options.ListenerEndpoint;
         if (string.IsNullOrWhiteSpace(endpoint) && listenerSupervisor is not null)
         {
-            if (operation.Preparation)
+            if (operation.Preparation || operation.ConditionalRearm)
             {
-                startedListener = await listenerSupervisor.EnsureStartedIfIdleAsync(request, ct).ConfigureAwait(false);
+                startedListener = operation.ConditionalRearm
+                    ? operation.ExpectedVacancy is null ? null : await listenerSupervisor.StartInVacancyAsync(operation.ExpectedVacancy, request, ct,
+                        vacant => operation.FailedVacancy = vacant).ConfigureAwait(false)
+                    : await listenerSupervisor.EnsureStartedIfIdleAsync(request, ct).ConfigureAwait(false);
                 endpoint = startedListener?.Endpoint.LocalIpc;
             }
             else
@@ -350,21 +397,43 @@ internal sealed partial class NknTunaAccelerationLane : INknTunaAccelerationSess
         }
     }
 
-    public async Task<bool> StartDialerSidecarAsync(string tunaAddress, string expectedRemotePeer, CancellationToken ct)
+    public Task<bool> StartDialerSidecarAsync(string tunaAddress, string expectedRemotePeer, CancellationToken ct)
+        => StartOfferDialerAsync(tunaAddress, expectedRemotePeer, null, ct);
+
+    public async Task<bool> StartOfferDialerAsync(string tunaAddress, string expectedRemotePeer, object? owner, CancellationToken ct)
     {
         Task<bool> startTask;
+        LaneStartOperation? started;
         lock (gate)
         {
             if (disposed || ct.IsCancellationRequested || IsPreparationOwnedUnsafe()) return false;
-            if (client?.IsAvailable == true && clientRole == ClientRole.Dialer)
+            var target = (expectedRemotePeer, tunaAddress);
+            var reuseClient = client?.IsAvailable == true && clientRole == ClientRole.Dialer && pendingLaneStart is null;
+            if ((reuseClient && currentDialTarget != target) ||
+                (!reuseClient && dialerStartTask is not null && pendingLaneStart?.DialTarget != target))
+                return false;
+            pendingDialClaim = owner;
+            heldDialCleanupOwner = null;
+            claimedDialLease = null;
+            if (reuseClient)
             {
+                // Only an unfinished offer can transfer cleanup ownership.
+                // Reusing an established client never creates new cleanup rights.
+                if (currentClientStart is { DialOfferOwner: not null } current) current.DialOfferOwner = owner;
+                if (owner is not null) claimedDialLease = CaptureCurrentLaneLease();
                 return true;
             }
 
             if (dialerStartTask is null)
             {
-                var operation = BeginLaneStartUnsafe();
-                dialerStartTask = StartOwnedDialerAsync(tunaAddress, expectedRemotePeer, operation, ct);
+                started = BeginDialStartUnsafe(tunaAddress, expectedRemotePeer);
+                started.DialOfferOwner = owner;
+                dialerStartTask = StartOwnedDialerAsync(tunaAddress, expectedRemotePeer, started, ct);
+            }
+            else
+            {
+                started = pendingLaneStart;
+                if (started is { DialOfferOwner: not null }) started.DialOfferOwner = owner;
             }
 
             startTask = dialerStartTask;
@@ -372,7 +441,14 @@ internal sealed partial class NknTunaAccelerationLane : INknTunaAccelerationSess
 
         try
         {
-            return await startTask.ConfigureAwait(false);
+            var ready = await startTask.ConfigureAwait(false);
+            lock (gate)
+            {
+                if (ready && owner is not null && ReferenceEquals(owner, pendingDialClaim) &&
+                    started is not null && ReferenceEquals(started, currentClientStart))
+                    claimedDialLease = CaptureCurrentLaneLease();
+            }
+            return ready;
         }
         finally
         {
@@ -637,6 +713,20 @@ internal sealed partial class NknTunaAccelerationLane : INknTunaAccelerationSess
         }
 
         return current.TrySendAsync(lane, envelopeBytes, ct);
+    }
+
+    public Task<bool> TryWritePairedCommitConfirmationAsync(byte[] bytes, long expiresUtcTicks, Func<Func<Task>, Task?> startIfCurrent, CancellationToken ct)
+    {
+        NknTunaSidecarClient? selected;
+        lock (gate) selected = client;
+        return selected?.TryWritePairedCommitConfirmationAsync(bytes, expiresUtcTicks, write => startIfCurrent(() =>
+        {
+            lock (gate)
+            {
+                if (client != selected) throw new OperationCanceledException("Tuna client replaced");
+                return write();
+            }
+        }), ct) ?? Task.FromResult(false);
     }
 
     public Task StopAsync(string reason, CancellationToken ct)
@@ -948,6 +1038,7 @@ internal sealed partial class NknTunaAccelerationLane : INknTunaAccelerationSess
 
                 client = nextClient;
                 currentClientStart = operation;
+                currentDialTarget = nextRole == ClientRole.Dialer ? operation?.DialTarget : null;
                 clientRole = nextRole;
                 clientDialerProcessOwner = nextRole == ClientRole.Dialer ? nextDialerOwner : null;
                 clientGeneration++;

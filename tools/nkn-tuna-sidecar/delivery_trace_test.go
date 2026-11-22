@@ -45,10 +45,10 @@ func TestDeliveryTraceBridgeWriteControls(t *testing.T) {
 				if failWrite {
 					_ = peer.Close()
 				}
-				var total atomic.Int64
+				budget := bridgeByteBudget{limit: 1 << 30}
 				var handoff atomic.Bool
 				results := make(chan bridgeDirectionResult, 1)
-				go bridgeDirection(ctx, "dialer", direction, source, destination, &total, 1<<30, 0, &handoff, emit, results, producer.connect())
+				go bridgeDirection(ctx, "dialer", direction, source, destination, &budget, 0, &handoff, emit, results, producer.connect())
 				payload := []byte(`{"messageId":"same","payload":"a"}`)
 				if err := writeFrame(app, frameTypeData, 2, 1, 0, payload); err != nil {
 					t.Fatal(err)
@@ -64,6 +64,9 @@ func TestDeliveryTraceBridgeWriteControls(t *testing.T) {
 				case result := <-results:
 					if failWrite && result.stage != "write" {
 						t.Fatalf("expected write failure: %+v", result)
+					}
+					if failWrite && budget.forwarded.Load() != 0 {
+						t.Fatal("failed write counted as forwarded payload")
 					}
 				case <-ctx.Done():
 					t.Fatal("bridge did not stop")

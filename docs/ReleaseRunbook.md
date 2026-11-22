@@ -4,6 +4,22 @@ This runbook describes the version-neutral steps to ship `v<version>` from a cle
 
 It is the canonical release process; use [rc-validation-checklist.md](release/rc-validation-checklist.md) for sign-off. A successful build, source checkpoint, or operator-analyzer PASS does not by itself qualify a release. Do not tag or publish before mandatory security/route proofs, payload provenance, packaging checks, and CI sign-off are established.
 
+## 0.7.1 local review build
+
+On 20 November 2026, the Windows x64 installer was built from `833a3396800740eb57a03b8ae3f0b34571155590`. This is a local candidate, not a public release or a CI artifact.
+
+| Local artifact | Bytes | SHA-256 |
+| --- | ---: | --- |
+| `nLink-Setup-win-x64-0.7.1.exe` | 87,999,704 | `80E370C152B867C7157501BE1CB6E8C7B72F37733063C734F971DAFB3D10F013` |
+
+The installer and staged app both report `0.7.1`. The package manifest passed, and all 14 portable ZIP files matched installer staging by SHA-256. The installer is unsigned and was not run. These checks do not qualify an upgrade from hotfix 2 or a live session. Before publication, use the [RC checklist](release/rc-validation-checklist.md) for the selected CI artifacts and sign them or obtain a 0.7.1-specific unsigned exception.
+
+## 0.7.1 Beta Readiness decision (2026-11-19)
+
+- [ ] **Case 10323 — known, unpassed.** [`CanonicalFallback_RequiresOriginalHandoffsBeyondOldOriginCap`](../tests/nLink.SmokeTests.Core/FrontierPayloadPrimaryTests.cs) (`host: "pwsh"`). X7 observed persistence and handoff but reached the 600-second watchdog without a downstream verdict. X8 stopped at host preflight and did not run the test.
+
+The release owner accepted this unresolved risk for **0.7.1 only** and stopped troubleshooting it for this release. This is not a pass, a fix, or a waiver for any future release. Keep the test enabled with its existing 600-second timeout and assertions. All other gates and failures retain their normal disposition.
+
 ## Published 0.7.0 Hotfix Revision 1 (2026-11-15)
 
 [`v0.7.0-hotfix.1`](https://github.com/resu12/nLink/releases/tag/v0.7.0-hotfix.1) is published at `d235dcf144c626b42d0a159c9aa7d18882f06c7d`, using CI #103's exact validated portable, installer and checksum file. The application version remains `0.7.0`. The original release below is preserved, not replaced.
@@ -15,9 +31,9 @@ It is the canonical release process; use [rc-validation-checklist.md](release/rc
 
 Exact hotfix-1 hashes, downloads and retained local validation are in [the release record](releases/0.7.0-hotfix.1.md).
 
-## Unreleased 0.7.0 Hotfix Revision 2
+## Published 0.7.0 Hotfix Revision 2 (2026-11-17)
 
-[Hotfix 2](releases/0.7.0-hotfix.2.md), source `ba507366`, has a fresh local unsigned portable/installer, 172/172 passing focused lifecycle/authentication regressions, and successful packaging checks with all 14 portable files matched to staging. It includes the session-cleanup, stale-listener, accounting-stop and session-icon fixes. It is not published or final-artifact-qualified; no CI, live-session or installer-lifecycle pass is claimed for this build. Obtain the existing applicable CI, payload/live, installer and signing decisions for the selected bytes before separate release approval. Preserve older review packages and failures; do not inherit either previous unsigned exception, move a published tag or replace assets. Case 10323 remains paused.
+[Hotfix 2](https://github.com/resu12/nLink/releases/tag/v0.7.0-hotfix.2) was published from `36557e07` using the exact [CI #108](https://github.com/resu12/nLink/actions/runs/43920671484) artifacts. Its unsigned exception applies only to those bytes. Use this release as the 0.7.1 upgrade baseline. The [earlier review build](releases/0.7.0-hotfix.2.md) from `ba507366` and its test outcomes remain separate.
 
 ## Current 0.7.0 Release Record (2026-11-15)
 

@@ -46,6 +46,7 @@ public partial class SessionHeaderView : UserControl
     private int tunaUnlockRefreshVersion;
     private string tunaRuntimeStatus = "unknown";
     private string? tunaUnlockMessage;
+    private TunaWalletLinkState? tunaUnlockMessageWallet;
     private DateTimeOffset? tunaUnlockMessageUntilUtc;
     private ITunaRuntimePilotService? subscribedTunaRuntime;
     private readonly DispatcherTimer tunaPulseTimer;
@@ -74,6 +75,9 @@ public partial class SessionHeaderView : UserControl
 
     public static readonly StyledProperty<bool> TunaActiveProperty =
         AvaloniaProperty.Register<SessionHeaderView, bool>(nameof(TunaActive), false);
+
+    public static readonly StyledProperty<bool> FileUsesRegularNknProperty =
+        AvaloniaProperty.Register<SessionHeaderView, bool>(nameof(FileUsesRegularNkn));
 
     public static readonly StyledProperty<string?> TunaStatusReasonProperty =
         AvaloniaProperty.Register<SessionHeaderView, string?>(nameof(TunaStatusReason), "inactive");
@@ -224,6 +228,8 @@ public partial class SessionHeaderView : UserControl
             view.UpdateTunaVisualState());
         TunaStatusReasonProperty.Changed.AddClassHandler<SessionHeaderView>((view, _) =>
             view.UpdateTunaVisualState());
+        FileUsesRegularNknProperty.Changed.AddClassHandler<SessionHeaderView>((view, _) =>
+            view.UpdateTunaVisualState());
     }
 
     public SessionHeaderView()
@@ -289,6 +295,12 @@ public partial class SessionHeaderView : UserControl
     {
         get => GetValue(TunaActiveProperty);
         set => SetValue(TunaActiveProperty, value);
+    }
+
+    public bool FileUsesRegularNkn
+    {
+        get => GetValue(FileUsesRegularNknProperty);
+        set => SetValue(FileUsesRegularNknProperty, value);
     }
 
     public string? TunaStatusReason
@@ -475,7 +487,8 @@ public partial class SessionHeaderView : UserControl
             active,
             reason,
             tunaRuntimeStatus,
-            tunaUnlockToggleOn);
+            tunaUnlockToggleOn,
+            FileUsesRegularNkn);
         var pulsing = !active &&
                       tunaUnlockToggleOn &&
                       presentation.IsConnecting &&
@@ -561,6 +574,22 @@ public partial class SessionHeaderView : UserControl
         SetAndRaise(TunaPulseScaleProperty, ref tunaPulseScale, nextScale);
     }
 
+    private void TunaUnlockToggle_ToolTipOpening(object? sender, CancelRoutedEventArgs e)
+    {
+        var pending = GetPendingTunaUnlockMessage();
+        var runtime = subscribedTunaRuntime;
+        var status = runtime?.RuntimeStatus ?? tunaRuntimeStatus;
+        if ((pending is null || tunaUnlockMessageWallet is not null) &&
+            (tunaUnlockMessageWallet is not null || status == "waiting_for_approved_session" || tunaRuntimeStatus == "waiting_for_approved_session"))
+        {
+            // HasSessionUnlock checks the shared wallet record, not just the retained password.
+            var unlocked = runtime?.HasSessionUnlock == true;
+            if (!unlocked && tunaUnlockMessageWallet is not null) SetTunaUnlockMessage(string.Empty);
+            tunaRuntimeStatus = DisplayedRuntimeStatus(status, unlocked);
+        }
+        UpdateTunaVisualState();
+    }
+
     private async void TunaUnlockToggle_Click(object? sender, RoutedEventArgs e)
     {
         if (tunaUnlockBusy)
@@ -628,9 +657,13 @@ public partial class SessionHeaderView : UserControl
             await RefreshTunaUnlockToggleAsync().ConfigureAwait(true);
 
             var result = await runtime
-                .UnlockForSessionAsync(password, TunaRuntimeUnlockSource.Header, CancellationToken.None)
+                .UnlockForSessionAsync(password, TunaRuntimeUnlockSource.Header, currentState.PromptWallet)
                 .ConfigureAwait(true);
-            SetTunaUnlockMessage(result.Message);
+            SetTunaUnlockResult(result, currentState.PromptWallet);
+        }
+        catch (Exception ex) when (JsonTunaWalletLinkStore.IsStorageError(ex))
+        {
+            SetTunaUnlockMessage("Couldn't confirm the wallet unlock. Check access to nLink's wallet settings.");
         }
         finally
         {
@@ -682,27 +715,28 @@ public partial class SessionHeaderView : UserControl
         }
 
         var state = await runtime.GetUnlockStateAsync(CancellationToken.None).ConfigureAwait(false);
-        if (version != Volatile.Read(ref tunaUnlockRefreshVersion))
-        {
-            return;
-        }
-
         await Dispatcher.UIThread.InvokeAsync(() =>
         {
+            if (version != Volatile.Read(ref tunaUnlockRefreshVersion)) return;
+            var status = DisplayedRuntimeStatus(state.RuntimeStatus, state.IsOn);
             var presentation = TunaStatusPresentationMapper.FromState(
                 TunaActive,
                 TunaStatusReason,
-                state.RuntimeStatus,
-                state.IsOn);
-            var tip = GetPendingTunaUnlockMessage() ?? presentation.Text;
+                status,
+                state.IsOn,
+                FileUsesRegularNkn);
+            var tip = GetPendingTunaUnlockMessage(state.PromptWallet) ?? presentation.Text;
             ApplyTunaUnlockToggleState(
                 state.IsVisible,
                 state.CanToggle && !tunaUnlockBusy,
                 state.IsOn,
                 tip,
-                state.RuntimeStatus);
+                status);
         });
     }
+
+    private static string DisplayedRuntimeStatus(string status, bool unlocked)
+        => !unlocked && status == "waiting_for_approved_session" ? "locked" : status;
 
     private void ApplyTunaUnlockToggleState(bool show, bool canToggle, bool unlocked, string tip, string runtimeStatus)
     {
@@ -753,18 +787,29 @@ public partial class SessionHeaderView : UserControl
         return false;
     }
 
+    private void SetTunaUnlockResult(TunaRuntimeUnlockResult result, TunaWalletLinkState wallet)
+    {
+        SetTunaUnlockMessage(result.Message);
+        tunaUnlockMessageWallet = result.Success ? wallet : null;
+    }
+
     private void SetTunaUnlockMessage(string message)
     {
+        tunaUnlockMessageWallet = null;
         tunaUnlockMessage = string.IsNullOrWhiteSpace(message) ? null : message.Trim();
         tunaUnlockMessageUntilUtc = tunaUnlockMessage is null ? null : DateTimeOffset.UtcNow.AddSeconds(8);
     }
 
-    private string? GetPendingTunaUnlockMessage()
+    private string? GetPendingTunaUnlockMessage(TunaWalletLinkState? refreshed = null)
     {
+        var staleSuccess = tunaUnlockMessageWallet is { } wallet &&
+            (subscribedTunaRuntime?.HoldsUnlockFor(wallet) != true ||
+             refreshed is not null && (refreshed.Status != TunaWalletLinkStatus.VerifiedFunded || !wallet.IsSamePayerLinkAs(refreshed)));
         if (string.IsNullOrWhiteSpace(tunaUnlockMessage) ||
             tunaUnlockMessageUntilUtc is not { } until ||
-            DateTimeOffset.UtcNow > until)
+            DateTimeOffset.UtcNow > until || staleSuccess)
         {
+            tunaUnlockMessageWallet = null;
             tunaUnlockMessage = null;
             tunaUnlockMessageUntilUtc = null;
             return null;

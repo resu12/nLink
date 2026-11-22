@@ -139,9 +139,12 @@ public sealed partial class NknSignalingTransport : IInitialActivationReceiverBa
                         $"{session.TransferId}:{session.Generation.ToString(CultureInfo.InvariantCulture)}", session.Generation);
                     // Retain this bounded ownership marker even if one member is disposed;
                     // a late callback still cannot release another member of the same pause.
-                    initialReceiverBarrierOwnedPauseSessionId = sessionId;
-                    initialReceiverBarrierOwnedPauseGeneration = pauseGeneration;
-                    session.RegisterInitialReceiverBarrierExecution(accepted.ExecutionFence);
+                    lock (activationPausePublicationGate)
+                    {
+                        initialReceiverBarrierOwnedPauseSessionId = sessionId;
+                        initialReceiverBarrierOwnedPauseGeneration = pauseGeneration;
+                        session.RegisterInitialReceiverBarrierExecution(accepted.ExecutionFence, pauseGeneration);
+                    }
                 }
             }
         }

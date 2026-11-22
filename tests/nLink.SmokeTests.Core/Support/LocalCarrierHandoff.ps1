@@ -47,7 +47,9 @@ foreach($pair in @(@($route,'Invoke-RouteAcceptanceRetainedAnalysis'),@($wrapper
     $expectedWatchdog=if($pair[1] -ceq 'Invoke-RouteAcceptanceRetainedAnalysis') {'3600'} else {'1800'}
     if($deadline.Count -ne 1 -or $deadline[0].Right.Extent.Text -cne $expectedWatchdog) { throw 'Production watchdog changed' }
     if(([regex]::Matches($text,'while \(-not \$process.WaitForExit\(5000\)\)')).Count -ne 1) { throw 'Production exit wait changed' }
-    $testWatchdog=if($slotTransport -or $sourceRequestMode) { 5 } else { 2 }
+    # Slot-only cases have no deliberate worker stall. Allow cold child startup
+    # and Add-Type compilation without changing the measured slot-offer bound.
+    $testWatchdog=if($TransportMode -ceq 'slot') { 20 } elseif($slotTransport -or $sourceRequestMode) { 5 } else { 2 }
     $text=$text.Replace($deadline[0].Extent.Text,('$analysisTimeoutSeconds = '+$testWatchdog))
     $text=$text.Replace('while (-not $process.WaitForExit(5000))','while (-not $process.WaitForExit(25))')
     $text=$text.Replace('$startInfo.UseShellExecute = $false',"`$startInfo.UseShellExecute = `$false`n`$startInfo.CreateNoWindow = `$true")

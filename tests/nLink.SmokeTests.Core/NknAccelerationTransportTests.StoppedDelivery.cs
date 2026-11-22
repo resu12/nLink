@@ -137,6 +137,93 @@ public sealed partial class NknAccelerationTransportTests
         }
     }
 
+    [Fact]
+    public async Task PairedCommitReply_SidecarWriterDropsRevokedQueuedCopyBeforeIPC()
+    {
+        using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(8));
+        var ct = deadline.Token;
+        using var server = new TcpListener(IPAddress.Loopback, 0);
+        server.Start();
+        using var client = new NknTunaSidecarClient(NknAccelerationLaneKind.File, 16);
+        using var relay = await ConnectDeliveryTraceRelayAsync(server, client, ct);
+        var reached = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        using var release = new ManualResetEventSlim();
+        var first = client.TryWritePairedCommitConfirmationAsync([1], long.MaxValue, write =>
+        {
+            reached.TrySetResult();
+            release.Wait(ct);
+            return write();
+        }, ct);
+        await reached.Task.WaitAsync(ct);
+        int current = 1;
+        var stale = client.TryWritePairedCommitConfirmationAsync([2], long.MaxValue, write => Volatile.Read(ref current) == 1 ? write() : null, ct);
+        var sentinel = client.TryWritePairedCommitConfirmationAsync([3], long.MaxValue, write => write(), ct);
+        Assert.False(stale.IsCompleted);
+        Volatile.Write(ref current, 0);
+        release.Set();
+        Assert.True(await first);
+        Assert.False(await stale);
+        Assert.True(await sentinel);
+        foreach (var expected in new byte[] { 1, 3 })
+        {
+            var wire = await NknTunaSidecarFrameProtocol.ReadFrameAsync(relay.GetStream(), ct);
+            if (wire.Type == NknTunaSidecarFrameType.Ping)
+                wire = await NknTunaSidecarFrameProtocol.ReadFrameAsync(relay.GetStream(), ct);
+            Assert.Equal(NknTunaSidecarFrameType.Data, wire.Type);
+            Assert.Equal(new byte[] { expected }, wire.Payload);
+        }
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task PairedCommitConfirmation_ClaimedCopyPastDeadlineWritesOnlyCurrentSentinel(bool expireAuthority)
+    {
+        using var testBudget = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        var ct = testBudget.Token;
+        using var server = new TcpListener(IPAddress.Loopback, 0);
+        server.Start();
+        using var client = new NknTunaSidecarClient(NknAccelerationLaneKind.File, 16);
+        using var relay = await ConnectDeliveryTraceRelayAsync(server, client, ct);
+        using var copyDeadline = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        using var release = new ManualResetEventSlim();
+        var claimed = new TaskCompletionSource<long>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var expires = expireAuthority ? DateTime.UtcNow.AddSeconds(1).Ticks : long.MaxValue;
+        var confirmation = client.TryWritePairedCommitConfirmationAsync([1], expires, write =>
+        {
+            claimed.SetResult(DateTime.UtcNow.Ticks);
+            release.Wait(ct); // The writer owns this copy but has not started its IPC write.
+            return write();
+        }, copyDeadline.Token);
+        try
+        {
+            Assert.True(await claimed.Task.WaitAsync(ct) < expires);
+            if (expireAuthority)
+            {
+                while (DateTime.UtcNow.Ticks < expires)
+                    await Task.Delay(10, ct);
+                Assert.False(copyDeadline.IsCancellationRequested);
+            }
+            else
+            {
+                var deadlineFired = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+                using var registration = copyDeadline.Token.Register(() => deadlineFired.TrySetResult());
+                copyDeadline.CancelAfter(TimeSpan.FromMilliseconds(1));
+                await deadlineFired.Task.WaitAsync(ct);
+            }
+        }
+        finally { release.Set(); }
+
+        var wasWritten = await confirmation.WaitAsync(ct);
+        Assert.True(await client.TryWritePairedCommitConfirmationAsync([2], long.MaxValue, write => write(), ct));
+        var wire = await NknTunaSidecarFrameProtocol.ReadFrameAsync(relay.GetStream(), ct);
+        while (wire.Type == NknTunaSidecarFrameType.Ping)
+            wire = await NknTunaSidecarFrameProtocol.ReadFrameAsync(relay.GetStream(), ct);
+        Assert.Equal(NknTunaSidecarFrameType.Data, wire.Type);
+        Assert.Equal(new byte[] { 2 }, wire.Payload); // FIFO: the rejected copy cannot hide behind the sentinel.
+        Assert.False(wasWritten);
+    }
+
     private static async Task<TcpClient> ConnectDeliveryTraceRelayAsync(
         TcpListener listener, NknTunaSidecarClient client, CancellationToken ct)
     {

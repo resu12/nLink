@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
 using System.Linq;
+using System.Runtime.ExceptionServices;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
@@ -42,17 +43,20 @@ internal interface ITunaRuntimePilotService
 
     bool HasSessionUnlock { get; }
 
+    bool HoldsUnlockFor(TunaWalletLinkState refreshedWallet);
+
     Task<TunaRuntimeUnlockState> GetUnlockStateAsync(CancellationToken ct = default);
 
-    Task<TunaRuntimeUnlockResult> UnlockForSessionAsync(char[]? password, TunaRuntimeUnlockSource source, CancellationToken ct = default);
+    Task<TunaRuntimeUnlockResult> UnlockForSessionAsync(char[]? password, TunaRuntimeUnlockSource source,
+        TunaWalletLinkState expectedWallet, CancellationToken ct = default);
 
     Task<TunaRuntimeUnlockResult> LockOrStopForSessionAsync(string reason, TunaRuntimeUnlockSource source, CancellationToken ct = default);
 
-    Task SaveWalletLinkAsync(TunaWalletLinkState wallet, CancellationToken ct);
+    Task<bool> TrySaveWalletValidationAsync(TunaWalletLinkState expected, TunaWalletLinkState wallet, CancellationToken ct);
 
-    Task ReplaceWalletLinkAsync(TunaWalletLinkState wallet, CancellationToken ct);
+    Task<bool> TryReplaceWalletLinkAsync(TunaWalletLinkState wallet, CancellationToken ct);
 
-    Task UnlinkWalletAsync(CancellationToken ct);
+    Task<bool> TryUnlinkWalletAsync(TunaWalletLinkState expected, CancellationToken ct);
 
     void SavePreferences(TunaRuntimePreferenceState state);
 
@@ -81,7 +85,10 @@ internal sealed record TunaRuntimeUnlockState(
     string StatusText,
     string UserMessage,
     bool IsCooldownActive,
-    TimeSpan CooldownRemaining);
+    TimeSpan CooldownRemaining)
+{
+    internal TunaWalletLinkState PromptWallet { get; init; } = TunaWalletLinkState.Unlinked;
+}
 
 internal sealed record TunaRuntimeUnlockResult(
     bool Success,
@@ -730,6 +737,7 @@ internal sealed class TunaRuntimePilotService : ITunaRuntimePilotService
     private static readonly TimeSpan DefaultStopCompletionTimeout = TimeSpan.FromSeconds(10);
     internal static TimeSpan ListenerRestartUnlockRetentionForTests => ListenerRestartUnlockRetention;
     private readonly object gate = new();
+    private readonly object lanePreferenceWriteGate = new();
     private readonly SemaphoreSlim walletWriteGate = new(1, 1);
     private readonly ITunaRuntimePreferenceStore preferenceStore;
     private readonly ITunaUsageAccountingStore usageStore;
@@ -738,6 +746,8 @@ internal sealed class TunaRuntimePilotService : ITunaRuntimePilotService
     private readonly Func<DateTimeOffset> nowProvider;
     private readonly TimeSpan stopCompletionTimeout;
     private char[]? unlockedPassword;
+    private TunaWalletLinkState? unlockedWallet;
+    private readonly List<TunaWalletLinkState> pendingWalletUnlinks = [];
     private CancellationTokenSource? listenerRestartUnlockRetentionCts;
     private TunaRuntimePreferenceState preferences;
     private TunaUsageAccountingState usage;
@@ -748,10 +758,14 @@ internal sealed class TunaRuntimePilotService : ITunaRuntimePilotService
     private CancellationTokenSource? unlockCooldownCts;
     private int stopInProgress;
     private int unlockAttemptInProgress;
+    private TunaWalletLinkState? unlockAttemptWallet;
+    private bool unlockAttemptRevoked;
     private long unlockGeneration;
+    private int pendingWalletReplacements;
     private bool currentSessionPaymentTelemetryObserved;
     private long currentSessionObservedBytesMoved;
     private string? currentSessionRunId;
+    private TunaWalletLinkState? currentSessionWallet;
     private int currentSessionPaymentEventCount;
     private DateTimeOffset? waitingForApprovedSessionStartedUtc;
     private DateTimeOffset? listenerStartUtc;
@@ -780,7 +794,7 @@ internal sealed class TunaRuntimePilotService : ITunaRuntimePilotService
             : DefaultStopCompletionTimeout;
         preferences = this.preferenceStore.Load();
         usage = this.usageStore.Load();
-        runtimeStatus = string.Equals(preferences.LastRuntimeStatus, "switching_to_regular_nkn", StringComparison.Ordinal)
+        runtimeStatus = preferences.LastRuntimeStatus is "switching_to_regular_nkn" or "unlock_validating"
             ? preferences.Enabled ? "locked" : "off"
             : preferences.LastRuntimeStatus;
         preferences = preferences.WithStatus(runtimeStatus);
@@ -831,15 +845,12 @@ internal sealed class TunaRuntimePilotService : ITunaRuntimePilotService
         }
     }
 
-    public bool HasSessionUnlock
+    public bool HasSessionUnlock => CanStartPaidListener();
+
+    public bool HoldsUnlockFor(TunaWalletLinkState refreshedWallet)
     {
-        get
-        {
-            lock (gate)
-            {
-                return unlockedPassword is { Length: > 0 };
-            }
-        }
+        lock (gate)
+            return preferences.Enabled && pendingWalletReplacements == 0 && HasWalletUnlock_NoLock(refreshedWallet);
     }
 
     public async Task<TunaRuntimeUnlockState> GetUnlockStateAsync(CancellationToken ct = default)
@@ -855,11 +866,24 @@ internal sealed class TunaRuntimePilotService : ITunaRuntimePilotService
     public async Task<TunaRuntimeUnlockResult> UnlockForSessionAsync(
         char[]? password,
         TunaRuntimeUnlockSource source,
+        TunaWalletLinkState expectedWallet,
         CancellationToken ct = default)
     {
         var acquiredUnlockAttempt = false;
-        if (password is { Length: > 0 } &&
-            Interlocked.CompareExchange(ref unlockAttemptInProgress, 1, 0) != 0)
+        if (password is { Length: > 0 })
+        {
+            lock (gate)
+            {
+                if (unlockAttemptInProgress == 0)
+                {
+                    acquiredUnlockAttempt = true;
+                    unlockAttemptInProgress = 1;
+                    unlockAttemptWallet = expectedWallet;
+                    unlockAttemptRevoked = pendingWalletReplacements != 0 || pendingWalletUnlinks.Exists(expectedWallet.IsSamePayerLinkAs);
+                }
+            }
+        }
+        if (password is { Length: > 0 } && !acquiredUnlockAttempt)
         {
             try
             {
@@ -872,7 +896,7 @@ internal sealed class TunaRuntimePilotService : ITunaRuntimePilotService
             }
         }
 
-        acquiredUnlockAttempt = password is { Length: > 0 };
+        var validating = false;
         try
         {
             if (password is null || password.Length == 0)
@@ -882,12 +906,26 @@ internal sealed class TunaRuntimePilotService : ITunaRuntimePilotService
             }
 
             long generation;
+            var wallet = await LoadWalletStateAsync(ct, tolerateReadFailure: source != TunaRuntimeUnlockSource.Options).ConfigureAwait(false);
+            ct.ThrowIfCancellationRequested();
+            var availability = walletVerifier.GetAvailability();
+            TunaRuntimeUnlockState cooldownState;
             lock (gate)
             {
+                cooldownState = BuildUnlockState_NoLock(wallet, availability, nowProvider());
+                if (unlockAttemptRevoked || !expectedWallet.IsSamePayerLinkAs(wallet) ||
+                    string.IsNullOrWhiteSpace(expectedWallet.WalletAddress) ||
+                    currentSessionWallet?.IsSamePayerLinkAs(wallet) == false)
+                    return TunaRuntimeUnlockResult.FromState(false, cooldownState, "Wallet changed. Unlock discarded.");
+
+                // A peer may have relinked the wallet while we retained an idle credential.
+                // Never let that credential's identity also own this new verification.
+                if (unlockedWallet is not null && !unlockedWallet.IsSamePayerLinkAs(wallet))
+                {
+                    ClearSessionUnlock_NoLock(unlockedWallet);
+                }
                 generation = unlockGeneration;
             }
-
-            var cooldownState = await GetUnlockStateAsync(ct).ConfigureAwait(false);
             if (cooldownState.IsCooldownActive)
             {
                 return TunaRuntimeUnlockResult.FromState(
@@ -909,7 +947,6 @@ internal sealed class TunaRuntimePilotService : ITunaRuntimePilotService
                 return TunaRuntimeUnlockResult.FromState(false, state, "Enable Tuna acceleration in Options first.");
             }
 
-            var wallet = await LoadWalletStateAsync(ct).ConfigureAwait(false);
             if (wallet.Status != TunaWalletLinkStatus.VerifiedFunded ||
                 string.IsNullOrWhiteSpace(wallet.WalletPath))
             {
@@ -918,7 +955,6 @@ internal sealed class TunaRuntimePilotService : ITunaRuntimePilotService
                 return TunaRuntimeUnlockResult.FromState(false, state, "Link and validate a funded Tuna wallet first.");
             }
 
-            var availability = walletVerifier.GetAvailability();
             if (!availability.IsAvailable || string.IsNullOrWhiteSpace(availability.SidecarPath))
             {
                 TrySetRuntimeStatus("unlock_failed_sidecar_unavailable", generation, clearUnlock: true);
@@ -926,6 +962,8 @@ internal sealed class TunaRuntimePilotService : ITunaRuntimePilotService
                 return TunaRuntimeUnlockResult.FromState(false, state, "Tuna sidecar is unavailable.");
             }
 
+            // This status can already be visible in memory even if persisting it throws.
+            validating = true;
             if (!TrySetRuntimeStatus("unlock_validating", generation))
             {
                 return await UnlockInvalidatedAsync(ct).ConfigureAwait(false);
@@ -945,14 +983,23 @@ internal sealed class TunaRuntimePilotService : ITunaRuntimePilotService
         }
         finally
         {
+            if (password is not null) Array.Clear(password);
             if (acquiredUnlockAttempt)
             {
-                Interlocked.Exchange(ref unlockAttemptInProgress, 0);
-            }
-
-            if (password is not null)
-            {
-                Array.Clear(password);
+                lock (gate)
+                {
+                    unlockAttemptWallet = null;
+                    unlockAttemptInProgress = 0;
+                    // Only the holder of this slot can have published unlock_validating.
+                    if (validating && runtimeStatus == "unlock_validating")
+                    {
+                        runtimeStatus = preferences.Enabled ? "locked" : "off";
+                        preferences = preferences.WithStatus(runtimeStatus);
+                        UpdateStartupTiming_NoLock(runtimeStatus, nowProvider());
+                        SaveStopPreferences_NoLock();
+                    }
+                }
+                NotifyStateChanged();
             }
         }
     }
@@ -965,12 +1012,10 @@ internal sealed class TunaRuntimePilotService : ITunaRuntimePilotService
         long generation,
         CancellationToken ct)
     {
-        var currentWallet = await LoadWalletStateAsync(ct).ConfigureAwait(false);
+        var currentWallet = await LoadWalletStateAsync(ct, tolerateReadFailure: source != TunaRuntimeUnlockSource.Options).ConfigureAwait(false);
         ct.ThrowIfCancellationRequested();
         if (currentWallet.Status != TunaWalletLinkStatus.VerifiedFunded ||
-            !string.Equals(currentWallet.WalletPath, wallet.WalletPath, StringComparison.Ordinal) ||
-            currentWallet.LinkedUtc != wallet.LinkedUtc ||
-            !string.Equals(currentWallet.WalletAddress, wallet.WalletAddress, StringComparison.Ordinal))
+            !currentWallet.IsSameValidationAs(wallet))
         {
             TrySetRuntimeStatus("locked", generation);
             return await UnlockInvalidatedAsync(ct).ConfigureAwait(false);
@@ -978,12 +1023,12 @@ internal sealed class TunaRuntimePilotService : ITunaRuntimePilotService
 
         if (!result.Success)
         {
-            if (!TrySetRuntimeStatus($"unlock_failed_{ClassifyUnlockFailure(result.Reason)}", generation, clearUnlock: true))
+            if (!TrySetRuntimeStatus($"unlock_failed_{ClassifyUnlockFailure(result.Reason)}", generation, clearUnlock: true,
+                    countWrongPassword: IsWrongPasswordReason(result.Reason)))
             {
                 return await UnlockInvalidatedAsync(ct).ConfigureAwait(false);
             }
 
-            RegisterUnlockFailure(result.Reason);
             var state = await GetUnlockStateAsync(ct).ConfigureAwait(false);
             var message = FormatUnlockFailureMessage(result.Reason);
             if (state.IsCooldownActive)
@@ -997,23 +1042,40 @@ internal sealed class TunaRuntimePilotService : ITunaRuntimePilotService
             return TunaRuntimeUnlockResult.FromState(false, state, message);
         }
 
-        var nextWallet = currentWallet.WithValidationResult(result, nowProvider());
-        Task? save = null;
-        lock (gate)
+        if (!string.Equals(result.WalletAddress, wallet.WalletAddress, StringComparison.Ordinal))
         {
-            if (generation == unlockGeneration)
+            lock (gate)
             {
-                ct.ThrowIfCancellationRequested();
-                save = walletLinkStore.SaveAsync(nextWallet, ct);
+                if (generation == unlockGeneration && !unlockAttemptRevoked)
+                {
+                    // Deny any future start without retiring an open listener's accounting callbacks.
+                    if (currentSessionRunId is null) ClearSessionUnlock_NoLock();
+                    else ClearRetainedCredential_NoLock();
+                }
             }
-        }
-
-        if (save is null)
-        {
             return await UnlockInvalidatedAsync(ct).ConfigureAwait(false);
         }
 
-        await save.ConfigureAwait(false);
+        var nextWallet = currentWallet.WithValidationResult(result, nowProvider());
+        Task<bool>? save = null;
+        lock (gate)
+        {
+            if (generation == unlockGeneration && !unlockAttemptRevoked)
+            {
+                ct.ThrowIfCancellationRequested();
+                if (currentSessionRunId is null)
+                    save = walletLinkStore.SaveAsync(nextWallet, ct, expectedValidation: wallet, expectedFundedPayer: wallet.WalletAddress);
+                else if (nextWallet.Status != TunaWalletLinkStatus.VerifiedFunded)
+                    ClearRetainedCredential_NoLock();
+            }
+        }
+
+        if (save is null || !await save.ConfigureAwait(false))
+        {
+            TrySetRuntimeStatus("locked", generation);
+            return await UnlockInvalidatedAsync(ct).ConfigureAwait(false);
+        }
+
         ct.ThrowIfCancellationRequested();
         if (nextWallet.Status != TunaWalletLinkStatus.VerifiedFunded)
         {
@@ -1041,59 +1103,86 @@ internal sealed class TunaRuntimePilotService : ITunaRuntimePilotService
 
     private async Task<TunaRuntimeUnlockResult> UnlockInvalidatedAsync(CancellationToken ct)
         => TunaRuntimeUnlockResult.FromState(false, await GetUnlockStateAsync(ct).ConfigureAwait(false),
-            "Tuna unlock was canceled because the wallet was locked or changed.");
+            "Tuna unlock was canceled because the wallet or listener state changed.");
 
-    public Task SaveWalletLinkAsync(TunaWalletLinkState wallet, CancellationToken ct)
-        => SaveWalletLinkAsync(wallet, replacingLink: false, ct);
+    public Task<bool> TrySaveWalletValidationAsync(TunaWalletLinkState expected, TunaWalletLinkState wallet, CancellationToken ct)
+        => SaveWalletLinkAsync(wallet, expected, ct);
 
-    public Task ReplaceWalletLinkAsync(TunaWalletLinkState wallet, CancellationToken ct)
-        => SaveWalletLinkAsync(wallet, replacingLink: true, ct);
+    public Task<bool> TryReplaceWalletLinkAsync(TunaWalletLinkState wallet, CancellationToken ct)
+        => SaveWalletLinkAsync(wallet, expectedValidation: null, ct);
 
-    private async Task SaveWalletLinkAsync(TunaWalletLinkState wallet, bool replacingLink, CancellationToken ct)
+    private async Task<bool> SaveWalletLinkAsync(TunaWalletLinkState wallet, TunaWalletLinkState? expectedValidation, CancellationToken ct)
     {
+        var replacingLink = expectedValidation is null;
         if (replacingLink)
         {
-            InvalidatePendingUnlock(ct);
-        }
-
-        await walletWriteGate.WaitAsync(ct).ConfigureAwait(false);
-        try
-        {
-            await walletLinkStore.SaveAsync(wallet, ct).ConfigureAwait(false);
-            if (replacingLink)
+            ct.ThrowIfCancellationRequested();
+            lock (gate)
             {
-                ClearSessionUnlock(keepActiveStatus: true);
+                // An open run still owns payment, cap and final-summary callbacks.
+                if (currentSessionRunId is not null) return false;
+                pendingWalletReplacements++;
+                unlockGeneration++;
+                unlockAttemptRevoked = true;
             }
         }
-        finally
-        {
-            walletWriteGate.Release();
-        }
-    }
 
-    public async Task UnlinkWalletAsync(CancellationToken ct)
-    {
-        InvalidatePendingUnlock(ct);
-        await walletWriteGate.WaitAsync(ct).ConfigureAwait(false);
         try
         {
-            // Keep deletion and invalidation ordered against a completed validation's save and unlock.
-            await walletLinkStore.ClearAsync(ct).ConfigureAwait(false);
-            await LockOrStopForSessionAsync("wallet_unlinked", TunaRuntimeUnlockSource.Options, ct).ConfigureAwait(false);
+            await walletWriteGate.WaitAsync(ct).ConfigureAwait(false);
+            try
+            {
+                if (!await walletLinkStore.SaveAsync(wallet, ct, expectedValidation).ConfigureAwait(false))
+                    return false;
+                if (replacingLink) ClearSessionUnlock(keepActiveStatus: true);
+            }
+            finally { walletWriteGate.Release(); }
+            return true;
         }
         finally
         {
-            walletWriteGate.Release();
+            if (replacingLink)
+            {
+                lock (gate) pendingWalletReplacements--;
+            }
         }
     }
 
-    private void InvalidatePendingUnlock(CancellationToken ct)
+    public async Task<bool> TryUnlinkWalletAsync(TunaWalletLinkState expected, CancellationToken ct)
     {
         ct.ThrowIfCancellationRequested();
+        // An in-flight save for this link must not grant an unlock while deletion is queued.
+        // Do not retire another wallet's listener generation for a stale request.
         lock (gate)
         {
-            // A save already in flight may finish, but it must not retain the password.
-            unlockGeneration++;
+            pendingWalletUnlinks.Add(expected);
+            if (unlockAttemptWallet?.IsSamePayerLinkAs(expected) == true) unlockAttemptRevoked = true;
+        }
+        var holdsWriteGate = false;
+        try
+        {
+            NotifyStateChanged();
+            bool cleared;
+            try
+            {
+                await walletWriteGate.WaitAsync(ct).ConfigureAwait(false);
+                holdsWriteGate = true;
+                cleared = await walletLinkStore.TryClearAsync(expected, ct).ConfigureAwait(false);
+            }
+            catch
+            {
+                LockOrStopForWallet("wallet_unlink_failed", TunaRuntimeUnlockSource.Options, expected);
+                throw;
+            }
+            if (!cleared) return false;
+            LockOrStopForWallet("wallet_unlinked", TunaRuntimeUnlockSource.Options, expected);
+            return true;
+        }
+        finally
+        {
+            lock (gate) pendingWalletUnlinks.Remove(expected);
+            if (holdsWriteGate) walletWriteGate.Release();
+            NotifyStateChanged();
         }
     }
 
@@ -1102,6 +1191,15 @@ internal sealed class TunaRuntimePilotService : ITunaRuntimePilotService
         TunaRuntimeUnlockSource source,
         CancellationToken ct = default)
     {
+        var shouldStop = LockOrStopForWallet(reason, source, expected: null);
+        var state = await GetUnlockStateAsync(ct).ConfigureAwait(false);
+        return TunaRuntimeUnlockResult.FromState(true, state, shouldStop
+            ? "Switching Tuna off. Current NKN remains connected."
+            : "Tuna wallet locked for this session.");
+    }
+
+    private bool LockOrStopForWallet(string reason, TunaRuntimeUnlockSource source, TunaWalletLinkState? expected)
+    {
         var normalizedReason = string.IsNullOrWhiteSpace(reason) ? "user_locked" : reason.Trim();
         ITransportAccelerationControl? control;
         TunaUsageSessionRecord? recordedSession;
@@ -1109,8 +1207,13 @@ internal sealed class TunaRuntimePilotService : ITunaRuntimePilotService
         var shouldQueueStop = false;
         lock (gate)
         {
-            shouldStop = IsTunaRuntimeSessionEngaged(runtimeStatus);
-            ClearSessionUnlock_NoLock();
+            // Disk deletion and local spending are separate. Only the owner of
+            // this run, retained credential or pending verification can revoke it.
+            if (expected is not null &&
+                (currentSessionWallet ?? unlockedWallet ?? unlockAttemptWallet)?.IsSamePayerLinkAs(expected) != true)
+                return false;
+            shouldStop = HasTransportToStop_NoLock();
+            ClearSessionUnlock_NoLock(expected);
             recordedSession = CompleteIncompleteSession_NoLock(normalizedReason);
             if (shouldStop && currentTransportControl is not null)
             {
@@ -1124,7 +1227,7 @@ internal sealed class TunaRuntimePilotService : ITunaRuntimePilotService
 
             preferences = preferences.WithStatus(runtimeStatus);
             UpdateStartupTiming_NoLock(runtimeStatus, nowProvider());
-            preferenceStore.Save(preferences);
+            SaveStopPreferences_NoLock();
             control = currentTransportControl;
         }
 
@@ -1161,7 +1264,7 @@ internal sealed class TunaRuntimePilotService : ITunaRuntimePilotService
                                 runtimeStatus = preferences.Enabled ? "locked" : "off";
                                 preferences = preferences.WithStatus(runtimeStatus);
                                 UpdateStartupTiming_NoLock(runtimeStatus, nowProvider());
-                                preferenceStore.Save(preferences);
+                                SaveStopPreferences_NoLock();
                             }
                         }
 
@@ -1181,10 +1284,23 @@ internal sealed class TunaRuntimePilotService : ITunaRuntimePilotService
                 $"event=tuna_runtime_locked; source={source.ToString().ToLowerInvariant()}; stop_requested={(shouldStop ? 1 : 0)}; reason={SanitizeStatusToken(normalizedReason)}");
         }
 
-        var state = await GetUnlockStateAsync(ct).ConfigureAwait(false);
-        return TunaRuntimeUnlockResult.FromState(true, state, shouldStop
-            ? "Switching Tuna off. Current NKN remains connected."
-            : "Tuna wallet locked for this session.");
+        return shouldStop;
+    }
+
+    // Revocation is effective in memory even if the status write fails. Do not strand a paid listener.
+    private ExceptionDispatchInfo? SaveStopPreferences_NoLock()
+    {
+        try
+        {
+            preferenceStore.Save(preferences);
+            return null;
+        }
+        catch (Exception ex)
+        {
+            LocalOperationalLog.Warn("NKN.Tuna",
+                $"event=tuna_stop_preferences_persist_failed; status={SanitizeStatusToken(runtimeStatus)}; error={ex.GetType().Name}");
+            return ExceptionDispatchInfo.Capture(ex);
+        }
     }
 
     public void SavePreferences(TunaRuntimePreferenceState state)
@@ -1193,22 +1309,37 @@ internal sealed class TunaRuntimePilotService : ITunaRuntimePilotService
         ITransportAccelerationControl? control = null;
         TunaUsageSessionRecord? recordedSession = null;
         var shouldStop = false;
-        lock (gate)
+        ExceptionDispatchInfo? disableSaveFailure = null;
+        // A rapid re-selection must not overtake retirement of the old offer.
+        lock (lanePreferenceWriteGate)
         {
-            if (!normalized.Enabled)
+            NknSignalingTransport? laneTransport;
+            ExceptionDispatchInfo? enableSaveFailure = null;
+            lock (gate)
             {
-                shouldStop = IsTunaRuntimeSessionEngaged(runtimeStatus);
-                ClearSessionUnlock_NoLock();
-                recordedSession = CompleteIncompleteSession_NoLock("runtime_disabled");
-                control = currentTransportControl;
+                if (!normalized.Enabled)
+                {
+                    shouldStop = HasTransportToStop_NoLock();
+                    ClearSessionUnlock_NoLock();
+                    recordedSession = CompleteIncompleteSession_NoLock("runtime_disabled");
+                    control = currentTransportControl;
+                }
+
+                runtimeStatus = normalized.Enabled ? normalized.LastRuntimeStatus : "off";
+                Volatile.Write(ref preferences, normalized.WithStatus(runtimeStatus));
+                UpdateStartupTiming_NoLock(runtimeStatus, nowProvider());
+                laneTransport = currentTransportControl as NknSignalingTransport;
+                if (normalized.Enabled)
+                {
+                    try { preferenceStore.Save(preferences); }
+                    catch (Exception ex) { enableSaveFailure = ExceptionDispatchInfo.Capture(ex); }
+                }
+                else disableSaveFailure = SaveStopPreferences_NoLock();
             }
-
-            runtimeStatus = normalized.Enabled ? normalized.LastRuntimeStatus : "off";
-            preferences = normalized.WithStatus(runtimeStatus);
-            UpdateStartupTiming_NoLock(runtimeStatus, nowProvider());
-            preferenceStore.Save(preferences);
+            // Never acquire the transport lock while holding the wallet lock.
+            laneTransport?.RetireDeselectedAccelerationOffers();
+            enableSaveFailure?.Throw();
         }
-
         LogUsageSessionRecorded(recordedSession);
         NotifyStateChanged();
         if (shouldStop && control is not null)
@@ -1217,6 +1348,8 @@ internal sealed class TunaRuntimePilotService : ITunaRuntimePilotService
                 () => control.StopAccelerationAsync("runtime_disabled", CancellationToken.None),
                 CancellationToken.None);
         }
+        // The caller requested a durable setting, not just a runtime stop.
+        disableSaveFailure?.Throw();
     }
 
     public void UnlockForNextSession(TunaWalletLinkState walletState, char[] password)
@@ -1233,7 +1366,8 @@ internal sealed class TunaRuntimePilotService : ITunaRuntimePilotService
         ITransportAccelerationControl? control = null;
         lock (gate)
         {
-            if (generation is not null && generation != unlockGeneration)
+            if (currentSessionRunId is not null || (generation is not null && (generation != unlockGeneration || unlockAttemptRevoked)) ||
+                pendingWalletUnlinks.Exists(walletState.IsSamePayerLinkAs))
             {
                 return false;
             }
@@ -1251,12 +1385,13 @@ internal sealed class TunaRuntimePilotService : ITunaRuntimePilotService
                 return false;
             }
 
-            unlockedPassword = new char[password.Length];
-            Array.Copy(password, unlockedPassword, password.Length);
-            runtimeStatus = "waiting_for_approved_session";
-            preferences = preferences.WithStatus(runtimeStatus);
+            var nextPreferences = preferences.WithStatus("waiting_for_approved_session");
+            preferenceStore.Save(nextPreferences);
+            preferences = nextPreferences;
+            runtimeStatus = nextPreferences.LastRuntimeStatus;
             UpdateStartupTiming_NoLock(runtimeStatus, DateTimeOffset.UtcNow);
-            preferenceStore.Save(preferences);
+            unlockedPassword = (char[])password.Clone();
+            unlockedWallet = walletState;
             control = currentTransportControl;
         }
 
@@ -1315,39 +1450,39 @@ internal sealed class TunaRuntimePilotService : ITunaRuntimePilotService
     }
 
     public ISignalingTransport CreateNknTransport()
+        => CreateNknTransport(NknSignalingTransport.CreateWithTunaAcceleration);
+
+    internal ISignalingTransport CreateNknTransport(
+        Func<NknTunaAccelerationOptions, INknTunaListenerSidecarSupervisor?, NknSignalingTransport> createTransport)
     {
         var envOptions = NknTunaAccelerationOptions.Load();
         if (envOptions.Enabled)
         {
-            return TrackTransport(NknSignalingTransport.CreateWithTunaAcceleration(envOptions, listenerSupervisor: null));
+            return TrackTransport(createTransport(envOptions, null));
         }
 
         var currentPreferences = Preferences;
         var availability = walletVerifier.GetAvailability();
-        if (!currentPreferences.Enabled)
-        {
-            SetRuntimeStatus("off");
-            return TrackTransport(availability.IsAvailable && !string.IsNullOrWhiteSpace(availability.SidecarPath)
-                ? NknSignalingTransport.CreateWithTunaAcceleration(
-                    NknTunaAccelerationOptions.CreatePassiveDialer(
-                        availability.SidecarPath,
-                        TunaRuntimePreferenceState.Default.Lanes),
-                    listenerSupervisor: null)
-                : new NknSignalingTransport());
-        }
-
         if (!availability.IsAvailable || string.IsNullOrWhiteSpace(availability.SidecarPath))
         {
-            SetRuntimeStatus("sidecar_unavailable");
+            SetRuntimeStatus(currentPreferences.Enabled ? "sidecar_unavailable" : "off");
             return TrackTransport(new NknSignalingTransport());
         }
 
-        var wallet = LoadWalletState();
-        SetRuntimeStatusForTransportCreation(wallet);
+        if (currentPreferences.Enabled) SetRuntimeStatusForTransportCreation(LoadWalletState());
+        else SetRuntimeStatus("off");
 
-        var runtimeOptions = NknTunaAccelerationOptions.CreateRuntimePilot(availability.SidecarPath, currentPreferences.Lanes);
-        INknTunaListenerSidecarSupervisor? supervisor = new RuntimeListenerSupervisor(this);
-        return TrackTransport(NknSignalingTransport.CreateWithTunaAcceleration(runtimeOptions, supervisor));
+        var runtimeOptions = NknTunaAccelerationOptions.CreateRuntimePilot(
+            availability.SidecarPath, TunaRuntimePreferenceState.Default.Lanes, runtimeLaneLimit: GetSessionTunaLanes);
+        return TrackTransport(createTransport(runtimeOptions, new RuntimeListenerSupervisor(this)));
+    }
+
+    private NknAccelerationLaneKind GetSessionTunaLanes()
+    {
+        // Lane capabilities are queried under transport locks; read the immutable
+        // preference snapshot without taking the wallet lock. Off still permits free dialing.
+        var current = Volatile.Read(ref preferences);
+        return current.Enabled ? current.Lanes : TunaRuntimePreferenceState.Default.Lanes;
     }
 
     internal INknTunaListenerSidecarSupervisor CreateRuntimeListenerSupervisorForTests()
@@ -1379,13 +1514,13 @@ internal sealed class TunaRuntimePilotService : ITunaRuntimePilotService
         }
     }
 
-    private async Task<TunaWalletLinkState> LoadWalletStateAsync(CancellationToken ct)
+    private async Task<TunaWalletLinkState> LoadWalletStateAsync(CancellationToken ct, bool tolerateReadFailure = true)
     {
         try
         {
             return await walletLinkStore.LoadAsync(ct).ConfigureAwait(false);
         }
-        catch
+        catch when (tolerateReadFailure)
         {
             return TunaWalletLinkState.Unlinked;
         }
@@ -1402,15 +1537,19 @@ internal sealed class TunaRuntimePilotService : ITunaRuntimePilotService
         var sidecarAvailable = availability.IsAvailable && !string.IsNullOrWhiteSpace(availability.SidecarPath);
         var cooldownRemaining = GetCooldownRemaining_NoLock(now);
         var cooldownActive = cooldownRemaining > TimeSpan.Zero;
-        var engaged = IsTunaRuntimeSessionEngaged(runtimeStatus);
-        var switchingToNkn = string.Equals(SanitizeStatusToken(runtimeStatus), "switching_to_regular_nkn", StringComparison.Ordinal);
-        var unlocked = unlockedPassword is { Length: > 0 };
-        var unlockAttemptInProgressNow = Volatile.Read(ref unlockAttemptInProgress) != 0;
+        var headerStatus = unlockAttemptRevoked && runtimeStatus == "unlock_validating"
+            ? (runtimeEnabled ? "locked" : "off") : runtimeStatus;
+        var engaged = IsTunaRuntimeSessionEngaged(headerStatus);
+        var switchingToNkn = string.Equals(SanitizeStatusToken(headerStatus), "switching_to_regular_nkn", StringComparison.Ordinal);
+        var unlocked = HasWalletUnlock_NoLock(wallet);
+        var slotBusy = unlockAttemptInProgress != 0;
+        var unlockAttemptInProgressNow = slotBusy && !unlockAttemptRevoked;
         var toggleOn = unlocked || engaged || unlockAttemptInProgressNow;
         var visible = walletFunded || toggleOn;
-        var canUnlock = walletFunded && runtimeEnabled && sidecarAvailable && !cooldownActive && !switchingToNkn && !unlockAttemptInProgressNow;
+        var canUnlock = walletFunded && runtimeEnabled && sidecarAvailable && !cooldownActive && !switchingToNkn && !slotBusy &&
+                        !pendingWalletUnlinks.Exists(wallet.IsSamePayerLinkAs);
         var canStopEngagedRuntime = engaged && !switchingToNkn;
-        var canToggle = canStopEngagedRuntime || (!switchingToNkn && !unlockAttemptInProgressNow && (toggleOn || canUnlock));
+        var canToggle = canStopEngagedRuntime || (!switchingToNkn && !slotBusy && (toggleOn || canUnlock));
         var statusText = cooldownActive
             ? $"Try again in {FormatCooldownRemaining(cooldownRemaining)}"
             : switchingToNkn
@@ -1428,17 +1567,17 @@ internal sealed class TunaRuntimePilotService : ITunaRuntimePilotService
             sidecarAvailable,
             unlocked,
             engaged || switchingToNkn || unlockAttemptInProgressNow,
-            runtimeStatus,
+            headerStatus,
             cooldownRemaining);
         return new TunaRuntimeUnlockState(
             visible,
             canToggle,
             toggleOn,
-            runtimeStatus,
+            headerStatus,
             statusText,
             message,
             cooldownActive,
-            cooldownRemaining);
+            cooldownRemaining) { PromptWallet = wallet };
     }
 
     private static string BuildUnlockUserMessage(
@@ -1490,8 +1629,9 @@ internal sealed class TunaRuntimePilotService : ITunaRuntimePilotService
         return "Unlock Tuna wallet for this session.";
     }
 
-    private NknTunaListenerSidecarOptions? CreateListenerSidecarOptions(RuntimeUsageSink usageSink)
+    private NknTunaListenerSidecarOptions? CreateListenerSidecarOptions(RuntimeUsageSink usageSink, out TunaWalletLinkState selected)
     {
+        selected = TunaWalletLinkState.Unlinked;
         var currentPreferences = Preferences;
         if (!currentPreferences.Enabled)
         {
@@ -1506,7 +1646,7 @@ internal sealed class TunaRuntimePilotService : ITunaRuntimePilotService
             return null;
         }
 
-        var wallet = LoadWalletState();
+        var wallet = selected = LoadWalletState();
         if (wallet.Status != TunaWalletLinkStatus.VerifiedFunded || string.IsNullOrWhiteSpace(wallet.WalletPath))
         {
             usageSink.SetStatus(StatusForWalletWithoutPaidListener(wallet));
@@ -1518,9 +1658,10 @@ internal sealed class TunaRuntimePilotService : ITunaRuntimePilotService
         {
             SidecarExePath = availability.SidecarPath,
             WalletPath = wallet.WalletPath,
-            TakeWalletPassword = () => TakeUnlockedPasswordForListenerStart(usageSink),
-            TakeWalletPasswordIfCurrent = isCurrent => TakeUnlockedPasswordForListenerStart(usageSink, isCurrent),
-            BeginUsageAttemptIfCurrent = (runId, isCurrent) => BeginListenerUsageAttempt(usageSink, runId, isCurrent),
+            ExpectedPayerAddress = wallet.WalletAddress,
+            TakeWalletPassword = () => TakeUnlockedPasswordForListenerStart(wallet, usageSink),
+            TakeWalletPasswordIfCurrent = isCurrent => TakeUnlockedPasswordForListenerStart(wallet, usageSink, isCurrent),
+            BeginUsageAttemptIfCurrent = (runId, isCurrent) => BeginListenerUsageAttempt(wallet, usageSink, runId, isCurrent),
             RuntimeGeneration = usageSink.Generation,
             MaxPriceNknPerMb = currentPreferences.MaxPriceNknPerMb,
             MaxTotalMiB = currentPreferences.MaxTotalMiB,
@@ -1535,8 +1676,27 @@ internal sealed class TunaRuntimePilotService : ITunaRuntimePilotService
             UsageSink = usageSink,
             StatusChanged = usageSink.SetStatus,
             ListenerCapHandoffRequested = (reason, source) => RequestCapHandoff(reason, source, usageSink),
-            CanTakeWalletPassword = () => usageSink.IsLifetimeCurrent && HasSessionUnlock,
+            CanTakeWalletPassword = () => CanStartPaidListener(wallet, usageSink),
         };
+    }
+
+    private bool HasWalletUnlock_NoLock(TunaWalletLinkState current)
+        => current.Status == TunaWalletLinkStatus.VerifiedFunded && unlockedPassword is { Length: > 0 } &&
+           unlockedWallet?.IsSamePayerLinkAs(current) == true &&
+           !pendingWalletUnlinks.Exists(current.IsSamePayerLinkAs);
+
+    private bool CanStartPaidListener(TunaWalletLinkState? selected = null, RuntimeUsageSink? usageSink = null, bool existingListenerAvailable = false)
+    {
+        lock (gate)
+        {
+            if (pendingWalletReplacements != 0) return false;
+            if (existingListenerAvailable) return true;
+            if (unlockedPassword is null || usageSink?.IsLifetimeCurrent == false) return false;
+        }
+        var current = LoadWalletState();
+        lock (gate)
+            return pendingWalletReplacements == 0 && usageSink?.IsLifetimeCurrent != false &&
+                selected?.IsSamePayerLinkAs(current) != false && HasWalletUnlock_NoLock(current);
     }
 
     private static bool EffectiveAllowDegradedProviderReady()
@@ -1577,16 +1737,17 @@ internal sealed class TunaRuntimePilotService : ITunaRuntimePilotService
                normalized.Equals("on", StringComparison.OrdinalIgnoreCase);
     }
 
-    private char[]? TakeUnlockedPasswordForListenerStart(RuntimeUsageSink usageSink, Func<bool>? isStartupCurrent = null)
+    private char[]? TakeUnlockedPasswordForListenerStart(TunaWalletLinkState selected, RuntimeUsageSink usageSink, Func<bool>? isStartupCurrent = null)
     {
-        char[] password;
+        var current = LoadWalletState();
         char[] passwordForSidecar;
         lock (gate)
         {
-            if (!usageSink.IsLifetimeCurrent || isStartupCurrent?.Invoke() == false) return null;
-            password = unlockedPassword ?? [];
-            if (password.Length == 0)
+            if (pendingWalletReplacements != 0 || !usageSink.IsLifetimeCurrent || isStartupCurrent?.Invoke() == false) return null;
+            if (!selected.IsSamePayerLinkAs(current) || pendingWalletUnlinks.Exists(current.IsSamePayerLinkAs)) return null;
+            if (!HasWalletUnlock_NoLock(current))
             {
+                if (unlockedWallet is not null) return null; // Stale selection must not publish a status for another wallet.
                 runtimeStatus = "wallet_not_unlocked";
                 preferences = preferences.WithStatus(runtimeStatus);
                 UpdateStartupTiming_NoLock(runtimeStatus, DateTimeOffset.UtcNow);
@@ -1595,21 +1756,23 @@ internal sealed class TunaRuntimePilotService : ITunaRuntimePilotService
                 return null;
             }
 
-            passwordForSidecar = new char[password.Length];
-            Array.Copy(password, passwordForSidecar, password.Length);
+            passwordForSidecar = (char[])unlockedPassword!.Clone();
             ScheduleListenerRestartUnlockRetention_NoLock();
         }
 
         return passwordForSidecar;
     }
 
-    private bool BeginListenerUsageAttempt(RuntimeUsageSink usageSink, string runId, Func<bool> isStartupCurrent)
+    private bool BeginListenerUsageAttempt(TunaWalletLinkState selected, RuntimeUsageSink usageSink, string runId, Func<bool> isStartupCurrent)
     {
+        var current = LoadWalletState();
         lock (gate)
         {
-            if (!usageSink.IsLifetimeCurrent || !isStartupCurrent()) return false;
+            if (pendingWalletReplacements != 0 || !usageSink.IsLifetimeCurrent || !isStartupCurrent() ||
+                !selected.IsSamePayerLinkAs(current) || !HasWalletUnlock_NoLock(current)) return false;
             var now = DateTimeOffset.UtcNow;
             currentSessionRunId = runId;
+            currentSessionWallet = selected;
             usageSink.RunId = currentSessionRunId;
             currentSessionPaymentEventCount = 0;
             runtimeStatus = "listener_starting";
@@ -1631,7 +1794,7 @@ internal sealed class TunaRuntimePilotService : ITunaRuntimePilotService
         lock (gate)
         {
             runtimeStatus = preferences.Enabled
-                ? unlockedPassword is { Length: > 0 }
+                ? HasWalletUnlock_NoLock(wallet)
                     ? "waiting_for_approved_session"
                     : StatusForWalletWithoutPaidListener(wallet)
                 : "off";
@@ -1705,6 +1868,7 @@ internal sealed class TunaRuntimePilotService : ITunaRuntimePilotService
             UpdateStartupTiming_NoLock(runtimeStatus, now);
             preferenceStore.Save(preferences);
             currentSessionRunId = null;
+            currentSessionWallet = null;
             currentSessionPaymentEventCount = 0;
             currentSessionPaymentTelemetryObserved = false;
             currentSessionObservedBytesMoved = 0;
@@ -1894,6 +2058,7 @@ internal sealed class TunaRuntimePilotService : ITunaRuntimePilotService
             DateTimeOffset.UtcNow);
         var recordedSession = usage.LastSessionRecord;
         currentSessionRunId = null;
+        currentSessionWallet = null;
         currentSessionPaymentEventCount = 0;
         currentSessionPaymentTelemetryObserved = false;
         currentSessionObservedBytesMoved = 0;
@@ -1938,7 +2103,7 @@ internal sealed class TunaRuntimePilotService : ITunaRuntimePilotService
         => TrySetRuntimeStatus(status, generation: null);
 
     private bool TrySetRuntimeStatus(string status, long? generation, bool clearUnlock = false,
-        RuntimeUsageSink? expectedListener = null)
+        RuntimeUsageSink? expectedListener = null, bool countWrongPassword = false)
     {
         string previousStatus;
         string nextStatus;
@@ -1947,15 +2112,19 @@ internal sealed class TunaRuntimePilotService : ITunaRuntimePilotService
         lock (gate)
         {
             if (expectedListener?.IsCurrent == false) return false;
-            if (generation is not null && generation != unlockGeneration)
+            if (generation is not null && (generation != unlockGeneration || (expectedListener is null && unlockAttemptRevoked)))
             {
                 return false;
             }
 
-            if (clearUnlock)
+            if (generation is not null && expectedListener is null && currentSessionRunId is not null)
             {
-                ClearSessionUnlock_NoLock();
+                // A late unlock result cannot publish over the listener or retire its usage sink.
+                if (clearUnlock) ClearRetainedCredential_NoLock();
+                return false;
             }
+            if (clearUnlock) ClearSessionUnlock_NoLock();
+            if (countWrongPassword) RegisterWrongPassword_NoLock();
 
             previousStatus = runtimeStatus;
             runtimeStatus = string.IsNullOrWhiteSpace(status) ? "unknown" : status.Trim();
@@ -1978,12 +2147,19 @@ internal sealed class TunaRuntimePilotService : ITunaRuntimePilotService
         return true;
     }
 
-    private void ClearSessionUnlock_NoLock()
+    private void ClearSessionUnlock_NoLock(TunaWalletLinkState? expected = null)
     {
         unlockGeneration++;
+        if (expected is null || unlockAttemptWallet?.IsSamePayerLinkAs(expected) == true) unlockAttemptRevoked = true;
+        ClearRetainedCredential_NoLock();
+    }
+
+    private void ClearRetainedCredential_NoLock()
+    {
         listenerRestartUnlockRetentionCts?.Cancel();
         listenerRestartUnlockRetentionCts?.Dispose();
         listenerRestartUnlockRetentionCts = null;
+        unlockedWallet = null;
         if (unlockedPassword is not null)
         {
             Array.Clear(unlockedPassword);
@@ -2012,6 +2188,7 @@ internal sealed class TunaRuntimePilotService : ITunaRuntimePilotService
 
                         listenerRestartUnlockRetentionCts?.Dispose();
                         listenerRestartUnlockRetentionCts = null;
+                        unlockedWallet = null;
                         if (unlockedPassword is not null)
                         {
                             Array.Clear(unlockedPassword);
@@ -2032,44 +2209,30 @@ internal sealed class TunaRuntimePilotService : ITunaRuntimePilotService
             CancellationToken.None);
     }
 
-    private TimeSpan RegisterUnlockFailure(string? reason)
+    private void RegisterWrongPassword_NoLock()
     {
-        if (!IsWrongPasswordReason(reason))
+        var cooldown = (++unlockFailureCount) switch
         {
-            return TimeSpan.Zero;
-        }
+            <= 1 => TimeSpan.Zero,
+            2 => TimeSpan.FromSeconds(2),
+            <= 4 => TimeSpan.FromSeconds(10),
+            _ => TimeSpan.FromSeconds(30),
+        };
+        unlockCooldownUntilUtc = cooldown > TimeSpan.Zero ? nowProvider().Add(cooldown) : null;
+        unlockCooldownCts?.Cancel();
+        unlockCooldownCts?.Dispose();
+        unlockCooldownCts = null;
 
-        TimeSpan cooldown;
-        CancellationTokenSource? cts = null;
-        lock (gate)
+        if (cooldown > TimeSpan.Zero)
         {
-            unlockFailureCount++;
-            cooldown = unlockFailureCount switch
-            {
-                <= 1 => TimeSpan.Zero,
-                2 => TimeSpan.FromSeconds(2),
-                <= 4 => TimeSpan.FromSeconds(10),
-                _ => TimeSpan.FromSeconds(30),
-            };
-            unlockCooldownUntilUtc = cooldown > TimeSpan.Zero ? nowProvider().Add(cooldown) : null;
-            unlockCooldownCts?.Cancel();
-            unlockCooldownCts?.Dispose();
-            unlockCooldownCts = null;
-            if (cooldown > TimeSpan.Zero)
-            {
-                cts = new CancellationTokenSource();
-                unlockCooldownCts = cts;
-            }
-        }
-
-        if (cts is not null)
-        {
+            var cts = unlockCooldownCts = new CancellationTokenSource();
+            var token = cts.Token;
             _ = Task.Run(
                 async () =>
                 {
                     try
                     {
-                        await Task.Delay(cooldown, cts.Token).ConfigureAwait(false);
+                        await Task.Delay(cooldown, token).ConfigureAwait(false);
                         lock (gate)
                         {
                             if (!ReferenceEquals(unlockCooldownCts, cts))
@@ -2091,8 +2254,6 @@ internal sealed class TunaRuntimePilotService : ITunaRuntimePilotService
                 },
                 CancellationToken.None);
         }
-
-        return cooldown;
     }
 
     private void ResetUnlockFailureState()
@@ -2122,6 +2283,9 @@ internal sealed class TunaRuntimePilotService : ITunaRuntimePilotService
         unlockCooldownUntilUtc = null;
         return TimeSpan.Zero;
     }
+
+    private bool HasTransportToStop_NoLock()
+        => currentSessionRunId is not null || (runtimeStatus != "unlock_validating" && IsTunaRuntimeSessionEngaged(runtimeStatus));
 
     private static bool IsTunaRuntimeSessionEngaged(string? status)
     {
@@ -2449,6 +2613,7 @@ internal sealed class TunaRuntimePilotService : ITunaRuntimePilotService
         private readonly TunaRuntimePilotService owner;
         private INknTunaListenerSidecarSupervisor? supervisor;
         private string? supervisorKey;
+        private TunaWalletLinkState? supervisorWallet;
         private long stopGeneration;
         private bool disposed;
 
@@ -2470,15 +2635,14 @@ internal sealed class TunaRuntimePilotService : ITunaRuntimePilotService
         {
             get
             {
+                bool innerAvailable;
                 lock (gate)
                 {
-                    if (supervisor?.CanOfferListener == true)
-                    {
-                        return true;
-                    }
+                    if (disposed) return false;
+                    innerAvailable = supervisor?.CanOfferListener == true;
                 }
 
-                return owner.HasSessionUnlock;
+                return owner.CanStartPaidListener(existingListenerAvailable: innerAvailable);
             }
         }
 
@@ -2504,7 +2668,36 @@ internal sealed class TunaRuntimePilotService : ITunaRuntimePilotService
             }
         }
 
-        private INknTunaListenerSidecarSupervisor? GetOrCreateSupervisor(bool requireIdle, CancellationToken ct, out long generation)
+        public bool IsCurrentVacancy(NknListenerVacancy vacant)
+        {
+            lock (gate) return !disposed && supervisor?.IsCurrentVacancy(vacant) == true;
+        }
+
+        public bool TryDetachForRearm(NknTunaListenerAdoptionSnapshot snapshot, out Action<string>? stop, out NknListenerVacancy? vacant, bool replacing = false)
+        {
+            lock (gate)
+            {
+                stop = null; vacant = null;
+                return !disposed && supervisor?.TryDetachForRearm(snapshot, out stop, out vacant, replacing) == true;
+            }
+        }
+
+        public Task<NknTunaListenerAdoptionSnapshot?> StartInVacancyAsync(NknListenerVacancy vacant,
+            NknTunaListenerStartRequest request, CancellationToken ct, Action<NknListenerVacancy> failed)
+        {
+            var current = GetOrCreateSupervisor(true, ct, out var generation, rearmOnly: true);
+            lock (gate)
+                return !disposed && generation == stopGeneration && ReferenceEquals(current, supervisor) && !ct.IsCancellationRequested
+                    ? current?.StartInVacancyAsync(vacant, request, ct, failed) ?? Task.FromResult<NknTunaListenerAdoptionSnapshot?>(null)
+                    : Task.FromResult<NknTunaListenerAdoptionSnapshot?>(null);
+        }
+
+        public bool TryUseExactListener(NknTunaListenerAdoptionSnapshot expected, Action use)
+        {
+            lock (gate) return !disposed && supervisor?.TryUseExactListener(expected, use) == true;
+        }
+
+        private INknTunaListenerSidecarSupervisor? GetOrCreateSupervisor(bool requireIdle, CancellationToken ct, out long generation, bool rearmOnly = false)
         {
             lock (gate)
             {
@@ -2514,7 +2707,7 @@ internal sealed class TunaRuntimePilotService : ITunaRuntimePilotService
             INknTunaListenerSidecarSupervisor current;
             INknTunaListenerSidecarSupervisor? retired = null;
             var usageSink = new RuntimeUsageSink(owner);
-            var options = owner.CreateListenerSidecarOptions(usageSink);
+            var options = owner.CreateListenerSidecarOptions(usageSink, out var selected);
             if (options is null)
             {
                 return null;
@@ -2525,13 +2718,16 @@ internal sealed class TunaRuntimePilotService : ITunaRuntimePilotService
             {
                 if (disposed || ct.IsCancellationRequested || generation != stopGeneration || !usageSink.IsLifetimeCurrent)
                     return null;
-                if (requireIdle && supervisor is not null && !string.Equals(supervisorKey, nextKey, StringComparison.Ordinal) &&
-                    supervisor is not NknTunaListenerSidecarSupervisor { IsIdle: true })
-                    return null; // Preparation may not replace another child/configuration.
-                if (supervisor is null || !string.Equals(supervisorKey, nextKey, StringComparison.Ordinal))
+                var walletChanged = supervisorWallet?.IsSamePayerLinkAs(selected) == false;
+                if (supervisor is null || walletChanged || !string.Equals(supervisorKey, nextKey, StringComparison.Ordinal))
                 {
+                    if (rearmOnly) return null;
                     if (supervisor is not null)
                     {
+                        // Changing the selected wallet must never dispose a starting or accounted listener.
+                        if ((requireIdle || walletChanged) && supervisor is not NknTunaListenerSidecarSupervisor { IsIdle: true })
+                            return null;
+                        if (walletChanged && Volatile.Read(ref owner.currentSessionRunId) is not null) return null;
                         supervisor.StateChanged -= OnSupervisorStateChanged;
                         retired = supervisor;
                     }
@@ -2539,6 +2735,7 @@ internal sealed class TunaRuntimePilotService : ITunaRuntimePilotService
                     supervisor = new NknTunaListenerSidecarSupervisor(options);
                     supervisor.StateChanged += OnSupervisorStateChanged;
                     supervisorKey = nextKey;
+                    supervisorWallet = selected;
                 }
 
                 current = supervisor;
@@ -2600,6 +2797,7 @@ internal sealed class TunaRuntimePilotService : ITunaRuntimePilotService
 
                 supervisor = null;
                 supervisorKey = null;
+                supervisorWallet = null;
             }
         }
 

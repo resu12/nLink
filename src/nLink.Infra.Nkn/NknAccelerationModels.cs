@@ -59,6 +59,8 @@ internal interface INknAccelerationLane : IDisposable
     bool TryApplyFailureOrigin(NknAccelerationFailureOrigin origin, Func<bool> apply) => false;
 
     Task<bool> TrySendAsync(NknBridgeChannel lane, byte[] envelopeBytes, CancellationToken ct);
+    Task<bool> TryWritePairedCommitConfirmationAsync(byte[] envelopeBytes, long expiresUtcTicks, Func<Func<Task>, Task?> startIfCurrent,
+        CancellationToken ct) => Task.FromResult(false);
 
     event EventHandler<NknIncomingMessage>? MessageReceived;
 
@@ -144,12 +146,30 @@ internal interface INknTunaAccelerationSession : INknAccelerationLane
 
     Task<bool> StartDialerSidecarAsync(string tunaAddress, string expectedRemotePeer, CancellationToken ct);
 
+    Task<bool> StartOfferDialerAsync(string tunaAddress, string expectedRemotePeer, object owner, CancellationToken ct)
+        => StartDialerSidecarAsync(tunaAddress, expectedRemotePeer, ct);
+
+    bool TryStopOfferDialer(object owner, string reason) => false;
+    bool IsCurrentOfferDial(object owner) => false;
+    ValueTask? TryBeginOfferDialWrite(object owner, Func<ValueTask?> write) => IsCurrentOfferDial(owner) ? write() : null;
+    bool TryCommitOfferDialer(object owner, bool retainUntilProbe, Func<bool, bool> publish) => false;
+
     Task StopAsync(string reason, CancellationToken ct);
 
     // Physical ownership only; neither receipt nor cleanup grants file authority.
     NknTunaLaneLease? CaptureCurrentLaneLease() => null;
+    (string? Address, NknTunaLaneLease? Lease) CaptureListenerOffer()
+        => (LocalTunaAddress, IsLocalPaidListenerActive ? CaptureCurrentLaneLease() : null);
+
+    Task<NknListenerRearm> RearmListenerAsync(NknListenerRearm expected, NknTunaListenerStartRequest request, CancellationToken ct)
+        => Task.FromResult(default(NknListenerRearm));
+    bool IsFailedListenerStartCurrent(long generation) => false;
+
+    bool TryPublishForListenerLease(NknTunaLaneLease lease, Action publish) => false;
 
     bool TryStopCurrentLaneLease(NknTunaLaneLease lease, string reason) => false;
+    // Detach under the caller's generation check; dispose only the detached resources outside its lock.
+    Action? DetachPaidListenerForStop(NknTunaLaneLease lease, string reason) => null;
 
     Task<NknTunaLaneLease?> StartPreparationLaneAsync(NknTunaLanePreparationRequest request, CancellationToken ct)
         => Task.FromResult<NknTunaLaneLease?>(null);
@@ -167,6 +187,10 @@ internal interface INknTunaAccelerationSession : INknAccelerationLane
         return false;
     }
 }
+
+// An empty receipt means ownership changed; a failed generation can authorize only its own retry.
+internal readonly record struct NknListenerRearm(NknTunaLaneLease? Lease, long? FailedGeneration);
+internal sealed record NknListenerVacancy(INknTunaListenerSidecarSupervisor Supervisor, long Stop, long Ownership);
 
 internal sealed record NknTunaLaneLease(
     Guid LaneInstanceId, long StartGeneration, long ClientGeneration,
@@ -247,6 +271,18 @@ internal interface INknTunaListenerSidecarSupervisor : IDisposable
     Task<NknTunaListenerAdoptionSnapshot?> EnsureStartedIfIdleAsync(NknTunaListenerStartRequest request, CancellationToken ct)
         => Task.FromResult<NknTunaListenerAdoptionSnapshot?>(null);
 
+    Task<NknTunaListenerAdoptionSnapshot?> StartInVacancyAsync(NknListenerVacancy vacant,
+        NknTunaListenerStartRequest request, CancellationToken ct,
+        Action<NknListenerVacancy> failed) => Task.FromResult<NknTunaListenerAdoptionSnapshot?>(null);
+
+    bool IsCurrentVacancy(NknListenerVacancy vacant) => false;
+    bool TryDetachForRearm(NknTunaListenerAdoptionSnapshot snapshot, out Action<string>? stop, out NknListenerVacancy? vacant, bool replacing = false)
+    {
+        stop = null; vacant = null; return false;
+    }
+
+    bool TryUseExactListener(NknTunaListenerAdoptionSnapshot expected, Action use) => false;
+
     NknTunaListenerAdoptionSnapshot? CaptureCurrentListenerAdoptionSnapshot();
 
     bool TryAdoptCurrentListener(
@@ -280,6 +316,10 @@ internal sealed record NknAccelerationLocalEndpoint(
 
 internal sealed class TransportAccelerationOfferPayload
 {
+    [JsonPropertyName("pairedRetryTransferId")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? PairedRetryTransferId { get; set; }
+
     [JsonPropertyName("sessionId")]
     public string SessionId { get; set; } = string.Empty;
 

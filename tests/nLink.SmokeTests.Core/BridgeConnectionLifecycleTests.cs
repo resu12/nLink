@@ -431,6 +431,52 @@ public sealed class BridgeConnectionLifecycleTests : SessionRuntimeConnectionTes
 
     [Trait("Category", "LegacySmoke")]
     [Fact]
+    public async Task Bridge_OwnedHandshake_CountsOnlySubmittedTraffic()
+    {
+        if (!OperatingSystem.IsWindows()) return;
+        var runtime = ResolveBridgeRuntimeDirectoryForHealthCheck(out _, out _);
+        Assert.False(string.IsNullOrWhiteSpace(runtime), "A local Node bridge runtime is required for the mock.");
+        var node = Path.Combine(runtime!, "node.exe");
+        Assert.True(File.Exists(node));
+        var dir = Directory.CreateTempSubdirectory("nlink-counted-write-").FullName;
+        var oldNode = Environment.GetEnvironmentVariable("NLINK_NKN_NODE_PATH");
+        var oldBridge = Environment.GetEnvironmentVariable("NLINK_NKN_BRIDGE_PATH");
+        try
+        {
+            var bridge = Path.Combine(dir, "mock.js");
+            WriteBridgeScriptWithManifest(bridge, BuildMockBridgeScriptWithCustomConnect(
+                "emit({event:'ok',id:msg.id,cmd:'connect'}); emit({event:'ready',protocol:2,channels:['control','media','bulk'],address:'local.fake',controlAddress:'local.fake',mediaAddress:'media.fake',bulkAddress:'bulk.fake',connectId:msg.connectId}); return;"));
+            Environment.SetEnvironmentVariable("NLINK_NKN_NODE_PATH", node);
+            Environment.SetEnvironmentVariable("NLINK_NKN_BRIDGE_PATH", bridge);
+            var keyPath = Path.Combine(dir, "id.json");
+            WriteIdentityFile(keyPath, "counted-write");
+            var seeds = new FakeProtectedSeedBackend();
+            seeds.SaveSeed(keyPath, RandomNumberGenerator.GetBytes(32));
+            using var seedOverride = NknSecretStore.OverrideBackendForTests(seeds);
+            using var adapter = new RealNknClientAdapter(new NknIdentity("counted-write", "counted-write.fake"),
+                LoadNknOptionsWithOverrides(keyPath, "counted-write"));
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+            await adapter.ConnectAsync(cts.Token);
+            // An offer refused at the physical writer is not outbound bridge traffic.
+            var count = (long)GetPrivateField(adapter, "bridgeSendCountSinceLastLog")!;
+            var bytes = (long)GetPrivateField(adapter, "bridgeSendPayloadBytesSinceLastLog")!;
+            Assert.False(await adapter.SendOwnedHandshakeAsync("peer.fake", [1, 2], NknBridgeChannel.Control, false, _ => null, cts.Token));
+            Assert.Equal(count, GetPrivateField(adapter, "bridgeSendCountSinceLastLog"));
+            Assert.Equal(bytes, GetPrivateField(adapter, "bridgeSendPayloadBytesSinceLastLog"));
+            Assert.True(await adapter.SendOwnedHandshakeAsync("peer.fake", [1, 2], NknBridgeChannel.Control, false, write => write(), cts.Token));
+            Assert.Equal(count + 1, GetPrivateField(adapter, "bridgeSendCountSinceLastLog"));
+            Assert.Equal(bytes + 2, GetPrivateField(adapter, "bridgeSendPayloadBytesSinceLastLog"));
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("NLINK_NKN_NODE_PATH", oldNode);
+            Environment.SetEnvironmentVariable("NLINK_NKN_BRIDGE_PATH", oldBridge);
+            CleanupDirectoryIfExists(dir);
+        }
+    }
+
+    [Trait("Category", "LegacySmoke")]
+    [Fact]
     public async Task Bridge_StaleReady_Ignored_UntilMatchingConnectIdArrives()
     {
         if (!OperatingSystem.IsWindows())

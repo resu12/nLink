@@ -109,6 +109,7 @@
                         IsVisible="{Binding #Root.ShowTunaUnlockToggle}"
                         IsEnabled="{Binding #Root.CanTunaUnlockToggle}"
                         ToolTip.Tip="{Binding #Root.TunaUnlockTip}"
+                        ToolTip.ToolTipOpening="TunaUnlockToggle_ToolTipOpening"
                         Click="TunaUnlockToggle_Click">
                     <Grid Width="30"
                           Height="16"

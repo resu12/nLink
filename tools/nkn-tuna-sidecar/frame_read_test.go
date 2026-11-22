@@ -40,11 +40,11 @@ func startFrameReadBridge(t *testing.T, direction string) (net.Conn, net.Conn, <
 	observed := &timeoutObservedConn{Conn: source, timedOut: make(chan struct{}, 1)}
 	results := make(chan bridgeDirectionResult, 1)
 	done := make(chan struct{})
-	var total atomic.Int64
+	budget := bridgeByteBudget{limit: 1 << 30}
 	var handoff atomic.Bool
 	go func() {
 		defer close(done)
-		bridgeDirection(ctx, "dialer", direction, observed, destination, &total, 1<<30, 0, &handoff,
+		bridgeDirection(ctx, "dialer", direction, observed, destination, &budget, 0, &handoff,
 			&emitter{jsonl: true, out: io.Discard}, results, nil)
 	}()
 	_ = app.SetDeadline(time.Now().Add(3 * time.Second))

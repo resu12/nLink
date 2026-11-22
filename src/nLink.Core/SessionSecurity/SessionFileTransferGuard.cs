@@ -63,6 +63,8 @@ public sealed record FileTransferStoragePolicy(
 {
     public const long DefaultMaxFileSizeBytes = 25L * 1024 * 1024 * 1024;
     public const int DefaultMaxChunkSizeBytes = 256 * 1024;
+    // Local picker choice, never taken from transfer metadata. An exact choice cannot overwrite.
+    internal string? ReceiverSelectedFileName { get; init; }
 }
 
 public sealed record FileTransferWritePlan(
@@ -486,7 +488,19 @@ public sealed class SessionFileTransferGuard
         }
 
         var rootPath = Path.GetFullPath(storagePolicy.RootDirectoryPath.Trim());
-        if (!TryResolveAvailableSafeFileName(rootPath, safeFileName, storagePolicy.AllowOverwrite, out var resolvedSafeFileName, out validation))
+        string resolvedSafeFileName;
+        if (storagePolicy.ReceiverSelectedFileName is { } selected)
+        {
+            validation = ValidateSafeFileName(selected, out resolvedSafeFileName);
+            if (!validation.IsAllowed)
+                return false;
+            if (resolvedSafeFileName != selected)
+            {
+                validation = FileTransferAccessResult.Denied(FileTransferValidationFailure.InvalidFileName, "Choose a name without leading or trailing spaces.");
+                return false;
+            }
+        }
+        else if (!TryResolveAvailableSafeFileName(rootPath, safeFileName, storagePolicy.AllowOverwrite, out resolvedSafeFileName, out validation))
         {
             return false;
         }
@@ -500,6 +514,12 @@ public sealed class SessionFileTransferGuard
             return false;
         }
 
+        if (storagePolicy.ReceiverSelectedFileName is not null && (File.Exists(candidatePath) || Directory.Exists(candidatePath)))
+        {
+            validation = FileTransferAccessResult.Denied(FileTransferValidationFailure.OverwriteBlocked, "That name is already in use. Choose another name.");
+            return false;
+        }
+
         var tempFileName = CreateTempFileName(resolvedSafeFileName);
         plan = new FileTransferWritePlan(
             rootPath,
@@ -507,7 +527,7 @@ public sealed class SessionFileTransferGuard
             tempFileName,
             Path.Combine(rootPath, tempFileName),
             candidatePath,
-            storagePolicy.AllowOverwrite,
+            storagePolicy.ReceiverSelectedFileName is null && storagePolicy.AllowOverwrite,
             descriptor.FileSizeBytes,
             storagePolicy.MaxChunkSizeBytes);
         validation = FileTransferAccessResult.Allowed();
@@ -558,7 +578,7 @@ public sealed class SessionFileTransferGuard
         }
     }
 
-    private static FileTransferAccessResult ValidateSafeFileName(string fileName, out string safeFileName)
+    internal static FileTransferAccessResult ValidateSafeFileName(string fileName, out string safeFileName)
     {
         safeFileName = string.Empty;
         if (string.IsNullOrWhiteSpace(fileName))
@@ -688,7 +708,7 @@ public sealed class SessionFileTransferGuard
         var comparison = OperatingSystem.IsWindows()
             ? StringComparison.OrdinalIgnoreCase
             : StringComparison.Ordinal;
-        var expectedPrefix = normalizedRoot + Path.DirectorySeparatorChar;
+        var expectedPrefix = Path.EndsInDirectorySeparator(normalizedRoot) ? normalizedRoot : normalizedRoot + Path.DirectorySeparatorChar;
         return candidatePath.StartsWith(expectedPrefix, comparison);
     }
 

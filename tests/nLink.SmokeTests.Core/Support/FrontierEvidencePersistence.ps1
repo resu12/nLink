@@ -26,15 +26,22 @@ function Read-PersistedFixture([string]$Path) {
     try {$read.CopyTo($copy); return ,$copy.ToArray()} finally {$copy.Dispose(); $read.Dispose()}
 }
 $checks=[Collections.Generic.List[string]]::new()
-foreach($mode in @('valid','exact-bound','over-bound','empty','collision','directory','copied-resource','repeat','closed-file',
+foreach($mode in @('valid','long-path','long-path-collision','exact-bound','over-bound','empty','collision','directory','copied-resource','repeat','closed-file',
     'pre-cancelled','scope-false','mid-write','before-rename','after-rename','after-retain','callback-throws','dispose')) {
     $root=[IO.Path]::Combine($Directory,$mode); [void][IO.Directory]::CreateDirectory($root)
     $destination=[IO.Path]::Combine($root,'evidence.json')
+    if($mode -cin @('long-path','long-path-collision')) {
+        $padding=255-$destination.Length-1
+        if($padding -lt 1 -or $padding -gt 240) {throw 'Long-path fixture root is unsuitable'}
+        $root=[IO.Path]::Combine($root,('p'*$padding)); [void][IO.Directory]::CreateDirectory($root)
+        $destination=[IO.Path]::Combine($root,'evidence.json')
+        if($destination.Length -ne 255 -or ($destination+'.'+('0'*32)+'.tmp').Length -ne 292) {throw 'Long-path fixture lengths changed'}
+    }
     $bytes=[Text.Encoding]::UTF8.GetBytes('{"value":"original"}')
     if($mode -cin @('exact-bound','mid-write')) { $bytes=[Text.Encoding]::UTF8.GetBytes(('{}'+(' '*65534))) }
     if($mode -ceq 'over-bound') { $bytes=[byte[]]::new(65537) }
     if($mode -ceq 'empty') { $bytes=[byte[]]::new(0) }
-    if($mode -ceq 'collision') { [IO.File]::WriteAllText($destination,'sentinel') }
+    if($mode -cin @('collision','long-path-collision')) { [IO.File]::WriteAllText($destination,'sentinel') }
     if($mode -ceq 'directory') { [void][IO.Directory]::CreateDirectory($destination) }
     $lifetime=[Threading.CancellationTokenSource]::new(); if($mode -ceq 'pre-cancelled') {$lifetime.Cancel()}
     $resource=$constructor.Invoke([object[]]@($lifetime.Token)); $state=[pscustomobject]@{Calls=0}
@@ -53,9 +60,9 @@ foreach($mode in @('valid','exact-bound','over-bound','empty','collision','direc
             $copy.Dispose()
         }
         $success=$persist.Invoke($resource,[object[]]@($destination,$bytes,$current))
-        if($mode -cin @('over-bound','empty','collision','directory','pre-cancelled','scope-false','mid-write','before-rename','after-rename','after-retain','callback-throws')) {
+        if($mode -cin @('over-bound','empty','collision','long-path-collision','directory','pre-cancelled','scope-false','mid-write','before-rename','after-rename','after-retain','callback-throws')) {
             if($success -or $isCurrent.GetValue($resource,$null)) {throw ('Invalid persistence survived: '+$mode)}
-            if($mode -ceq 'collision' -and [IO.File]::ReadAllText($destination) -cne 'sentinel') {throw 'Existing evidence overwritten'}
+            if($mode -cin @('collision','long-path-collision') -and [IO.File]::ReadAllText($destination) -cne 'sentinel') {throw 'Existing evidence overwritten'}
             if($mode -cin @('mid-write','before-rename','callback-throws') -and [IO.File]::Exists($destination)) {throw 'Pre-rename failure published final path'}
             if($mode -cin @('after-rename','after-retain') -and -not [IO.File]::Exists($destination)) {throw 'Post-rename fault was not exercised'}
             if($mode -ceq 'mid-write') {

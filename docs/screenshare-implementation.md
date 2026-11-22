@@ -9,7 +9,7 @@ This document describes the current nLink screen-sharing implementation. It is a
 - Sender role: the helpee captures and sends screen media.
 - Receiver role: the helper receives, decodes, and renders screen media.
 - Consent boundary: screen sharing starts only inside an approved and verified nLink session with the screen-share capability granted.
-- Transport boundary: normal NKN remains the default. Experimental Tuna can carry only `MsgType.ScreenShareFrame` on the media lane after session-bound Tuna negotiation succeeds.
+- Transport boundary: normal NKN remains the default. Tuna can carry only `MsgType.ScreenShareFrame` on the media lane after session-bound Tuna negotiation succeeds.
 
 Screen-share control messages are not accelerated by Tuna. Stop, config, keyframe, recovery, cursor, and pressure messages stay on the current NKN control path.
 
@@ -180,7 +180,7 @@ Useful evidence includes bridge health, screen-share lane counters, queue pressu
 - Live latency depends on NKN and network delivery.
 - H.264 quality depends on capture source, encoder behavior, decoder behavior, and stream recovery.
 - Screen sharing is real-time media. It prefers freshness over preserving every outdated frame.
-- Tuna remains experimental and optional. Current NKN remains the default and fallback path.
+- Tuna is optional. Current NKN remains the default and fallback path.
 
 ## Validation
 

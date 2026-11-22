@@ -10713,6 +10713,7 @@ public sealed partial class SessionFileTransferService
             {
                 bool deferred;
                 bool activationPauseStarted;
+                FileTransferRouteRuntimeDescriptor pauseSourceRoute;
                 var rebindGeneration = 0;
                 lock (gate)
                 {
@@ -10738,6 +10739,7 @@ public sealed partial class SessionFileTransferService
                         out rebindGeneration,
                         out activationPauseStarted,
                         out var activationPauseAlreadyRecovered);
+                    pauseSourceRoute = context.RouteRuntime;
                     if (deferred)
                     {
                         waitForSignal = activationPauseAlreadyRecovered
@@ -10754,7 +10756,7 @@ public sealed partial class SessionFileTransferService
                 if (activationPauseStarted)
                 {
                     LogTransportPaused(FileTransferDirection.Outbound, context.TransferId, context.SessionId, pauseReason);
-                    ScheduleOutboundV4TransportPauseControlRetry(context, paused: true, pauseReason);
+                    ScheduleOutboundV4TransportPauseControlRetry(context, paused: true, pauseReason, pauseSourceRoute: pauseSourceRoute);
                 }
 
                 LocalOperationalLog.Warn(
@@ -18245,6 +18247,7 @@ public sealed partial class SessionFileTransferService
                     var deferredForFileTunaFallbackHandoff = false;
                     var activationPauseStarted = false;
                     var activationPauseAlreadyRecovered = false;
+                    FileTransferRouteRuntimeDescriptor pauseSourceRoute;
                     string pauseReason = "transport_paused";
                     int rebindGeneration = 0;
                     var errorCompletionCurrent = false;
@@ -18267,6 +18270,7 @@ public sealed partial class SessionFileTransferService
                         }
 
                         var blockForTransportPause = ShouldBlockOutboundV4TransportSendForTransportPauseLocked(context, repairSend);
+                        pauseSourceRoute = context.RouteRuntime;
                         if (errorCompletionCurrent &&
                             blockForTransportPause)
                         {
@@ -18326,7 +18330,7 @@ public sealed partial class SessionFileTransferService
                         if (activationPauseStarted)
                         {
                             LogTransportPaused(FileTransferDirection.Outbound, context.TransferId, context.SessionId, pauseReason);
-                            ScheduleOutboundV4TransportPauseControlRetry(context, paused: true, pauseReason);
+                            ScheduleOutboundV4TransportPauseControlRetry(context, paused: true, pauseReason, pauseSourceRoute: pauseSourceRoute);
                         }
 
                         var eventName = activationPauseAlreadyRecovered
@@ -21168,10 +21172,13 @@ public sealed partial class SessionFileTransferService
         OutboundTransferContext context,
         bool paused,
         string reason,
-        bool localTunaActivationBarrier = false)
+        bool localTunaActivationBarrier = false,
+        FileTransferRouteRuntimeDescriptor? pauseSourceRoute = null)
     {
+        // A local regular-V4 pause remains local even if Tuna commits before this callback runs.
+        var pauseRoute = pauseSourceRoute ?? context.RouteRuntime;
         if (ShouldSuppressRegularNknV4TunaActivationTransportPauseControl(
-                context.RouteRuntime,
+                pauseRoute,
                 reason,
                 localTunaActivationBarrier))
         {
@@ -21179,8 +21186,8 @@ public sealed partial class SessionFileTransferService
                 FileTransferDirection.Outbound,
                 context.TransferId,
                 context.SessionId,
-                context.RouteRuntime,
-                context.NegotiatedDataProtocolVersion,
+                pauseRoute,
+                pauseRoute.ProtocolVersion,
                 paused,
                 reason);
             return;
@@ -21198,10 +21205,12 @@ public sealed partial class SessionFileTransferService
         InboundTransferContext context,
         bool paused,
         string reason,
-        bool localTunaActivationBarrier = false)
+        bool localTunaActivationBarrier = false,
+        FileTransferRouteRuntimeDescriptor? pauseSourceRoute = null)
     {
+        var pauseRoute = pauseSourceRoute ?? context.RouteRuntime;
         if (ShouldSuppressRegularNknV4TunaActivationTransportPauseControl(
-                context.RouteRuntime,
+                pauseRoute,
                 reason,
                 localTunaActivationBarrier))
         {
@@ -21209,8 +21218,8 @@ public sealed partial class SessionFileTransferService
                 FileTransferDirection.Inbound,
                 context.TransferId,
                 context.SessionId,
-                context.RouteRuntime,
-                context.NegotiatedDataProtocolVersion,
+                pauseRoute,
+                pauseRoute.ProtocolVersion,
                 paused,
                 reason);
             return;
@@ -26011,7 +26020,9 @@ public sealed partial class SessionFileTransferService
             errorCode: errorCode,
             statusMessage: statusMessage,
             sendError: true,
-            errorMessage: errorMessage,
+            // Both V4 and V6 report destination-open failures here. Only the receiver gets the filesystem detail.
+            errorMessage: errorCode is StreamOpenFailedErrorCode or V4SparseDestinationRequiredErrorCode
+                ? "The receiver could not open the file destination." : errorMessage,
             cancelReason: null,
             ct: CancellationToken.None,
             requiredFeedbackOperation: null,

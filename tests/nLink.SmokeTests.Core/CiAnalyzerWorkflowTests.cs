@@ -45,13 +45,14 @@ public sealed class CiAnalyzerWorkflowTests : FileTransferOpsScriptsTestBase
         Assert.Contains("name: ci-bridge-bundle", runtime);
         Assert.Contains("**/core-contract-results*.trx", runtime);
         Assert.Contains("**/filetransfer-contract-results*.trx", runtime);
-        Assert.Contains("needs: [runtime_contracts, analyzer]", smoke);
+        Assert.Contains("needs: [runtime_contracts, analyzer, file_transfer_acceptance]", smoke);
         Assert.Contains("if: ${{ always() }}", smoke);
         Assert.Contains("${{ needs.runtime_contracts.result }}", smoke);
         Assert.Contains("${{ needs.analyzer.result }}", smoke);
-        Assert.True(smoke.IndexOf("Require runtime and every analyzer lane", StringComparison.Ordinal) <
+        Assert.Contains("${{ needs.file_transfer_acceptance.result }}", smoke);
+        Assert.True(smoke.IndexOf("Require runtime, analyzer and file-transfer acceptance", StringComparison.Ordinal) <
             smoke.IndexOf("- name: Checkout", StringComparison.Ordinal));
-        foreach (var gate in new[] { "-Lane FileTransferAcceptanceFake ", "-Lane Smoke ", "--reliability-gate",
+        foreach (var gate in new[] { "-Lane Smoke ", "--reliability-gate",
                      "Build installer + portable release assets", "Verify staged package manifests", "Verify release assets", "-Lane GuiSmoke " })
         {
             Assert.Contains(gate, smoke);
@@ -66,6 +67,29 @@ public sealed class CiAnalyzerWorkflowTests : FileTransferOpsScriptsTestBase
         Assert.Contains("artifacts/ci-analyzer/progress.log", analyzer);
         Assert.Contains("name: ci-bridge-bundle", analyzer);
         Assert.Contains("name: ci-bridge-bundle", smoke);
+    }
+
+    [Fact]
+    public void AcceptanceMatrix_RunsBothSublanesAwayFromPackaging()
+    {
+        var acceptance = Job("file_transfer_acceptance");
+        var lanes = File.ReadAllText(Path.Combine(FindRepoRoot(), "tools", "Test-Lanes.ps1"));
+        var aggregate = Regex.Match(lanes, "(?s)\"FileTransferAcceptanceFake\" \\{(.*?)\\}").Groups[1].Value;
+        var expected = Regex.Matches(aggregate, "-Name \"(FileTransfer\\w+)\"")
+            .Select(match => match.Groups[1].Value).ToArray();
+        var actual = Regex.Matches(acceptance, @"(?m)^          - (FileTransfer\w+)\r?$")
+            .Select(match => match.Groups[1].Value).ToArray();
+
+        Assert.Equal(new[] { "FileTransferAcceptanceScenarios", "FileTransferEvidenceIntegrity" }, expected);
+        Assert.Equal(expected, actual);
+        Assert.Contains("needs: runtime_contracts", acceptance);
+        Assert.Contains("fail-fast: false", acceptance);
+        Assert.Contains("name: ci-bridge-bundle", acceptance);
+        Assert.Contains("-Lane $env:NLINK_ACCEPTANCE_LANE -Configuration Release -NoBuild", acceptance);
+        Assert.DoesNotContain("continue-on-error:", acceptance);
+        Assert.Matches(@"(?s)Upload file-transfer acceptance results.*?if: always\(\).*?name: filetransfer-acceptance-\$\{\{ matrix.lane \}\}", acceptance);
+        Assert.Contains("**/filetransfer-acceptance-results*.trx", acceptance);
+        Assert.DoesNotContain("filetransfer-acceptance-results", Job("smoke"));
     }
 
     [Theory]
@@ -113,28 +137,35 @@ public sealed class CiAnalyzerWorkflowTests : FileTransferOpsScriptsTestBase
     }
 
     [Theory]
-    [InlineData("powershell", "success", "success", true)]
-    [InlineData("powershell", "failure", "success", false)]
-    [InlineData("powershell", "success", "failure", false)]
-    [InlineData("powershell", "success", "skipped", false)]
-    [InlineData("powershell", "success", "cancelled", false)]
-    [InlineData("pwsh", "success", "success", true)]
-    [InlineData("pwsh", "failure", "success", false)]
-    [InlineData("pwsh", "success", "failure", false)]
-    [InlineData("pwsh", "success", "skipped", false)]
-    [InlineData("pwsh", "success", "cancelled", false)]
+    [InlineData("powershell", "success", "success", "success", true)]
+    [InlineData("powershell", "failure", "success", "success", false)]
+    [InlineData("powershell", "success", "failure", "success", false)]
+    [InlineData("powershell", "success", "skipped", "success", false)]
+    [InlineData("powershell", "success", "cancelled", "success", false)]
+    [InlineData("powershell", "success", "success", "failure", false)]
+    [InlineData("powershell", "success", "success", "skipped", false)]
+    [InlineData("powershell", "success", "success", "cancelled", false)]
+    [InlineData("pwsh", "success", "success", "success", true)]
+    [InlineData("pwsh", "failure", "success", "success", false)]
+    [InlineData("pwsh", "success", "failure", "success", false)]
+    [InlineData("pwsh", "success", "skipped", "success", false)]
+    [InlineData("pwsh", "success", "cancelled", "success", false)]
+    [InlineData("pwsh", "success", "success", "failure", false)]
+    [InlineData("pwsh", "success", "success", "skipped", false)]
+    [InlineData("pwsh", "success", "success", "cancelled", false)]
     public async Task ReleaseAdmission_RejectsFailedSkippedOrCancelledDependencies(
-        string host, string runtime, string analyzer, bool admitted)
+        string host, string runtime, string analyzer, string acceptance, bool admitted)
     {
         if (!OperatingSystem.IsWindows()) return;
 
         var script = """
-            param([string]$RuntimeResult, [string]$AnalyzerResult)
+            param([string]$RuntimeResult, [string]$AnalyzerResult, [string]$AcceptanceResult)
             $ErrorActionPreference = 'Stop'
             $env:RUNTIME_RESULT = $RuntimeResult
             $env:ANALYZER_RESULT = $AnalyzerResult
-            """ + Environment.NewLine + StepScript("smoke", "Require runtime and every analyzer lane");
-        var result = await RunPowerShellScriptTextAsync(script, [runtime, analyzer], host);
+            $env:ACCEPTANCE_RESULT = $AcceptanceResult
+            """ + Environment.NewLine + StepScript("smoke", "Require runtime, analyzer and file-transfer acceptance");
+        var result = await RunPowerShellScriptTextAsync(script, [runtime, analyzer, acceptance], host);
         Assert.Equal(admitted, result.ExitCode == 0);
         if (!admitted) Assert.Contains("Required qualification failed", result.Stdout + result.Stderr);
     }
